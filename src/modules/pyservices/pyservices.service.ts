@@ -578,12 +578,29 @@ export interface ReporteVueloPayload {
   comision_vendedor_usd?: number;
   comision_vendedor_nombre?: string | null;
   /**
-   * Lo que VuelaTour paga al vendedor: comisión + su IVA cuando la
-   * cotización grava (`pagoVendedorUsd`, fuente única). null sin comisión.
+   * Lo que VuelaTour paga al vendedor y RESTA la ganancia de este reporte.
+   * Desde el 13-oct-2026 (decisión 3, invariante 73): el pago REAL = Σ de
+   * los gastos del vuelo de las dos categorías del pago al vendedor, en USD
+   * (MXN ÷ tc_gasto o el T.C. del vuelo; sin T.C. no se resta y va en
+   * notas); 0 explícito si la cotización trae comisión y no hay pago
+   * capturado; null sin comisión ni pagos. Antes: el COTIZADO
+   * (`pagoVendedorUsd`, comisión + su IVA).
    */
   pago_vendedor_usd?: number | null;
-  /** total − pago_vendedor_usd (neto de VuelaTour = precio base con su IVA). */
+  /** total − pago_vendedor_usd (CANCELADO: lo retenido − ese pago). */
   neto_vuelatour_usd?: number | null;
+  /**
+   * ADITIVA (13-oct-2026, invariante 73): `pago_vendedor_usd` es SOLO gasto
+   * real (misma bandera de los libros, invariante 61). Un pyservices previo
+   * la ignora.
+   */
+  comision_vendedor_solo_gasto_real?: true;
+  /**
+   * ADITIVO (invariante 73): la comisión COTIZADA con su IVA
+   * (`pagoVendedorUsd`) como DATO de la cotización — jamás se resta. null
+   * sin comisión.
+   */
+  pago_vendedor_cotizado_usd?: number | null;
   metodo_cobro?: string | null;
   tramos?: ReporteVueloTramoPayload[];
   // Comparación horas cotizadas vs voladas (utilidad operativa) + motivos.
@@ -615,7 +632,7 @@ export interface ReporteVueloPayload {
   venta_sin_iva_usd?: number;
   /** Venta (total c/IVA) − gastos del vuelo. */
   remanente_usd?: number | null;
-  /** Remanente − comisión vendedor − comisiones bancarias. */
+  /** Remanente − pago REAL al vendedor (invariante 73) − comisiones bancarias. */
   ganancia_final_usd?: number | null;
   /** Ganancia / horas cobradas (fallback: voladas), como el Excel. */
   ganancia_x_hr_usd?: number | null;

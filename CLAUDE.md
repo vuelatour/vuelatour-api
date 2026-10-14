@@ -994,8 +994,10 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     (`parteAvion`/`repartirUsd`, como la venta y la comisión bancaria; Σ de
     los aviones == el pago al centavo) y el avión sellado en el gasto es solo
     referencia. La comisión COTIZADA que se compara contra el pago es
-    `pagoVendedorUsd` (comisión + su IVA) en todos los lectores. Ningún
-    lector recalcula estas particiones a mano.
+    `pagoVendedorUsd` (comisión + su IVA) en todos los lectores (solo para
+    comparar y avisar: desde el 13-oct-2026 ningún libro ni el reporte por
+    vuelo la RESTA — invariantes 61 y 73). Ningún lector recalcula estas
+    particiones a mano.
     **Balance por avión (Excel, 2-sep-2026)**: la hoja "Gastos Indirectos"
     del libro INDIVIDUAL = `gastos_indirectos` + `otros_gastos` pintados
     JUNTOS por pyservices (fusión de presentación); el contrato del payload
@@ -2756,7 +2758,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       resta el pago cotizado de $Y USD).» —o la variante de CANCELADO— con una
       conversión PURA local, NUNCA con `gastoUsd`, que tiene el efecto lateral
       `gastosTcVueloCount += 1`; el aviso «Vuelo externo con N gasto(s)… ADEMÁS
-      del costo del operador» no la cuenta). **SIN cambio a propósito**: la
+      del costo del operador» no la cuenta. **SUPERSEDIDO el 13-oct-2026
+      (invariante 73)**: la ganancia resta el pago REAL de las dos categorías
+      con esa misma conversión pura y, sin gasto, nada). **SIN cambio a propósito**: la
       hoja «otros gastos» (`gastosEmpresaYSueltos` / `.or` del Libro), los
       parciales de reparto (`CAT_EMPRESA`) y `pendienteGastosVueloSinLibro`
       (la exclusión sería un no-op). El pre-cierre la ve como cualquier gasto
@@ -6157,7 +6161,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       #251/#332 y captura los pendientes, y SOLO entonces se regeneran
       septiembre y octubre. DEUDA que el ajuste NO toca: `aircraft.metrics.
       finanzas` y `groups.gastosPorHijo` (por fecha_gasto, no ven
-      COMISIONES); el reporte por vuelo sigue restando el pago COTIZADO; un
+      COMISIONES); el reporte por vuelo restaba el pago COTIZADO (RESUELTO el
+      13-oct-2026, invariante 73: resta el pago REAL); un
       avión dado de baja que voló absorbe en el balance y no en el reparto
       (`compute()` solo trae activos); `regla_comisiones` sigue sin viajar;
       T.C. heredado de la D3 (COMISIONES y reparto con tc_gasto ?? K —K el
@@ -7694,6 +7699,68 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       sin tocarse comisiones.spec, empresa.spec, modo.spec, afac-om.spec y
       lote.spec.
 
+73. **REPORTE POR VUELO: EL PAGO AL VENDEDOR ES EL GASTO REAL (13-oct-2026,
+    lote 2, API 0.0.75, SIN migración).** Decisión 3 del cliente («en todo:
+    solo gastos reales»): el PDF/Excel del vuelo (`flight-report.service`)
+    seguía restando el pago COTIZADO (`pagoVendedorUsd` = comisión + su
+    IVA), la provisión que la D3 sacó de todos los libros (invariante 61).
+    - **Regla**: `GANANCIA = remanente − pago REAL al vendedor − comisiones
+      bancarias`. Pago REAL = Σ de los gastos del vuelo de las DOS
+      categorías (`categoriaEsPagoVendedor`: «Comisión del vendedor
+      (VuelaTour)» + «(avión)»; aquí no importa quién lo absorbe: es la
+      economía COMPLETA del vuelo), en USD con la MISMA conversión PURA que
+      ya tenía su nota (USD directo; MXN ÷ `tc_gasto` > 0 o el T.C. del
+      vuelo), suma cruda y `toFixed(2)` al final, NUNCA con `gastoUsd` (su
+      efecto lateral `gastosTcVueloCount += 1` alteraría la nota de los
+      costos). En TODO estado: un CANCELADO con pago capturado también lo
+      resta (es dinero que sí salió). Sin gasto real NO se resta nada. Los
+      gastos se siguen LISTANDO con «pago al vendedor — ya descontado en
+      «pago al vendedor» (no resta aparte)» y fuera del costo y del
+      remanente (restarlos también como gasto sería doble). Un pago en MXN
+      sin ningún T.C. NO se resta y se AVISA («N pago(s) al vendedor en MXN
+      por $X SIN tipo de cambio …»); no cuenta en `gastos_sin_tc_*` (no es
+      costo del vuelo).
+    - **Payload** (`ReporteVueloPayload`, contrato con pyservices):
+      `comision_vendedor_usd` sigue siendo la COTIZADA (dato de la
+      cotización); `pago_vendedor_usd` = el pago REAL que resta la ganancia
+      (0 explícito si la cotización trae comisión y no hay pago; null sin
+      comisión ni pagos); `neto_vuelatour_usd` = total − ese pago (CANCELADO:
+      lo retenido − ese pago); ADITIVOS la bandera
+      `comision_vendedor_solo_gasto_real: true` (la misma de los libros) y
+      `pago_vendedor_cotizado_usd` (la cotizada con su IVA como DATO de la
+      cotización, null sin comisión; jamás se resta). Con
+      el pyservices de hoy la cascada visible cuadra con la ganancia
+      («(−) Pago comisión vendedor» pinta `pago_vendedor_usd`; con 0 no se
+      pinta) — DEUDA de presentación: su etiqueta dice «(c/IVA)» / «(comisión
+      + IVA)» cuando el pago supera la comisión pre-IVA, que con un pago real
+      puede no ser IVA, y la sección de la cotización pinta «Pago comisión
+      vendedor −$0.00» / «Neto VuelaTour» = total cuando no hay pago:
+      pyservices puede rotular con la bandera y pintar ahí la cotizada.
+    - **Notas** (`notas_horas`): con pago «Pago real al vendedor capturado:
+      $100 USD en 1 gasto(s); la ganancia de este reporte resta este pago
+      real (la comisión cotizada con su IVA es de $80 USD).» (sin la
+      cotizada si no hay comisión; variante de CANCELADO «…; el vuelo se
+      canceló, pero es dinero que sí salió: la ganancia de este reporte lo
+      resta.»); sin pago y con comisión «Comisión del vendedor cotizada $80
+      USD sin gasto real capturado: la ganancia de este reporte no resta
+      pago al vendedor (si ya se pagó, captúralo en Gastos como «Comisión del
+      vendedor (VuelaTour)» o «Comisión del vendedor (avión)» ligado a este
+      vuelo).» (CANCELADO: «Vuelo CANCELADO: comisión del vendedor cotizada
+      $80 USD sin gasto real capturado; este reporte no resta pago al
+      vendedor y el neto de VuelaTour es lo retenido.»). El aviso del externo
+      («Vuelo externo con N gasto(s)… ADEMÁS del costo del operador») sigue
+      sin contarlos.
+    - **Consecuencia para el cliente**: los reportes por vuelo de comisiones
+      cotizadas SIN pago capturado (#233, #237, #260, #317, #404, #417, #442
+      al 13-oct) suben su ganancia por el cotizado hasta capturar el pago;
+      #251 y #332 restan su pago real. Ningún otro libro cambia (balance,
+      reparto y Dinero ya eran solo gasto real desde el 0.0.74).
+    - Spec: `flight-report.service.pago-vendedor.spec` (resta el real y no
+      el cotizado, sin pago 0/neto/nota, sin efecto lateral en la nota del
+      T.C. del vuelo, USD + `tc_gasto`, MXN sin T.C. avisado y fuera de
+      `gastos_sin_tc`, las dos categorías, vuelo sin comisión (#332),
+      CANCELADO con y sin pago, bandera, externo).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -8424,6 +8491,15 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
+  por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
+  vuelo; contrato con pyservices ADITIVO (la bandera
+  `comision_vendedor_solo_gasto_real`; `pago_vendedor_usd` cambia de
+  significado pero la cascada visible cuadra con el pyservices de hoy).
+  Cualquier orden de deploy es seguro. Verificación: el reporte de #332
+  (N621TX, $1,305.00 conciliado, sin comisión cotizada) resta su pago y el
+  de #233 (comisión cotizada sin pago) ya no resta nada y lo dice en notas.
 
 - **13-oct-2026 — SIN migración** para el vínculo gasto → celda del balance
   y los enlaces desde Conciliación (lote 2 punto 5, invariante 72): nada se

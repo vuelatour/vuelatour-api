@@ -371,10 +371,11 @@ export class FlightReportService {
             categoriaEsDeEmpresa(g.categoria as string | null)
               ? 'gasto de VuelaTour — no resta al vuelo'
               : null,
-            // PAGO AL VENDEDOR (28-sep-2026, invariante 31): se lista, pero
-            // la ganancia de este reporte ya resta el pago COTIZADO una sola
-            // vez (`pagoVendedorUsd`) — restarlo también como gasto sería
-            // contarlo dos veces.
+            // PAGO AL VENDEDOR (28-sep-2026, invariante 31; desde el
+            // 13-oct-2026, invariante 73, la ganancia resta estos gastos
+            // REALES —las dos categorías— en la línea «pago al vendedor»):
+            // se lista, pero no entra al costo — restarlo también como
+            // gasto sería contarlo dos veces.
             categoriaEsPagoVendedor(g.categoria as string | null)
               ? 'pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)'
               : null,
@@ -463,7 +464,8 @@ export class FlightReportService {
       // vuelo — si restaran aquí, este reporte contradiría la fila del mismo
       // vuelo en el balance, que ya los manda a la hoja "otros gastos".
       // COMISION_VENDEDOR (28-sep-2026, invariante 31) tampoco resta aquí:
-      // la ganancia ya descuenta el pago al vendedor (el cotizado, abajo).
+      // la ganancia descuenta el pago al vendedor UNA vez, abajo (desde el
+      // 13-oct-2026 el REAL de las dos categorías, invariante 73).
       if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
       const usd = gastoUsd(g);
       if (usd == null) {
@@ -542,13 +544,11 @@ export class FlightReportService {
     // GANANCIA = remanente − PAGO AL VENDEDOR − comisiones bancarias;
     // GANANCIA X HR sobre horas COBRADAS (fallback voladas); % sobre venta
     // sin IVA. El pago al vendedor se resta UNA sola vez (aquí): el costo
-    // del vuelo (gastos + combustible) no lo contiene — la categoría
-    // «Comisión del vendedor» (COMISION_VENDEDOR, 28-sep-2026) existe pero se
-    // EXCLUYE del costo arriba y solo sale como nota informativa; el que se
-    // resta es el COTIZADO — y la venta es el total del cliente,
-    // que incluye la comisión (regla 23-jul). Pago = comisión + su IVA
-    // cuando la cotización grava (`pagoVendedorUsd`, fuente única — misma
-    // cifra que la provisión de Otros movimientos y del Libro Dinero).
+    // del vuelo (gastos + combustible) no lo contiene — las dos categorías
+    // del pago al vendedor se EXCLUYEN del costo arriba — y la venta es el
+    // total del cliente, que incluye la comisión (regla 23-jul). Desde el
+    // 13-oct-2026 (decisión 3 del cliente, invariante 73) el pago que se
+    // resta es el REAL (los gastos de esas categorías), nunca el cotizado.
     const ventaUsd = n(v.monto_total_usd);
     const ventaSinIvaUsd = Number((ventaUsd - n(v.iva_usd)).toFixed(2));
     // Partición del ingreso (regla 6 + Regla A, 28-ago-2026): venta del
@@ -612,53 +612,77 @@ export class FlightReportService {
       ? Number((ventaUsd - costoVueloUsd).toFixed(2))
       : null;
     // CANCELADO (verificación 28-ago; misma regla que el balance, el reparto
-    // y "Otros movimientos"): el servicio no se prestó y la comisión no se
-    // cobró — NO se provisiona pago al vendedor ni se resta de la ganancia;
-    // el neto de VuelaTour es lo retenido (cobros no reembolsados).
+    // y "Otros movimientos"): el servicio no se prestó; el neto de VuelaTour
+    // es lo retenido (cobros no reembolsados).
     const cancelado = v.estado === 'CANCELADO';
-    const pagoVendedor = cancelado ? 0 : pagoVendedorUsd(particion);
-    if (cancelado && particion.comision_vendedor_usd > 0) {
-      notasHoras.push(
-        'Vuelo CANCELADO: la comisión del vendedor no se provisiona ni se resta (el servicio no se prestó); el neto de VuelaTour es lo retenido.',
-      );
-    }
-    // PAGO REAL al vendedor (invariante 31): nota INFORMATIVA solo si hay
-    // gastos COMISION_VENDEDOR. Conversión PURA local con la MISMA regla de
-    // `gastoUsd` (USD directo; MXN ÷ tc_gasto > 0 o el T.C. del vuelo) — NO
-    // se llama a `gastoUsd`: incrementa `gastosTcVueloCount` y alteraría la
-    // nota de «gasto(s) en MXN sin T.C. propio», que habla de los gastos que
-    // SÍ restan.
+    // PAGO AL VENDEDOR = SOLO EL GASTO REAL (13-oct-2026, decisión 3 del
+    // cliente «en todo: solo gastos reales», invariante 73). Hasta aquí el
+    // reporte restaba el COTIZADO (`pagoVendedorUsd` = comisión + su IVA): la
+    // provisión que la D3 sacó de todos los libros. Ahora resta la Σ de los
+    // gastos del vuelo de las DOS categorías del pago al vendedor
+    // («Comisión del vendedor (VuelaTour)» + «(avión)»; aquí no importa quién
+    // lo absorbe: es la economía COMPLETA del vuelo), en TODO estado (un
+    // cancelado con pago capturado también: es dinero que sí salió).
+    // Conversión PURA con la MISMA regla de `gastoUsd` (USD directo; MXN ÷
+    // tc_gasto > 0 o el T.C. del vuelo) — NO se llama a `gastoUsd`: su
+    // efecto lateral `gastosTcVueloCount += 1` alteraría la nota de «gasto(s)
+    // en MXN sin T.C. propio», que habla de los costos. Un pago en MXN sin
+    // ningún T.C. NO se resta y se AVISA (jamás desaparece en silencio). Sin
+    // gasto real no se resta nada: la comisión cotizada queda como dato y
+    // como nota.
+    const pagoCotizadoUsd = pagoVendedorUsd(particion);
     const pagosRealesVendedor = gastosRows.filter((g) =>
       categoriaEsPagoVendedor(g.categoria as string | null),
     );
-    if (pagosRealesVendedor.length > 0) {
-      let pagadoUsd = 0;
-      let todosConvierten = true;
-      for (const g of pagosRealesVendedor) {
-        if (g.moneda === 'USD') {
-          pagadoUsd += n(g.monto);
-          continue;
-        }
-        const tcg =
-          g.tc_gasto != null && Number(g.tc_gasto) > 0
-            ? Number(g.tc_gasto)
-            : tcVuelo;
-        if (tcg == null) {
-          todosConvierten = false;
-          continue;
-        }
-        pagadoUsd += n(g.monto) / tcg;
+    let pagoRealAcumUsd = 0;
+    let pagosVendedorSinTc = 0;
+    let pagosVendedorSinTcMxn = 0;
+    for (const g of pagosRealesVendedor) {
+      if (g.moneda === 'USD') {
+        pagoRealAcumUsd += n(g.monto);
+        continue;
       }
-      const nPagos = pagosRealesVendedor.length;
-      const cuanto = todosConvierten
-        ? `: ${fmtDineroTexto(pagadoUsd, 'USD')} en ${nPagos} gasto(s)`
-        : ` en ${nPagos} gasto(s)`;
+      const tcg =
+        g.tc_gasto != null && Number(g.tc_gasto) > 0
+          ? Number(g.tc_gasto)
+          : tcVuelo;
+      if (tcg == null) {
+        pagosVendedorSinTc += 1;
+        pagosVendedorSinTcMxn += n(g.monto);
+        continue;
+      }
+      pagoRealAcumUsd += n(g.monto) / tcg;
+    }
+    const pagoVendedor = Number(pagoRealAcumUsd.toFixed(2));
+    const pagosConvertidos = pagosRealesVendedor.length - pagosVendedorSinTc;
+    if (pagosConvertidos > 0) {
       notasHoras.push(
         cancelado
-          ? `Pago real al vendedor capturado${cuanto} (vuelo cancelado: este reporte no resta pago al vendedor).`
-          : `Pago real al vendedor capturado${cuanto} (la ganancia de este reporte resta el pago cotizado de ${fmtDineroTexto(pagoVendedor, 'USD')}).`,
+          ? `Pago real al vendedor capturado: ${fmtDineroTexto(pagoVendedor, 'USD')} en ${pagosConvertidos} gasto(s); el vuelo se canceló, pero es dinero que sí salió: la ganancia de este reporte lo resta.`
+          : `Pago real al vendedor capturado: ${fmtDineroTexto(pagoVendedor, 'USD')} en ${pagosConvertidos} gasto(s); la ganancia de este reporte resta este pago real${
+              pagoCotizadoUsd > 0
+                ? ` (la comisión cotizada con su IVA es de ${fmtDineroTexto(pagoCotizadoUsd, 'USD')})`
+                : ''
+            }.`,
       );
     }
+    if (pagosVendedorSinTc > 0) {
+      notasHoras.push(
+        `${pagosVendedorSinTc} pago(s) al vendedor en MXN por $${pagosVendedorSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio (y el vuelo no tiene T.C.): no se restan de la ganancia — captura su T.C. en Gastos.`,
+      );
+    }
+    if (pagosRealesVendedor.length === 0 && pagoCotizadoUsd > 0) {
+      notasHoras.push(
+        cancelado
+          ? `Vuelo CANCELADO: comisión del vendedor cotizada ${fmtDineroTexto(pagoCotizadoUsd, 'USD')} sin gasto real capturado; este reporte no resta pago al vendedor y el neto de VuelaTour es lo retenido.`
+          : `Comisión del vendedor cotizada ${fmtDineroTexto(pagoCotizadoUsd, 'USD')} sin gasto real capturado: la ganancia de este reporte no resta pago al vendedor (si ya se pagó, captúralo en Gastos como «Comisión del vendedor (VuelaTour)» o «Comisión del vendedor (avión)» ligado a este vuelo).`,
+      );
+    }
+    // Con comisión cotizada o con algún pago capturado, la línea «pago al
+    // vendedor» viaja SIEMPRE como número (0 explícito = no se resta nada:
+    // pyservices no pinta la resta y su cascada cuadra con la ganancia).
+    const conLineaVendedor =
+      particion.comision_vendedor_usd > 0 || pagosRealesVendedor.length > 0;
     const gananciaFinalUsd =
       remanenteUsd != null
         ? Number((remanenteUsd - pagoVendedor - comisionesBancoUsd).toFixed(2))
@@ -745,25 +769,30 @@ export class FlightReportService {
       // el total del cliente YA la incluye — se le suma al precio). Regla A
       // (28-ago tarde): es ingreso de VuelaTour que se paga al vendedor — no
       // costo del avión; este reporte (economía completa) resta ese pago
-      // una vez. pago_vendedor_usd = comisión + su IVA cuando grava
-      // (`pagoVendedorUsd`); neto = total − pago = precio base con su IVA.
+      // una vez. `comision_vendedor_usd` sigue siendo la COTIZADA (dato de la
+      // cotización). Desde el 13-oct-2026 (invariante 73)
+      // `pago_vendedor_usd` = el pago REAL que resta la ganancia (Σ de los
+      // gastos de las dos categorías, 0 explícito sin pago capturado si la
+      // cotización trae comisión; null sin comisión ni pagos) y `neto` =
+      // total − ese pago (CANCELADO: lo retenido − ese pago).
       comision_vendedor_usd: n(v.comision_vendedor_usd),
       comision_vendedor_nombre:
         (v.comision_vendedor_nombre as string | null) ?? null,
-      // CANCELADO con comisión: pago 0 explícito (no se provisiona) y el
-      // neto es lo retenido; sin comisión, null como siempre.
-      pago_vendedor_usd:
-        pagoVendedor > 0
-          ? pagoVendedor
-          : cancelado && particion.comision_vendedor_usd > 0
-            ? 0
-            : null,
-      neto_vuelatour_usd:
-        pagoVendedor > 0
-          ? Number((particion.total_usd - pagoVendedor).toFixed(2))
-          : cancelado && particion.comision_vendedor_usd > 0
-            ? Number(totalCobrado.toFixed(2))
-            : null,
+      pago_vendedor_usd: conLineaVendedor ? pagoVendedor : null,
+      neto_vuelatour_usd: conLineaVendedor
+        ? Number(
+            (
+              (cancelado ? totalCobrado : particion.total_usd) - pagoVendedor
+            ).toFixed(2),
+          )
+        : null,
+      // ADITIVOS (13-oct-2026, invariante 73): el pago al vendedor de este
+      // reporte es SOLO gasto real (mismo nombre que la bandera de los
+      // libros, invariante 61) y la cotizada con su IVA queda como DATO
+      // (jamás se resta) para que pyservices la pinte en la sección de la
+      // cotización. Un pyservices previo ignora las dos.
+      comision_vendedor_solo_gasto_real: true as const,
+      pago_vendedor_cotizado_usd: pagoCotizadoUsd > 0 ? pagoCotizadoUsd : null,
       // Dato de la COTIZACIÓN (método previsto; desde el 11-sep-2026 también
       // "cómo se cobró al final" cuando un cobro liquidó el vuelo). El
       // método REAL de cada abono va en cada línea de `cobros`
