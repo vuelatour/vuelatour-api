@@ -130,6 +130,66 @@ describe('ordenarCandidatosGasto — orden por defecto', () => {
   });
 });
 
+describe('coincide_factura (concepto del SPEI, 0.0.75) — señal DENTRO de su nivel', () => {
+  // Golden: los 29 «Pago VIP SAESA» (4–28 sep) contra un SPEI de $2,231.38.
+  const saesa = Array.from({ length: 29 }, (_, i) => ({
+    id: `saesa-${String(i).padStart(2, '0')}`,
+    monto: [2231.37, 2231.38, 1118.12, 2801.4][i % 4],
+    fecha: `2026-09-${String(4 + (i % 25)).padStart(2, '0')}`,
+  }));
+  const ref = { montoCargo: 2231.38, fecha: '2026-09-24' };
+
+  it('sin el campo (o en false) el orden es byte a byte el de siempre', () => {
+    const sinCampo = ordenarCandidatosGasto(saesa, ref).map((c) => c.id);
+    const enFalse = ordenarCandidatosGasto(
+      saesa.map((c) => ({ ...c, coincide_factura: false })),
+      ref,
+    ).map((c) => c.id);
+    expect(enFalse).toEqual(sinCampo);
+    expect(ordenarCandidatosPorNiveles(saesa, ref).map((c) => c.id)).toEqual(
+      sinCampo,
+    );
+  });
+
+  it('con el campo va primero DENTRO del nivel que cuadra', () => {
+    const marcados = saesa.map((c) =>
+      c.id === 'saesa-25' ? { ...c, coincide_factura: true } : c,
+    );
+    const orden = ordenarCandidatosGasto(marcados, ref).map((c) => c.id);
+    expect(saesa.find((c) => c.id === 'saesa-25')?.monto).toBe(2231.38);
+    expect(orden[0]).toBe('saesa-25');
+  });
+
+  it('uno que NO cuadra nunca sube sobre los que cuadran; los cruzados siguen al final', () => {
+    const r = ordenarCandidatosGasto(
+      [
+        { id: 'cuadra', monto: 2231.38, fecha: '2026-09-01' },
+        {
+          id: 'no-cuadra-con-factura',
+          monto: 5000,
+          fecha: '2026-09-24',
+          coincide_factura: true,
+        },
+        { id: 'no-cuadra', monto: 4000, fecha: '2026-09-24' },
+        {
+          id: 'usd-con-factura',
+          monto: 120,
+          fecha: '2026-09-24',
+          cruzado: true,
+          coincide_factura: true,
+        },
+      ],
+      ref,
+    );
+    expect(r.map((c) => c.id)).toEqual([
+      'cuadra',
+      'no-cuadra-con-factura',
+      'no-cuadra',
+      'usd-con-factura',
+    ]);
+  });
+});
+
 describe('ordenarCandidatosPorNiveles — con gastos en efectivo (revisión 6-oct-2026)', () => {
   const ref = { montoCargo: 212, fecha: '2026-09-07' };
 

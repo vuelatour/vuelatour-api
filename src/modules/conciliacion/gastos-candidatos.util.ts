@@ -137,6 +137,13 @@ export interface CandidatoOrdenable {
   faltante?: number | null;
   fecha?: string | null;
   cruzado?: boolean;
+  /**
+   * ADITIVO (0.0.75, invariante 69): el folio del gasto coincide con la
+   * factura que cita el concepto del banco. Solo ordena DENTRO de su nivel
+   * de monto (después de `cruzado` y `cuadra`): jamás brinca sobre un
+   * candidato que cuadra, jamás liga ni preselecciona.
+   */
+  coincide_factura?: boolean;
 }
 
 /**
@@ -163,10 +170,11 @@ function distanciaMonto(c: CandidatoOrdenable, montoCargo: number): number {
 }
 
 /**
- * Orden por defecto del contrato: (1) los que CUADRAN con el cargo, (2)
- * cercanía de monto (contra el monto o el faltante), (3) cercanía de fecha,
- * (4) fecha más reciente primero; los cruzados (USD con TC implícito) al
- * final. Estable y determinista (último desempate: id).
+ * Orden por defecto del contrato: (1) los que CUADRAN con el cargo, (2) los
+ * cuyo folio COINCIDE con la factura del concepto del banco (0.0.75; sin el
+ * campo no cuenta), (3) cercanía de monto (contra el monto o el faltante),
+ * (4) cercanía de fecha, (5) fecha más reciente primero; los cruzados (USD
+ * con TC implícito) al final. Estable y determinista (último desempate: id).
  */
 export function ordenarCandidatosGasto<T extends CandidatoOrdenable>(
   candidatos: readonly T[],
@@ -175,15 +183,17 @@ export function ordenarCandidatosGasto<T extends CandidatoOrdenable>(
   const clave = (c: T) => {
     const cruzado = c.cruzado === true ? 1 : 0;
     const cuadra = cuadraConCargo(c, ref.montoCargo) ? 0 : 1;
+    const factura = c.coincide_factura === true ? 0 : 1;
     const dMonto = cruzado ? 0 : distanciaMonto(c, ref.montoCargo);
     const dFecha = c.fecha ? difDias(ref.fecha, c.fecha) : Infinity;
-    return { cruzado, cuadra, dMonto, dFecha };
+    return { cruzado, cuadra, factura, dMonto, dFecha };
   };
   return [...candidatos]
     .map((c) => ({ c, k: clave(c) }))
     .sort((a, b) => {
       if (a.k.cruzado !== b.k.cruzado) return a.k.cruzado - b.k.cruzado;
       if (a.k.cuadra !== b.k.cuadra) return a.k.cuadra - b.k.cuadra;
+      if (a.k.factura !== b.k.factura) return a.k.factura - b.k.factura;
       if (a.k.dMonto !== b.k.dMonto) return a.k.dMonto - b.k.dMonto;
       if (a.k.dFecha !== b.k.dFecha) return a.k.dFecha - b.k.dFecha;
       const fa = a.c.fecha ?? '';

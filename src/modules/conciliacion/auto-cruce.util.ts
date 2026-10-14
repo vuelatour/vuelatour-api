@@ -781,6 +781,17 @@ export function descripcionesSeContradicen(
 const NIVEL_EMPATE_MAX = 4;
 
 /**
+ * Una pareja del dedupe (0.0.75): la línea `nuevo` del archivo ES la fila
+ * `previo` ya importada. Los índices son los de los arreglos RECIBIDOS por
+ * `emparejarDuplicados`; `nivel` = el de `nivelEmpateDedupe` de esa arista.
+ */
+export interface ParejaDedupe {
+  nuevo: number;
+  previo: number;
+  nivel: number;
+}
+
+/**
  * Nivel del empate de una línea nueva con una fila previa del MISMO bucket
  * (menor = más fuerte; `null` = no son la misma línea):
  *  0. REFERENCIA igual **y** leyenda tolerante igual (re-subir el mismo PDF).
@@ -790,8 +801,16 @@ const NIVEL_EMPATE_MAX = 4;
  *  4. REFERENCIA igual con leyendas que NO se contradicen (la IA redactó
  *     distinto la MISMA línea: «AEROPUERTO DE COZUMEL» / «Aeropuerto
  *     Cozumel (TUA)»).
+ *
+ * Exportada desde el 0.0.75 (concepto del SPEI, 13-oct-2026): la regla
+ * ORDEN_ARCHIVO de `planEnriquecimiento` re-empareja gemelos por posición y
+ * exige que cada nueva pareja siga siendo la MISMA línea para el dedupe. La
+ * lógica no cambió.
  */
-function nivelEmpateDedupe(n: LineaDedupe, p: LineaDedupe): number | null {
+export function nivelEmpateDedupe(
+  n: LineaDedupe,
+  p: LineaDedupe,
+): number | null {
   const ref = refDedupe(n.referencia);
   const mismaRef = ref !== null && ref === refDedupe(p.referencia);
   const desc = nivelDescripcionDedupe(n.descripcion, p.descripcion);
@@ -835,31 +854,39 @@ function nivelEmpateDedupe(n: LineaDedupe, p: LineaDedupe): number | null {
  * MULTICONJUNTO: cada fila previa se usa UNA sola vez. Dos cargos
  * legítimos iguales del mismo día siguen entrando si el archivo trae dos y
  * la base uno; y las líneas del MISMO archivo nunca se deduplican entre sí.
+ *
+ * Desde el 0.0.75 (concepto del SPEI, 13-oct-2026) devuelve además
+ * `parejas` (qué línea nueva es qué fila previa): `parejas` alimenta
+ * `planEnriquecimiento` (`enriquecer-descripcion.util`). El predicado, los
+ * niveles, `aInsertar` y `duplicados` NO cambiaron (el espejo SQL
+ * 20260929000001 tampoco): `parejas.length === duplicados` siempre.
  */
 export function emparejarDuplicados<T extends LineaDedupe>(
   nuevos: readonly T[],
   previos: readonly LineaDedupe[],
-): { aInsertar: T[]; duplicados: number } {
-  // Solo interesan los buckets que trae el archivo.
-  const buckets = new Map<
-    string,
-    { nuevos: number[]; previos: LineaDedupe[] }
-  >();
+): { aInsertar: T[]; duplicados: number; parejas: ParejaDedupe[] } {
+  // Solo interesan los buckets que trae el archivo. Los buckets guardan
+  // ÍNDICES (de los arreglos recibidos) para poder devolver `parejas`.
+  const buckets = new Map<string, { nuevos: number[]; previos: number[] }>();
   nuevos.forEach((n, i) => {
     const k = claveBucket(n);
     const b = buckets.get(k) ?? { nuevos: [], previos: [] };
     b.nuevos.push(i);
     buckets.set(k, b);
   });
-  for (const p of previos) buckets.get(claveBucket(p))?.previos.push(p);
+  previos.forEach((p, i) => buckets.get(claveBucket(p))?.previos.push(i));
 
   const duplicado = new Array<boolean>(nuevos.length).fill(false);
+  const parejas: ParejaDedupe[] = [];
   for (const b of buckets.values()) {
     if (b.previos.length === 0) continue;
     // Filas previas con las que empata cada línea nueva, la más fuerte primero.
     const aristas = b.nuevos.map((i) =>
       b.previos
-        .map((p, k) => ({ k, nivel: nivelEmpateDedupe(nuevos[i], p) }))
+        .map((pi, k) => ({
+          k,
+          nivel: nivelEmpateDedupe(nuevos[i], previos[pi]),
+        }))
         .filter((a): a is { k: number; nivel: number } => a.nivel !== null)
         .sort((x, y) => x.nivel - y.nivel || x.k - y.k),
     );
@@ -893,9 +920,62 @@ export function emparejarDuplicados<T extends LineaDedupe>(
     b.nuevos.forEach((i, u) => {
       duplicado[i] = emparejada[u];
     });
+    // Parejas del emparejamiento final (fila previa k ↔ línea usadaPor[k]),
+    // con el nivel de ESA arista.
+    usadaPor.forEach((u, k) => {
+      if (u === -1) return;
+      const arista = aristas[u].find((a) => a.k === k);
+      parejas.push({
+        nuevo: b.nuevos[u],
+        previo: b.previos[k],
+        nivel: arista ? arista.nivel : NIVEL_EMPATE_MAX,
+      });
+    });
   }
   const aInsertar = nuevos.filter((_, i) => !duplicado[i]);
-  return { aInsertar, duplicados: nuevos.length - aInsertar.length };
+  parejas.sort((x, y) => x.nuevo - y.nuevo);
+  return {
+    aInsertar,
+    duplicados: nuevos.length - aInsertar.length,
+    parejas,
+  };
+}
+
+/**
+ * Previas en un orden DETERMINISTA para el dedupe (0.0.75): fecha, tipo,
+ * monto a centavos, `orden_archivo` asc (null al final), `created_at` asc e
+ * id asc. El conteo de duplicados no depende del orden (emparejamiento
+ * máximo), pero QUÉ fila previa se empareja con qué línea sí puede cambiar
+ * entre previas equivalentes; con este orden `parejas` —que alimenta
+ * `planEnriquecimiento`— sale igual en cada corrida. Devuelve una COPIA.
+ */
+export function ordenarPreviosParaDedupe<
+  P extends LineaDedupe & {
+    id?: string;
+    orden_archivo?: number | null;
+    created_at?: string | null;
+  },
+>(previos: readonly P[]): P[] {
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const cent = (x: number | string) => Math.round((Number(x) || 0) * 100);
+  return [...previos].sort((a, b) => {
+    const f = cmp(a.fecha ?? '', b.fecha ?? '');
+    if (f !== 0) return f;
+    const t = cmp(a.tipo ?? '', b.tipo ?? '');
+    if (t !== 0) return t;
+    const m = cent(a.monto) - cent(b.monto);
+    if (m !== 0) return m;
+    const oa = a.orden_archivo ?? null;
+    const ob = b.orden_archivo ?? null;
+    if (oa !== ob) {
+      if (oa === null) return 1;
+      if (ob === null) return -1;
+      return oa - ob;
+    }
+    const c = cmp(a.created_at ?? '', b.created_at ?? '');
+    if (c !== 0) return c;
+    return cmp(a.id ?? '', b.id ?? '');
+  });
 }
 
 // =======================================================================

@@ -5,8 +5,11 @@ import {
   descripcionesSeContradicen,
   elegirCandidato,
   elegirMovimiento,
-  emparejarDuplicados,
+  emparejarDuplicados as emparejarDuplicadosReal,
   leyendasNombranDistinto,
+  nivelEmpateDedupe,
+  ordenarPreviosParaDedupe,
+  type LineaDedupe,
   mismaDescripcionDedupe,
   montoCasa,
   nivelDescripcionDedupe,
@@ -21,6 +24,44 @@ import {
   ventanaDias,
   type GastoCandidatoCruce,
 } from './auto-cruce.util';
+
+/**
+ * CONCEPTO DEL SPEI (0.0.75): `emparejarDuplicados` devuelve además
+ * `parejas`. Cada llamada de ESTE spec pasa por aquí y comprueba, en TODOS
+ * los fixtures de siempre (Cozumel, ZOMAY, ASA CANCUN, CARGO INDEBIDO,
+ * DIDI…), que las parejas cuentan EXACTAMENTE los duplicados, con índices
+ * válidos, cada fila previa y cada línea una sola vez, del mismo bucket, con
+ * su nivel real y ordenadas por línea; y que `aInsertar` son justo las
+ * líneas sin pareja (el golden de siempre no se mueve).
+ */
+function emparejarDuplicados<T extends LineaDedupe>(
+  nuevos: readonly T[],
+  previos: readonly LineaDedupe[],
+) {
+  const r = emparejarDuplicadosReal(nuevos, previos);
+  expect(r.parejas).toHaveLength(r.duplicados);
+  const lineas = new Set<number>();
+  const filas = new Set<number>();
+  let anterior = -1;
+  for (const p of r.parejas) {
+    expect(Number.isInteger(p.nuevo) && p.nuevo >= 0).toBe(true);
+    expect(p.nuevo).toBeLessThan(nuevos.length);
+    expect(Number.isInteger(p.previo) && p.previo >= 0).toBe(true);
+    expect(p.previo).toBeLessThan(previos.length);
+    expect(lineas.has(p.nuevo)).toBe(false);
+    expect(filas.has(p.previo)).toBe(false);
+    lineas.add(p.nuevo);
+    filas.add(p.previo);
+    expect(p.nuevo).toBeGreaterThan(anterior);
+    anterior = p.nuevo;
+    expect(claveBucket(nuevos[p.nuevo])).toBe(claveBucket(previos[p.previo]));
+    expect(nivelEmpateDedupe(nuevos[p.nuevo], previos[p.previo])).toBe(p.nivel);
+  }
+  const sinPareja = nuevos.filter((_, i) => !lineas.has(i));
+  expect(r.aInsertar).toHaveLength(sinPareja.length);
+  r.aInsertar.forEach((x, i) => expect(x).toBe(sinPareja[i]));
+  return r;
+}
 
 /**
  * Casos REALES del Scotiabank MXN «GASTOS GNRAL» (semana 7-13 sep 2026),
@@ -898,6 +939,106 @@ describe('emparejarDuplicados — re-lecturas REALES de la IA (29-sep-2026)', ()
     );
     expect(r.duplicados).toBe(0);
     expect(r.aInsertar).toHaveLength(3);
+  });
+});
+
+describe('CONCEPTO DEL SPEI (0.0.75): parejas y previos en orden determinista', () => {
+  const SPEI = 'SEL TRANSF. INTERBANCARIA SPEI';
+  const linea = (descripcion: string, referencia: string) => ({
+    fecha: '2026-09-12',
+    tipo: 'CARGO',
+    monto: 2231.38,
+    descripcion,
+    referencia,
+  });
+
+  it('re-subir con concepto NO duplica: «SEL TRANSF. INTERBANCARIA SPEI» vs «… BANORTE fact vip 7360», con la misma referencia y con otra', () => {
+    const R = '00000000000000000001';
+    const misma = emparejarDuplicados(
+      [linea(`${SPEI} BANORTE fact vip 7360`, R)],
+      [linea(SPEI, R)],
+    );
+    expect(misma.duplicados).toBe(1);
+    expect(misma.parejas).toEqual([{ nuevo: 0, previo: 0, nivel: 0 }]);
+    const otra = emparejarDuplicados(
+      [linea(`${SPEI} BANORTE fact vip 7360`, '999')],
+      [linea(SPEI, R)],
+    );
+    expect(otra.duplicados).toBe(1);
+    expect(otra.parejas).toEqual([{ nuevo: 0, previo: 0, nivel: 2 }]);
+  });
+
+  it('gemelos 2×2: cada fila previa una sola vez y los índices son los de los arreglos recibidos', () => {
+    const R = '00000000000000000001';
+    const otroDia = { ...linea(SPEI, R), fecha: '2026-09-01' };
+    const r = emparejarDuplicados(
+      [
+        linea(`${SPEI} BANORTE fact vip 7350`, R),
+        linea(`${SPEI} BANORTE fact vip 7351`, R),
+      ],
+      [otroDia, linea(SPEI, R), linea(SPEI, R)],
+    );
+    expect(r.duplicados).toBe(2);
+    expect(r.parejas.map((p) => p.previo).sort()).toEqual([1, 2]);
+  });
+
+  it('ordenarPreviosParaDedupe: fecha, tipo, monto, orden_archivo (null al final), created_at e id; copia sin mutar', () => {
+    const previos = [
+      {
+        id: 'd',
+        fecha: '2026-09-02',
+        tipo: 'CARGO',
+        monto: 5,
+        orden_archivo: null,
+      },
+      {
+        id: 'c',
+        fecha: '2026-09-01',
+        tipo: 'CARGO',
+        monto: 5,
+        orden_archivo: null,
+        created_at: '2026-09-03T00:00:00Z',
+      },
+      {
+        id: 'b',
+        fecha: '2026-09-01',
+        tipo: 'CARGO',
+        monto: 5,
+        orden_archivo: null,
+        created_at: '2026-09-02T00:00:00Z',
+      },
+      {
+        id: 'a',
+        fecha: '2026-09-01',
+        tipo: 'CARGO',
+        monto: 5,
+        orden_archivo: 7,
+      },
+      { id: 'e', fecha: '2026-09-01', tipo: 'ABONO', monto: 5 },
+      { id: 'f', fecha: '2026-09-01', tipo: 'CARGO', monto: '4.99' },
+    ];
+    const copia = JSON.parse(JSON.stringify(previos)) as typeof previos;
+    const orden = ordenarPreviosParaDedupe(previos).map((p) => p.id);
+    expect(orden).toEqual(['e', 'f', 'a', 'b', 'c', 'd']);
+    expect(previos).toEqual(copia);
+    // Determinista: cualquier permutación de la entrada da lo mismo.
+    expect(
+      ordenarPreviosParaDedupe([...previos].reverse()).map((p) => p.id),
+    ).toEqual(orden);
+  });
+
+  it('el conteo no cambia con el orden de las previas (multiconjunto intacto)', () => {
+    const R = '00000000000000000001';
+    const nuevos = [
+      linea(`${SPEI} BANORTE fact vip 7350`, R),
+      linea(`${SPEI} BANORTE fact vip 7351`, R),
+      linea('ASA CANCUN', R),
+    ];
+    const previos = [linea(SPEI, R), linea('ASA CANCUN', R), linea(SPEI, R)];
+    const a = emparejarDuplicados(nuevos, previos);
+    const b = emparejarDuplicados(nuevos, ordenarPreviosParaDedupe(previos));
+    expect(b.duplicados).toBe(a.duplicados);
+    expect(b.aInsertar).toEqual(a.aInsertar);
   });
 });
 

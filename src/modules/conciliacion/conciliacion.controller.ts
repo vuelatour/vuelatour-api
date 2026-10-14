@@ -73,6 +73,20 @@ export class ConciliacionController {
     return this.conciliacion.importar(dto, c.userId);
   }
 
+  // CONCEPTO DEL SPEI (13-oct-2026, API 0.0.75, invariante 69): la vista
+  // previa de la importación NO escribe nada (ni archiva el archivo). Roles
+  // de la clase (ADMIN, FACTURACION); mismo DTO que `importar` (ignora
+  // `solo_enriquecer`, `filename` y `file_base64`).
+  @Post('importar/vista-previa')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Simula la importación SIN escribir: cuántas líneas ya estaban, a cuántas se les completaría el concepto del banco, gemelos y vínculos que no se completan y las líneas nuevas',
+  })
+  vistaPrevia(@Body() dto: ImportarMovimientosDto) {
+    return this.conciliacion.vistaPreviaImport(dto);
+  }
+
   @Post('importar-async')
   @ApiOperation({
     summary:

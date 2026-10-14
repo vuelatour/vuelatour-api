@@ -187,6 +187,29 @@ export class ImportarMovimientosDto {
   @IsString()
   @MaxLength(16_000_000)
   file_base64?: string;
+
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 69): re-subir un periodo
+   * YA importado solo para completar el concepto del SPEI. No inserta, no
+   * cruza ni empareja reversos. La vista previa (`importar/vista-previa`)
+   * usa este mismo DTO e ignora este campo, `filename` y `file_base64`.
+   */
+  @ApiPropertyOptional({
+    description:
+      'true = solo completar el concepto del banco de los movimientos YA importados: no inserta, no cruza ni empareja reversos; lo que no encuentre lo devuelve en no_encontrados',
+  })
+  @IsOptional()
+  // El valor CRUDO del cuerpo: con `enableImplicitConversion` (main.ts) un
+  // «"si"» llegaría convertido a `true` (Boolean('si')) y se aceptaría en
+  // silencio; así solo pasan `true` y `false` de verdad.
+  @Transform(({ obj, key, value }): unknown => {
+    const fuente = obj as Record<string, unknown> | null | undefined;
+    return fuente && typeof fuente === 'object' && key in fuente
+      ? fuente[key]
+      : (value as unknown);
+  })
+  @IsBoolean()
+  solo_enriquecer?: boolean;
 }
 
 export class ListConciliacionQuery {

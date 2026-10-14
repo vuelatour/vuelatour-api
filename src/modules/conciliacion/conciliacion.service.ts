@@ -195,6 +195,7 @@ import {
   type CargoConciliadoExcluido,
   type ExcluidosCandidatos,
   type GastoExcluible,
+  type GrupoExcluidos,
 } from './candidatos-excluidos.util';
 import {
   CLASIFICACION_TRASPASO,
@@ -203,6 +204,7 @@ import {
   elegirMovimiento,
   emparejarDuplicados,
   montoCasa,
+  ordenarPreviosParaDedupe,
   patronTraspaso,
   primeraLinea,
   sumarResultado,
@@ -213,6 +215,39 @@ import {
   type GastoCandidatoCruce,
   type ResultadoCruce,
 } from './auto-cruce.util';
+import {
+  CONCEPTO_TEXTO_MAX,
+  direccionDeFechas,
+  ENRIQUECIMIENTO_DETALLE_MAX,
+  ENRIQUECIMIENTO_OMITIDOS_MAX,
+  estadoCuentaIdsParaDireccion,
+  idsParaLeerFolios,
+  lineasNuevasEnBucketConocido,
+  NUEVOS_MISMO_DIA_DETALLE_MAX,
+  planEnriquecimiento,
+  VISTA_PREVIA_DETALLE_MAX,
+  VISTA_PREVIA_OMITIDOS_MAX,
+  type DireccionArchivo,
+  type EnriquecimientoOmitido,
+  type EnriquecimientoPlaneado,
+  type FilaPreviaEnriquecible,
+  type ReglaEnriquecimiento,
+} from './enriquecer-descripcion.util';
+import {
+  coincideFacturaConGasto,
+  estadoLigados,
+  facturaConceptoParaRespuesta,
+  facturaDeConcepto,
+  foliosDeGastoCrudo,
+  numerosDeGasto,
+  REPETIDA_DIAS,
+  repeticionesDeFactura,
+  type FacturaConcepto,
+  type FilaUniversoFactura,
+  type FoliosGasto,
+  type NumeroFactura,
+  type TipoFacturaConcepto,
+} from './factura-concepto.util';
 import {
   abonosCandidatosDeCargo,
   anteponerNotaReverso,
@@ -387,6 +422,19 @@ export interface GastosCandidatosRespuesta {
   truncado: boolean;
   excluidos?: ExcluidosCandidatos['excluidos'];
   excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
+  /**
+   * ADITIVO (0.0.75, invariante 69): SOLO cuando el concepto del cargo cita
+   * una factura. `otros_gastos` = gastos a ±120 días que tienen ESA factura
+   * y no salen como candidatos (forma de `excluidos`; `conciliado_con` en
+   * YA_CONCILIADO); null = no se pudo leer.
+   */
+  factura_concepto?: {
+    tipo: TipoFacturaConcepto;
+    numeros: string[];
+    texto: string;
+    pista: string | null;
+    otros_gastos: GrupoExcluidos[] | null;
+  };
 }
 
 /**
@@ -483,6 +531,11 @@ export interface ParsedStatement {
   uso_ia?: UsoIaPayload | null;
   /** Encabezados del archivo (tabular): para el mapeo manual del panel. */
   columnas?: string[];
+  /**
+   * Avisos del parse (ya llegaban de pyservices; tipados desde el 0.0.75):
+   * p. ej. «N transferencia(s) o pago(s) se leyeron SIN su concepto…».
+   */
+  advertencias?: string[];
 }
 
 export interface SugerenciaConciliacion {
@@ -538,6 +591,13 @@ export interface SugerenciaConciliacion {
      * `common/folio-comprobante.util`.
      */
     folio_comprobante?: string | null;
+    /**
+     * ADITIVO (0.0.75, invariante 69): SOLO en «Vincular gasto» y solo
+     * cuando el concepto del cargo cita una factura: el folio del gasto
+     * (factura recibida, ticket, IA o «fact NNNN» en la 1.ª línea de las
+     * notas) es esa factura. Ordena dentro de su nivel; jamás liga.
+     */
+    coincide_factura?: boolean;
   }>;
 }
 
@@ -762,6 +822,100 @@ interface CtxErrorPartes {
 
 /** Tope de gastos que lee el endpoint de candidatos de un cargo (una página). */
 const CANDIDATOS_GASTO_TOPE = 1000;
+
+/**
+ * CONCEPTO DEL SPEI (13-oct-2026, API 0.0.75, invariante 69): filas previas
+ * que lee el dedupe de una importación (paginadas; con más ⇒ 400 «impórtalo
+ * por partes») y archivos cuya dirección se lee para ORDEN_ARCHIVO.
+ */
+const PREVIOS_DEDUPE_TOPE = 20_000;
+const DIRECCIONES_ARCHIVO_MAX = 5;
+/** Tope de `no_encontrados_detalle` (modo `solo_enriquecer`). */
+const NO_ENCONTRADOS_DETALLE_MAX = 50;
+/** Universo de `repetida_en`: UNA página de PostgREST; llegar a ella ⇒ null. */
+const REPETIDAS_UNIVERSO_TOPE = 1000;
+
+/** Una fila completada, tal como viaja en el rastro y en la vista previa. */
+export interface DetalleEnriquecido {
+  movimiento_id: string;
+  fecha: string;
+  tipo: string;
+  monto: number;
+  antes: string;
+  despues: string;
+  regla: ReglaEnriquecimiento;
+}
+
+function detalleEnriquecido(e: EnriquecimientoPlaneado): DetalleEnriquecido {
+  return {
+    movimiento_id: e.previo_id,
+    fecha: e.fecha,
+    tipo: e.tipo,
+    monto: e.monto,
+    antes: e.antes,
+    despues: e.despues,
+    regla: e.regla,
+  };
+}
+
+/** Σ de los movimientos que se quedaron sin concepto (todos los omitidos). */
+function movimientosOmitidos(
+  omitidos: readonly EnriquecimientoOmitido[],
+): number {
+  return omitidos.reduce((acc, o) => acc + o.movimiento_ids.length, 0);
+}
+
+/**
+ * Respuesta de `importar` / `importar-async` (resultados del job). Los
+ * campos del 0.0.75 son ADITIVOS: `enriquecidos`, `enriquecimiento_omitidos`
+ * y `enriquecimiento` siempre; `nuevos_mismo_dia_y_monto(_detalle)` solo en
+ * el modo normal; `solo_enriquecer`, `no_encontrados(_detalle)` solo con
+ * `solo_enriquecer`.
+ */
+// `type` (no `interface`): los specs la leen como `Record<string, unknown>`.
+export type ResultadoImportacion = {
+  importados: number;
+  conciliados_auto: number;
+  duplicados_omitidos: number;
+  conciliados: number;
+  traspasos: number;
+  reversos: number;
+  reversos_emparejados: number;
+  ambiguos: number;
+  sin_candidato: number;
+  rechazados: number;
+  errores: number;
+  por_criterio: Record<string, number>;
+  detalle: ResultadoMovimiento[];
+  enriquecidos?: number;
+  enriquecimiento_omitidos?: number;
+  enriquecimiento?: {
+    estado_cuenta_id: string | null;
+    detalle: DetalleEnriquecido[];
+    omitidos: EnriquecimientoOmitido[];
+  };
+  nuevos_mismo_dia_y_monto?: number;
+  nuevos_mismo_dia_y_monto_detalle?: Array<{
+    orden_archivo: number;
+    fecha: string;
+    tipo: string;
+    monto: number;
+    moneda: string | null;
+    descripcion: string | null;
+  }>;
+  solo_enriquecer?: true;
+  no_encontrados?: number;
+  no_encontrados_detalle?: Array<{
+    orden_archivo: number;
+    fecha: string;
+    tipo: string;
+    monto: number;
+    moneda: string | null;
+    descripcion: string | null;
+    referencia: string | null;
+    factura: string | null;
+  }>;
+};
 
 @Injectable()
 export class ConciliacionService {
@@ -1260,8 +1414,26 @@ export class ConciliacionService {
       const res = await this.ejecutarImport(
         dto,
         userId,
-        async (progreso, paso) => setJob({ progreso, paso }),
+        // CONCEPTO DEL SPEI (0.0.75): `parcial` es el rastro del
+        // enriquecimiento; se guarda en `resultados` A MEDIO JOB para que
+        // sobreviva si después algo truena (el catch no toca `resultados`).
+        async (progreso, paso, parcial) =>
+          setJob({ progreso, paso }, parcial ? { resultados: parcial } : {}),
       );
+      // Solo las llaves DEFINIDAS (un modo no trae las del otro).
+      const nuevos: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries({
+        enriquecidos: res.enriquecidos,
+        enriquecimiento_omitidos: res.enriquecimiento_omitidos,
+        enriquecimiento: res.enriquecimiento,
+        nuevos_mismo_dia_y_monto: res.nuevos_mismo_dia_y_monto,
+        nuevos_mismo_dia_y_monto_detalle: res.nuevos_mismo_dia_y_monto_detalle,
+        solo_enriquecer: res.solo_enriquecer,
+        no_encontrados: res.no_encontrados,
+        no_encontrados_detalle: res.no_encontrados_detalle,
+      })) {
+        if (v !== undefined) nuevos[k] = v;
+      }
       await setJob(
         {
           estado: 'LISTO',
@@ -1283,6 +1455,7 @@ export class ConciliacionService {
             rechazados: res.rechazados,
             errores: res.errores,
             por_criterio: res.por_criterio,
+            ...nuevos,
           },
           errores_detalle: res.detalle.slice(0, 100),
         },
@@ -1332,15 +1505,17 @@ export class ConciliacionService {
     return fila;
   }
 
-  private async ejecutarImport(
+  /**
+   * Líneas del archivo listas para insertar (y para el dedupe). ORDEN DEL
+   * ARCHIVO (12-oct-2026, invariante 55): cada línea guarda su posición en
+   * el estado de cuenta (1 = la primera del archivo, contando también las
+   * que se descartan por no traer fecha) para que el reporte salga en el
+   * mismo orden que el archivo del banco. Sin líneas con fecha ⇒ 400.
+   */
+  private lineasDeImportacion(
     dto: ImportarMovimientosDto,
-    userId: string,
-    onProgress: (progreso: number, paso: string) => Promise<void>,
+    userId: string | null,
   ) {
-    // ORDEN DEL ARCHIVO (12-oct-2026, invariante 55): cada línea guarda su
-    // posición en el estado de cuenta (1 = la primera del archivo, contando
-    // también las que se descartan por no traer fecha) para que el reporte
-    // salga en el mismo orden que el archivo del banco.
     const base = dto.movimientos
       .map((m, i) => ({ m, orden_archivo: i + 1 }))
       .filter(({ m }) => m.fecha)
@@ -1365,8 +1540,61 @@ export class ConciliacionService {
         'No hay movimientos con fecha para importar.',
       );
     }
-    await onProgress(5, 'Buscando duplicados…');
+    return base;
+  }
 
+  /**
+   * Filas YA importadas de la cuenta en el periodo del archivo (dedupe y
+   * concepto del SPEI). PAGINADAS por la PK (0.0.75): el `.limit(20000)` de
+   * antes lo cortaba PostgREST en max-rows (1000) SIN avisar y el
+   * multiconjunto salía incompleto. Con más de `PREVIOS_DEDUPE_TOPE` ⇒ 400
+   * (jamás se deduplica contra una foto recortada). Devuelve el orden
+   * determinista de `ordenarPreviosParaDedupe`. `orden_archivo` y
+   * `reverso_de_id` solo detrás de sus sondas.
+   */
+  private async leerPreviosDedupe(
+    cuentaId: string,
+    desde: string,
+    hasta: string,
+  ): Promise<FilaPreviaEnriquecible[]> {
+    const [conOrden, conReversos] = await Promise.all([
+      this.ordenArchivoOn(),
+      this.reversosOn(),
+    ]);
+    const cols = `${await this.movCols()}, estado_cuenta_id${conOrden ? ', orden_archivo' : ''}${conReversos ? ', reverso_de_id' : ''}`;
+    const { filas, truncado } = await this.leerPaginado(
+      (d, h) =>
+        this.supabase.service
+          .from('movimiento_bancario')
+          .select(cols)
+          .eq('cuenta_bancaria_id', cuentaId)
+          .gte('fecha', desde)
+          .lte('fecha', hasta)
+          .order('id', { ascending: true })
+          .range(d, h),
+      PREVIOS_DEDUPE_TOPE,
+    );
+    if (truncado) {
+      throw new BadRequestException(
+        'El periodo del archivo trae más de 20,000 movimientos previos en la cuenta: impórtalo por partes.',
+      );
+    }
+    return ordenarPreviosParaDedupe(
+      filas as unknown as FilaPreviaEnriquecible[],
+    );
+  }
+
+  /**
+   * Lo que comparten la importación, `solo_enriquecer` y la vista previa
+   * (0.0.75), SIN escribir nada: previos paginados, dedupe (con `parejas`),
+   * las lecturas best-effort que el plan necesita (folios de los gemelos
+   * ligados y dirección de los archivos previos) y el PLAN del concepto del
+   * SPEI (`planEnriquecimiento`, puro).
+   */
+  private async prepararImportacion(
+    dto: ImportarMovimientosDto,
+    base: ReturnType<ConciliacionService['lineasDeImportacion']>,
+  ) {
     // CANDADO DE RE-IMPORTACIÓN: el mismo estado de cuenta subido dos veces
     // duplicaría los movimientos e inflaría los pendientes para siempre (los
     // gastos ya conciliados no se vuelven a cruzar). Dedup MULTICONJUNTO por
@@ -1374,30 +1602,361 @@ export class ConciliacionService {
     // cuenta: dos cargos legítimos idénticos del mismo día solo se omiten si
     // ya existen exactamente esas repeticiones en la base.
     const fechas = base.map((r) => r.fecha).sort();
-    const { data: previos, error: prevErr } = await this.supabase.service
-      .from('movimiento_bancario')
-      .select('fecha, tipo, monto, descripcion, referencia')
-      .eq('cuenta_bancaria_id', dto.cuenta_bancaria_id)
-      .gte('fecha', fechas[0])
-      .lte('fecha', fechas[fechas.length - 1])
-      // SIN limit explícito PostgREST corta en el «Max rows» del proyecto
-      // (1000) y el multiconjunto salía incompleto ⇒ duplicados en silencio.
-      .limit(20000);
-    if (prevErr) throw new Error(prevErr.message);
+    const [previos, cuentaInfo] = await Promise.all([
+      this.leerPreviosDedupe(
+        dto.cuenta_bancaria_id,
+        fechas[0],
+        fechas[fechas.length - 1],
+      ),
+      this.infoCuenta(dto.cuenta_bancaria_id),
+    ]);
     // Fuente única del candado: `emparejarDuplicados` (auto-cruce.util). La
     // referencia que la IA lee del PDF NO es estable entre lecturas (29-sep-
     // 2026: el mismo cargo llegó con tres referencias distintas y se insertó
     // tres veces), así que NUNCA veta un duplicado: manda la leyenda
     // tolerante (truncado, redacción) y la referencia solo suma.
-    const { aInsertar: nuevos, duplicados: duplicadosOmitidos } =
-      emparejarDuplicados(base, previos ?? []);
+    const { aInsertar, duplicados, parejas } = emparejarDuplicados(
+      base,
+      previos,
+    );
+    // CONCEPTO DEL SPEI (0.0.75, invariante 69): lecturas SOLO cuando hacen
+    // falta (gemelos ligados ⇒ folios; gemelos de un mismo archivo ⇒ su
+    // dirección). Best-effort: si fallan, esos gemelos quedan GEMELOS.
+    const idsFolios = idsParaLeerFolios(base, previos, parejas);
+    const foliosPorPrevia =
+      idsFolios.length > 0
+        ? await this.foliosParaGemelos(idsFolios, previos)
+        : new Map<string, NumeroFactura[]>();
+    const idsDireccion = estadoCuentaIdsParaDireccion(base, previos, parejas);
+    const direccionPorEstadoCuenta =
+      idsDireccion.length > 0 && (await this.ordenArchivoOn())
+        ? await this.direccionesDeArchivos(idsDireccion)
+        : new Map<string, DireccionArchivo | null>();
+    const plan = planEnriquecimiento(base, previos, parejas, {
+      foliosPorPrevia,
+      // `base` ya va en el orden del archivo (orden_archivo ascendente).
+      direccionArchivoNuevo: direccionDeFechas(base.map((b) => b.fecha)),
+      direccionPorEstadoCuenta,
+      moneda: cuentaInfo.moneda,
+    });
+    const nuevosMismoDia = lineasNuevasEnBucketConocido(aInsertar, previos);
+    return {
+      aInsertar,
+      duplicados,
+      plan,
+      nuevosMismoDia,
+      cuentaInfo,
+    };
+  }
+
+  /**
+   * previa → números de factura de su(s) gasto(s) ligado(s) (regla FOLIO).
+   * Partes por la puente (con la sonda) o, sin ella, el espejo `gasto_id`;
+   * folios con `numerosDeGasto` (factura recibida, ticket, IA y «fact NNNN»
+   * en la primera línea de las notas). BEST-EFFORT: si algo falla, mapa
+   * vacío + warn (los gemelos quedan GEMELOS, jamás se adivina).
+   */
+  private async foliosParaGemelos(
+    previoIds: string[],
+    previos: readonly FilaPreviaEnriquecible[],
+  ): Promise<Map<string, NumeroFactura[]>> {
+    try {
+      let pares: Array<{ movimiento_id: string; gasto_id: string }>;
+      if (await this.partesOn()) {
+        pares = (await this.partesDeMovimientos(previoIds)).map((p) => ({
+          movimiento_id: p.movimiento_id,
+          gasto_id: p.gasto_id,
+        }));
+      } else {
+        const ids = new Set(previoIds);
+        pares = previos
+          .filter((p) => ids.has(p.id) && typeof p.gasto_id === 'string')
+          .map((p) => ({
+            movimiento_id: p.id,
+            gasto_id: p.gasto_id as string,
+          }));
+      }
+      if (pares.length === 0) return new Map();
+      const embed = await this.embedFolio();
+      const gastos = await this.leerPorLotes(
+        pares.map((p) => p.gasto_id),
+        (lote) =>
+          this.supabase.service
+            .from('gasto')
+            .select(`id, notas, ${embed}`)
+            .in('id', lote),
+      );
+      const numerosDe = new Map(
+        gastos.map((g) => [
+          g.id as string,
+          numerosDeGasto(foliosDeGastoCrudo(g)),
+        ]),
+      );
+      const out = new Map<string, NumeroFactura[]>();
+      for (const p of pares) {
+        const lista = out.get(p.movimiento_id) ?? [];
+        lista.push(...(numerosDe.get(p.gasto_id) ?? []));
+        out.set(p.movimiento_id, lista);
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(
+        `importación: no se pudieron leer los folios de los gemelos (${previoIds.length}): ${err instanceof Error ? err.message : String(err)}; quedan como GEMELOS.`,
+      );
+      return new Map();
+    }
+  }
+
+  /**
+   * Dirección (ASC/DESC por fecha) de los archivos con los que se
+   * importaron unos gemelos (regla ORDEN_ARCHIVO), ≤ 5 archivos. Se lee en
+   * el orden del archivo (`orden_archivo` ≥ 1; `gte` y no `.not()`).
+   * BEST-EFFORT: un archivo que no se pudo leer queda null.
+   */
+  private async direccionesDeArchivos(
+    ids: string[],
+  ): Promise<Map<string, DireccionArchivo | null>> {
+    const out = new Map<string, DireccionArchivo | null>();
+    for (const id of ids.slice(0, DIRECCIONES_ARCHIVO_MAX)) {
+      try {
+        const { filas, truncado } = await this.leerPaginado(
+          (d, h) =>
+            this.supabase.service
+              .from('movimiento_bancario')
+              .select('fecha, orden_archivo')
+              .eq('estado_cuenta_id', id)
+              .gte('orden_archivo', 1)
+              .order('orden_archivo', { ascending: true })
+              .order('id', { ascending: true })
+              .range(d, h),
+          PREVIOS_DEDUPE_TOPE,
+        );
+        out.set(
+          id,
+          truncado
+            ? null
+            : direccionDeFechas(filas.map((f) => f.fecha as string | null)),
+        );
+      } catch (err) {
+        this.logger.warn(
+          `importación: no se pudo leer el orden del estado de cuenta ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        out.set(id, null);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Escribe el concepto planeado, UNA fila a la vez: SOLO `descripcion` y
+   * `updated_by` (el trigger mueve `updated_at`), con CAS sobre el texto
+   * leído y `origen = IMPORTADO`. 0 filas ⇒ CAMBIO_CONCURRENTE; un error ⇒
+   * ERROR con su texto (≤ 200). Jamás lanza ni toca otra columna.
+   */
+  private async aplicarEnriquecimiento(
+    lista: readonly EnriquecimientoPlaneado[],
+    userId: string,
+    moneda: string | null,
+  ): Promise<{
+    enriquecidos: EnriquecimientoPlaneado[];
+    omitidos: EnriquecimientoOmitido[];
+  }> {
+    const enriquecidos: EnriquecimientoPlaneado[] = [];
+    const omitidos: EnriquecimientoOmitido[] = [];
+    const omitido = (
+      e: EnriquecimientoPlaneado,
+      motivo: 'CAMBIO_CONCURRENTE' | 'ERROR',
+      detalle?: string,
+    ): EnriquecimientoOmitido => {
+      const fc = facturaDeConcepto(e.despues);
+      return {
+        motivo,
+        fecha: e.fecha,
+        tipo: e.tipo,
+        monto: e.monto,
+        moneda,
+        movimiento_ids: [e.previo_id],
+        conceptos: [e.despues.slice(0, CONCEPTO_TEXTO_MAX)],
+        facturas: fc ? [fc.texto] : [],
+        ...(detalle !== undefined ? { detalle: detalle.slice(0, 200) } : {}),
+      };
+    };
+    for (const e of lista) {
+      try {
+        const { data, error } = await this.supabase.service
+          .from('movimiento_bancario')
+          .update({ descripcion: e.despues, updated_by: userId })
+          .eq('id', e.previo_id)
+          .eq('descripcion', e.antes)
+          .eq('origen', 'IMPORTADO')
+          .select('id');
+        if (error) throw new Error(error.message);
+        if (((data ?? []) as unknown[]).length >= 1) enriquecidos.push(e);
+        else omitidos.push(omitido(e, 'CAMBIO_CONCURRENTE'));
+      } catch (err) {
+        omitidos.push(
+          omitido(e, 'ERROR', err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+    return { enriquecidos, omitidos };
+  }
+
+  /**
+   * VISTA PREVIA de la importación (0.0.75): la MISMA preparación que
+   * `importar` SIN archivar ni escribir nada. El panel la pide antes de
+   * importar para decir «N ya estaban · a M se les agregará el concepto ·
+   * K nuevas» y ofrecer «Solo completar conceptos».
+   */
+  async vistaPreviaImport(dto: ImportarMovimientosDto) {
+    const base = this.lineasDeImportacion(dto, null);
+    const prep = await this.prepararImportacion(dto, base);
+    const mismoDia = new Set(prep.nuevosMismoDia.map((n) => n.orden_archivo));
+    return {
+      total: base.length,
+      ya_estaban: prep.duplicados,
+      nuevos: prep.aInsertar.length,
+      nuevos_mismo_dia_y_monto: prep.nuevosMismoDia.length,
+      se_enriquecen: prep.plan.enriquecer.length,
+      enriquecimiento_omitidos: movimientosOmitidos(prep.plan.omitidos),
+      moneda: prep.cuentaInfo.moneda,
+      omitidos: prep.plan.omitidos.slice(0, VISTA_PREVIA_OMITIDOS_MAX),
+      nuevos_detalle: prep.aInsertar
+        .slice(0, VISTA_PREVIA_DETALLE_MAX)
+        .map((n) => ({
+          orden_archivo: n.orden_archivo,
+          fecha: n.fecha,
+          tipo: n.tipo,
+          monto: Number(n.monto),
+          descripcion: n.descripcion,
+          mismo_dia_y_monto: mismoDia.has(n.orden_archivo),
+        })),
+      enriquecibles_detalle: prep.plan.enriquecer
+        .slice(0, VISTA_PREVIA_DETALLE_MAX)
+        .map(detalleEnriquecido),
+    };
+  }
+
+  private async ejecutarImport(
+    dto: ImportarMovimientosDto,
+    userId: string,
+    onProgress: (
+      progreso: number,
+      paso: string,
+      parcial?: Record<string, unknown>,
+    ) => Promise<void>,
+  ): Promise<ResultadoImportacion> {
+    const base = this.lineasDeImportacion(dto, userId);
+    await onProgress(5, 'Buscando duplicados…');
+    const prep = await this.prepararImportacion(dto, base);
+    const nuevos = prep.aInsertar;
+    const duplicadosOmitidos = prep.duplicados;
+    const cuentaInfo = prep.cuentaInfo;
 
     await onProgress(18, 'Archivando el estado de cuenta…');
     // El archivo original se archiva DESPUÉS de validar y ANTES de insertar:
     // cada movimiento queda ligado a su estado de cuenta. Se archiva aunque
     // todo resulte duplicado (re-subir un estado de cuenta viejo solo para
-    // conservar el archivo es un caso legítimo).
+    // conservar el archivo es un caso legítimo), y también con
+    // `solo_enriquecer`.
     const estadoCuentaId = await this.archivarEstadoCuenta(dto, userId);
+
+    // CONCEPTO DEL SPEI (0.0.75, invariante 69): completar la descripción
+    // de las filas YA importadas que eran solo la leyenda del banco. Solo
+    // `descripcion` + `updated_by`, con CAS; las filas completadas NO se
+    // vuelven a cruzar (para eso está «Cruzar pendientes»).
+    let enriquecidos: EnriquecimientoPlaneado[] = [];
+    let omitidosEnr: EnriquecimientoOmitido[] = [...prep.plan.omitidos];
+    if (prep.plan.enriquecer.length > 0) {
+      await onProgress(
+        20,
+        `Completando el concepto de ${prep.plan.enriquecer.length} movimientos…`,
+      );
+      const r = await this.aplicarEnriquecimiento(
+        prep.plan.enriquecer,
+        userId,
+        cuentaInfo.moneda,
+      );
+      enriquecidos = r.enriquecidos;
+      omitidosEnr = [...omitidosEnr, ...r.omitidos];
+    }
+    const camposEnr = {
+      enriquecidos: enriquecidos.length,
+      enriquecimiento_omitidos: movimientosOmitidos(omitidosEnr),
+      enriquecimiento: {
+        estado_cuenta_id: estadoCuentaId,
+        detalle: enriquecidos
+          .slice(0, ENRIQUECIMIENTO_DETALLE_MAX)
+          .map(detalleEnriquecido),
+        omitidos: omitidosEnr.slice(0, ENRIQUECIMIENTO_OMITIDOS_MAX),
+      },
+    };
+    if (prep.plan.enriquecer.length > 0) {
+      // El rastro que sobrevive aunque después algo truene.
+      await onProgress(24, 'Conceptos completados', camposEnr);
+      this.logger.log(
+        `importación cuenta ${dto.cuenta_bancaria_id} (estado de cuenta ${estadoCuentaId ?? 'sin archivo'}, ${dto.filename ?? 'sin nombre'}): concepto completado en ${enriquecidos.length} de ${prep.plan.enriquecer.length}; ${camposEnr.enriquecimiento_omitidos} sin completar.`,
+      );
+    }
+
+    const sinCruce = {
+      importados: 0,
+      conciliados_auto: 0,
+      duplicados_omitidos: duplicadosOmitidos,
+      conciliados: 0,
+      traspasos: 0,
+      reversos: 0,
+      reversos_emparejados: 0,
+      ambiguos: 0,
+      sin_candidato: 0,
+      rechazados: 0,
+      errores: 0,
+      por_criterio: {} as Record<string, number>,
+      detalle: [] as ResultadoMovimiento[],
+    };
+
+    // SOLO COMPLETAR CONCEPTOS: no inserta, no cruza ni empareja reversos;
+    // lo que no encontró se LISTA (jamás se agrega).
+    if (dto.solo_enriquecer === true) {
+      if (estadoCuentaId) {
+        await this.supabase.service
+          .from('estado_cuenta_archivo')
+          .update({ movimientos_importados: 0 })
+          .eq('id', estadoCuentaId);
+      }
+      return {
+        ...sinCruce,
+        ...camposEnr,
+        solo_enriquecer: true,
+        no_encontrados: nuevos.length,
+        no_encontrados_detalle: nuevos
+          .slice(0, NO_ENCONTRADOS_DETALLE_MAX)
+          .map((n) => ({
+            orden_archivo: n.orden_archivo,
+            fecha: n.fecha,
+            tipo: n.tipo,
+            monto: Number(n.monto),
+            moneda: cuentaInfo.moneda,
+            descripcion: n.descripcion,
+            referencia: n.referencia,
+            factura: facturaDeConcepto(n.descripcion)?.texto ?? null,
+          })),
+      };
+    }
+
+    const camposMismoDia = {
+      nuevos_mismo_dia_y_monto: prep.nuevosMismoDia.length,
+      nuevos_mismo_dia_y_monto_detalle: prep.nuevosMismoDia
+        .slice(0, NUEVOS_MISMO_DIA_DETALLE_MAX)
+        .map((n) => ({
+          orden_archivo: n.orden_archivo,
+          fecha: n.fecha,
+          tipo: n.tipo,
+          monto: Number(n.monto),
+          moneda: cuentaInfo.moneda,
+          descripcion: n.descripcion,
+        })),
+    };
 
     if (nuevos.length === 0) {
       if (estadoCuentaId) {
@@ -1406,21 +1965,7 @@ export class ConciliacionService {
           .update({ movimientos_importados: 0 })
           .eq('id', estadoCuentaId);
       }
-      return {
-        importados: 0,
-        conciliados_auto: 0,
-        duplicados_omitidos: duplicadosOmitidos,
-        conciliados: 0,
-        traspasos: 0,
-        reversos: 0,
-        reversos_emparejados: 0,
-        ambiguos: 0,
-        sin_candidato: 0,
-        rechazados: 0,
-        errores: 0,
-        por_criterio: {} as Record<string, number>,
-        detalle: [] as ResultadoMovimiento[],
-      };
+      return { ...sinCruce, ...camposEnr, ...camposMismoDia };
     }
     // La posición solo se escribe con la columna aplicada (sonda); sin ella
     // la fila es la de siempre.
@@ -1447,8 +1992,8 @@ export class ConciliacionService {
     // La moneda de la cuenta define contra qué se cruza: un cargo de 3,000 en
     // la cuenta USD jamás debe conciliar un gasto de $3,000 MXN. El TIPO
     // decide el cruce de abonos: PASARELA (Paywise) coteja bruto/neto/
-    // referencia a ±5 días; BANCO, neto/bruto a ±3.
-    const cuentaInfo = await this.infoCuenta(dto.cuenta_bancaria_id);
+    // referencia a ±5 días; BANCO, neto/bruto a ±3. (Se leyó en la
+    // preparación, 0.0.75.)
     const monedaCuenta = cuentaInfo.moneda;
 
     // Auto-conciliación: la parte lenta (una consulta por movimiento). El
@@ -1546,6 +2091,10 @@ export class ConciliacionService {
       errores: conteo.errores,
       por_criterio: porCriterio,
       detalle,
+      // ADITIVOS (0.0.75, invariante 69): concepto del SPEI y líneas nuevas
+      // con la misma fecha y monto que una fila ya importada.
+      ...camposEnr,
+      ...camposMismoDia,
     };
   }
 
@@ -6959,7 +7508,9 @@ export class ConciliacionService {
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
         // `gasto.medio_pago` (ADITIVO 6-oct-2026): «Efectivo» en la celda.
-        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}${colCobros}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        // `notas_fc` (0.0.75): solo para la coherencia de `factura_concepto`
+        // («fact NNNN» en la 1.ª línea); se RETIRA de la respuesta.
+        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}${colCobros}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, notas_fc:notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -6980,19 +7531,31 @@ export class ConciliacionService {
       (data ?? []) as unknown as Array<Record<string, unknown>>,
     );
     // ADITIVO (5-oct-2026): `gasto.folio_comprobante` (número de factura).
+    // CONCEPTO DEL SPEI (0.0.75): ANTES de quitar los campos crudos se
+    // guardan los folios del gasto 1 ↔ 1 para la coherencia del chip
+    // «Factura NNNN»; la copia que viaja NO lleva `notas_fc` (la respuesta
+    // del gasto no crece).
+    const foliosPorMov = new Map<string, FoliosGasto[]>();
     for (const m of filas) {
       const gasto = unwrapOne<Record<string, unknown>>(
         m.gasto as Record<string, unknown> | null,
       );
-      if (gasto) m.gasto = conFolioComprobante(gasto);
+      if (!gasto) continue;
+      foliosPorMov.set(m.id as string, [foliosDeGastoCrudo(gasto)]);
+      const copia: Record<string, unknown> = { ...gasto };
+      delete copia.notas_fc;
+      m.gasto = conFolioComprobante(copia);
     }
     await this.anotarMotivoPendiente(filas);
     // ADITIVOS (30-sep-2026): `reverso_de` (abono) / `revertido_por` (cargo).
     await this.anotarReversos(filas);
     // ADITIVOS (2-oct-2026): `gastos[]`, `gastos_suma`, `gastos_diferencia`.
-    if (conPartes) await this.anotarPartes(filas, embedFolioLista);
+    if (conPartes)
+      await this.anotarPartes(filas, embedFolioLista, foliosPorMov);
     // ADITIVOS (12-oct-2026): `cobros[]`, `cobros_suma`, `cobros_diferencia`.
     if (conCobrosLote) await this.anotarCobrosLote(filas);
+    // ADITIVO (0.0.75, invariante 69): `factura_concepto` («Factura 7360»).
+    await this.anotarFacturaConcepto(filas, foliosPorMov);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
       data: filas,
@@ -7016,6 +7579,12 @@ export class ConciliacionService {
   private async anotarPartes(
     filas: Array<Record<string, unknown>>,
     embedFolioLista: string,
+    /**
+     * ADITIVO (0.0.75): folios CRUDOS de los gastos de cada cargo para la
+     * coherencia de `factura_concepto`; los de las partes pisan los del
+     * espejo 1 ↔ 1.
+     */
+    foliosPorMov?: Map<string, FoliosGasto[]>,
   ): Promise<void> {
     const conPartes = filas.filter((m) => Number(m.gastos_n) > 0);
     try {
@@ -7041,6 +7610,12 @@ export class ConciliacionService {
       }
       for (const m of filas) {
         const ps = porMov.get(m.id as string) ?? [];
+        if (foliosPorMov && ps.length > 0) {
+          foliosPorMov.set(
+            m.id as string,
+            ps.map((p) => foliosDeGastoCrudo(gastoDe.get(p.gasto_id) ?? null)),
+          );
+        }
         const items = ps.map((p) => {
           // + `folio_comprobante` (5-oct-2026), sin los campos crudos.
           const g: Record<string, unknown> = conFolioComprobante(
@@ -7096,7 +7671,108 @@ export class ConciliacionService {
         delete m.gastos;
         delete m.gastos_suma;
         delete m.gastos_diferencia;
+        // Un lote sin sus gastos no tiene folios que comparar (el 1 ↔ 1
+        // conserva los de su espejo).
+        if (Number(m.gastos_n) >= 2) foliosPorMov?.delete(m.id as string);
       }
+    }
+  }
+
+  /**
+   * CONCEPTO DEL SPEI (13-oct-2026, API 0.0.75, invariante 69): a cada fila
+   * cuya descripción cita una factura le pone `factura_concepto` (chip
+   * «Factura 7360»): `ligados` = coherencia contra los folios de sus gastos
+   * (solo CARGOS con gastos; null si no) y `repetida_en` = la MISMA factura
+   * en otro movimiento del mismo tipo, en CUALQUIER cuenta a ±120 días, con
+   * UNA consulta por página (`ilike '%fac%'`). Si esa consulta falla o llega
+   * al tope de PostgREST (1000), `repetida_en` = null: «no verificado»,
+   * jamás «no se repite». Sin ninguna fila con factura, cero consultas y la
+   * página sale byte a byte igual. BEST-EFFORT: nunca lanza.
+   */
+  private async anotarFacturaConcepto(
+    filas: Array<Record<string, unknown>>,
+    foliosPorMov: Map<string, FoliosGasto[]>,
+  ): Promise<void> {
+    const conFactura: Array<{
+      m: Record<string, unknown>;
+      fc: FacturaConcepto;
+    }> = [];
+    for (const m of filas) {
+      const fc = facturaDeConcepto(
+        typeof m.descripcion === 'string' ? m.descripcion : null,
+      );
+      if (fc) conFactura.push({ m, fc });
+    }
+    if (conFactura.length === 0) return;
+    let universo: FilaUniversoFactura[] | null = null;
+    const fechas = conFactura
+      .map(({ m }) => (typeof m.fecha === 'string' ? m.fecha.slice(0, 10) : ''))
+      .filter(Boolean)
+      .sort();
+    if (fechas.length > 0) {
+      try {
+        const { data, error } = await this.supabase.service
+          .from('movimiento_bancario')
+          .select(
+            'id, fecha, tipo, monto, descripcion, conciliado, cuenta:cuenta_bancaria(alias)',
+          )
+          .ilike('descripcion', '%fac%')
+          .gte('fecha', ventanaDias(fechas[0], REPETIDA_DIAS).desde)
+          .lte(
+            'fecha',
+            ventanaDias(fechas[fechas.length - 1], REPETIDA_DIAS).hasta,
+          )
+          .order('fecha', { ascending: true })
+          .order('id', { ascending: true })
+          .range(0, REPETIDAS_UNIVERSO_TOPE - 1);
+        if (error) throw new Error(error.message);
+        const leidas = (data ?? []) as unknown as Array<
+          Record<string, unknown>
+        >;
+        if (leidas.length >= REPETIDAS_UNIVERSO_TOPE) {
+          this.logger.warn(
+            `factura_concepto: ${leidas.length} movimientos citan facturas en ±${REPETIDA_DIAS} días (tope de PostgREST): «también en otro pago» queda sin verificar.`,
+          );
+        } else {
+          universo = leidas.map((u) => {
+            const cuenta = unwrapOne(
+              u.cuenta as { alias?: unknown } | { alias?: unknown }[] | null,
+            );
+            return {
+              id: u.id as string,
+              fecha: typeof u.fecha === 'string' ? u.fecha.slice(0, 10) : null,
+              tipo: typeof u.tipo === 'string' ? u.tipo : null,
+              monto: r2(Number(u.monto) || 0),
+              descripcion:
+                typeof u.descripcion === 'string' ? u.descripcion : null,
+              conciliado: u.conciliado === true,
+              cuenta: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
+            };
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `factura_concepto: no se pudo verificar si las facturas se repiten: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        universo = null;
+      }
+    }
+    for (const { m, fc } of conFactura) {
+      const id = m.id as string;
+      const folios = foliosPorMov.get(id);
+      const ligados =
+        m.tipo === (TipoMovimientoBancario.CARGO as string) && folios
+          ? estadoLigados(fc, folios)
+          : null;
+      const fecha = typeof m.fecha === 'string' ? m.fecha.slice(0, 10) : '';
+      const repetida =
+        universo === null || !fecha
+          ? null
+          : repeticionesDeFactura(
+              { id, fecha, tipo: typeof m.tipo === 'string' ? m.tipo : '', fc },
+              universo,
+            );
+      m.factura_concepto = facturaConceptoParaRespuesta(fc, ligados, repetida);
     }
   }
 
@@ -9013,6 +9689,12 @@ export class ConciliacionService {
     g: Record<string, unknown>,
     tcImplicito: number | null,
     ligado: number,
+    /**
+     * ADITIVO (0.0.75): con la factura que cita el concepto del cargo, el
+     * candidato lleva `coincide_factura` (de la fila CRUDA: `gastoRicoCols`
+     * ya trae folio, IA, factura y notas). Sin ella, la ficha de siempre.
+     */
+    opts: { factura?: FacturaConcepto | null } = {},
   ): SugerenciaConciliacion['candidatos'][number] {
     const prov = unwrapOne(
       g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
@@ -9044,6 +9726,14 @@ export class ConciliacionService {
         typeof captura?.nombre === 'string' ? captura.nombre : null,
       // ADITIVO (5-oct-2026): número de la factura del gasto.
       folio_comprobante: folioComprobanteDeFila(g),
+      ...(opts.factura
+        ? {
+            coincide_factura: coincideFacturaConGasto(
+              opts.factura,
+              foliosDeGastoCrudo(g),
+            ),
+          }
+        : {}),
     };
   }
 
@@ -9094,7 +9784,7 @@ export class ConciliacionService {
     const incluirNoBancarios = query.incluir_no_bancarios === true;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id, fecha, monto, tipo, cuenta_bancaria_id')
+      .select('id, fecha, monto, tipo, cuenta_bancaria_id, descripcion')
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
@@ -9106,6 +9796,11 @@ export class ConciliacionService {
         error: 'SOLO_CARGOS',
       });
     }
+    // CONCEPTO DEL SPEI (0.0.75): la factura que cita el cargo («fact vip
+    // 7360») marca ★ el candidato con ese folio (dentro de su nivel).
+    const fc = facturaDeConcepto(
+      typeof mov.descripcion === 'string' ? mov.descripcion : null,
+    );
     const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id as string);
     if (!moneda) throw errorSinMonedaCuenta();
     const fecha = typeof mov.fecha === 'string' ? mov.fecha.slice(0, 10) : '';
@@ -9193,7 +9888,9 @@ export class ConciliacionService {
     const candidatos = [
       ...propios.map((g) =>
         conMedio(
-          this.aCandidatoGasto(g, null, vinculado.get(g.id as string) ?? 0),
+          this.aCandidatoGasto(g, null, vinculado.get(g.id as string) ?? 0, {
+            factura: fc,
+          }),
         ),
       ),
       ...cruzados.map((x) =>
@@ -9202,6 +9899,7 @@ export class ConciliacionService {
             x.g,
             round6(x.tc),
             vinculado.get(x.g.id as string) ?? 0,
+            { factura: fc },
           ),
           cruzado: true as const,
         }),
@@ -9223,6 +9921,25 @@ export class ConciliacionService {
         propios.length >= CANDIDATOS_GASTO_TOPE ||
         leidosUsd >= CANDIDATOS_GASTO_TOPE,
     };
+    if (fc) {
+      // ADITIVO (0.0.75): la factura del concepto y los OTROS gastos que la
+      // tienen (sin `fc`, la respuesta es byte a byte la de siempre).
+      respuesta.factura_concepto = {
+        tipo: fc.tipo,
+        numeros: fc.numeros.map((n) => n.texto),
+        texto: fc.texto,
+        pista: fc.pista,
+        otros_gastos: await this.otrosGastosConFactura(fc, {
+          movId,
+          fecha,
+          dias,
+          ventana,
+          monedaCuenta: moneda,
+          incluirNoBancarios,
+          candidatoIds: new Set(ordenados.map((c) => c.id)),
+        }),
+      };
+    }
     if (ordenados.length > 0) return respuesta;
     const excluidos = await this.excluidosDeCandidatos({
       movId,
@@ -9250,6 +9967,115 @@ export class ConciliacionService {
    * BEST-EFFORT: si la consulta falla devuelve null y la respuesta sale
    * SIN `excluidos`, como el 0.0.62 (el panel pinta el vacío de siempre).
    */
+  /**
+   * «Vincular gasto» de un cargo cuyo concepto cita una factura (0.0.75,
+   * invariante 69): los gastos a ±max(120, dias) que TIENEN esa factura y
+   * no salen como candidatos, agrupados como `excluidos` (con quién está
+   * conciliado cada YA_CONCILIADO: posible pago doble o liga equivocada).
+   * Se busca por los DÍGITOS sin ceros (solo [0-9]: seguros en `.or`):
+   * (A) `folio_ticket` / `notas` que los contienen y (B), con la sonda de
+   * serie/folio, los gastos de las facturas recibidas cuyo folio termina en
+   * ellos; después filtra EXACTO con `coincideFacturaConGasto`. BEST-EFFORT:
+   * error ⇒ null + warn.
+   */
+  private async otrosGastosConFactura(
+    fc: FacturaConcepto,
+    ctx: {
+      movId: string;
+      fecha: string;
+      dias: number;
+      ventana: { desde: string; hasta: string };
+      monedaCuenta: string;
+      incluirNoBancarios: boolean;
+      candidatoIds: ReadonlySet<string>;
+    },
+  ): Promise<GrupoExcluidos[] | null> {
+    try {
+      const digitos = [
+        ...new Set(
+          fc.numeros.map((n) => n.digitos).filter((d) => /^\d+$/.test(d)),
+        ),
+      ];
+      if (digitos.length === 0) return [];
+      const rango = ventanaExcluidos(ctx.fecha, ctx.dias);
+      const cols = `${GASTO_EXCLUIDO_COLS}, notas, ${await this.embedFolio()}`;
+      const sb = this.supabase.service;
+      const { data: dataA, error: errA } = await sb
+        .from('gasto')
+        .select(cols)
+        .or(
+          digitos
+            .flatMap((d) => [`folio_ticket.ilike.*${d}*`, `notas.ilike.*${d}*`])
+            .join(','),
+        )
+        .gte('fecha_gasto', rango.desde)
+        .lte('fecha_gasto', rango.hasta)
+        .limit(EXCLUIDOS_LECTURA_TOPE);
+      if (errA) throw new Error(errA.message);
+      const porId = new Map<string, Record<string, unknown>>();
+      for (const g of (dataA ?? []) as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (typeof g.id === 'string') porId.set(g.id, g);
+      }
+      if (await serieFolioRecibidaDisponible(sb)) {
+        const facturaIds = new Set<string>();
+        for (const d of digitos) {
+          const { data: fr, error: errF } = await sb
+            .from('factura_recibida')
+            .select('id')
+            .ilike('folio', `%${d}`)
+            .limit(50);
+          if (errF) throw new Error(errF.message);
+          for (const f of (fr ?? []) as Array<{ id?: unknown }>) {
+            if (typeof f.id === 'string') facturaIds.add(f.id);
+          }
+        }
+        if (facturaIds.size > 0) {
+          const { data: dataB, error: errB } = await sb
+            .from('gasto')
+            .select(cols)
+            .in('factura_recibida_id', [...facturaIds])
+            .gte('fecha_gasto', rango.desde)
+            .lte('fecha_gasto', rango.hasta)
+            .limit(EXCLUIDOS_LECTURA_TOPE);
+          if (errB) throw new Error(errB.message);
+          for (const g of (dataB ?? []) as unknown as Array<
+            Record<string, unknown>
+          >) {
+            if (typeof g.id === 'string' && !porId.has(g.id))
+              porId.set(g.id, g);
+          }
+        }
+      }
+      const filas = [...porId.values()]
+        .filter(
+          (g) =>
+            !ctx.candidatoIds.has(g.id as string) &&
+            coincideFacturaConGasto(fc, foliosDeGastoCrudo(g)),
+        )
+        .map((g) => gastoExcluibleDeFila(g))
+        .filter((g): g is GastoExcluible => g !== null);
+      const grupos = agruparExcluidos(filas, {
+        monedaCuenta: ctx.monedaCuenta,
+        ventana: ctx.ventana,
+        fechaCargo: ctx.fecha,
+        incluirNoBancarios: ctx.incluirNoBancarios,
+      });
+      const yaConciliados = grupos.find((g) => g.motivo === 'YA_CONCILIADO');
+      if (!yaConciliados) return grupos;
+      return conCargosConciliados(
+        grupos,
+        await this.cargosConciliadosDe(yaConciliados.gastos.map((g) => g.id)),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `gastos-candidatos ${ctx.movId}: no se pudieron leer los otros gastos de ${fc.texto}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
   private async excluidosDeCandidatos(opts: {
     movId: string;
     q: string | undefined;

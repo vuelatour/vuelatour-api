@@ -448,8 +448,13 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      - **Espejo SQL**: la limpieza `20260929000001_limpieza_duplicados_…`
        agrupa con el MISMO predicado (`mismaDescripcionDedupe`); si cambia
        aquí (p. ej. el veto de plazas/números), cambia allá.
-     La consulta de previos lleva `.limit(20000)` (sin límite PostgREST
-     cortaba en 1000 y duplicaba en silencio).
+     **Desde el 0.0.75 (invariante 69)** los previos se leen PAGINADOS por
+     la PK (`leerPreviosDedupe`; el `.limit(20000)` de antes NO bastaba:
+     PostgREST corta en max-rows = 1000 sin avisar; con más de 20,000 ⇒ 400
+     «impórtalo por partes») y en un orden determinista
+     (`ordenarPreviosParaDedupe`), y `emparejarDuplicados` devuelve además
+     `parejas` (qué línea es qué fila) con el MISMO predicado: alimentan el
+     concepto del SPEI al re-subir.
    - **`ventanaAbono` en hora Cancún** (`-05:00`), como `cobrosSinBanco`:
      invariante 4. Antes un cobro de las 20:00 del último día caía fuera.
    - **La IA propone, jamás liga**: `POST /conciliacion/movimientos/:id/
@@ -7141,6 +7146,154 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `DRYRUN_FALLA A` sobre la aplicada, §4 aborta con un contador
       atrasado, `updated_at` y la cola de Google intactos.
 
+69. **CONCEPTO DEL SPEI: SE COMPLETA AL RE-SUBIR Y «Factura NNNN» EN
+    CONCILIACIÓN (13-oct-2026, lote 2, API 0.0.75, SIN migración).** Caso
+    real (VIP SAESA): los SPEI de septiembre se importaron con la IA leyendo
+    SOLO el renglón principal («SEL TRANSF. INTERBANCARIA SPEI»): de 98 filas
+    de EJE SCOTIA, 73 son leyendas sin concepto (39 «SEL TRANSF.
+    INTERBANCARIA SPEI», 30 «TRANSF INTERBANCARIA SPEI», 2 «03 POR COBRANZA
+    DOMICILIADA», 1 «SEL PAGO DE SERVICIOS», 1 «SCN Pagos a Proveedores») y
+    en GASTOS GNRAL 14 del 24-sep; el concepto («… BANORTE fact vip 7360»)
+    es lo que dice QUÉ factura pagó cada una. Premisa corregida: re-subir el
+    PDF con el prompt nuevo de pyservices (renglones de continuación) NO
+    duplica —el dedupe ya tolera el prefijo— pero tampoco completaba nada.
+    Datos verificados el 13-oct (solo SELECT): 0 filas con `orden_archivo`,
+    0 con vínculo no bancario, todas IMPORTADO; los 29 «Pago VIP SAESA» están
+    conciliados como TRANSFERENCIA sin folio ni factura; los 5 SPEI de SAESA
+    del 12-oct (fact vip 7349, 7352, 7357, 7359 y 7360) traen concepto y
+    siguen sin conciliar; las 3 «pre factura corner» tienen una factura
+    recibida con ESE número (4409, 4480, 4481).
+    - **La referencia NO veta el dedupe** (invariante 7): reabriría el
+      incidente del 29-sep (los SPEI traen la referencia de relleno
+      «00000000000000000001»). Solo desempata gemelos (regla REFERENCIA).
+    - **Fuente única PURA `conciliacion/enriquecer-descripcion.util.ts`**
+      (`planEnriquecimiento` y sus constantes). Solo se completan las
+      LEYENDAS de la lista blanca `LEYENDAS_SIN_CONCEPTO` (las 6 de prod +
+      CGO SPEI, SPEI ENVIADO, SPEI RECIBIDO), NO «cualquier prefijo» (con un
+      prefijo genérico «ASA CANCUN» recibiría el texto de «ASA CANCUN I»), y
+      se mide con `normalizarPlano`, NUNCA con `descDedupe` (quita «SEL» y
+      «SPEI»). Por bucket (fecha|tipo|monto) y leyenda T: G = previas con
+      texto T; L = líneas con texto T o que lo extienden (menos las que el
+      dedupe emparejó FUERA de G); C = las que lo extienden; K = las iguales.
+      Reglas, EN ORDEN: INTERCAMBIABLES (toda G virgen: indistinguibles;
+      UNICO si G y C son de uno), UNICO, MISMO_TEXTO, REFERENCIA (pares de
+      nivel 0 con referencias distintas en G y en L), ORDEN_ARCHIVO (gemelos
+      de UN mismo archivo con dirección conocida del viejo y del nuevo; se
+      empareja por rango y cada pareja debe seguir siendo la misma línea
+      para `nivelEmpateDedupe`) y FOLIO (el número de la factura del gasto
+      ligado: un ÚNICO emparejamiento perfecto, ≤ 7 gemelos). **No adivina**:
+      si ninguna regla decide, GEMELOS con sus ids, conceptos (≤ 5) y
+      facturas — el resumen dice qué facturas pagó el par y se coteja en el
+      portal del banco. Candado extra (revisión del lote 2): fuera de
+      INTERCAMBIABLES y REFERENCIA (que asignan las parejas del dedupe tal
+      cual) una regla solo aplica si TODA línea que completa es duplicado de
+      una fila del grupo: una línea que además se va a INSERTAR jamás presta
+      su texto a otra fila. Una fila MANUAL nunca se toca; una con vínculo no
+      bancario (invariante 48: su nota cita la leyenda) tampoco ⇒
+      VINCULO_NO_BANCARIO. Idempotente: una fila ya completada deja de ser
+      leyenda.
+    - **`emparejarDuplicados` devuelve además `parejas`** ({nuevo, previo,
+      nivel}, índices de los arreglos recibidos, ordenadas por línea) con el
+      MISMO predicado (`parejas.length === duplicados`; el espejo SQL
+      20260929000001 no cambia); `nivelEmpateDedupe` se exporta y
+      `ordenarPreviosParaDedupe` da el orden determinista de las previas.
+      Los previos se leen PAGINADOS por la PK (`leerPreviosDedupe`: el
+      `.limit(20000)` de antes lo cortaba PostgREST en 1000 sin avisar; con
+      más de 20,000 ⇒ 400 «El periodo del archivo trae más de 20,000
+      movimientos previos en la cuenta: impórtalo por partes.»), con
+      `estado_cuenta_id` y, detrás de sus sondas, `orden_archivo` y
+      `reverso_de_id`. Lecturas SOLO cuando hacen falta y best-effort
+      (`foliosParaGemelos` por la puente o el espejo; `direccionesDeArchivos`
+      ≤ 5): si fallan, esos gemelos quedan GEMELOS.
+    - **La escritura** (`aplicarEnriquecimiento`, secuencial): SOLO
+      `descripcion` + `updated_by`, con CAS `.eq('id').eq('descripcion',
+      antes).eq('origen','IMPORTADO')`; 0 filas ⇒ CAMBIO_CONCURRENTE (jamás
+      pisa una edición de la oficina); un error ⇒ ERROR (≤ 200) y se sigue.
+      Jamás cambia monto, fecha, tipo, referencia, notas, ligas,
+      `conciliado`, `estado_cuenta_id`, `orden_archivo` ni el número de
+      filas. Según `pg_trigger` (13-oct) ese UPDATE solo dispara
+      `trg_movimiento_bancario_set_updated_at` (las listas `UPDATE OF` de los
+      demás no incluyen `descripcion` ni `updated_by`). Las filas completadas
+      NO se vuelven a cruzar (para eso está «Cruzar pendientes»).
+    - **Rastro** en `conciliacion_import_job.resultados` (jsonb, ya existe):
+      `enriquecidos`, `enriquecimiento_omitidos` (Σ de los movimientos que
+      se quedaron sin concepto) y `enriquecimiento {estado_cuenta_id,
+      detalle ≤ 300 [{movimiento_id, fecha, tipo, monto, antes, despues,
+      regla}], omitidos ≤ 50 [{motivo GEMELOS | VINCULO_NO_BANCARIO |
+      CAMBIO_CONCURRENTE | ERROR, fecha, tipo, monto, moneda, movimiento_ids,
+      conceptos, facturas, detalle?}]}`; se escribe TAMBIÉN a medio job
+      (`onProgress(24, …, parcial)`) y sobrevive si después algo truena (el
+      catch no toca `resultados`). Reversión con el mismo CAS: `update
+      movimiento_bancario m set descripcion = d->>'antes' from
+      conciliacion_import_job j, jsonb_array_elements(j.resultados->
+      'enriquecimiento'->'detalle') d where j.id = '<job>' and m.id =
+      (d->>'movimiento_id')::uuid and m.descripcion = d->>'despues'`.
+    - **Contrato (todo ADITIVO)**: `importar` / `importar-async` /
+      `importar-status` ganan `enriquecidos`, `enriquecimiento_omitidos` y
+      `enriquecimiento`; en el modo normal además `nuevos_mismo_dia_y_monto`
+      + `_detalle` (≤ 20; líneas que se INSERTAN en un bucket que ya tenía
+      filas: casi siempre la misma línea leída de otro modo —renglón
+      reescrito, otro dígito de factura, clave de rastreo—). Cuerpo
+      `solo_enriquecer?: boolean` (estricto: un «"si"» ⇒ 400; un API previo
+      responde 400 «property solo_enriquecer should not exist»): no inserta,
+      no cruza ni empareja reversos, archiva el PDF con
+      `movimientos_importados = 0` y devuelve `solo_enriquecer: true`,
+      `no_encontrados` + `_detalle` (≤ 50, con `factura`). **`POST
+      importar/vista-previa`** (ADMIN, FACTURACION; 200) corre la MISMA
+      preparación SIN archivar ni escribir: `{total, ya_estaban, nuevos,
+      nuevos_mismo_dia_y_monto, se_enriquecen, enriquecimiento_omitidos,
+      moneda, omitidos ≤ 20, nuevos_detalle ≤ 50 (+ mismo_dia_y_monto),
+      enriquecibles_detalle ≤ 50}`. `ParsedStatement.advertencias?` queda
+      tipado.
+    - **«Factura NNNN»: fuente única PURA `conciliacion/factura-concepto.util.ts`**
+      (`facturaDeConcepto`: clave FACTURA(S)/FACT(S)/FAC(S) con PRE pegado o
+      separado; ventana de 6 tokens, pista ≤ 4 palabras, un mes corta, 2–8
+      dígitos o serie, encadenado Y/E/,/'/'/&/-, ≤ 5 números; precisión antes
+      que cobertura: «Folio 383», «COT 337» y «… F A0422 …, SPID» de HSBC USD
+      NO se leen). El panel NO parsea. `GET movimientos`: cada fila que cita
+      una factura gana `factura_concepto {tipo FACTURA|PREFACTURA, numeros,
+      texto, pista, ligados, repetida_en}`. `ligados` = coherencia con los
+      folios de SUS gastos (`estadoLigados`: COINCIDE | PARCIAL | NO_COINCIDE
+      | SIN_FOLIO; null en ABONOS, sin gasto o si el lote no se pudo leer):
+      el embed 1 ↔ 1 suma `notas_fc:notas` y la copia que viaja lo retira (la
+      respuesta del gasto NO crece); `anotarPartes` aporta los de cada parte.
+      `repetida_en` = la MISMA factura (mismo número y pistas compatibles) en
+      otro movimiento del mismo tipo, en CUALQUIER cuenta a ±120 días, con
+      UNA consulta por página (`ilike '%fac%'`); **null = no verificado** (la
+      lectura falló o llegó a 1000 filas), [] = no se repite. Una página sin
+      facturas: cero consultas y byte a byte igual. La PREFACTURA cuenta: en
+      Corner su número es el folio de la factura recibida.
+    - **«Vincular gasto»**: solo cuando el concepto cita una factura, cada
+      candidato gana `coincide_factura` (factura recibida, `folio_ticket`,
+      folio de la IA o «fact NNNN» en la 1.ª línea de las notas; folios de
+      más de 8 dígitos no cuentan, son recibos SPEI) y la respuesta
+      `factura_concepto {…, otros_gastos}` (gastos a ±120 días con esa
+      factura que no son candidatos, forma de `excluidos` con
+      `conciliado_con`; null = no se pudo leer). `coincide_factura` es una
+      SEÑAL dentro de su nivel de monto (`ordenarCandidatosGasto`: cruzado →
+      cuadra → coincide_factura → dMonto → dFecha): jamás brinca sobre un
+      candidato que cuadra, jamás liga ni preselecciona (no exigir monto
+      compatible: rompería los pagos parciales de la invariante 7), y el
+      auto-cruce, «Sugerir» y «sugerir-lote» NO la usan (sin la llave).
+    - **Regla del folio en transferencias** (la oficina): una factura ↔ un
+      gasto ⇒ «Folio»; una factura ↔ varios gastos ⇒ «fact NNNN» en la
+      PRIMERA línea de las notas de cada gasto (o amarrar la factura
+      recibida a cada uno): `uq_gasto_folio_ticket_norm` es único desde 4
+      caracteres y el 2.º gasto rebotaría con 409. «7352-A» se reconoce como
+      7352.
+    - Specs: `factura-concepto.util.spec` (los 44 casos del prototipo,
+      folios, coherencia, repetidas), `enriquecer-descripcion.util.spec` (los
+      20 escenarios sobre el dedupe REAL + ORDEN_ARCHIVO), `auto-cruce.util.spec`
+      (cada llamada del spec verifica `parejas` en TODOS los fixtures de
+      siempre; orden determinista; regresión del concepto),
+      `gastos-candidatos.util.spec` (golden SAESA sin el campo),
+      `conciliacion.service.enriquecer.spec` y
+      `conciliacion.service.factura-concepto.spec` (PostgREST falso que
+      respeta `range`, el tope de 1000 y el CAS:
+      `conciliacion-postgrest.fixture-spec.ts`),
+      `dto/conciliacion.dto.enriquecer.spec` y
+      `conciliacion.controller.enriquecer.spec` (HTTP y roles).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7872,6 +8025,77 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **13-oct-2026 — SIN migración** para el concepto del SPEI (lote 2,
+  invariante 69): `movimiento_bancario.descripcion` es `text`, el rastro va
+  en `conciliacion_import_job.resultados` (jsonb, desde 20260916000001) y
+  `orden_archivo`/`estado_cuenta_id`/la puente ya existen. **Dry-run
+  OBLIGATORIO antes del deploy** (regla del workspace: escrituras REALES en
+  una transacción que se aborta; sin palabras destructivas, pasa por MCP al
+  proyecto `bjesduasnzbzywofukbf`): toma un cargo conciliado con lote y un
+  abono con cobros, les hace el UPDATE de `descripcion` con la CAS, `set
+  constraints all immediate` y comprueba que ninguna otra columna ni las
+  partes se movieron, que `updated_at` sí y que la CAS no pisa un texto ya
+  cambiado ⇒ debe terminar en `ERROR: DRYRUN_OK` (probado en un Postgres 17
+  local con espejo de los triggers BEFORE y diferidos):
+
+      do $dry$
+      declare v_id uuid; v_ab uuid; v_a record; v_d record; v_n int;
+      begin
+        select m.id into v_id from public.movimiento_bancario m
+         where m.origen::text = 'IMPORTADO' and m.tipo::text = 'CARGO' and m.conciliado
+           and coalesce(m.gastos_n, 0) >= 2 and m.descripcion is not null
+         order by m.fecha desc, m.id limit 1;
+        if v_id is null then raise exception 'DRYRUN_FALLA A: no hay cargo conciliado con lote'; end if;
+        select * into v_a from public.movimiento_bancario where id = v_id;
+        update public.movimiento_bancario
+           set descripcion = v_a.descripcion || ' BANORTE fact vip 9999 DRYRUN', updated_by = v_a.updated_by
+         where id = v_id and descripcion = v_a.descripcion and origen::text = 'IMPORTADO';
+        get diagnostics v_n = row_count;
+        if v_n <> 1 then raise exception 'DRYRUN_FALLA B: el CAS no tomó la fila (%)', v_n; end if;
+        set constraints all immediate;
+        select * into v_d from public.movimiento_bancario where id = v_id;
+        if (v_d.monto, v_d.fecha, v_d.tipo::text, v_d.cuenta_bancaria_id, v_d.conciliado, v_d.gastos_n, v_d.cobros_n)
+             is distinct from (v_a.monto, v_a.fecha, v_a.tipo::text, v_a.cuenta_bancaria_id, v_a.conciliado, v_a.gastos_n, v_a.cobros_n)
+           or (v_d.gasto_id, v_d.cobro_id, v_d.cobro_grupo_id, v_d.clasificacion_id, v_d.ingreso_id, v_d.reverso_de_id)
+             is distinct from (v_a.gasto_id, v_a.cobro_id, v_a.cobro_grupo_id, v_a.clasificacion_id, v_a.ingreso_id, v_a.reverso_de_id)
+           or (v_d.notas, v_d.referencia, v_d.estado_cuenta_id, v_d.orden_archivo, v_d.origen::text)
+             is distinct from (v_a.notas, v_a.referencia, v_a.estado_cuenta_id, v_a.orden_archivo, v_a.origen::text)
+        then raise exception 'DRYRUN_FALLA C: el UPDATE de descripcion movió otra columna'; end if;
+        if v_d.descripcion is distinct from v_a.descripcion || ' BANORTE fact vip 9999 DRYRUN' then raise exception 'DRYRUN_FALLA C2: la descripción no quedó como se escribió'; end if;
+        if v_d.updated_at is not distinct from v_a.updated_at then raise exception 'DRYRUN_FALLA D: updated_at no se movió'; end if;
+        if (select count(*) from public.movimiento_bancario_gasto p where p.movimiento_id = v_id) <> v_a.gastos_n then raise exception 'DRYRUN_FALLA E: cambiaron las partes del lote'; end if;
+        update public.movimiento_bancario set descripcion = 'X'
+         where id = v_id and descripcion = v_a.descripcion and origen::text = 'IMPORTADO';
+        get diagnostics v_n = row_count;
+        if v_n <> 0 then raise exception 'DRYRUN_FALLA F: el CAS pisó una descripción ya cambiada'; end if;
+        select m.id into v_ab from public.movimiento_bancario m
+         where m.origen::text = 'IMPORTADO' and m.tipo::text = 'ABONO' and m.conciliado
+           and coalesce(m.cobros_n, 0) >= 1 and m.descripcion is not null
+         order by m.fecha desc, m.id limit 1;
+        if v_ab is null then raise exception 'DRYRUN_FALLA G: no hay abono conciliado con cobros'; end if;
+        select * into v_a from public.movimiento_bancario where id = v_ab;
+        update public.movimiento_bancario
+           set descripcion = v_a.descripcion || ' TRASLADO AEREO DRYRUN', updated_by = v_a.updated_by
+         where id = v_ab and descripcion = v_a.descripcion and origen::text = 'IMPORTADO';
+        get diagnostics v_n = row_count;
+        if v_n <> 1 then raise exception 'DRYRUN_FALLA G2: el CAS del abono no tomó la fila (%)', v_n; end if;
+        set constraints all immediate;
+        select * into v_d from public.movimiento_bancario where id = v_ab;
+        if (v_d.conciliado, v_d.cobros_n, v_d.cobro_id, v_d.monto) is distinct from (v_a.conciliado, v_a.cobros_n, v_a.cobro_id, v_a.monto)
+           or (select count(*) from public.movimiento_bancario_cobro p where p.movimiento_id = v_ab) <> v_a.cobros_n
+        then raise exception 'DRYRUN_FALLA G3: el UPDATE del abono movió su conciliación'; end if;
+        raise exception 'DRYRUN_OK';
+      end
+      $dry$;
+
+  Orden: dry-run → API 0.0.75 → pyservices (prompt con
+  renglones de continuación) → panel → APK (ayuda en Notas). Con el API
+  nuevo y pyservices previo no hay conceptos que completar; con el panel
+  previo el enriquecimiento ocurre igual pero el resumen no lo menciona.
+  Operación con septiembre: snapshot SQL antes y después (cifras idénticas
+  salvo `sin_concepto`), re-subir «scotia eje sep.pdf» y «scotia gastos
+  (6).pdf» con «Solo completar conceptos» si la vista previa marca líneas
+  nuevas con la misma fecha y monto.
 - **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000006_vuelo_id_cliente.sql`**
   (invariante 68, ID de vuelo por cliente; NO aplicada: la aplica el
   orquestador por el MCP; UNA sola migración atómica, independiente de las
@@ -8915,6 +9139,20 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Concepto del SPEI (13-oct-2026, invariante 69)**: (1) **candado de
+  reglas por texto** — el concepto que teclea un tercero se ve con
+  `patronDevolucion`/`patronTraspaso` («devolución», «traspaso entre
+  cuentas») en el re-cruce: una fila PENDIENTE completada podría salir en
+  «Emparejar devoluciones» (confirma) o clasificarse como traspaso; la
+  importación NO re-cruza. Revisión tras re-subir: `select fecha, tipo,
+  monto, descripcion from public.movimiento_bancario where not conciliado and
+  upper(descripcion) ~ '(DEVOLUCION|REVERSO|CONTRACARGO|RECLAMACION|TRASPASO
+  ENTRE CUENTAS)' and fecha >= '2026-09-01'`; decide el cliente. (2)
+  Persistir `saldo_posterior` (la columna existe y pyservices la lee) para
+  emparejar gemelos EXACTOS a futuro. (3) Que `parse` reenvíe
+  `banco`/`cuenta_moneda`. (4) El formato «… F A0422 …, SPID» de HSBC USD,
+  que `facturaDeConcepto` no detecta (falso negativo aceptado).
 
 - **TUA sistémica (13-oct-2026, invariante 66) — decisiones del cliente**:
   (a) el renglón del pre-cierre `tua_cobrada_sin_pagada` no tiene
