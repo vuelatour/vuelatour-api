@@ -8,6 +8,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PilotsModule } from '../pilots/pilots.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { VisionModule } from '../vision/vision.module';
 import { CobroReciboService } from './cobro-recibo.service';
 import { FacturaClienteService } from './factura-cliente.service';
@@ -33,6 +34,10 @@ import { VueloSeguimientoService } from './vuelo-seguimiento.service';
     PilotsModule,
     PyservicesModule,
     RealtimeModule,
+    // K de los libros en el reporte por vuelo (revisión del lote 2,
+    // 14-oct-2026): el T.C. oficial del día de la cotización para el vuelo
+    // sin T.C. capturado. Sin ciclo: TipoCambioModule no importa nada.
+    TipoCambioModule,
     VisionModule,
   ],
   controllers: [FlightsController],

@@ -473,6 +473,14 @@ export interface GastosCandidatosRespuesta {
    * lectura fallida. El panel lo usa como capacidad (`'tc_oficial' in r`).
    */
   tc_oficial?: { tc: number; fecha_dato: string; fuente: string } | null;
+  /**
+   * ADITIVO (revisión del lote 2, 14-oct-2026): SOLO cuando la LECTURA del
+   * T.C. oficial del día del cargo FALLÓ (≠ «no hay dato»). Entonces
+   * `tc_oficial` va null, cada cruzado lleva `tc_cruce.lectura_fallida` con
+   * su propio texto y las compras en USD no se pudieron buscar por su monto
+   * en pesos: el panel lo dice en ámbar y no promete esa búsqueda.
+   */
+  tc_oficial_lectura_fallida?: true;
   excluidos?: ExcluidosCandidatos['excluidos'];
   excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
   /**
@@ -945,6 +953,15 @@ const REPETIDAS_UNIVERSO_TOPE = 1000;
 
 /** Gastos USD conciliados que revisa el aviso del pre-cierre (más ⇒ null). */
 const LIGAS_USD_GASTOS_TOPE = 5000;
+
+/**
+ * Movimientos que lee `resumen()` (tarjetas por cuenta de Conciliación),
+ * PAGINADOS por la PK (14-oct-2026): con más ⇒ 400 `RESUMEN_MUY_GRANDE`
+ * (jamás un total recortado).
+ */
+const RESUMEN_MOVIMIENTOS_TOPE = 20_000;
+export const MENSAJE_RESUMEN_MUY_GRANDE =
+  'El periodo trae más de 20,000 movimientos del banco: elige un rango de fechas más corto para ver el resumen por cuenta.';
 
 /** Una fila completada, tal como viaja en el rastro y en la vista previa. */
 export interface DetalleEnriquecido {
@@ -7204,18 +7221,30 @@ export class ConciliacionService {
     const conPartes = await this.partesOn();
     const colsResumen: string = conPartes
       ? 'id, cuenta_bancaria_id, tipo, monto, conciliado, gastos_n'
-      : 'cuenta_bancaria_id, tipo, monto, conciliado';
-    let q = this.supabase.service
-      .from('movimiento_bancario')
-      .select(colsResumen);
-    if (desde) q = q.gte('fecha', desde);
-    if (hasta) q = q.lte('fecha', hasta);
-    const { data, error } = await q;
-    if (error) throw new Error(error.message);
+      : 'id, cuenta_bancaria_id, tipo, monto, conciliado';
+    // PAGINADO por la PK (revisión del lote 2, 14-oct-2026): la vista por
+    // default de Conciliación (sin ?desde/?hasta) lee TODA la tabla y
+    // PostgREST corta en max-rows = 1000 SIN avisar — con la fila 1,001 las
+    // tarjetas por cuenta (total, pendientes, monto pendiente,
+    // `diferencia_lotes`) salían de un subconjunto arbitrario y la oficina
+    // creía la conciliación más avanzada (prod: 999 movimientos el 14-oct).
+    // Llegar al tope ⇒ 400 explícito, jamás un total recortado.
+    const { filas: data, truncado } = await this.leerPaginado((a, b) => {
+      let q = this.supabase.service
+        .from('movimiento_bancario')
+        .select(colsResumen);
+      if (desde) q = q.gte('fecha', desde);
+      if (hasta) q = q.lte('fecha', hasta);
+      return q.order('id', { ascending: true }).range(a, b);
+    }, RESUMEN_MOVIMIENTOS_TOPE);
+    if (truncado) {
+      throw new BadRequestException({
+        message: MENSAJE_RESUMEN_MUY_GRANDE,
+        error: 'RESUMEN_MUY_GRANDE',
+      });
+    }
     const difLotes = conPartes
-      ? await this.diferenciaLotesPorCuenta(
-          (data ?? []) as unknown as Array<Record<string, unknown>>,
-        )
+      ? await this.diferenciaLotesPorCuenta(data)
       : null;
 
     const { data: cuentas } = await this.supabase.service
@@ -7237,7 +7266,7 @@ export class ConciliacionService {
         monto_pendiente: number;
       }
     >();
-    for (const m of (data ?? []) as unknown as Array<Record<string, unknown>>) {
+    for (const m of data) {
       const key = m.cuenta_bancaria_id as string;
       const cur = porCuenta.get(key) ?? {
         total: 0,
@@ -10783,7 +10812,17 @@ export class ConciliacionService {
       this.sumasLigadasDe(usd.map((g) => g.id as string)),
       this.oficialesTabla([fecha]),
     ]);
-    const oficial = oficiales?.get(String(fecha).slice(0, 10)) ?? null;
+    // Revisión del lote 2 (14-oct-2026): con la LECTURA del oficial fallida
+    // no se puede saber cuáles quedan LEJOS (+24.3 % del caso Aircraft
+    // Spruce): los cruzados NO se mandan a la IA (antes iban todos como
+    // «sin oficial», los LEJOS incluidos). Los de la moneda de la cuenta sí.
+    if (oficiales === null) {
+      this.logger.warn(
+        `Sugerir: no se pudo leer el T.C. oficial del ${String(fecha).slice(0, 10)}; las compras en USD no se mandan a la IA.`,
+      );
+      return [...propios, ...parciales];
+    }
+    const oficial = oficiales.get(String(fecha).slice(0, 10)) ?? null;
     const cruzados = usd
       .filter((g) => !((ligadosUsd.get(g.id as string) ?? 0) > 0))
       .map((g) => {
@@ -11008,11 +11047,17 @@ export class ConciliacionService {
     // (revisión 6-oct-2026): ligar 1 ↔ 1 un gasto en efectivo en dólares
     // haría que `recalcular_gasto_conciliado` le derive `tc_gasto` de ESTE
     // cargo. La raíz `tc_oficial` viaja SIEMPRE (capacidad del panel).
+    // Revisión del lote 2 (14-oct-2026): la lectura FALLIDA ya no se
+    // disfraza de «sin T.C. oficial del día» — `tc_cruce` dice que no se
+    // pudo leer (`lectura_fallida`) y la raíz `tc_oficial_lectura_fallida`
+    // (como el auto-cruce, que ya daba ERROR `TEXTO_CRUCE_USD_SIN_LECTURA_TC`).
     let tcOficial: OficialDelDia | null = null;
+    let tcLecturaFallida = false;
     let cruzados: Array<{ g: Record<string, unknown>; ev: TcCruceUsd }> = [];
     let leidosUsd = 0;
     if (moneda === 'MXN' && montoCargo > 0) {
       const oficiales = await this.oficialesTabla([fecha]);
+      tcLecturaFallida = oficiales === null;
       tcOficial = oficiales?.get(fecha) ?? null;
       // Búsqueda de monto ⇒ DOS lecturas (dólares tal cual y, con oficial,
       // el equivalente en pesos ÷ oficial ±3 %); vacía o texto ⇒ la banda.
@@ -11038,7 +11083,12 @@ export class ConciliacionService {
         .filter((g) => !((conPartes.get(g.id as string) ?? 0) > 0))
         .map((g) => {
           const ev = evaluarTcCruce(montoCargo, Number(g.monto), tcOficial);
-          return ev && ev.en_banda ? { g, ev: tcCruceUsdPublico(ev) } : null;
+          return ev && ev.en_banda
+            ? {
+                g,
+                ev: tcCruceUsdPublico(ev, { lecturaFallida: tcLecturaFallida }),
+              }
+            : null;
         })
         .filter(
           (x): x is { g: Record<string, unknown>; ev: TcCruceUsd } =>
@@ -11094,6 +11144,9 @@ export class ConciliacionService {
             fuente: tcOficial.fuente,
           }
         : null,
+      ...(tcLecturaFallida
+        ? { tc_oficial_lectura_fallida: true as const }
+        : {}),
     };
     if (fc) {
       // ADITIVO (0.0.75): la factura del concepto y los OTROS gastos que la

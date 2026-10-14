@@ -17,7 +17,9 @@ import {
   textoReciprocoCruceUsd,
   textoSePuedeCruzarUsd,
   textoTcCruce,
+  textoTcCruceSinLectura,
   tituloTcCruce,
+  tituloTcCruceSinLectura,
   TOLERANCIA_TC_OFICIAL_PCT,
   descDedupe,
   descripcionesSeContradicen,
@@ -1316,6 +1318,45 @@ describe('T.C. oficial del día (invariante 70)', () => {
       titulo:
         'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01 sep 2026 · fuente open.er-api · tolerancia ±2 %',
     });
+  });
+
+  it('(d2) lectura del oficial FALLIDA ≠ «sin dato»: texto, título y marca propios (revisión del lote 2)', () => {
+    const sinOficial = ev(8939.38, 422.86, null);
+    expect(textoTcCruceSinLectura(sinOficial)).toBe(
+      'T.C. 21.14 · no se pudo leer el T.C. oficial del día',
+    );
+    expect(tituloTcCruceSinLectura(sinOficial)).toBe(
+      'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · no se pudo leer el T.C. oficial del día del cargo: no se comprobó; vuelve a abrir «Vincular gasto» para compararlo',
+    );
+    expect(tcCruceUsdPublico(sinOficial, { lecturaFallida: true })).toEqual({
+      tc_implicito: 21.140283,
+      en_banda: true,
+      tc_oficial: null,
+      tc_oficial_fecha: null,
+      tc_oficial_fuente: null,
+      desvio_pct: null,
+      nivel: 'SIN_OFICIAL',
+      tolerancia_pct: 2,
+      fuera_de_lugar: false,
+      texto: 'T.C. 21.14 · no se pudo leer el T.C. oficial del día',
+      titulo:
+        'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · no se pudo leer el T.C. oficial del día del cargo: no se comprobó; vuelve a abrir «Vincular gasto» para compararlo',
+      lectura_fallida: true,
+    });
+    // Sin la opción, el «sin dato» de siempre y SIN la marca.
+    const sinDato = tcCruceUsdPublico(sinOficial);
+    expect(sinDato.texto).toBe('T.C. 21.14 · sin T.C. oficial del día');
+    expect(sinDato).not.toHaveProperty('lectura_fallida');
+    // Con oficial, la opción no cambia nada (la lectura sí funcionó).
+    expect(
+      tcCruceUsdPublico(ev(8939.38, 422.86, of(17.0077)), {
+        lecturaFallida: true,
+      }),
+    ).toEqual(tcCruceUsdPublico(ev(8939.38, 422.86, of(17.0077))));
+    // Fuera de banda también lo dice.
+    expect(textoTcCruceSinLectura(ev(3740.63, 325, null))).toBe(
+      'T.C. 11.51 · no se pudo leer el T.C. oficial del día: fuera de la banda 15–25',
+    );
   });
 
   const TUBO =

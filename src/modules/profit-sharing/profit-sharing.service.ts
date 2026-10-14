@@ -1903,7 +1903,10 @@ export class ProfitSharingService {
     // propio del ingreso ?? oficial del día de su `fecha`). Sin T.C. NO suma
     // (va a `otros_ingresos_avion_sin_tc_mxn`): jamás se inventa uno. Cada
     // usd se redondea a centavos y el total = round2(Σ). El balance convierte
-    // la hoja con su T.C. promedio: pueden diferir centavos, como los gastos.
+    // la hoja con su T.C. promedio: los dos PUEDEN DIFERIR y no son centavos
+    // (crece con la distancia entre el T.C. del ingreso y el promedio del
+    // libro: ING-4 2,746.70 aquí vs 2,710.47 en el balance), como los gastos
+    // (revisión del lote 2, 14-oct-2026; invariante 67).
     let otrosIngresosAvion = 0;
     let otrosIngresosSinTcMxn = 0;
     let otrosIngresosTcOficialCount = 0;

@@ -1158,6 +1158,14 @@ export type TcCruceUsd = EvaluacionTcCruce & {
   fuera_de_lugar: boolean;
   texto: string;
   titulo: string;
+  /**
+   * ADITIVO (revisión del lote 2, 14-oct-2026): SOLO cuando la LECTURA del
+   * T.C. oficial falló (≠ «ese día no hay dato»). El nivel sigue siendo
+   * SIN_OFICIAL (un panel previo lo pinta igual); el texto dice que no se
+   * pudo comprobar y el panel lo pinta en ámbar con «Vincular de todos
+   * modos».
+   */
+  lectura_fallida?: true;
 };
 
 export type ContrasteDescripcionUsd =
@@ -1286,14 +1294,46 @@ export function tituloTcCruce(ev: EvaluacionTcCruce): string {
     : `${base} · fuera de la banda ${TC_IMPLICITO_MIN}–${TC_IMPLICITO_MAX}: la base de datos no deriva el T.C. de esta liga`;
 }
 
-/** `tc_cruce` del contrato (evaluación + tolerancia + marca + textos). */
-export function tcCruceUsdPublico(ev: EvaluacionTcCruce): TcCruceUsd {
+/**
+ * Texto de la liga cuando NO se pudo LEER el T.C. oficial (revisión del
+ * lote 2, 14-oct-2026): «T.C. 21.14 · no se pudo leer el T.C. oficial del
+ * día» (+ «: fuera de la banda 15–25»). Jamás «sin T.C. oficial del día»:
+ * eso afirmaría que el dato no existe cuando lo que falló fue la carga.
+ */
+export function textoTcCruceSinLectura(ev: EvaluacionTcCruce): string {
+  const pieza = `T.C. ${dec(ev.tc_implicito, 2)} · no se pudo leer el T.C. oficial del día`;
+  return ev.en_banda
+    ? pieza
+    : `${pieza}: fuera de la banda ${TC_IMPLICITO_MIN}–${TC_IMPLICITO_MAX}`;
+}
+
+/** Tooltip de la liga con la lectura del oficial FALLIDA. */
+export function tituloTcCruceSinLectura(ev: EvaluacionTcCruce): string {
+  const exacto = `T.C. exacto ${ev.tc_implicito.toFixed(6)} (pesos del cargo ÷ dólares del gasto)`;
+  const base = `${exacto} · no se pudo leer el T.C. oficial del día del cargo: no se comprobó; vuelve a abrir «Vincular gasto» para compararlo`;
+  return ev.en_banda
+    ? base
+    : `${base} · fuera de la banda ${TC_IMPLICITO_MIN}–${TC_IMPLICITO_MAX}: la base de datos no deriva el T.C. de esta liga`;
+}
+
+/**
+ * `tc_cruce` del contrato (evaluación + tolerancia + marca + textos). Con
+ * `lecturaFallida` (la lectura del oficial falló, revisión del lote 2) y sin
+ * oficial, los textos lo dicen y viaja `lectura_fallida: true`; el nivel
+ * sigue siendo SIN_OFICIAL.
+ */
+export function tcCruceUsdPublico(
+  ev: EvaluacionTcCruce,
+  opts: { lecturaFallida?: boolean } = {},
+): TcCruceUsd {
+  const sinLectura = opts.lecturaFallida === true && ev.tc_oficial == null;
   return {
     ...ev,
     tolerancia_pct: TOLERANCIA_TC_OFICIAL_PCT,
     fuera_de_lugar: ligaUsdFueraDeLugar(ev),
-    texto: textoTcCruce(ev),
-    titulo: tituloTcCruce(ev),
+    texto: sinLectura ? textoTcCruceSinLectura(ev) : textoTcCruce(ev),
+    titulo: sinLectura ? tituloTcCruceSinLectura(ev) : tituloTcCruce(ev),
+    ...(sinLectura ? { lectura_fallida: true as const } : {}),
   };
 }
 

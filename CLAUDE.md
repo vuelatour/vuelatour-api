@@ -6452,8 +6452,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       del avión (la regla de COMIDA); sin vuelo NI avión ⇒ suelto en «otros
       gastos» del general (regla existente) y pendiente de avión. Reparto a
       socios: set `DIRECTO` (clave `COMISARIATO`, etiqueta «Comisariato»):
-      resta de la utilidad y de los socios. Libro Dinero: acreditado al avión
-      del vuelo (rama de siempre). Reporte por vuelo, tablero, ficha del
+      resta de la utilidad y de los socios. Libro Dinero: como todo gasto
+      directo del vuelo (COMIDA, OPERACIONES…) NO tiene columna ahí —no sale
+      en «otros gastos» (que lee sin vuelo o de EMPRESA) ni se acredita a
+      ningún avión en 'utilidades'—; su costo vive en el balance del avión
+      (revisión del lote 2, 14-oct-2026: antes decía «acreditado al avión
+      del vuelo», y no es así). Reporte por vuelo, tablero, ficha del
       avión y grupos: gasto del vuelo (no está en `categoriaFueraDelAvion`).
       «Otros movimientos»/TUAS pagadas: no lo ven.
     - **Cinturón 22P02**: `MIGRACION_DE_CATEGORIA` gana `COMISARIATO:
@@ -6484,12 +6488,21 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       columna OTROS de su vuelo ⇒ baja la ganancia y el reparto de agosto
       (ya entregado ⇒ la cuenta corriente de los socios puede marcar unos
       dólares «adelantados»); «otros gastos» del general de agosto baja
-      1,291.00. Un peso, una vez, en el mismo mes.
+      1,291.00 y el Libro Dinero de agosto deja de listarlos en «otros
+      gastos» (sin acreditarlos a ningún avión). Un peso, una vez, en el
+      mismo mes.
     - **Skew / rollback**: panel previo ⇒ pinta «Comisariato» por el
       fallback capitalizado y no la propone al crear; app ≤ +80 la lee como
-      código con etiqueta capitalizada. pyservices nuevo ANTES del API ⇒ la
-      app +81 aplicaría la sugerencia y un API ≤ 0.0.74 rebota 400 IsEnum
-      (por eso pyservices va DESPUÉS del API). **ROLLBACK del API a ≤
+      código con etiqueta capitalizada. pyservices nuevo ANTES del API es
+      SEGURO (revisión del lote 2, 14-oct-2026; antes este punto decía lo
+      contrario): la app publicada (+80) y el panel de prod solo aplican una
+      `categoria_sugerida` de SU catálogo (COMISARIATO no está ⇒ la
+      ignoran), el API 0.0.74 nunca pisa la categoría (solo anota la
+      discrepancia) y el APK +81/+82 NO se publica hasta la 000001 y el API
+      0.0.75 — el 400 IsEnum solo lo dispara el chip de una app +81
+      publicada antes de tiempo, con o sin pyservices. Orden ÚNICO del lote:
+      «ORDEN DE DESPLIEGUE DEL LOTE 0.0.75» en «Migraciones y despliegue».
+      **ROLLBACK del API a ≤
       0.0.74 PROHIBIDO con gastos COMISARIATO** (la fila los sumaría a
       OPERACIONES como «categoría futura no mapeada» y el reparto los dejaría
       EXCLUIDOS); el valor del enum no se retira (inofensivo sin filas).
@@ -6722,7 +6735,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       MONEDA del gasto (la cifra estaba en la moneda vieja: USD y MXN nunca
       se mezclan) — todos los roles —, o un rol de campo bajó el monto bajo
       ella. Un 0 vigente nunca se limpia solo. Un PATCH que no toca nada de
-      eso no lee el gasto vigente ni decide. **No es dinero del banco**: no
+      eso no lee el gasto vigente ni decide. **Con la llave presente la
+      limpieza por MONEDA no aplica** (la cifra se acepta en la moneda
+      nueva si cabe): por eso el PANEL (revisión del lote 2, 14-oct-2026) ya
+      no reenvía la cifra precargada al cambiar la moneda — la manda SOLO si
+      la oficina la reescribió en el campo; si no, la llave no viaja, aplica
+      esta limpieza y el panel lo avisa y pide confirmación antes del PATCH
+      (igual al reclasificar fuera de Operaciones/Aterrizaje/FBO). Antes,
+      corregir USD 1,000 → MXN 17,500 sin tocar la TUA de 300 la guardaba
+      como 300 MXN en silencio. **No es dinero del banco**: no
       entra a `cambiaDineroDelGasto` (se corrige con el gasto conciliado), al
       candado del reparto manual ni al auto-cruce.
     - **Sonda ÚNICA** `common/tua-incluida-disponible.util.ts`
@@ -6915,7 +6936,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       = USD ⇒ neto; MXN ⇒ neto ÷ (T.C. propio ?? oficial del día de `fecha`,
       MISMO lote de `resolverTcOficial` —un día, una consulta—); sin T.C. no
       suma (`otros_ingresos_avion_sin_tc_mxn`); cada usd a centavos y total
-      = round2(Σ). Pueden diferir centavos entre libros: NO es bug.
+      = round2(Σ). Los dos libros PUEDEN DIFERIR y NO son centavos (revisión
+      del lote 2, 14-oct-2026: el texto decía «centavos» y era falso): la
+      diferencia crece con la distancia entre el T.C. del ingreso (propio u
+      oficial de su día; un USD cuenta su neto tal cual) y el promedio del
+      libro. Caso real ING-4 (N990GG, $46,550.80 MXN del 4-sep, sin T.C.
+      propio): balance ÷ 17.17442 = 2,710.47 USD; reparto ÷ 16.9479 = 2,746.70
+      USD (36.23 USD; ~18.48 para el socio al 51 %). Un USD de 1,000 a
+      18.0243 en un libro con promedio 17.21 sale ≈ 1,047.32 en el balance y
+      1,000.00 en el reparto. Es el MISMO diseño de las hojas de gastos (dos
+      T.C. por diseño): NO es bug, pero se le dice así al cliente (nota de la
+      pestaña en pyservices, `_NOTA_OTROS_INGRESOS_AVION`). Unificar (que la
+      cascada sume la conversión POR ingreso) exige cambiar a la vez la
+      fórmula C5 de pyservices (`ROUND(A5/AVERAGE(T.C. de costos),2)`):
+      decisión aparte.
     - **Presencia de llaves (todo ADITIVO; skew en los dos sentidos)**: hoja
       y línea SIEMPRE en los libros de avión (individual y `aviones[]`; vacía
       `{filas: [], total_mxn: 0, usd: 0}`, también EXTERNOS, que no lee
@@ -7403,7 +7437,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       rango equivalente) y el orden es de 7 niveles (ver invariante 48). La
       raíz `tc_oficial {tc, fecha_dato, fuente} | null` viaja SIEMPRE (null
       en cuenta no MXN, sin dato o con la lectura fallida): el panel la usa
-      como capacidad. `excluidos`: un USD bancario en banda deja de ser
+      como capacidad. **Lectura FALLIDA ≠ «sin dato» (revisión del lote 2,
+      14-oct-2026)**: si `oficialesTabla` devuelve null (PostgREST caído), el
+      nivel sigue SIN_OFICIAL pero el `tc_cruce` lleva el ADITIVO
+      `lectura_fallida: true` con su propio texto («T.C. 21.14 · no se pudo
+      leer el T.C. oficial del día»; título «… no se comprobó; vuelve a
+      abrir «Vincular gasto» para compararlo», `tcCruceUsdPublico(ev,
+      {lecturaFallida})`) y la raíz el ADITIVO `tc_oficial_lectura_fallida:
+      true` (ausente si la lectura funcionó): el panel lo pinta en ámbar
+      con «Vincular de todos modos» y no promete la búsqueda en pesos.
+      Antes decía «sin T.C. oficial del día» (afirmaba que no había dato) y
+      el caso Aircraft Spruce (+24.3 % real) salía en gris, sin aviso. `excluidos`: un USD bancario en banda deja de ser
       OTRA_MONEDA (`ContextoExclusion.montoCargo/cruzadosUsd`).
     - **Lista** (`GET movimientos`): cada CARGO con EXACTAMENTE una parte
       cruzada lleva `tc_cruce` a nivel de FILA (en su propio try: si el
@@ -7416,7 +7460,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       oficiales falla o se trunca, esos cargos quedan SIN anotar.
     - **IA** (`sugerir`, `sugerir-lote`): los cruzados se leen en banda con
       el oficial de tabla; los LEJOS ya NO se mandan y los que van llevan
-      `tc_cruce` (pyservices ignora el campo extra).
+      `tc_cruce` (pyservices ignora el campo extra). Con la LECTURA del
+      oficial fallida no va NINGÚN cruzado (no se sabe cuáles quedan LEJOS;
+      revisión del lote 2, 14-oct-2026), con un warn en el log.
     - **Pre-cierre** (`GET /v1/profit-sharing/pre-cierre`): item
       `gastos_usd_tc_fuera_de_lugar` JUSTO después de
       `gastos_bancarios_sin_conciliar`, NO bloqueante (`listo` no cambia):
@@ -7720,6 +7766,31 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       sin ningún T.C. NO se resta y se AVISA («N pago(s) al vendedor en MXN
       por $X SIN tipo de cambio …»); no cuenta en `gastos_sin_tc_*` (no es
       costo del vuelo).
+    - **K DE LOS LIBROS en TODO el reporte (revisión del lote 2,
+      14-oct-2026)**: el «T.C. del vuelo» del reporte era SOLO el capturado
+      (`tc_usd_mxn`); en un vuelo sin él (#70 y #157, COMPLETADOS, con
+      comisión cotizada) un pago al vendedor en pesos sin `tc_gasto` no se
+      restaba aquí y SÍ en los libros (balance: K = capturado ?? oficial;
+      reparto: `kComisionesDeVuelo`). Hoy el reporte usa el MISMO K:
+      `tc_usd_mxn` ?? T.C. OFICIAL de referencia del día Cancún de la
+      COTIZACIÓN (`fecha_solicitud`; si no, el del vuelo) vía
+      `TipoCambioService.oficialDetallePara` (la cadena de
+      `tcOficialPorVuelos`), para TODO lo que está en pesos sin T.C. propio:
+      cobros y sus comisiones bancarias (`cobrosEnUsd`), gastos del costo y
+      pagos al vendedor. `FlightReportService` lo recibe @Optional (3.er
+      parámetro; `FlightsModule` importa `TipoCambioModule`, congelado en
+      `flights.module.spec`); sin servicio, sin fecha o sin dato ⇒ como
+      antes (solo el capturado, y se avisa lo que no convirtió). Nunca en
+      silencio: «N gasto(s) en MXN sin T.C. propio convertidos con el T.C.
+      oficial del día de la cotización (17.3943).» y «El vuelo no tiene T.C.
+      en la cotización: lo que está en pesos sin T.C. propio (cobros, gastos
+      y pagos al vendedor) se convirtió con el T.C. oficial de referencia
+      del día de la cotización, 17.3943 (dato del 2026-07-21, fuente
+      open.er-api) — el mismo que usan el balance por avión y el reparto.»
+      (solo si alguna partida lo usó). El `tc_usd_mxn` del payload sigue
+      siendo el CAPTURADO (columna MXN del PDF). Consecuencia: #70 y #157
+      (todos sus gastos en MXN sin `tc_gasto`) dejan de excluir el 100 % de
+      sus costos del reporte.
     - **Payload** (`ReporteVueloPayload`, contrato con pyservices):
       `comision_vendedor_usd` sigue siendo la COTIZADA (dato de la
       cotización); `pago_vendedor_usd` = el pago REAL que resta la ganancia
@@ -7759,7 +7830,18 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       el cotizado, sin pago 0/neto/nota, sin efecto lateral en la nota del
       T.C. del vuelo, USD + `tc_gasto`, MXN sin T.C. avisado y fuera de
       `gastos_sin_tc`, las dos categorías, vuelo sin comisión (#332),
-      CANCELADO con y sin pago, bandera, externo).
+      CANCELADO con y sin pago, bandera, externo; y desde la revisión del
+      lote 2 el K de los libros: #70 sin T.C. ⇒ pago de $2,000 MXN ÷ 17.3943
+      = 114.98 USD restado con el día Cancún de `fecha_solicitud`, cobros en
+      pesos con el mismo K, con T.C. capturado no se consulta el oficial,
+      sin dato como antes, todo en dólares sin la nota) y
+      `flights.module.spec` (el import de `TipoCambioModule`).
+    - **pyservices (revisión del lote 2)**: con la bandera, la sección
+      «Cotización» del PDF/Excel pinta la COTIZADA
+      (`pago_vendedor_cotizado_usd`) y su neto (total − cotizada, como el
+      panel), y la cascada rotula «(−) Pago real al vendedor» con
+      `pago_vendedor_usd`, sin «(c/IVA)» (la DEUDA de presentación de arriba
+      quedó resuelta allá; sin la bandera, byte a byte como antes).
 
 ## Convenciones NestJS
 
@@ -8492,6 +8574,75 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **ORDEN DE DESPLIEGUE DEL LOTE 0.0.75 (lote 2 del 13-oct-2026;
+  CONSOLIDADO en la revisión del 14-oct-2026 — manda sobre lo que diga cada
+  invariante 63–73 y sobre el CLAUDE.md de pyservices).** Hasta la revisión
+  había DOS órdenes incompatibles para el mismo push: «pyservices DESPUÉS
+  del API» (Comisariato, invariante 63) y «pyservices ANTES del API»
+  (ingreso por avión, ID por cliente, TUA). Prod = `bjesduasnzbzywofukbf`
+  (existen DOS proyectos: confirmar con un SELECT). Cada paso SOLO con el
+  anterior verificado:
+  1. **Migraciones con dependencia DURA, ANTES del push del API**:
+     `20261013000001` (enum COMISARIATO) y `20261013000009` (enum
+     DOMICILIADO: sin ella, 22P02 en TODA la conciliación), cada una con el
+     dry-run de su cabecera ⇒ comprobar que no quedó nada ⇒
+     `apply_migration` ⇒ `pg_enum` ⇒ `get_advisors`. Pueden ir aquí también
+     (o en cualquier momento: el API las sondea) `20261013000006` (ID por
+     cliente) y `20261013000008` (TUA incluida). El dry-run SIN migración
+     del concepto del SPEI (invariante 69) también va antes del API.
+  2. **pyservices COMPLETO** (push a `main`, Railway; confirmar el
+     deployment ACTIVO). Seguro con el API 0.0.74 en prod: sin las llaves
+     nuevas todo libro sale byte a byte; la IA puede sugerir COMISARIATO
+     pero nadie la aplica (la app publicada +80 y el panel de prod solo
+     aplican sugerencias de SU catálogo y el API 0.0.74 nunca pisa la
+     categoría: solo anota la discrepancia); un estado de cuenta leído con
+     los renglones de continuación entra igual (el panel de prod manda los
+     campos del movimiento uno por uno, `MovimientoImportDto.descripcion`
+     no tiene tope y el dedupe tolera el prefijo). Ventana inocua, pero sin
+     re-subir estados de cuenta ni regenerar libros mientras dure.
+  3. **API 0.0.75** (push a `main`, Railway). Justo antes, `pg_enum` con
+     COMISARIATO y DOMICILIADO (1 fila cada uno). Después `GET /v1/version`
+     = la versión del lote (nunca un health). Al revés (API antes que
+     pyservices) los números quedan bien pero el libro de N990GG de
+     septiembre saldría SIN la pestaña «Otros ingresos» ni la línea «(+)
+     OTROS INGRESOS USD» con una UTILIDAD DESPUÉS que ya los suma, y la
+     CLAVE con ID por cliente cortada en la columna A.
+  4. **Migraciones DESPUÉS del API**: `20261013000005` (CHECK del ingreso
+     con avión: así su 23514 llega traducido) y `20261013000002`
+     (reclasificación de agosto: SOLO con el API 0.0.75 arriba; sus conteos
+     van acotados a los 4 ids).
+  5. **Panel** (push a `main`, Vercel) SIEMPRE después del API.
+  6. **APK** 1.1.3+81/+82/+83 (commits locales; push y APK los hace el
+     usuario) SOLO con la 000001 y el API 0.0.75 arriba.
+  Después, y ANTES de regenerar septiembre y octubre: el PASO 0 de la
+  invariante 67 (la oficina confirma ING-4), las capturas pendientes de la
+  invariante 61 y el checklist de datos del bullet siguiente.
+- **CHECKLIST DE DATOS ANTES DE REGENERAR SEPTIEMBRE (revisión del lote 2,
+  14-oct-2026; dato de prod, NO código: nada se toca sin la oficina).** En
+  septiembre hay DOS repartos de utilidades a socios capturados como
+  GASTO (verificado por SELECT): `448f4cd2` (INDIRECTO, $100,000.00 MXN en
+  efectivo, 15-sep, sellado a N621TX, «reparto utilidades Macedo…
+  efectivo fondo pablo») y `b4298c40` (OTRO, $290,800.85 MXN por
+  transferencia, 21-sep, sellado a N621TX, «Reparto Utilidades Hernan
+  Agosto», conciliado con el SPEI `0943ac60` de EJE SCOTIA y con factura
+  SOLICITADA «Folio 280 · ASESORIA Y SERVICIOS PROFESIONALES HGSJ»). Una
+  entrega a un socio NO es costo: se registra como ENTREGA de la cuenta
+  corriente (invariante 38; `reparto_pago` tiene 0 filas). Efecto HOY (ya
+  publicado; regenerar solo lo vuelve a publicar): el primero resta
+  100,000 MXN (~5,750 USD) de la utilidad cobrada de N621TX en el BALANCE
+  (bloque de socios y participación de VuelaTour), mientras el REPARTO lo
+  deja EXCLUIDO (INDIRECTO sin reparto) ⇒ balance y reparto de N621TX ya
+  difieren ~5,750 USD; el segundo es gasto de EMPRESA (bloque VUELATOUR
+  −~16.7k USD y «otros gastos» del Libro Dinero). Orden correcto: (1) la
+  oficina confirma a qué mes y a qué avión corresponde cada pago (Hernan
+  tuvo 40.92 % de N621TX hasta el 7-jun-2026 y tiene el 100 % de XA-VGV;
+  la nota dice «Agosto»); (2) si el pago es ANTERIOR al arranque de la
+  cuenta del socio (default 2026-09 con saldo 0), se ajustan `cuenta_desde`
+  / `saldo_inicial_usd` con `PUT profit-sharing/socios/:id/cuenta` — un
+  `POST pagos` directo lo dejaría ADELANTADO o rebotaría 409
+  `PAGO_EXCEDE_SALDO`; (3) solo entonces se reclasifican o retiran los dos
+  gastos; `b4298c40` exige antes DESVINCULAR el cargo `0943ac60` (acción
+  destructiva: confirma) y resolver su factura solicitada.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
@@ -8619,10 +8770,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
       end
       $dry$;
 
-  Orden: dry-run → API 0.0.75 → pyservices (prompt con
-  renglones de continuación) → panel → APK (ayuda en Notas). Con el API
-  nuevo y pyservices previo no hay conceptos que completar; con el panel
-  previo el enriquecimiento ocurre igual pero el resumen no lo menciona.
+  Orden: el del lote («ORDEN DE DESPLIEGUE DEL LOTE 0.0.75», arriba):
+  dry-run → pyservices (prompt con renglones de continuación) → API 0.0.75
+  → panel → APK (ayuda en Notas). Los dos órdenes entre pyservices y el API
+  son seguros aquí: con el API nuevo y pyservices previo no hay conceptos
+  que completar; con pyservices nuevo y el API 0.0.74 la descripción solo
+  llega más larga (el dedupe tolera el prefijo); con el panel previo el
+  enriquecimiento ocurre igual pero el resumen no lo menciona. Re-subir
+  septiembre SOLO con el API 0.0.75 arriba.
   Operación con septiembre: snapshot SQL antes y después (cifras idénticas
   salvo `sin_concepto`), re-subir «scotia eje sep.pdf» y «scotia gastos
   (6).pdf» con «Solo completar conceptos» si la vista previa marca líneas
@@ -8812,9 +8967,16 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   el bloque `do $dry$` de su cabecera en UNA llamada ⇒ `DRYRUN_OK
   20261013000002 · A–C5` (4 reclasificados = 1,291.00 MXN, bitácora +4
   actor Sistema, huella de dinero intacta, 671d350a/b54126d5 intactos,
-  segunda corrida YA_APLICADA, guarda ABORTADA) ⇒ `count(categoria =
-  COMISARIATO)` = 0 ⇒ `apply_migration` (name
-  `20261013000002_comisariato_reclasificacion`) ⇒ 4 ⇒ `get_advisors` ⇒
+  segunda corrida YA_APLICADA, guarda ABORTADA) ⇒ COMISARIATO entre los 4
+  ids = 0 ⇒ `apply_migration` (name
+  `20261013000002_comisariato_reclasificacion`) ⇒ los 4 ids COMISARIATO
+  (1,291.00) ⇒ `get_advisors` ⇒ (revisión del lote 2, 14-oct-2026: el
+  chequeo A, la comprobación tras el dry-run y la verificación cuentan SOLO
+  los 4 ids — con el API 0.0.75 y el panel ya desplegados la oficina puede
+  capturar COMISARIATO nuevos antes de correrla y eso NO es «migración
+  aplicada»; el cuerpo del dry-run se volvió a compilar en prod el 14-oct
+  como función `pg_temp` dentro de un bloque que termina en `raise
+  exception 'SINTAXIS_OK'`, sin ejecutar nada) ⇒
   regenerar los libros de AGOSTO (N58BT, XA-VGV, N990GG, N621TX y el
   general) y avisar al cliente. Ninguna de las dos lleva palabras
   destructivas (el MCP las acepta). Los tres cuerpos plpgsql (los dos
@@ -9686,11 +9848,18 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   del cliente (hoy no leen movimientos, cuentas ni el bucket
   `estados-cuenta`); (c) la hoja no compara el T.C. guardado contra el
   oficial del día: ese aviso vive en el pre-cierre (invariante 70); (d)
-  **URGENTE, fuera de este alcance**: `ConciliacionService.resumen()` lee
-  `movimiento_bancario` SIN paginar (999 filas en prod el 13-oct; PostgREST
-  corta en 1000): con la próxima importación las tarjetas por cuenta de
-  Conciliación y `diferencia_lotes` contarán de menos en silencio. Arreglo:
-  `leerPaginado` ordenado por id, como el resto de los lectores.
+  RESUELTO en la revisión del lote 2 (14-oct-2026): `ConciliacionService.
+  resumen()` leía `movimiento_bancario` SIN paginar (999 filas en prod el
+  13-oct; PostgREST corta en 1000) y la vista por default de Conciliación
+  (sin fechas) habría contado de menos en silencio con la próxima
+  importación. Hoy va con `leerPaginado` ordenado por la PK (`id` siempre
+  en el select) y tope `RESUMEN_MOVIMIENTOS_TOPE` = 20,000: llegar a él ⇒
+  400 `RESUMEN_MUY_GRANDE` («El periodo trae más de 20,000 movimientos del
+  banco: elige un rango de fechas más corto para ver el resumen por
+  cuenta.», `MENSAJE_RESUMEN_MUY_GRANDE`), jamás un total recortado; el
+  panel lo dice con un aviso de degradación. Spec: bloque «resumen» de
+  `conciliacion.service.lote.spec` (1,050 movimientos con max-rows 1000 ⇒
+  cuenta los 1,050; 20,000 ⇒ 400).
 
 - **Cruce USD ↔ pesos (13-oct-2026, invariante 70)**: (1) el aviso del
   pre-cierre `gastos_usd_tc_fuera_de_lugar` no tiene «descartar»: una compra
@@ -9735,8 +9904,10 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   VuelaTour); cuando CHARTERS/UTILIDAD tengan regla por avión, la «(avión)»
   que carga un avión debe dejar de restarse ahí (si no, se contaría dos
   veces). (2) `aircraft.metrics.finanzas`, `groups.gastosPorHijo` (por
-  fecha_gasto, no ven la columna COMISIONES) y el reporte por vuelo (sigue
-  restando el pago COTIZADO). (3) **Avión inactivo** que voló: absorbe la
+  fecha_gasto, no ven la columna COMISIONES); el reporte por vuelo restaba
+  el pago COTIZADO (RESUELTO el 13-oct-2026, invariante 73: resta el pago
+  REAL, y desde la revisión del lote 2 con el K de los libros). (3)
+  **Avión inactivo** que voló: absorbe la
   «(avión)» en el balance y no en el reparto (`compute()` solo trae
   activos); «otros movimientos» la marcaría «ningún libro de avión la
   cargó». (4) **No se puede cargar la «(avión)» a UN solo avión de un vuelo

@@ -6,6 +6,7 @@ jest.mock('../pyservices/pyservices.service', () => ({
 import { FlightReportService } from './flight-report.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { ReporteVueloPayload } from '../pyservices/pyservices.service';
+import type { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
 
 /**
  * REPORTE POR VUELO + PAGO AL VENDEDOR (28-sep-2026, invariante 31;
@@ -88,16 +89,21 @@ function fake(tablas: Record<string, Fila[]>) {
   return { service: { from } } as unknown as SupabaseService;
 }
 
-async function reporte(v: Fila, gastos: Fila[]): Promise<ReporteVueloPayload> {
+async function reporte(
+  v: Fila,
+  gastos: Fila[],
+  opts: { tipoCambio?: TipoCambioService; cobros?: Fila[] } = {},
+): Promise<ReporteVueloPayload> {
   const service = new FlightReportService(
     fake({
       vuelo: [v],
       escala: [],
-      cobro_vuelo: [],
+      cobro_vuelo: opts.cobros ?? [],
       gasto: gastos,
       vuelo_apoyo: [],
     }),
     {} as never,
+    opts.tipoCambio,
   );
   return (
     service as unknown as {
@@ -302,5 +308,123 @@ describe('Reporte por vuelo — pago al vendedor SOLO REAL (decisión 3, invaria
     expect(control.notas_horas).toContain(
       'Vuelo externo con 1 gasto(s) capturado(s) ADEMÁS del costo del operador: verifica que el pago al operador no esté también capturado como gasto (se contaría doble).',
     );
+  });
+});
+
+/**
+ * K DE LOS LIBROS (revisión del lote 2, 14-oct-2026): un vuelo SIN T.C. en la
+ * cotización convierte lo que está en pesos sin T.C. propio con el T.C.
+ * OFICIAL del día Cancún de la COTIZACIÓN (el MISMO del balance por avión y
+ * del reparto). Caso real #70 (jul, Saab, comisión 115 USD, sin T.C.): un
+ * pago al vendedor capturado en MXN sin T.C. dejaba de restarse aquí y SÍ se
+ * restaba en los libros.
+ */
+describe('Reporte por vuelo — K de los libros (capturado ?? oficial del día de la cotización)', () => {
+  const OFICIAL = 17.3943;
+  function tipoCambioFalso(tc: number | null) {
+    const oficialDetallePara = jest.fn((dia: string) =>
+      Promise.resolve(
+        tc == null
+          ? null
+          : {
+              tc,
+              fecha_dato: dia === '2026-07-21' ? '2026-07-21' : dia,
+              fuente: 'open.er-api',
+            },
+      ),
+    );
+    return {
+      oficialDetallePara,
+      servicio: { oficialDetallePara } as unknown as TipoCambioService,
+    };
+  }
+  /** #70: cotizado el 21-jul (03:30Z del 22 = 21 en Cancún), voló el 23-jul. */
+  const SIN_TC = vuelo({
+    tc_usd_mxn: null,
+    monto_total_mxn: null,
+    fecha_solicitud: '2026-07-22T03:30:00+00:00',
+    fecha_vuelo: '2026-07-23T15:00:00+00:00',
+  });
+  const NOTA_OFICIAL =
+    'El vuelo no tiene T.C. en la cotización: lo que está en pesos sin T.C. propio (cobros, gastos y pagos al vendedor) se convirtió con el T.C. oficial de referencia del día de la cotización, 17.3943 (dato del 2026-07-21, fuente open.er-api) — el mismo que usan el balance por avión y el reparto.';
+
+  it('el pago al vendedor en MXN sin T.C. SÍ se resta con el oficial del día de la cotización (antes: no se restaba)', async () => {
+    const tc = tipoCambioFalso(OFICIAL);
+    const r = await reporte(
+      SIN_TC,
+      [OPERACION, gasto('COMISION_VENDEDOR', 2000)],
+      {
+        tipoCambio: tc.servicio,
+      },
+    );
+    // Día Cancún de `fecha_solicitud` (no el UTC ni el del vuelo).
+    expect(tc.oficialDetallePara).toHaveBeenCalledWith('2026-07-21');
+    expect(r.pago_vendedor_usd).toBe(114.98);
+    expect(r.gastos_total_usd).toBe(23);
+    expect(r.ganancia_final_usd).toBe(
+      Number(((r.remanente_usd ?? 0) - 114.98).toFixed(2)),
+    );
+    expect(r.notas_horas).toContain(
+      '1 gasto(s) en MXN sin T.C. propio convertidos con el T.C. oficial del día de la cotización (17.3943).',
+    );
+    expect(r.notas_horas).toContain(NOTA_OFICIAL);
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(/SIN tipo de cambio/);
+    // El T.C. del payload sigue siendo el CAPTURADO (columna MXN del PDF).
+    expect(r.tc_usd_mxn).toBeNull();
+  });
+
+  it('cobros en MXN sin T.C. propio también se convierten con el mismo K', async () => {
+    const tc = tipoCambioFalso(OFICIAL);
+    const r = await reporte(SIN_TC, [], {
+      tipoCambio: tc.servicio,
+      cobros: [
+        {
+          monto: 34788.6,
+          moneda: 'MXN',
+          tc_usd_mxn: null,
+          metodo_cobro: 'TRANSFERENCIA',
+          fecha_cobro: '2026-07-23',
+          comision_banco_pct: null,
+          comision_banco_monto: null,
+        },
+      ],
+    });
+    expect(r.total_cobrado_usd).toBe(2000);
+    expect(r.notas_horas).toContain(NOTA_OFICIAL);
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(
+      /sin tipo de cambio: NO están en el total cobrado/,
+    );
+  });
+
+  it('con T.C. capturado NO se consulta el oficial; sin dato oficial, como antes (se avisa, no se resta)', async () => {
+    const tc = tipoCambioFalso(OFICIAL);
+    const con = await reporte(vuelo(), [OPERACION, COMISION], {
+      tipoCambio: tc.servicio,
+    });
+    expect(tc.oficialDetallePara).not.toHaveBeenCalled();
+    expect(con.pago_vendedor_usd).toBe(100);
+    expect(con.notas_horas).toContain(NOTA_TC_VUELO);
+    expect((con.notas_horas ?? []).join(' | ')).not.toMatch(/T\.C\. oficial/);
+
+    const sinDato = await reporte(SIN_TC, [gasto('COMISION_VENDEDOR', 1600)], {
+      tipoCambio: tipoCambioFalso(null).servicio,
+    });
+    expect(sinDato.pago_vendedor_usd).toBe(0);
+    expect(sinDato.notas_horas).toContain(
+      '1 pago(s) al vendedor en MXN por $1,600 SIN tipo de cambio (y el vuelo no tiene T.C.): no se restan de la ganancia — captura su T.C. en Gastos.',
+    );
+    expect((sinDato.notas_horas ?? []).join(' | ')).not.toMatch(
+      /T\.C\. oficial de referencia/,
+    );
+  });
+
+  it('todo en dólares: el oficial no se usa y su nota no sale', async () => {
+    const r = await reporte(
+      SIN_TC,
+      [gasto('COMISION_VENDEDOR', 50, { moneda: 'USD' })],
+      { tipoCambio: tipoCambioFalso(OFICIAL).servicio },
+    );
+    expect(r.pago_vendedor_usd).toBe(50);
+    expect(r.notas_horas).not.toContain(NOTA_OFICIAL);
   });
 });

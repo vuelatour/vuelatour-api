@@ -61,10 +61,13 @@
 -- columna OTROS de la fila del vuelo ⇒ baja su remanente/ganancia y el
 -- reparto de agosto (ya entregado) ⇒ la cuenta corriente de los socios puede
 -- marcar unos dólares «adelantados»; la hoja «otros gastos» del Balance
--- general de agosto baja 1,291.00 MXN; el Libro Dinero de agosto los acredita
--- al avión del vuelo. Regenerar los libros de agosto tras aplicar. Un peso,
--- una vez, en el mismo mes (fecha_gasto y vuelo de agosto; nada cambia de
--- mes).
+-- general de agosto baja 1,291.00 MXN; el Libro Dinero de agosto deja de
+-- listarlos en «otros gastos» (su total baja 1,291.00) y NO los acredita a
+-- ningún avión: es la regla de todo gasto directo del vuelo (como COMIDA),
+-- cuyo costo vive en el balance del avión, no en el Libro Dinero (revisión
+-- del lote 2, 14-oct-2026: antes decía «los acredita al avión del vuelo», y
+-- no es así). Regenerar los libros de agosto tras aplicar. Un peso, una vez,
+-- en el mismo mes (fecha_gasto y vuelo de agosto; nada cambia de mes).
 --
 -- ROLLBACK (manual, si el cliente lo pide):
 --   update public.gasto set categoria = 'OTRO', updated_by = null
@@ -94,18 +97,20 @@
 --                    where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISARIATO') then
 --       raise exception 'DRYRUN_FALLA A: falta aplicar 20261013000001';
 --     end if;
---     if (select count(*) from public.gasto where categoria::text = 'COMISARIATO') <> 0 then
---       raise exception 'DRYRUN_FALLA A: ya hay gastos COMISARIATO (¿migración aplicada o capturas nuevas?)';
+--     -- (TODOS los conteos ACOTADOS a los 4 ids: con el API 0.0.75 y el panel ya
+--     --  desplegados la oficina puede capturar gastos COMISARIATO nuevos antes de
+--     --  correr esto, y eso NO es «migración aplicada»; revisión del lote 2)
+--     if (select count(*) from public.gasto g where g.id = any (v_ids) and g.categoria::text = 'COMISARIATO') <> 0 then
+--       raise exception 'DRYRUN_FALLA A: alguno de los 4 ya es COMISARIATO (¿migración ya aplicada?)';
 --     end if;
 --     if (select count(*) from public.gasto g where g.id = any (v_ids) and g.categoria::text = 'OTRO' and g.vuelo_id is not null) <> 4 then
 --       raise exception 'DRYRUN_FALLA A: los 4 gastos ya no son OTRO con vuelo';
 --     end if;
---     -- (conteos ACOTADOS a los 4 ids: una captura concurrente de la oficina no tumba el dry-run)
 --     select count(*) into v_b0 from public.gasto_bitacora where gasto_id = any (v_ids);
 --     select md5(string_agg((to_jsonb(g) - 'categoria' - 'notas' - 'updated_at' - 'updated_by' - 'verificado_por' - 'verificado_at')::text, '|' order by g.id))
 --       into v_huella0 from public.gasto g where g.id = any (v_ids);
 --     select md5(string_agg(to_jsonb(g)::text, '|' order by g.id)) into v_fuera0 from public.gasto g where g.id = any (v_fuera);
---     raise notice 'okA · 4 OTRO con vuelo, 0 COMISARIATO';
+--     raise notice 'okA · los 4 son OTRO con vuelo (ninguno COMISARIATO)';
 --
 --     -- B) PRIMERA corrida (cuerpo real)
 --     v_res := pg_temp.reclasificar_comisariato_20261013();
@@ -159,11 +164,16 @@
 --     raise exception 'DRYRUN_OK 20261013000002 · A–C5 (4 reclasificados = 1,291.00 MXN, bitácora +4 actor Sistema, dinero intacto, excluidos intactos, idempotente, guardas)';
 --   end $dry$;
 --
--- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada:
---   select count(*) from public.gasto where categoria::text = 'COMISARIATO';   ⇒ 0
+-- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada (ACOTADO a los 4 ids:
+-- un COMISARIATO capturado por la oficina con el API 0.0.75 no cuenta):
+--   select count(*) from public.gasto
+--    where id = any (array['30ab4bca-dfbc-4701-98af-f70631f13072','83da7c99-038f-498a-933d-2e1ebd77706e',
+--      'fab45352-4386-44f6-960e-c0953d462f66','962ecdf4-d2aa-4e0a-b206-fb746917e295']::uuid[])
+--      and categoria::text = 'COMISARIATO';                                       ⇒ 0
 -- APLICAR (apply_migration, name '20261013000002_comisariato_reclasificacion')
--- y VERIFICAR: 4 gastos COMISARIATO (= 1,291.00 MXN), 4 filas nuevas de
--- bitácora con actor null, get_advisors sin hallazgos nuevos. Después:
+-- y VERIFICAR con la MISMA consulta (y `sum(monto)`): los 4 ids COMISARIATO
+-- (= 1,291.00 MXN), 4 filas nuevas de bitácora con actor null, get_advisors
+-- sin hallazgos nuevos. Después:
 -- regenerar los balances de AGOSTO (N58BT, XA-VGV, N990GG, N621TX y el
 -- general) y avisar al cliente del efecto en el reparto y la cuenta corriente
 -- de agosto.

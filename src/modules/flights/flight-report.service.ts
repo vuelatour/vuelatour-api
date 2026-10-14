@@ -1,5 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  TipoCambioService,
+  type TipoCambioDetalle,
+} from '../tipo-cambio/tipo-cambio.service';
+import { diaCancun } from '../../common/fecha-cancun.util';
 import {
   PyservicesService,
   type ReporteVueloLineaPayload,
@@ -41,7 +46,7 @@ function fuenteParticipacionLabel(fuente: string): string {
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio
  *  e iva_pct/calculo_snapshot para la partición venta avión / VuelaTour). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, iva_pct, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, combinado_con_id, calculo_snapshot';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_solicitud, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, iva_pct, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, combinado_con_id, calculo_snapshot';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -57,7 +62,41 @@ export class FlightReportService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    /**
+     * T.C. oficial de respaldo del vuelo SIN T.C. en la cotización (revisión
+     * del lote 2, 14-oct-2026: el K de los libros). @Optional: sin él (specs
+     * armados a mano) el reporte convierte solo con el T.C. capturado, como
+     * antes.
+     */
+    @Optional() private readonly tipoCambio?: TipoCambioService,
   ) {}
+
+  /**
+   * K DEL VUELO = el de los LIBROS (revisión del lote 2, 14-oct-2026,
+   * invariante 73): el T.C. de la cotización (`tc_usd_mxn`) o, sin él, el
+   * T.C. OFICIAL de referencia del día Cancún de la COTIZACIÓN
+   * (`fecha_solicitud`; si no, el del vuelo) — la MISMA cadena que
+   * `tcOficialPorVuelos` del balance por avión y `kComisionesDeVuelo` del
+   * reparto. Antes el reporte solo tenía el capturado: en un vuelo sin él,
+   * un pago al vendedor (o un gasto, o un cobro) en pesos sin T.C. propio NO
+   * se restaba aquí y SÍ en los libros. Nunca lanza: sin servicio, sin
+   * fecha o sin dato ⇒ null (el reporte lo avisa como siempre).
+   */
+  private async kOficialDeCotizacion(v: {
+    fecha_solicitud?: unknown;
+    fecha_vuelo?: unknown;
+  }): Promise<TipoCambioDetalle | null> {
+    if (!this.tipoCambio) return null;
+    const str = (x: unknown): string | null =>
+      typeof x === 'string' && x ? x : null;
+    const fuente = str(v.fecha_solicitud) ?? str(v.fecha_vuelo);
+    if (!fuente) return null;
+    try {
+      return await this.tipoCambio.oficialDetallePara(diaCancun(fuente));
+    } catch {
+      return null;
+    }
+  }
 
   async pdf(flightId: string): Promise<Buffer> {
     return this.pyservices.generateReporteVueloPdf(
@@ -284,6 +323,26 @@ export class FlightReportService {
       }
     }
 
+    // K del vuelo (el de los libros: capturado ?? oficial del día de la
+    // cotización). TODO lo que está en pesos sin T.C. propio —cobros, sus
+    // comisiones bancarias, gastos y pagos al vendedor— se convierte con él.
+    const kCapturado =
+      v.tc_usd_mxn != null && Number(v.tc_usd_mxn) > 0
+        ? Number(v.tc_usd_mxn)
+        : null;
+    const kOficial =
+      kCapturado == null ? await this.kOficialDeCotizacion(v) : null;
+    const tcVuelo = kCapturado ?? kOficial?.tc ?? null;
+    /** Cuántas partidas en pesos usaron el oficial (para su nota). */
+    let usosKOficial = 0;
+    if (kOficial != null) {
+      usosKOficial += (cobrosRes.data ?? []).filter(
+        (c) =>
+          c.moneda === 'MXN' &&
+          !(Number(c.tc_usd_mxn) > 0) &&
+          Number(c.monto) > 0,
+      ).length;
+    }
     const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map(
       (c) => ({
         fecha: (c.fecha_cobro as string) ?? null,
@@ -303,10 +362,7 @@ export class FlightReportService {
     );
     // Total cobrado por la fuente canónica: cada cobro convertido a USD con su
     // TC (o el del vuelo). Antes se sumaban MXN y USD crudos → saldos absurdos.
-    const conv = cobrosEnUsd(
-      cobrosRes.data ?? [],
-      v.tc_usd_mxn as number | null,
-    );
+    const conv = cobrosEnUsd(cobrosRes.data ?? [], tcVuelo);
     const totalCobrado = conv.total_usd;
     if (conv.sin_tc_count > 0) {
       notasHoras.push(
@@ -324,7 +380,7 @@ export class FlightReportService {
           moneda: c.moneda,
           tc_usd_mxn: c.tc_usd_mxn,
         })),
-      v.tc_usd_mxn as number | null,
+      tcVuelo,
     );
     const comisionesBancoUsd = comisionesConv.total_usd;
 
@@ -431,14 +487,11 @@ export class FlightReportService {
     const tacoFin = tacosLlegada.length > 0 ? Math.max(...tacosLlegada) : null;
 
     // Gastos a USD con la MISMA regla de cobros y del Balance por avión:
-    // USD directo; MXN ÷ tc_gasto; sin TC propio toma el T.C. del vuelo de
+    // USD directo; MXN ÷ tc_gasto; sin TC propio toma el K del vuelo de
     // RESPALDO (los gastos casi nunca traen TC capturado y el balance salía
-    // sin restar nada). Solo si tampoco hay T.C. del vuelo se excluye y se
-    // reporta para que la oficina lo corrija.
-    const tcVuelo =
-      v.tc_usd_mxn != null && Number(v.tc_usd_mxn) > 0
-        ? Number(v.tc_usd_mxn)
-        : null;
+    // sin restar nada) — desde el lote 2 (14-oct-2026) el K de los libros:
+    // capturado ?? oficial del día de la cotización. Solo si tampoco hay K
+    // se excluye y se reporta para que la oficina lo corrija.
     let gastosTcVueloCount = 0;
     const gastoUsd = (g: Record<string, unknown>): number | null => {
       if (g.moneda === 'USD') return n(g.monto);
@@ -531,8 +584,11 @@ export class FlightReportService {
     );
     if (gastosTcVueloCount > 0) {
       notasHoras.push(
-        `${gastosTcVueloCount} gasto(s) en MXN sin T.C. propio convertidos con el T.C. del vuelo (${tcVuelo}).`,
+        kOficial != null
+          ? `${gastosTcVueloCount} gasto(s) en MXN sin T.C. propio convertidos con el T.C. oficial del día de la cotización (${tcVuelo}).`
+          : `${gastosTcVueloCount} gasto(s) en MXN sin T.C. propio convertidos con el T.C. del vuelo (${tcVuelo}).`,
       );
+      if (kOficial != null) usosKOficial += gastosTcVueloCount;
     }
     if (gastosSinTcCount > 0) {
       notasHoras.push(
@@ -642,15 +698,17 @@ export class FlightReportService {
         pagoRealAcumUsd += n(g.monto);
         continue;
       }
-      const tcg =
+      const propio =
         g.tc_gasto != null && Number(g.tc_gasto) > 0
           ? Number(g.tc_gasto)
-          : tcVuelo;
+          : null;
+      const tcg = propio ?? tcVuelo;
       if (tcg == null) {
         pagosVendedorSinTc += 1;
         pagosVendedorSinTcMxn += n(g.monto);
         continue;
       }
+      if (propio == null && kOficial != null) usosKOficial += 1;
       pagoRealAcumUsd += n(g.monto) / tcg;
     }
     const pagoVendedor = Number(pagoRealAcumUsd.toFixed(2));
@@ -669,6 +727,13 @@ export class FlightReportService {
     if (pagosVendedorSinTc > 0) {
       notasHoras.push(
         `${pagosVendedorSinTc} pago(s) al vendedor en MXN por $${pagosVendedorSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio (y el vuelo no tiene T.C.): no se restan de la ganancia — captura su T.C. en Gastos.`,
+      );
+    }
+    // El K oficial NUNCA en silencio: qué T.C., de qué día y de qué fuente
+    // (el MISMO que usan el balance y el reparto para este vuelo).
+    if (kOficial != null && usosKOficial > 0) {
+      notasHoras.push(
+        `El vuelo no tiene T.C. en la cotización: lo que está en pesos sin T.C. propio (cobros, gastos y pagos al vendedor) se convirtió con el T.C. oficial de referencia del día de la cotización, ${kOficial.tc} (dato del ${kOficial.fecha_dato}, fuente ${kOficial.fuente}) — el mismo que usan el balance por avión y el reparto.`,
       );
     }
     if (pagosRealesVendedor.length === 0 && pagoCotizadoUsd > 0) {

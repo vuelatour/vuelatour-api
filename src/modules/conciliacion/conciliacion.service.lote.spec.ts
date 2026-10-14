@@ -6,7 +6,10 @@ import {
   ServiceUnavailableException,
   type Logger,
 } from '@nestjs/common';
-import { ConciliacionService } from './conciliacion.service';
+import {
+  ConciliacionService,
+  MENSAJE_RESUMEN_MUY_GRANDE,
+} from './conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { IaUsoService } from '../ia-uso/ia-uso.service';
@@ -1029,6 +1032,54 @@ describe('lectores', () => {
     const r = await svc.resumen();
     const gnral = r.find((c) => c.cuenta_bancaria_id === CTA)!;
     expect(gnral).toMatchObject({ diferencia_lotes: 0.01, conciliados: 3 });
+  });
+
+  it('resumen PAGINADO (revisión del lote 2): con max-rows 1000, 1,050 movimientos cuentan TODOS', async () => {
+    // Prod el 14-oct: 999 movimientos. La vista por default (sin fechas) lee
+    // la tabla entera y PostgREST corta en 1000 SIN avisar: con la fila
+    // 1,001 las tarjetas salían de un subconjunto.
+    const db = mundo();
+    const extra = Array.from({ length: 1046 }, (_, i) =>
+      cargo(`mx-${String(i).padStart(4, '0')}`, 100 + i, {
+        conciliado: i % 3 === 0,
+      }),
+    );
+    db.movimiento_bancario.push(...extra);
+    const pendientes = db.movimiento_bancario.filter((m) => !m.conciliado);
+    const montoPendiente =
+      Math.round(pendientes.reduce((a, m) => a + Number(m.monto), 0) * 100) /
+      100;
+    const { svc, log } = armar(db, { maxFilas: 1000 });
+    const r = await svc.resumen();
+    const gnral = r.find((c) => c.cuenta_bancaria_id === CTA)!;
+    expect(gnral.total).toBe(1050);
+    expect(gnral.pendientes).toBe(pendientes.length);
+    expect(gnral.conciliados).toBe(1050 - pendientes.length);
+    expect(gnral.monto_pendiente).toBe(montoPendiente);
+    // Ordenada por la PK y con `range` (páginas que no se pisan).
+    const lecturas = log.filter(
+      (l) =>
+        l.tabla === 'movimiento_bancario' &&
+        l.texto.includes('select(id, cuenta_bancaria_id'),
+    );
+    expect(lecturas.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('resumen: al llegar al tope (20,000) ⇒ 400 RESUMEN_MUY_GRANDE, jamás un total recortado', async () => {
+    const db = mundo();
+    db.movimiento_bancario.push(
+      ...Array.from({ length: 20_000 }, (_, i) =>
+        cargo(`tope-${String(i).padStart(5, '0')}`, 10, { conciliado: true }),
+      ),
+    );
+    const { svc } = armar(db, { maxFilas: 1000 });
+    const { e, code, message } = await error(svc.resumen());
+    expect(e).toBeInstanceOf(BadRequestException);
+    expect(code).toBe('RESUMEN_MUY_GRANDE');
+    expect(message).toBe(MENSAJE_RESUMEN_MUY_GRANDE);
+    expect(message).toBe(
+      'El periodo trae más de 20,000 movimientos del banco: elige un rango de fechas más corto para ver el resumen por cuenta.',
+    );
   });
 
   it('Excel: «Conciliado con» nombra los 3 gastos y «Matrícula» une las del lote', async () => {

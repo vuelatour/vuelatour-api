@@ -508,6 +508,49 @@ describe('GET movimientos/:id/gastos-candidatos — los USD en cuentas en pesos'
     });
   });
 
+  it('lectura del oficial FALLIDA (≠ sin dato): texto propio, `lectura_fallida` y la raíz lo dice', async () => {
+    const db = () =>
+      mundo({
+        gasto: [gastoUsd('tubo', 422.86, '2026-09-01', { notas: TUBO })],
+        movimiento_bancario: [mov('asa', '2026-09-01', 8939.38, 'ASA CANCUN')],
+      });
+    // Revisión del lote 2 (14-oct-2026): con la lectura caída, el tubo del
+    // caso Aircraft Spruce (+24.3 % contra el oficial real) ya no sale como
+    // «sin T.C. oficial del día» (afirmaba que no había dato).
+    const falla = await armar(db(), {
+      tc: tipoCambioFalso('falla'),
+    }).svc.gastosCandidatosDeMovimiento('asa', {});
+    expect(falla.tc_oficial).toBeNull();
+    expect(falla.tc_oficial_lectura_fallida).toBe(true);
+    expect(falla.candidatos[0]).toMatchObject({
+      id: 'tubo',
+      cruzado: true,
+      tc_cruce: {
+        nivel: 'SIN_OFICIAL',
+        lectura_fallida: true,
+        fuera_de_lugar: false,
+        texto: 'T.C. 21.14 · no se pudo leer el T.C. oficial del día',
+      },
+    });
+    expect(falla.candidatos[0].tc_cruce?.titulo).toBe(
+      'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · no se pudo leer el T.C. oficial del día del cargo: no se comprobó; vuelve a abrir «Vincular gasto» para compararlo',
+    );
+    // Sin dato del día (lectura buena): el texto de siempre y SIN las marcas.
+    const vacio = await armar(db(), {
+      tc: tipoCambioFalso('vacio'),
+    }).svc.gastosCandidatosDeMovimiento('asa', {});
+    expect(vacio).not.toHaveProperty('tc_oficial_lectura_fallida');
+    expect(vacio.candidatos[0].tc_cruce).toMatchObject({
+      nivel: 'SIN_OFICIAL',
+      texto: 'T.C. 21.14 · sin T.C. oficial del día',
+    });
+    expect(vacio.candidatos[0].tc_cruce).not.toHaveProperty('lectura_fallida');
+    // Con oficial: tampoco viaja la marca.
+    const con = await armar(db()).svc.gastosCandidatosDeMovimiento('asa', {});
+    expect(con).not.toHaveProperty('tc_oficial_lectura_fallida');
+    expect(con.candidatos[0].tc_cruce).toMatchObject({ nivel: 'LEJOS' });
+  });
+
   it('en «ASA CANCUN» $8,939.38 el tubo sale LEJOS, último de los bancarios', async () => {
     const db = mundo({
       gasto: [
@@ -666,6 +709,23 @@ describe('«Sugerir con IA» — los cruzados llevan tc_cruce y los LEJOS no se 
     const s = await armar(db).svc.sugerir('aircraft');
     expect(s.candidatos.map((c) => c.id)).toEqual(['tubo']);
     expect(s.candidatos[0].tc_cruce).toMatchObject({ nivel: 'CERCA' });
+  });
+
+  it('con la LECTURA del oficial fallida, ningún cruzado va a la IA (no se sabe cuáles quedan LEJOS)', async () => {
+    const db = mundo({
+      gasto: [
+        gastoUsd('tubo', 422.86, '2026-09-01', { notas: TUBO }),
+        gastoMxn('mxn-asa', 8939.38, '2026-09-01', {
+          medio_pago: 'TARJETA_CORP',
+        }),
+      ],
+      movimiento_bancario: [mov('asa', '2026-09-01', 8939.38, 'ASA CANCUN')],
+    });
+    const s = await armar(db, { tc: tipoCambioFalso('falla') }).svc.sugerir(
+      'asa',
+    );
+    // El gasto en pesos de la cuenta sí; el tubo (+24.3 % real) no.
+    expect(s.candidatos.map((c) => c.id)).toEqual(['mxn-asa']);
   });
 });
 

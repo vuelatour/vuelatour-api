@@ -83,6 +83,11 @@ export function filaHojaOtrosIngresos(
  * null; total 0 ⇒ 0; si no, total ÷ `tcHojas` (sin T.C. ⇒ null). Un
  * ingreso USD sin T.C. (el CHECK `ingreso_tc_resultado_chk` ya lo impide)
  * se grita en `pendientes`: la utilidad después de gastos queda vacía.
+ * OJO (revisión del lote 2, 14-oct-2026): el REPARTO convierte cada ingreso
+ * por separado (USD = su neto; MXN ÷ su T.C. propio u oficial de su día), así
+ * que este `usd` y el del reparto PUEDEN diferir más que centavos (ING-4:
+ * 2,710.47 aquí vs 2,746.70 allá). Es el diseño de dos T.C. de las hojas de
+ * gastos; unificarlo exige cambiar a la vez la fórmula C5 de pyservices.
  */
 export function hojaOtrosIngresosAvion(
   ingresos: readonly IngresoParaLibro[],
