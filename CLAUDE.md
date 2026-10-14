@@ -7096,6 +7096,65 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **ORDEN DE DESPLIEGUE DEL LOTE 0.0.74 (13-oct-2026: decisiones 1–6, D3
+  con el ajuste de dos categorías y la revisión adversaria).** Nada tiene
+  push todavía (API sobre `e18e0fb0`, pyservices sobre `4d206ab`, panel
+  sobre `a2918be`). Prod = `bjesduasnzbzywofukbf` (existen DOS proyectos:
+  confirmar con SELECT antes —el vuelo #251 con su gasto de $4,080.00 y la
+  última migración `20261012000002`—). Cada paso SOLO con el anterior
+  verificado:
+  1. **Migraciones** (las aplica el orquestador por MCP; detalle en el
+     bullet «PENDIENTES (13-oct-2026)» de abajo): `20261013000003`
+     (dry-run por `execute_sql` ⇒ `DRYRUN_OK 20261013000003 …` ⇒ comprobar
+     que no quedó nada ⇒ `apply_migration` con SOLO el cuerpo ⇒ `pg_enum`:
+     el valor justo después de COMISION_VENDEDOR ⇒ `get_advisors`) →
+     `20261013000004` (solo con la 000003 YA confirmada, en horario
+     tranquilo: dry-run ⇒ `DRYRUN_OK 20261013000004 · A–C8` ⇒
+     comprobaciones ⇒ `apply_migration` ⇒ `pg_get_constraintdef` ⇒
+     `get_advisors`). Si el MCP declina: paquete en `docs/` para el SQL
+     Editor + insert en `supabase_migrations.schema_migrations`.
+  2. **pyservices** (push a `main`, Railway; confirmar el deployment
+     ACTIVO): `3e4fc1d` (COSTO UNITARIO) · `12b5e86` (T.C. en «permisos») ·
+     `11dcaae` (nota FACTURA VUELATOUR) · `982488d` (D3, textos) ·
+     `8a16349` (AFAC en filas) · `62a10e4` (dos categorías) · `47e67a9`
+     (revisión: permisos AFAC pagados $0.00). Nunca `982488d` sin
+     `62a10e4`. Con el API de prod (0.0.73) no llega ninguna bandera nueva:
+     libros byte a byte.
+  3. **API 0.0.74** (push a `main`, Railway). Justo antes: `select 1 from
+     pg_enum e join pg_type t on t.oid = e.enumtypid where t.typname =
+     'categoria_gasto' and e.enumlabel = 'COMISION_VENDEDOR_AVION'` ⇒ 1
+     fila. Commits: `bbdf411a` (post-mortem del 12-oct, docs) · `9e3a381c`
+     (quotes desde/hasta) · `458bbecd` (COSTO UNITARIO) · `4b61db75` (T.C.
+     «permisos», invariante 59) · `c942996e` (factura por cuenta,
+     invariante 60) · `dd431583` (D3) · `c9ac1022` (AFAC en filas,
+     invariante 62) · `47d4b76a` (dos categorías, invariante 61) ·
+     `c726d642` (revisión) · «Versión 0.0.74» (este). Nunca `dd431583` sin
+     `47d4b76a`. Después: `GET /v1/version` = `0.0.74` (nunca un health) y
+     el humo de la invariante 61 (`GET /v1/expenses?pendientes=1` ⇒ 200;
+     `?categoria=COMISION_VENDEDOR_AVION&limit=1` ⇒ 200 vacío;
+     `GET /v1/dashboards/gastos` ⇒ 200 con el renglón nuevo).
+  4. **Panel** (push a `main`, Vercel) SIEMPRE después del API: `4eefb3b`
+     (dos categorías; el 0.0.73 rechaza la categoría nueva por IsEnum).
+     Verificar el commit desplegado con la API pública de GitHub (curl).
+  5. **Flutter**: `66e8036` (+81 Comisariato) y `3b121e7` (+82 dos
+     categorías) son commits LOCALES; push y APK los hace el usuario y
+     **NO se publica el APK hasta la migración 20261013000001 y el API
+     0.0.75** (Comisariato).
+  Después del deploy y ANTES de regenerar: avisar al cliente de las dos
+  categorías (#251 y #332 se quedan «(VuelaTour)»; comisiones cotizadas
+  sin pago: #233, #237, #260, #317, #404, #417 y #442), de la compuerta
+  AFAC de la invariante 62 (bullet siguiente) y de lo de la invariante 60
+  (solicitud viva aunque el cobro sea BillPocket/Paywise/efectivo, avisos
+  por anticipos aplicados, sin backfill); SOLO entonces regenerar
+  septiembre y octubre (balance, reparto, cuenta corriente y Libro
+  Dinero). **ROLLBACK del API a ≤ 0.0.73 PROHIBIDO con gastos «(avión)»
+  capturados.** Verificado en local el 13-oct-2026: `tsc --noEmit` limpio;
+  eslint de los 72 `.ts` cambiados desde `e18e0fb0`: 92 errores y 12
+  avisos, TODOS de `e18e0fb0` (aircraft-balance 5, expenses 5, flights
+  64 + 5, inventory 2, dinero-report 2, quotes 14 + 7; 0 nuevos); jest
+  263 suites / 4,433 pruebas; pyservices `pytest -q` 1,036 passed, 2
+  skipped, 7 failed = los mismos 7 de `4d206ab` (entorno local: IA/PDF);
+  `ruff check app tests` 19 = los mismos 19 de `4d206ab`.
 - **13-oct-2026 — SIN migración** para los permisos AFAC como filas que
   SUMAN en «otros movimientos» (invariante 62): solo payload API→pyservices
   (`seccion: 'AFAC'` por fila y la bandera ADITIVA `afac_en_filas`; el API
