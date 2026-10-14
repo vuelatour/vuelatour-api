@@ -8872,13 +8872,42 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `PAGO_EXCEDE_SALDO`; (3) solo entonces se reclasifican o retiran los dos
   gastos; `b4298c40` exige antes DESVINCULAR el cargo `0943ac60` (acción
   destructiva: confirma) y resolver su factura solicitada.
-- **14-oct-2026 — 0.0.76, SIN migración** para la fecha del pago desde
-  Conciliación (invariante 74): ruta ADITIVA `PATCH /v1/expenses/:id/fecha`;
-  `PATCH /v1/expenses/:id` y su auto-cruce no cambian. Orden: API (Railway)
-  ⇒ `GET /v1/version` = `0.0.76` (nunca un health) ⇒ panel (Vercel). Con el
-  panel antes del API, «Fecha» responde 404 «Cannot PATCH …» (el panel dice
-  RUTA_NO_DISPONIBLE) y no escribe nada; rollback del API a 0.0.75: igual de
-  inofensivo. Sin dry-run, `apply_migration` ni `get_advisors`.
+- **14-oct-2026 — ORDEN DE DESPLIEGUE 0.0.76, SIN migración** (fecha del
+  pago desde Conciliación, invariante 74). Base: API sobre `422f5275`
+  (0.0.75, en prod: `GET /v1/version` lo confirmó el 14-oct) y panel sobre
+  `f23cef9`. Ruta ADITIVA `PATCH /v1/expenses/:id/fecha`; `PATCH
+  /v1/expenses/:id` («Verificar / editar») y su auto-cruce no cambian. **El
+  panel consume campos NUEVOS** (la ruta, `candado_mes_vuelo` en la ficha
+  del candidato de «Vincular gasto» y `fecha_hora_carga_movida` en la
+  respuesta), así que el API va PRIMERO:
+  1. **API 0.0.76** (push a `main`, Railway): `f39b1aca` (ruta, inv. 74) ·
+     `292a303a` (revisión: 409 `FECHA_GASTO_YA_CONCILIADO`,
+     `fecha_hora_carga_movida`, `candado_mes_vuelo`, sueltas del bloque
+     VUELATOUR y `package.json` = `0.0.76`) · «Versión 0.0.76» (este).
+     Después `GET /v1/version` = `0.0.76` (nunca un health).
+  2. **Panel** (push a `main`, Vercel) SOLO con el 0.0.76 arriba: `fa79752`
+     (botón «Fecha», diálogo anidado, «Deshacer» y «Gastos sin banco» sin
+     tabla vacía cuando falla la carga) · `c9d79d6` (revisión) y los
+     «Verificación: …» que agregue su carril. Verificar el commit
+     desplegado con la API pública de GitHub (curl).
+  Skew: panel ANTES del API ⇒ «Fecha» abre el diálogo, pero «Guardar
+  fecha» recibe 404 «Cannot PATCH …» (el panel dice RUTA_NO_DISPONIBLE) y
+  no escribe nada; API nuevo con panel viejo ⇒ nadie llama la ruta,
+  `update()` se comporta igual y la llave de más de la ficha
+  (`candado_mes_vuelo`) la ignoran el panel de prod (no valida ese payload)
+  y pyservices (`GastoCandidato` de pydantic sin `extra="forbid"`).
+  Rollback del API a 0.0.75: igual de inofensivo; del panel: desaparece el
+  botón. Sin dry-run, `apply_migration` ni `get_advisors`; sin pyservices
+  ni app. Verificado en local el 14-oct-2026 (API): `tsc --noEmit` limpio
+  (también con `tsconfig.build.json`, el del build de Railway); eslint (sin
+  --fix) de los 12 `.ts` cambiados desde `422f5275`: 5 errores y 0 avisos,
+  todos en `expenses.service.ts` e idénticos (regla, mensaje y renglón de
+  código) a los 5 de `422f5275` (solo se corren 30 líneas; 0 nuevos); jest
+  313 suites / 5,203 pruebas, 0 fallos (en `422f5275`: 309 / 5,123, 0
+  fallos; las 5,123 siguen con el mismo nombre y hay 80 nuevas). Columnas de
+  los selects nuevos (`GASTO_CAMBIO_FECHA_COLS` y `fecha_vuelo` en
+  `GASTO_RICO_COLS`) comprobadas en prod por `information_schema` (solo
+  SELECT): 22 de 22.
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
