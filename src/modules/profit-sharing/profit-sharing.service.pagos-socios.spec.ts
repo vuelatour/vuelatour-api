@@ -130,6 +130,8 @@ function avionN4142R(svc: ProfitSharingService) {
       periodo: SEPTIEMBRE,
       tcOficialVuelo: new Map(),
       tcOficialGasto: new Map(),
+      // K de respaldo de las comisiones (revisión 13-oct-2026): ninguno.
+      tcKComisionesVuelo: new Map(),
       // Comisiones a cargo del avión (6-oct-2026) y pago al vendedor por
       // vuelo (13-oct-2026, invariante 61): este vuelo no trae comisiones
       // bancarias ni pagos al vendedor ⇒ el reparto no cambia.

@@ -1374,8 +1374,9 @@ export interface BalanceOtroMovimientoFilaPayload {
   nota_egreso?: string | null;
   /**
    * ADITIVA (13-oct-2026, API 0.0.74, invariante 62): 'AFAC' = fila por
-   * avión de PERMISOS AFAC (ingreso: provisión del periodo; egreso:
-   * permisos pagados), anexada al final de `filas` por `payloadGeneral`;
+   * avión de PERMISOS AFAC (ingreso: provisión del periodo; egreso: los
+   * permisos pagados CITADOS con $0.00 «a cargo del avión» —ya restan en la
+   * cascada de su avión—), anexada al final de `filas` por `payloadGeneral`;
    * pyservices nuevo pinta un encabezado de sección antes de la primera; un
    * pyservices previo la pinta como fila normal (suma igual). Las filas por
    * vuelo y las sueltas no la traen.

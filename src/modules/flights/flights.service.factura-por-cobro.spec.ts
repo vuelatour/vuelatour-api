@@ -309,6 +309,23 @@ describe('createCobro — solicitud automática de factura (fire-and-forget)', (
     }
   });
 
+  it('la opción INTERNA `omitirSolicitudFactura` («Es el pago de un vuelo» desde el banco) no la dispara: la dispara el llamador tras ligar el abono', async () => {
+    const { service, solicitarPorCobro, inserts } = armar();
+    const res = (await service.createCobro(
+      V1,
+      dto({ cuenta_destino: 'HSBC Pesos' }),
+      USER,
+      Rol.ADMIN,
+      undefined,
+      undefined,
+      { omitirSolicitudFactura: true },
+    )) as Row;
+    await vaciarCola();
+    expect(inserts).toHaveLength(1);
+    expect(res).toMatchObject({ id: 'c-new', cuenta_destino: 'HSBC Pesos' });
+    expect(solicitarPorCobro).not.toHaveBeenCalled();
+  });
+
   it('una PARTE de sobre de grupo no la dispara (lo hace el grupo UNA vez por sobre)', async () => {
     const { service, solicitarPorCobro } = armar();
     await service.createCobro(

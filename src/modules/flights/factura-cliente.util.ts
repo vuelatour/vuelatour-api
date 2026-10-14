@@ -554,9 +554,10 @@ export function etiquetaFacturaRegistrada(p: {
  *     el Excel ya no dice «nada» de un vuelo que la oficina marcó facturado;
  *  5. (13-oct-2026, invariante 60) sin factura registrada, lo que dicen los
  *     COBROS del vuelo, con dos insumos OPCIONALES: «Pendiente de factura»
- *     si `exigencia === 'EXIGE'` (algún cobro positivo cayó en una cuenta
- *     que exige factura: HSBC/Scotiabank, o transferencia/link HSBC/cheque
- *     sin cuenta — `vueloExigeFactura`) O si hay solicitud VIVA desde el
+ *     si `exigencia === 'EXIGE'` (en una cuenta que exige factura —
+ *     HSBC/Scotiabank, o transferencia/link HSBC/cheque sin cuenta— QUEDÓ
+ *     dinero, neto de sus reembolsos por moneda: `vueloExigeFactura`) O si
+ *     hay solicitud VIVA desde el
  *     vuelo (`solicitada`; refinamiento documentado sobre la decisión
  *     literal: la columna nunca contradice la bandeja «Por facturar» ni el
  *     caso «paga contra factura»; el pre-cierre NO usa esta rama); «No

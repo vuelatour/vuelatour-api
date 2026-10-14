@@ -435,6 +435,19 @@ export interface CobroDeAnticipoOpts {
   ingreso_anticipo_id: string;
 }
 
+/**
+ * Opción INTERNA del alta de un cobro (revisión 13-oct-2026, invariante
+ * 60): `omitirSolicitudFactura` = NO disparar aquí la solicitud automática
+ * de factura. Solo la usa `IngresosService.cobroDeVueloDesdeAbono` («Es el
+ * pago de un vuelo» desde el banco): ese camino BORRA el cobro recién creado
+ * si la liga con el abono falla (compensación) y una solicitud ya escrita no
+ * se deshace — así que la dispara él mismo DESPUÉS de que la liga queda
+ * hecha. Jamás llega de un DTO.
+ */
+export interface CobroAltaInternaOpts {
+  omitirSolicitudFactura?: boolean;
+}
+
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
 const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
 // Métodos que el PILOTO puede cobrar en campo: efectivo (MXN/USD) y terminal de
@@ -11880,6 +11893,9 @@ export class FlightsService {
     // 6.º parámetro INTERNO (24-sep-2026, ingresos): el cobro nace de un
     // ANTICIPO. Sin él el insert es byte-idéntico al de siempre.
     anticipo?: CobroDeAnticipoOpts,
+    // 7.º parámetro INTERNO (revisión 13-oct-2026, invariante 60): ver
+    // `CobroAltaInternaOpts`. Sin él, el gancho de factura de siempre.
+    interna?: CobroAltaInternaOpts,
   ) {
     const vuelo = await this.findById(vueloId);
     // REPLAY del outbox (10-sep-2026 · B3): la rama idempotente va ANTES de
@@ -12132,8 +12148,11 @@ export class FlightsService {
     // el POST del outbox del piloto (HSBC_LINK) no espera lecturas ni pushes
     // (un timeout daría un «fallido» falso, invariante 13). El replay
     // idempotente y el 23505 retornaron ANTES y no re-disparan; las partes
-    // de un sobre tampoco: lo hace el grupo UNA vez por sobre.
-    if (!sobre) {
+    // de un sobre tampoco: lo hace el grupo UNA vez por sobre. Con
+    // `interna.omitirSolicitudFactura` («Es el pago de un vuelo» desde el
+    // banco) la dispara el llamador DESPUÉS de ligar el abono: si la liga
+    // falla, su compensación borra el cobro y aquí no debe quedar nada.
+    if (!sobre && interna?.omitirSolicitudFactura !== true) {
       void this.solicitarFacturaPorCobros({
         vueloIds: [vueloId],
         cobro: {

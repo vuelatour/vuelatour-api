@@ -184,6 +184,71 @@ describe('vueloExigeFactura — tri-estado del vuelo', () => {
     ).toBe('EXIGE');
   });
 
+  // Revisión 13-oct-2026: la exigencia del VUELO es por el NETO de cada
+  // cuenta (o método sin cuenta) y moneda — el reembolso se clasifica por SU
+  // cuenta/método sin mirar el signo.
+  it('anticipo por transferencia a HSBC Dólares devuelto COMPLETO (misma cuenta y moneda) ⇒ NO_EXIGE', () => {
+    expect(
+      vueloExigeFactura([
+        {
+          cuenta_destino: 'HSBC Dólares',
+          metodo_cobro: 'TRANSFERENCIA',
+          moneda: 'USD',
+          monto: 1000,
+        },
+        {
+          cuenta_destino: 'HSBC Dólares',
+          metodo_cobro: 'TRANSFERENCIA',
+          moneda: 'USD',
+          monto: -1000,
+        },
+      ]),
+    ).toBe('NO_EXIGE');
+    // Transferencia sin cuenta devuelta y el vuelo pagado por BillPocket.
+    expect(
+      vueloExigeFactura([
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'MXN', monto: 5000 },
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'MXN', monto: -5000 },
+        { metodo_cobro: 'BILLPOCKET', moneda: 'MXN', monto: 5000 },
+      ]),
+    ).toBe('NO_EXIGE');
+  });
+
+  it('reembolso PARCIAL ⇒ EXIGE (quedó dinero en la cuenta); centavos de redondeo no exigen', () => {
+    expect(
+      vueloExigeFactura([
+        { cuenta_destino: 'HSBC Pesos', moneda: 'MXN', monto: 1000 },
+        { cuenta_destino: 'HSBC Pesos', moneda: 'MXN', monto: -400 },
+      ]),
+    ).toBe('EXIGE');
+    expect(
+      vueloExigeFactura([
+        { cuenta_destino: 'HSBC Pesos', moneda: 'MXN', monto: 0.1 },
+        { cuenta_destino: 'HSBC Pesos', moneda: 'MXN', monto: 0.2 },
+        { cuenta_destino: 'HSBC Pesos', moneda: 'MXN', monto: -0.3 },
+      ]),
+    ).toBe('NO_EXIGE');
+  });
+
+  it('el reembolso solo netea su MISMA cuenta/método y moneda: en efectivo, en otra moneda o sin moneda ⇒ sigue EXIGE (jamás se suman USD y MXN)', () => {
+    const hsbc = {
+      cuenta_destino: 'HSBC Dólares',
+      metodo_cobro: 'TRANSFERENCIA',
+      moneda: 'USD',
+      monto: 1000,
+    };
+    for (const reembolso of [
+      { metodo_cobro: 'EFECTIVO', moneda: 'USD', monto: -1000 },
+      { cuenta_destino: 'HSBC Dólares', moneda: 'MXN', monto: -1000 },
+      { cuenta_destino: 'HSBC Dólares', monto: -1000 },
+    ]) {
+      expect([reembolso, vueloExigeFactura([hsbc, reembolso])]).toEqual([
+        reembolso,
+        'EXIGE',
+      ]);
+    }
+  });
+
   it('todos sin exigir ⇒ NO_EXIGE (y el reembolso no cuenta)', () => {
     expect(
       vueloExigeFactura([
@@ -228,29 +293,53 @@ describe('textos de cuenta/origen (con `etiquetaMetodoCobro`, nunca «HSBC link�
     expect(origenCobroTexto({ metodo_cobro: 'CHEQUE' })).toBe('por Cheque');
   });
 
-  it('cuentasQueExigenFactura: distintas, en orden, solo de los que exigen', () => {
+  it('cuentasQueExigenFactura: distintas, en orden, solo de las que exigen y en las que QUEDÓ dinero (neto por moneda)', () => {
     expect(
       cuentasQueExigenFactura([
         {
           cuenta_destino: 'Scotiabank Pesos',
           metodo_cobro: 'TRANSFERENCIA',
+          moneda: 'MXN',
           monto: 10,
         },
-        { metodo_cobro: 'BILLPOCKET', monto: 10 },
-        { metodo_cobro: 'TRANSFERENCIA', monto: 10 },
+        { metodo_cobro: 'BILLPOCKET', moneda: 'MXN', monto: 10 },
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'MXN', monto: 10 },
         {
           cuenta_destino: 'Scotiabank Pesos',
           metodo_cobro: 'CHEQUE',
+          moneda: 'MXN',
           monto: 10,
         },
+        // Devuelto completo en la MISMA cuenta y moneda: no queda nada.
+        {
+          cuenta_destino: 'HSBC Dólares',
+          metodo_cobro: 'DOLARES',
+          moneda: 'USD',
+          monto: 10,
+        },
+        {
+          cuenta_destino: 'HSBC Dólares',
+          metodo_cobro: 'DOLARES',
+          moneda: 'USD',
+          monto: -10,
+        },
+      ]),
+    ).toEqual(['Scotiabank Pesos', 'Transferencia sin cuenta destino']);
+    // La MISMA transferencia sin cuenta en USD y en MXN es UNA cuenta texto.
+    expect(
+      cuentasQueExigenFactura([
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'USD', monto: 10 },
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'MXN', monto: 10 },
+        { metodo_cobro: 'TRANSFERENCIA', moneda: 'MXN', monto: -10 },
+      ]),
+    ).toEqual(['Transferencia sin cuenta destino']);
+    // Lector sin `moneda`: el reembolso no netea (jamás se suman monedas).
+    expect(
+      cuentasQueExigenFactura([
         { cuenta_destino: 'HSBC Dólares', metodo_cobro: 'DOLARES', monto: 10 },
         { cuenta_destino: 'HSBC Dólares', metodo_cobro: 'DOLARES', monto: -10 },
       ]),
-    ).toEqual([
-      'Scotiabank Pesos',
-      'Transferencia sin cuenta destino',
-      'HSBC Dólares',
-    ]);
+    ).toEqual(['HSBC Dólares']);
     expect(cuentasQueExigenFactura([])).toEqual([]);
   });
 });

@@ -673,11 +673,44 @@ export class ProfitSharingService {
     // MXN sin tc_gasto → TC oficial del día del GASTO. Misma cadena que el
     // Balance por avión (tc capturado ?? oficial del día). Sin dato (sin
     // red) el monto sigue en sin_tc_* como siempre — jamás se inventa.
-    const tcOficial = await this.resolverTcOficial(
-      vuelos.filter((v) =>
-        cobrosNecesitanTc(cobrosPorVuelo.get(v.id) ?? [], v.tc_usd_mxn),
+    //
+    // (c) K DE LAS COMISIONES (revisión 13-oct-2026, invariante 61): vuelos
+    // sin tc_usd_mxn cuyos cobros NO piden T.C. pero que traen un pago
+    // «Comisión del vendedor (avión)» en pesos SIN tc_gasto. El balance
+    // (`tcOficialPorVuelos`) resuelve el oficial del día de la cotización
+    // para TODO vuelo sin tc_usd_mxn y con ese K convierte y resta el pago;
+    // sin (c) el reparto lo dejaba en `gastos_sin_tc` y los socios cobraban
+    // el pago completo de más (101 de 271 vuelos COMPLETADO de jul–oct no
+    // traen tc_usd_mxn). Va en un mapa APARTE (`tcKComisionesVuelo`) para
+    // que `cobros_tc_oficial_count`, `detalle.vuelos[].tc_oficial` y
+    // `tc_oficial` sigan contando SOLO los vuelos cuyos COBROS lo usaron.
+    // Mismo lote de días: una consulta por día para (a), (b) y (c).
+    const vuelosTcCobros = new Set(
+      vuelos
+        .filter((v) =>
+          cobrosNecesitanTc(cobrosPorVuelo.get(v.id) ?? [], v.tc_usd_mxn),
+        )
+        .map((v) => v.id),
+    );
+    const tcResuelto = await this.resolverTcOficial(
+      vuelos.filter(
+        (v) =>
+          vuelosTcCobros.has(v.id) ||
+          pagoVendedorAvionNecesitaK(
+            gastosVendedorPorVuelo.get(v.id) ?? [],
+            v.tc_usd_mxn,
+          ),
       ),
       gastos,
+    );
+    const tcOficial = {
+      vuelo: new Map(
+        [...tcResuelto.vuelo].filter(([id]) => vuelosTcCobros.has(id)),
+      ),
+      gasto: tcResuelto.gasto,
+    };
+    const tcKComisionesVuelo = new Map(
+      [...tcResuelto.vuelo].filter(([id]) => !vuelosTcCobros.has(id)),
     );
 
     // Horas voladas del periodo por avión (por tramo: el avión de la escala
@@ -731,7 +764,8 @@ export class ProfitSharingService {
     // «COMISIÓN DEL VENDEDOR (AVIÓN)» QUE CARGA ALGÚN AVIÓN (13-oct-2026, API
     // 0.0.74, invariante 61): vuelos del reparto en el universo de la
     // «(avión)» (`pagoVendedorAvionEnUniverso`: COMPLETADO, o CANCELADO con
-    // cobros retenidos, con el MISMO K de los cobros de `computeAvion`) y con
+    // cobros retenidos, con el MISMO K de `comisionesDelVuelo` en
+    // `computeAvion`: `kComisionesDeVuelo`) y con
     // algún avión con parte de la venta. GLOBAL (no por avión): decide la
     // clave EXCLUIDO del eje fecha_gasto de cada gasto «(avión)» aunque esté
     // sellado a OTRO avión (caso i5). Solo transparencia: no suma nada.
@@ -743,7 +777,7 @@ export class ProfitSharingService {
         pagoVendedorAvionEnUniverso({
           estado: v.estado,
           cobros: cobrosPorVuelo.get(v.id) ?? [],
-          tcVenta: pos(v.tc_usd_mxn) ?? tcOficial.vuelo.get(v.id)?.tc ?? null,
+          tcVenta: kComisionesDeVuelo(v, tcOficial.vuelo, tcKComisionesVuelo),
         })
       ) {
         vuelosConPagoVendedorAvion.add(v.id);
@@ -838,6 +872,7 @@ export class ProfitSharingService {
         periodo: q,
         tcOficialVuelo: tcOficial.vuelo,
         tcOficialGasto: tcOficial.gasto,
+        tcKComisionesVuelo,
         vigenciaComisiones,
         gastosVendedorPorVuelo,
         vuelosConPagoVendedorAvion,
@@ -1056,6 +1091,15 @@ export class ProfitSharingService {
        */
       tcOficialVuelo: Map<string, TipoCambioDetalle>;
       tcOficialGasto: Map<string, TipoCambioDetalle>;
+      /**
+       * K de respaldo SOLO de las comisiones (revisión 13-oct-2026,
+       * invariante 61): vuelo.id → T.C. oficial del día de la cotización de
+       * los vuelos sin tc_usd_mxn cuyos cobros NO lo pidieron pero que traen
+       * un pago «Comisión del vendedor (avión)» MXN sin tc_gasto. Solo entra
+       * a `comisionesDelVuelo` (`kComisionesDeVuelo`): nunca a los cobros ni
+       * a los conteos/detalle del T.C. oficial.
+       */
+      tcKComisionesVuelo: ReadonlyMap<string, TipoCambioDetalle>;
       /**
        * Primer día de las comisiones a cargo del avión (6-oct-2026, API
        * 0.0.65): vuelos con `fecha_vuelo` (día Cancún) desde ese día
@@ -1294,14 +1338,20 @@ export class ProfitSharingService {
       // factor 1; la «(avión)» entra en COMPLETADO o CANCELADO con cobros
       // retenidos) y la parte de ESTE avión (`parte`, repartirUsd). En USD.
       // Se calcula SIEMPRE: la fila lleva COMISIONES con `lleva_comisiones`
-      // (la vigencia, o un pago «(avión)» absorbido antes de ella).
+      // (la vigencia, o un pago «(avión)» absorbido antes de ella). K =
+      // `kComisionesDeVuelo` (revisión 13-oct-2026): el MISMO del balance
+      // aunque los cobros no lo hayan pedido.
       const diaVuelo = diaCancun(v.fecha_vuelo);
       const calcComisiones = comisionesDelVuelo({
         diaVuelo,
         vigenteDesde: ctx.vigenciaComisiones,
         cobros: ctx.cobrosPorVuelo.get(v.id) ?? [],
         gastos: ctx.gastosVendedorPorVuelo.get(v.id) ?? [],
-        tcVenta: pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
+        tcVenta: kComisionesDeVuelo(
+          v,
+          ctx.tcOficialVuelo,
+          ctx.tcKComisionesVuelo,
+        ),
         particion: p,
         estado: v.estado,
         parteAvion: parte,
@@ -2770,6 +2820,14 @@ export class ProfitSharingService {
     // TC oficial del día del gasto (29-ago): los MXN sin TC que SÍ tienen
     // referencia oficial YA entran al reparto y al balance (informativo);
     // solo bloquean el cierre los que ni así convierten (sin red / sin dato).
+    // EXCEPCIÓN (revisión 13-oct-2026, invariante 61): el pago «Comisión del
+    // vendedor (avión)» NO se convierte con el oficial del día del GASTO sino
+    // con el K de su VUELO (tc de la cotización ?? oficial del día de la
+    // cotización, `kComisionesDeVuelo`) y cuenta en el MES DEL VUELO. Este
+    // renglón lo da por convertido con el oficial de SU día (y solo si su
+    // fecha_gasto cae en el periodo): es una aproximación informativa. Si el
+    // día de la cotización no tuviera dato, quien lo grita es `gastos_sin_tc`
+    // del avión en el reparto del mes del vuelo.
     const tcOficialGastosPre = await this.resolverTcOficial(
       [],
       sinTc.map((g) => ({
@@ -3794,6 +3852,47 @@ function diaDeFecha(fecha: string | null): string | null {
   if (!fecha) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return fecha;
   return diaCancun(fecha);
+}
+
+/**
+ * ¿El vuelo necesita el K oficial SOLO por sus pagos «Comisión del vendedor
+ * (avión)» (revisión 13-oct-2026, invariante 61)? Sin tc_usd_mxn y con al
+ * menos uno en PESOS sin tc_gasto: el único que `comisionesDelVuelo` lleva a
+ * USD con K (un pago USD ya está en dólares; los cobros los cubre
+ * `cobrosNecesitanTc`). Lado EXACTO por `ladoPagoVendedor` (nunca prefijo).
+ */
+function pagoVendedorAvionNecesitaK(
+  gastos: ReadonlyArray<GastoVendedorVueloRow>,
+  tcVuelo: unknown,
+): boolean {
+  if (pos(tcVuelo) != null) return false;
+  return gastos.some(
+    (g) =>
+      ladoPagoVendedor(g.categoria ?? null) === 'AVION' &&
+      g.moneda === 'MXN' &&
+      pos(g.tc_gasto) == null,
+  );
+}
+
+/**
+ * K de las COMISIONES de un vuelo (`comisionesDelVuelo` y el universo de la
+ * «(avión)»): el T.C. de la cotización ?? el oficial del día de la
+ * cotización — el de los cobros si lo pidieron; si no, el del mapa aparte de
+ * las comisiones. Es el MISMO K que el balance (`kCapturado ?? kDetalle?.tc`,
+ * oficial para TODO vuelo sin tc_usd_mxn): sin él, un pago «(avión)» en
+ * pesos sin tc_gasto restaba en el balance y no en el reparto.
+ */
+function kComisionesDeVuelo(
+  v: { id: string; tc_usd_mxn?: unknown },
+  tcOficialVuelo: ReadonlyMap<string, TipoCambioDetalle>,
+  tcKComisionesVuelo: ReadonlyMap<string, TipoCambioDetalle>,
+): number | null {
+  return (
+    pos(v.tc_usd_mxn) ??
+    tcOficialVuelo.get(v.id)?.tc ??
+    tcKComisionesVuelo.get(v.id)?.tc ??
+    null
+  );
 }
 
 /**

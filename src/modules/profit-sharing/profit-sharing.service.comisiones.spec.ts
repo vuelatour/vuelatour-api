@@ -849,6 +849,71 @@ describe('Reparto ↔ balance por avión: las MISMAS comisiones (fuente única)'
     expect(dSaldo).toBe(-80);
     expect(dCobrada).toBe(dSaldo);
   });
+
+  // Revisión 13-oct-2026 (invariante 61): el reparto pedía el T.C. oficial
+  // SOLO para los vuelos cuyos COBROS lo necesitaban; el balance lo resuelve
+  // para TODO vuelo sin tc_usd_mxn. Un pago «(avión)» en pesos sin tc_gasto
+  // en un vuelo sin tc_usd_mxn con cobros que traen su T.C. (el caso normal
+  // en prod: 101 de 271 vuelos COMPLETADO de jul–oct sin tc_usd_mxn) restaba
+  // en el balance y NO en el reparto (quedaba en `gastos_sin_tc`): los
+  // socios cobraban el pago completo de más.
+  it('vuelo SIN tc_usd_mxn, con T.C. oficial y cobros que NO lo piden: el pago «(avión)» MXN sin tc_gasto usa el MISMO K que el balance — USD == MXN ÷ K, comisiones_venta_usd == balance.comisiones_usd y Δ saldo == Δ utilidad cobrada; los conteos del T.C. oficial de los cobros no cambian', async () => {
+    const OFICIAL = 17;
+    const mundoSinTc = (gastos: Fila[]) =>
+      mundoReparto({
+        vuelo: mundoCon({ v1: { tc_usd_mxn: null } }).vuelo,
+        gasto: mundoCon({ gastos }).gasto,
+      });
+    const conPago = mundoSinTc([gastoComision('g-cv', 1600, {}, AVION)]);
+    const sinPago = mundoSinTc([]);
+    const reparto = async (mundo: Record<string, Fila[]>) => {
+      const { svc } = armar(mundo, undefined, OFICIAL);
+      const r = await svc.compute({ desde: DESDE, hasta: HASTA });
+      const a = r.aviones.find((x) => x.aeronave.id === AV);
+      if (!a) throw new Error('sin avión');
+      return { r, a };
+    };
+    const con = await reparto(conPago);
+    const sin = await reparto(sinPago);
+    const libroCon = await libroBalance(conPago, undefined, OFICIAL);
+    const libroSin = await libroBalance(sinPago, undefined, OFICIAL);
+    const fila = libroCon.vuelos.find((x) => x.vuelo_id === V1)!;
+    const v = con.a.detalle.vuelos.find((x) => x.id === V1)!;
+    // El balance: K = oficial del día de la cotización; el pago resta en
+    // pesos en su columna COMISIONES.
+    expect(fila.tc_venta).toBe(OFICIAL);
+    expect(fila.comision_vendedor_real_mxn).toBe(1600);
+    expect(fila.comision_vendedor_real_pagos).toBe(1);
+    // El reparto: el MISMO K ⇒ 1,600 ÷ 17 = 94.12 USD.
+    expect(v.comision_vendedor_real_usd).toBe(r2(1600 / OFICIAL));
+    expect(v.comision_vendedor_real_usd).toBe(
+      r2((fila.comision_vendedor_real_mxn ?? 0) / fila.tc_venta!),
+    );
+    expect(con.a.ingresos.comisiones_venta_usd).toBe(
+      libroCon.balance.comisiones_usd,
+    );
+    expect(sin.a.ingresos.comisiones_venta_usd).toBe(
+      libroSin.balance.comisiones_usd,
+    );
+    // El pago mueve el saldo del reparto y la utilidad cobrada del balance
+    // EXACTAMENTE lo mismo, y ya no cae en `gastos_sin_tc`.
+    const dSaldo = r2(con.a.saldo_disponible_usd - sin.a.saldo_disponible_usd);
+    const dCobrada = r2(
+      (libroCon.balance.utilidad_cobrada_usd ?? 0) -
+        (libroSin.balance.utilidad_cobrada_usd ?? 0),
+    );
+    expect(dSaldo).toBe(-r2(1600 / OFICIAL));
+    expect(dCobrada).toBe(dSaldo);
+    expect(con.a.gastos.gastos_sin_tc_count).toBe(
+      sin.a.gastos.gastos_sin_tc_count,
+    );
+    expect(con.a.gastos.gastos_sin_tc_mxn).toBe(sin.a.gastos.gastos_sin_tc_mxn);
+    // Los conteos y el detalle del T.C. oficial siguen siendo de los COBROS:
+    // los de este vuelo traen su T.C., así que no lo usaron.
+    expect(v.tc_oficial).toBeUndefined();
+    expect(con.a.ingresos.cobros_tc_oficial_count).toBe(0);
+    expect(con.r.tc_oficial.vuelos).toBe(sin.r.tc_oficial.vuelos);
+  });
 });
 
 describe('Reparto — COMISIONES: revisión 6-oct-2026', () => {

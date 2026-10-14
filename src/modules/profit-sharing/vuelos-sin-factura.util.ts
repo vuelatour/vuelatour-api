@@ -17,6 +17,14 @@
  * registrado DESPUÉS de cerrar el mes ya no aparece aquí: lo cubre la
  * solicitud automática (bandeja «Por facturar»).
  *
+ * CANCELADOS (revisión 13-oct-2026): para un vuelo cancelado no existe
+ * «pídela desde el vuelo» (el panel oculta «Necesito factura» y el API
+ * responde 409 VUELO_CANCELADO; la solicitud automática los descarta): el
+ * detalle dice que ahí se registra directo en Facturas emitidas y el chip
+ * lleva `estado: 'CANCELADO'` (ADITIVO, SOLO en cancelados; el panel ya lo
+ * pinta junto al folio). La exigencia es por el NETO de cada cuenta: un
+ * anticipo devuelto completo ya no aparece (`vueloExigeFactura`).
+ *
  * Helpers PUROS: la lectura (`facturasDeVuelos`) vive en
  * `profit-sharing.service`; aquí solo el filtro, el shape y el orden.
  */
@@ -28,7 +36,7 @@ export const TITULO_PRECIERRE_VUELOS_SIN_FACTURA =
   'Vuelos cobrados en cuentas que exigen factura sin factura registrada';
 
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA =
-  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo. No bloquea el cierre.';
+  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y no se reembolsaron, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo. No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA =
@@ -52,6 +60,12 @@ export interface VueloCobradoSinFactura {
   solicitada: boolean;
   /** Cuentas (texto) de los cobros que exigen factura, distintas. */
   cuentas: string[];
+  /**
+   * ADITIVO (revisión 13-oct-2026): SOLO en un vuelo CANCELADO —para él no
+   * existe «pídela desde el vuelo»—; el panel lo pinta junto al folio. En
+   * los demás estados la llave no viaja.
+   */
+  estado?: 'CANCELADO';
 }
 
 /**
@@ -82,6 +96,7 @@ export function vuelosCobradosSinFactura(args: {
           : null,
       solicitada: f.solicitada,
       cuentas: [...f.cuentas_exigen],
+      ...(f.estado === 'CANCELADO' ? { estado: 'CANCELADO' as const } : {}),
     });
   }
   const ms = (f: string | null) => {

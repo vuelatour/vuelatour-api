@@ -4616,12 +4616,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Desde el 0.0.74 (invariante 62) la
       pestaña trae además una fila «AFAC · matrícula» por avión:
       `ingresos_propios_usd` incluye la provisión AFAC del periodo de cada
-      avión y `pagos_vendedor_usd` los permisos AFAC pagados (TODOS los
-      gastos PERMISO de su hoja «permisos»), cada fila ÷ el
-      `totales.tc_promedio` del libro de su avión (alineado en `tcFilas` por
-      `payloadGeneral`); el insumo `afacEnFilas` solo cambia la `nota`
-      («(por vuelo, AFAC por avión y sueltas)… más la provisión AFAC del
-      periodo de cada avión… permisos AFAC pagados…»). El T.C.
+      avión, ÷ el `totales.tc_promedio` del libro de su avión (alineado en
+      `tcFilas` por `payloadGeneral`); los permisos pagados (TODOS los
+      gastos PERMISO de su hoja «permisos») van CITADOS con egreso $0.00
+      (revisión del 13-oct-2026: ya restan en la cascada del avión), así que
+      `pagos_vendedor_usd` NO los cuenta; el insumo `afacEnFilas` solo
+      cambia la `nota` («(por vuelo, AFAC por avión y sueltas)… más la
+      provisión AFAC del periodo de cada avión… los permisos pagados de cada
+      avión van en su fila «AFAC · matrícula» con egreso $0.00…»). El T.C.
       por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
       `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
       que sale byte-idéntico, y sin él no hay consultas nuevas): fila por
@@ -5617,11 +5619,23 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `METODOS_COBRO_EXIGEN_FACTURA_SIN_CUENTA` = HSBC_LINK, TRANSFERENCIA,
       CHEQUE; BILLPOCKET/EFECTIVO/PAYWISE/DOLARES/OTRO/vacío ⇒ no);
       `vueloExigeFactura(cobros)` tri-estado EXIGE | NO_EXIGE | SIN_COBROS
-      sobre TODOS los cobros positivos del vuelo (de cualquier fecha; las
-      partes de un sobre entran porque `crearParte` copia cuenta y método
-      del sobre); `cuentaDeCobroTexto` ('HSBC Pesos' / 'Transferencia sin
-      cuenta destino'), `origenCobroTexto` ('en HSBC Pesos' / 'por
-      Transferencia') y `cuentasQueExigenFactura` (distintas, en orden).
+      sobre TODOS los cobros del vuelo (de cualquier fecha; las partes de un
+      sobre entran porque `crearParte` copia cuenta y método del sobre):
+      sin cobros positivos ⇒ SIN_COBROS; **por el NETO** (revisión
+      13-oct-2026) ⇒ EXIGE solo si en alguna cuenta (o método sin cuenta)
+      que exige QUEDÓ dinero neto de sus reembolsos, por grupo
+      `cuentaDeCobroTexto` + `moneda` (`netosQueExigen`: el reembolso de
+      `createReembolso` se clasifica por SU cuenta/método sin mirar el
+      signo; tolerancia 0.005; un reembolso SIN moneda no netea —jamás se
+      suman USD y MXN—); si no ⇒ NO_EXIGE. Un anticipo en HSBC devuelto
+      COMPLETO en la misma cuenta ⇒ «No lleva factura» y fuera del
+      pre-cierre; devuelto en parte, en efectivo, en otra cuenta o en otra
+      moneda ⇒ sigue exigiendo (conservador). El lector suma `moneda` al
+      select de `cobro_vuelo`. `cuentaDeCobroTexto` ('HSBC Pesos' /
+      'Transferencia sin cuenta destino'), `origenCobroTexto` ('en HSBC
+      Pesos' / 'por Transferencia') y `cuentasQueExigenFactura` (distintas,
+      en orden, solo las de neto > 0). `cobroExigeFactura` (por cobro, los
+      ganchos) no cambia: un reembolso nunca exige por sí solo.
       **Es por cuenta/método, NO por rol**: el PILOTO también la dispara
       desde la app con HSBC_LINK (está en `METODOS_COBRO_PILOTO`). Etiquetas
       de método SIEMPRE por `etiquetaMetodoCobro` (invariante 7).
@@ -5709,11 +5723,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       partes), con los vuelos de las partes con monto > 0
       (`vuelosConParteCobrada`, puro en `particion-cobro.util.ts`) y
       `cobroGrupoId`; `GroupsService` NO inyecta nada nuevo (usa
-      `this.flights`). Heredan sin tocar `ingresos.service.ts`: el anticipo
-      aplicado (método del anticipo, sin cuenta) y «Es el pago de un vuelo»
-      desde el banco (TRANSFERENCIA ⇒ exige; PAYWISE ⇒ no) — ruido esperado
-      en facturación (cada uno crea solicitud y avisa; se deduplica por
-      vuelo con el CAS), dicho al cliente. NO disparan: `createReembolso`,
+      `this.flights`). Hereda sin tocar `ingresos.service.ts` el anticipo
+      aplicado (método del anticipo, sin cuenta) — ruido esperado en
+      facturación (crea solicitud y avisa; se deduplica por vuelo con el
+      CAS), dicho al cliente. **«Es el pago de un vuelo» desde el banco NO
+      hereda el gancho** (revisión 13-oct-2026): `createCobro` gana el 7.º
+      parámetro INTERNO `CobroAltaInternaOpts.omitirSolicitudFactura` y
+      `IngresosService.cobroDeVueloDesdeAbono` dispara
+      `solicitarFacturaPorCobros` (fire-and-forget, TRANSFERENCIA ⇒ exige;
+      PAYWISE ⇒ no) SOLO después de que `linkCobro` responde bien: si la
+      liga falla (409 MOVIMIENTO_YA_LIGADO o un error de PostgREST) su
+      compensación BORRA el cobro, y antes la solicitud («Por facturar»,
+      «Pendiente de factura») y el aviso a facturación ya habían salido por
+      un cobro que no existe. NO disparan: `createReembolso`,
       `deleteCobro`, `eliminarCobro`, ni corregir HACIA BillPocket/Paywise
       (sin retiro automático: la oficina retira a mano, con confirmación).
       Las respuestas HTTP de los endpoints de cobro no cambian ni un byte.
@@ -5726,6 +5748,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       estrictamente `exigencia === 'EXIGE' && registrada == null` (la
       solicitud viva NO lo mete ni lo saca: `solicitada` solo informa),
       `vuelos[] {id, folio, fecha_vuelo, matricula, solicitada, cuentas}`
+      (+ `estado: 'CANCELADO'` ADITIVO SOLO en un cancelado —revisión
+      13-oct-2026: para él no existe «pídela desde el vuelo» (el panel
+      oculta «Necesito factura», el API responde 409 VUELO_CANCELADO y la
+      solicitud automática lo descarta); el chip del panel ya lo pinta
+      «#430 (CANCELADO)» y el detalle dice «si el vuelo está cancelado,
+      regístrala directo en Facturas emitidas»—)
       por `fecha_vuelo` (empate por folio, sin fecha al final),
       `lectura_fallida` (count 0 + «No se pudo verificar…»), justo después
       de `externos_sin_honorario`; `bloqueantes` y `listo` no cambian. Los
@@ -5748,10 +5776,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       desfasada hasta desplegar pyservices (cero 422). Orden recomendado:
       pyservices → API (al revés de la invariante 58, cuya lógica es la
       opuesta).
-    - Specs: `common/cuentas-cobro.spec` (tabla de verdad),
+    - Specs: `common/cuentas-cobro.spec` (tabla de verdad; NETO: devuelto
+      completo ⇒ NO_EXIGE, parcial ⇒ EXIGE, centavos, en efectivo / otra
+      moneda / sin moneda no netea; `cuentasQueExigenFactura` con neto),
       `factura-cliente.util.spec` (paso 5; `etiquetaFacturaRegistrada` ≡
-      cascada vieja), `factura-cliente-etiquetas.spec` (3 consultas por lote
-      + puente con la sonda, select con `estado`/`factura_solicitada_at`,
+      cascada vieja), `factura-cliente-etiquetas.spec` (CANCELADO con
+      anticipo devuelto completo / en parte y select con `moneda`; 3
+      consultas por lote + puente con la sonda, select con
+      `estado`/`factura_solicitada_at`,
       paginación 1 001 cobros ⇒ 2 páginas sin perder el vuelo 1 001,
       solicitud viva solo con la sonda, reembolso no cuenta, `facturasDeVuelos`
       con TODOS los ids, error de `cobro_vuelo` lanza),
@@ -5766,14 +5798,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       con HSBC_LINK, BillPocket/Paywise/efectivo no, parte de sobre no,
       replay no, mock que rechaza ⇒ cobro igual y solo warn, reembolso
       nunca; `updateCobro` con cuenta ⇒ `await`, solo referencia/notas no,
-      hacia BillPocket no; 9 argumentos ⇒ null),
+      hacia BillPocket no; 9 argumentos ⇒ null; la opción INTERNA
+      `omitirSolicitudFactura` no la dispara),
+      `ingresos.service.spec` («Es el pago de un vuelo»: la solicitud sale
+      DESPUÉS de `linkCobro` con el cobro creado; si la liga falla, se borra
+      el cobro y no sale ninguna),
       `groups/particion-cobro.util.spec` (`vuelosConParteCobrada`),
       `groups/groups.service.cobro-factura.spec` (orden sobre → partes →
       factura → aviso, BillPocket, fallo, sin partes con dinero,
       `repartirCobro`), `profit-sharing/vuelos-sin-factura.util.spec` y
       `profit-sharing.service.pre-cierre-vuelos-sin-factura.spec` (BD en
       memoria con max-rows 1000: 7 casos + orden, no bloquea, cada regla,
-      anti-cap con páginas `[0,999]`/`[1000,1999]`, lectura fallida),
+      anti-cap con páginas `[0,999]`/`[1000,1999]`, lectura fallida,
+      `estado: 'CANCELADO'` solo en cancelados, CANCELADO devuelto completo
+      fuera y en parte dentro),
       `aircraft-balance.service.factura.spec` (paso 5 en el individual, en
       los dos libros del multi-avión, en el consolidado y en col J con UNA
       lectura por vuelo; bandera en individual, `aviones[]` y consolidado y
@@ -5965,11 +6003,24 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       libro EXTERNOS cuenta las «(avión)» de sus vuelos con motivo «sin
       avión»).
     - **Reparto** (`profit-sharing.service`): `compute()` arma el Set GLOBAL
-      `vuelosConPagoVendedorAvion` (universo con el MISMO K de los cobros ∧
-      algún factor > 0) y lo pasa en `ctx`; `computeAvion` calcula
-      `comisionesDelVuelo` SIEMPRE (`comisionesVuelo = lleva_comisiones ?
-      calc : null`), salta el cancelado con `!retieneCobros(conv)` y ya no
-      tiene `vuelosVendedorACargo`. `fetchGastosVendedorDeVuelos` sin filtro
+      `vuelosConPagoVendedorAvion` (universo con el MISMO K de
+      `comisionesDelVuelo` ∧ algún factor > 0) y lo pasa en `ctx`;
+      `computeAvion` calcula `comisionesDelVuelo` SIEMPRE (`comisionesVuelo =
+      lleva_comisiones ? calc : null`), salta el cancelado con
+      `!retieneCobros(conv)` y ya no tiene `vuelosVendedorACargo`. **K de las
+      comisiones = el MISMO del balance** (revisión 13-oct-2026,
+      `kComisionesDeVuelo`): tc_usd_mxn ?? oficial del día de la cotización
+      (`fecha_solicitud ?? fecha_vuelo`) — el de los cobros si lo pidieron
+      (`cobrosNecesitanTc`); si no, el del mapa APARTE `tcKComisionesVuelo`,
+      que `compute()` resuelve en el MISMO lote de días para los vuelos sin
+      tc_usd_mxn con un pago «(avión)» MXN sin tc_gasto
+      (`pagoVendedorAvionNecesitaK`). Antes el reparto solo pedía el oficial
+      para los cobros: un pago «(avión)» en pesos de un vuelo sin
+      tc_usd_mxn (101 de 271 COMPLETADO de jul–oct) restaba en el balance y
+      NO en el reparto (quedaba en `gastos_sin_tc`; los socios cobraban el
+      pago de más). `cobros_tc_oficial_count`, `detalle.vuelos[].tc_oficial`
+      y `tc_oficial` siguen contando SOLO los vuelos cuyos COBROS lo usaron.
+      `fetchGastosVendedorDeVuelos` sin filtro
       de categoría ni de fecha (el mapa guarda las dos por la unión; el
       util elige el lado). Cuatro claves EXCLUIDO por el eje fecha_gasto
       (SOLO transparencia, ninguna suma; cada una empieza con el código
@@ -6062,18 +6113,29 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `logger.warn` de «otros movimientos».
     - **Deploy y operación**: migraciones 000003 → 000004 (ver «Migraciones
       y despliegue») → pyservices → API 0.0.74 (justo antes del push,
-      `pg_enum` con el valor) → panel (SIEMPRE después del API) → Flutter
-      (commit local +82). Después: avisar al cliente, la oficina decide
+      `pg_enum` con el valor) → panel (SIEMPRE después del API) → Flutter:
+      commit local +82 — **NO publicar el APK hasta la migración
+      20261013000001 y el API 0.0.75** (la +82 incluye Comisariato +81:
+      `COMISARIATO` sale en los chips del piloto y el API 0.0.74 la rechaza
+      con 400 por IsEnum; el outbox la trata como determinista ⇒ captura
+      FALLIDO al primer intento). Después: avisar al cliente, la oficina decide
       #251/#332 y captura los pendientes, y SOLO entonces se regeneran
       septiembre y octubre. DEUDA que el ajuste NO toca: `aircraft.metrics.
       finanzas` y `groups.gastosPorHijo` (por fecha_gasto, no ven
       COMISIONES); el reporte por vuelo sigue restando el pago COTIZADO; un
       avión dado de baja que voló absorbe en el balance y no en el reparto
       (`compute()` solo trae activos); `regla_comisiones` sigue sin viajar;
-      T.C. heredado de la D3 (COMISIONES y reparto con tc_gasto ?? K; la
-      pestaña con tc_gasto ?? promedio; el Dinero con tc_gasto ?? T.C. de
-      venta: un pago USD sin tc_gasto puede diferir por centavos, hoy 0
-      casos); el universo del Dinero (solo textos y la llave) puede diferir
+      T.C. heredado de la D3 (COMISIONES y reparto con tc_gasto ?? K —K el
+      MISMO en los dos libros: capturado ?? oficial del día de la
+      cotización, también en el reparto para un vuelo cuyos cobros no lo
+      piden (revisión 13-oct-2026)—; la pestaña con tc_gasto ?? promedio;
+      el Dinero con tc_gasto ?? T.C. de venta: un pago USD sin tc_gasto
+      puede diferir por centavos, hoy 0 casos; el renglón informativo
+      `gastos_tc_oficial` del pre-cierre da por convertido un pago
+      «(avión)» MXN sin tc_gasto con el oficial del día del GASTO —el real
+      usa el K de su vuelo y cuenta en el mes del vuelo—: si el día de la
+      cotización no tuviera dato, lo grita `gastos_sin_tc` del avión en el
+      reparto); el universo del Dinero (solo textos y la llave) puede diferir
       del Balance únicamente en un CANCELADO con reembolso neto cero en otra
       moneda sin T.C.; sin QA visual en navegador.
     - Specs: `categoria-gasto.util.spec` (21 valores con AVION justo después
@@ -6097,7 +6159,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       g″) D6 informativa), `balance-empresa.util.spec` (notas, fila mixta),
       `profit-sharing.service.comisiones.spec` / `.empresa.spec` (las cuatro
       claves con sus etiquetas, Set global i5, cancelado con/sin cobros,
-      agosto con «(avión)»), `dinero-report.service.pago-vendedor.spec`
+      agosto con «(avión)»; cruce balance↔reparto con un vuelo SIN
+      tc_usd_mxn, T.C. oficial y cobros que no lo piden: USD == MXN ÷ K,
+      `comisiones_venta_usd == balance.comisiones_usd`, Δ saldo == Δ utilidad
+      cobrada, sin `gastos_sin_tc` y sin tocar los conteos del oficial),
+      `dinero-report.service.pago-vendedor.spec`
       (sufijo y notas, llave, cruce con el Balance), `expenses.service.
       sin-vuelo.spec` (400 por categoría en los 4 roles, reclasificación
       conciliada, 23514 de cada CHECK sin categoría en el dto, 22P02 de la
@@ -6115,7 +6181,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     en TOTALES (provisión AFAC del periodo = ingreso de VuelaTour por avión;
     cada permiso pagado = egreso), ya no bloque informativo bajo totales».
     SUPERSEDE el punto (2) de la invariante 53 (el bloque informativo
-    `afac`).
+    `afac`). **Revisión del 13-oct-2026, ANTES del deploy (hallazgo alta de
+    la revisión adversaria)**: el permiso PAGADO ya resta en el avión, así
+    que en la fila va CITADO con egreso **$0.00** «a cargo del avión» —ver
+    «UN PERMISO PAGADO, UNA VEZ» abajo—; la provisión sí suma como ingreso.
     - **Regla**: `payloadGeneral` (la UNA armadura que comparten
       `xlsxGeneral` y `libroGeneral`, invariante 52; NO `xlsxGeneral`)
       ANEXA AL FINAL de `otros_movimientos.filas` (después de la última fila
@@ -6124,15 +6193,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «balance»; el libro EXTERNOS nunca llega: `esAvion = false`). INGRESO
       = `totales.permiso_afac_mxn` del libro (= Σ de su columna T «PERMISO
       AFAC (PROVISIÓN)», round2(tarifa × z × D) por vuelo, TAL CUAL: nadie
-      la recalcula); EGRESO = Σ `monto_mxn` de su hoja `permisos` (TODOS los
-      gastos PERMISO del avión del periodo, con o sin vuelo —no solo los de
-      AFAC—: exactamente `filasPermisos` de `buildPayload`). Apareados en la
-      MISMA fila como las TUAS (remanente = ingreso − egreso; pyservices
-      escribe `ROUND(G−D,2)` como en toda fila). Un avión sin provisión ni
-      permisos no genera fila. Como viven DENTRO de `filas`, suman en
-      TOTALES con las fórmulas de siempre y entran UNA vez al bloque
-      VUELATOUR (invariante 47: `ingresos_propios_usd` suma la provisión,
-      `pagos_vendedor_usd` los permisos pagados).
+      la recalcula); EGRESO = **$0.00 INFORMATIVO**: se citan las filas de su
+      hoja `permisos` (TODOS los gastos PERMISO del avión del periodo, con o
+      sin vuelo —no solo los de AFAC—: exactamente `filasPermisos` de
+      `buildPayload`) con su Σ en el concepto, pero no egresan (ya restan en
+      la cascada del avión). Apareados en la MISMA fila como las TUAS
+      (remanente = ingreso − 0 = la provisión, 0 si solo hay permisos;
+      pyservices escribe `ROUND(G−D,2)` como en toda fila). Un avión sin
+      provisión ni permisos no genera fila. Como viven DENTRO de `filas`,
+      suman en TOTALES con las fórmulas de siempre y entran UNA vez al
+      bloque VUELATOUR (invariante 47: `ingresos_propios_usd` suma la
+      provisión; `pagos_vendedor_usd` NO cambia: el egreso es 0).
     - **Fuente única PURA**
       `aircraft/afac-otros-movimientos.util.ts#filasAfacOtrosMovimientos
       (librosAviones) → {filas, tcs}` (spec; cero consultas, cero recálculo
@@ -6152,19 +6223,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       tarifa …») y `nota_ingreso` = «Provisión AFAC de cada vuelo de XB-PEV
       (columna PERMISO AFAC de su hoja de vuelos): tarifa 25.00 USD/hr × T.C.
       de costos × horas cobradas» + una línea «{clave del vuelo} =
-      $1,082.50» por vuelo con provisión. Egreso (solo con permisos): uno ⇒
-      «permiso AFAC pagado · {detalle}»; varios ⇒ «permisos AFAC pagados · N
-      conceptos (ver nota)» con `nota_egreso` de una línea por permiso
-      («permiso AFAC pagado · {detalle} = $2,500.00 · 05/09/2026»; «= —» sin
-      pesos); `fecha_egreso` = la fecha no nula más antigua; permisos en USD
-      sin T.C. ⇒ sufijo « (parcial: USD sin TC)» / « (USD sin TC)» (la marca
-      que `ladoEnUsd` respeta: ese lado del bloque queda vacío) y
-      `egreso_mxn` = Σ de los convertibles (null si ninguno). `remanente_mxn`
-      = round2(ingreso − egreso) con el lado sin monto en 0; los DOS sin
-      monto (solo permisos USD sin T.C. y sin provisión) ⇒ null, como
-      `colapsarFilasDeVuelo` (jamás un $0.00 falso). Ningún texto lleva «·
-      PROVISIÓN (» (la marca del amarillo de pyservices): «provisión» va en
-      minúsculas.
+      $1,082.50» por vuelo con provisión. Egreso (solo con permisos),
+      `egreso_mxn` = **0**: uno ⇒ «permiso AFAC pagado · {detalle} · a cargo
+      del avión XB-PEV ($2,500.00 en su hoja «permisos»)»; varios ⇒
+      «permisos AFAC pagados · N conceptos (ver nota) · a cargo del avión
+      XB-PEV ($5,518.00 en su hoja «permisos»)» con `nota_egreso` de una
+      línea por permiso («permiso AFAC pagado · {detalle} = $2,500.00 ·
+      05/09/2026»; «= —» sin pesos); `fecha_egreso` = la fecha no nula más
+      antigua; permisos en USD sin T.C. ⇒ «($2,500.00 en su hoja «permisos»;
+      1 en USD sin T.C.)» / «(en USD sin T.C. en su hoja «permisos»)» —NUNCA
+      la marca «sin TC» que `ladoEnUsd` respeta: la fila egresa $0.00 y a
+      ese lado del bloque no le falta nada; el avión sin T.C. deja su propia
+      utilidad vacía—. `remanente_mxn` = round2(ingreso − 0) (nunca −0).
+      Ningún texto lleva «· PROVISIÓN (» (la marca del amarillo de
+      pyservices): «provisión» va en minúsculas.
     - **UN GASTO, UNA VEZ, UN MES**: las filas derivan EXCLUSIVAMENTE de los
       libros ya calculados. La provisión sigue `fecha_vuelo` (día Cancún); el
       permiso pagado, la regla del libro: `gastosAvion` (sin vuelo,
@@ -6178,15 +6250,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **T.C. de la fila** (bloque VUELATOUR; NO viaja a pyservices):
       `totales.tc_promedio` del libro de su avión (promedio de las z de
       costos redondeado a 2; sin vuelos, el oficial del cierre —invariante
-      47—; null se propaga: la fila cuenta en `movimientos_sin_tc` y deja su
-      lado y el resultado vacíos, coherente con `permisos.usd` null). Drift
-      DOCUMENTADO: (a) la provisión en USD (Σ X_i ÷ promedio de z) difiere
-      de tarifa × Σ horas cuando z varía dentro del mes (con 100 USD/hr en
-      las 7 aeronaves puede ser de dólares, no de centavos); (b) el egreso en
-      USD difiere de `permisos.usd` por centavos (`tc_promedio` va redondeado
-      a 2; `tcHojas`, crudo). Refinamiento NO adoptado (aditivo, solo si el
-      cliente exige el USD exacto de la provisión): T.C. ponderado `ingreso ÷
-      Σ(X_i ÷ z_i)` para el ingreso + `tc_egreso` en `MovimientoParaEmpresa`.
+      47—; null se propaga: con provisión, la fila cuenta en
+      `movimientos_sin_tc` y deja el lado de ingresos y el resultado vacíos;
+      con solo permisos (egreso $0.00) no vacía nada —el avión sin T.C. ya
+      deja vacía su participación, coherente con `permisos.usd` null—). Drift
+      DOCUMENTADO: la provisión en USD (Σ X_i ÷ promedio de z) difiere de
+      tarifa × Σ horas cuando z varía dentro del mes (con 100 USD/hr en las
+      7 aeronaves puede ser de dólares, no de centavos); el egreso es $0.00
+      (sin drift). Refinamiento NO adoptado (aditivo, solo si el cliente
+      exige el USD exacto de la provisión): T.C. ponderado `ingreso ÷
+      Σ(X_i ÷ z_i)` para el ingreso. Si algún día el permiso egresa aquí,
+      su USD diferiría de `permisos.usd` por centavos (`tc_promedio` va
+      redondeado a 2; `tcHojas`, crudo): `tc_egreso` en
+      `MovimientoParaEmpresa`.
       El `tc_aplicado` por fila de la hoja «permisos» (invariante 59) NO se
       usa aquí para recalcular nada.
     - **Contrato (ADITIVO; skew en los dos sentidos)**:
@@ -6212,8 +6288,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       cancelados, COTIZADO y RESERVA incluidos, más la provisión AFAC del
       periodo de cada avión (la que ese avión ya carga como costo en su
       columna PERMISO AFAC). Egresos = {pagoVendedor}, TUAs pagadas, extensión
-      de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.»
-      — `{pagoVendedor}` es el fragmento de la invariante 61, TAL CUAL.
+      de horario, comisión bancaria y gastos sueltos; los permisos pagados de
+      cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya
+      restan en el balance de su avión (hoja «permisos»).» —
+      `{pagoVendedor}` es el fragmento de la invariante 61, TAL CUAL.
     - **Posición**: al FINAL de `filas` (pyservices las pinta tras el último
       vuelo, con un encabezado de sección, y antes de «MOVIMIENTOS SIN AVIÓN
       / SIN VUELO»). Si el cliente las prefiere al inicio es un `unshift` de
@@ -6232,41 +6310,60 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       dependencia dura): en la ventana API nuevo + pyservices viejo los
       INGRESOS PROPIOS y el RESULTADO suben con la provisión (~$27k
       MXN/avión/mes con 100 USD/hr) sin que la etiqueta lo diga.
-    - **ALERTA DE DINERO (pregunta ABIERTA al cliente, ver «Pendientes
-      conocidos»)**: el permiso PAGADO ya resta en el avión (hoja «permisos»
-      → `permisos_usd` de la cascada → utilidad cobrada → socios; en el
-      reparto, el grupo PERMISO) y desde el 0.0.74 resta ADEMÁS como egreso
-      de VuelaTour: el grupo lo cuenta dos veces y VuelaTour lo resta 1 + su
-      % como socia. La provisión NO es doble (−T en el avión, +T en la
-      pestaña). Esta invariante NO toca la cascada ni el reparto (mueven
-      dinero de socios: solo con decisión expresa). Además TODA la hoja
-      «permisos» (internación, nocturno…) egresa rotulada «permiso AFAC
-      pagado» (el detalle va en la nota).
+    - **UN PERMISO PAGADO, UNA VEZ (revisión del 13-oct-2026, antes del
+      deploy; pregunta ABIERTA al cliente, ver «Pendientes conocidos»)**: el
+      permiso PAGADO ya resta en el avión (hoja «permisos» → `permisos_usd`
+      de la cascada → utilidad cobrada → socios; en el reparto, el grupo
+      PERMISO) desde antes del 0.0.74, y el reparto de septiembre ya se
+      entregó así. La versión de c9ac1022 lo egresaba ADEMÁS en VuelaTour:
+      el grupo lo contaba dos veces (XB-ANU oct-2026: 5,518 de caja ⇒ −11,036
+      en el grupo; VuelaTour −5,518 − 30 % × 5,518) y lo publicaba cualquier
+      Balance general (pantalla y descarga) desde el deploy, no solo al
+      regenerar septiembre. Por eso, mientras el cliente no responda, la fila
+      lo CITA con egreso $0.00 (mismo patrón que la «Comisión del vendedor
+      (avión)», invariante 61): el grupo lo resta UNA vez (en el avión) y los
+      socios no cambian. Desviación consciente del texto literal de la
+      decisión 2 («cada permiso pagado = egreso»): gana el dinero correcto.
+      Si responde «sale del avión», el cambio va JUNTO en un solo deploy:
+      `utilidadDespues` sin `hojaPermisos.usd` (`permisos_usd` como nota;
+      pyservices: variante de la fórmula de la cascada `'permisos'!$C$5` y
+      `_NOTA_PERMISOS`), el grupo PERMISO fuera del saldo del reparto (y
+      decidir si el reparto cobra entonces la provisión), el Libro Dinero, y
+      aquí `egreso_mxn` = Σ `monto_mxn` con la marca «sin TC» de siempre
+      (más los 4 textos de pyservices). La provisión NO es doble (−T en el
+      avión, +T en la pestaña). TODA la hoja «permisos» (internación,
+      nocturno…) se cita rotulada «permiso AFAC pagado» (el detalle va en la
+      nota).
     - **Fuera de alcance**: Libro Dinero, pre-cierre, la hoja «permisos» del
       libro individual (invariante 59) y la columna T con la tarifa por fila
       de la flota (invariante 53 (1)) no cambian. Sin migración.
-    - Specs: `afac-otros-movimientos.util.spec` (fila exacta, varios
-      permisos, USD sin T.C. parcial y total, solo permisos / solo
+    - Specs: `afac-otros-movimientos.util.spec` (fila exacta con egreso
+      $0.00 «a cargo del avión», varios permisos, USD sin T.C. parcial y
+      total SIN la marca «sin TC», solo permisos (remanente 0) / solo
       provisión, singular y sin tarifa, centavos, T.C. null, orden y
-      EXTERNOS, ningún texto con la marca del amarillo),
+      EXTERNOS, ningún texto con la marca del amarillo, «un permiso, una
+      vez»),
       `aircraft-balance.service.afac-om.spec` (mundo con tarifa 25 y tres
       permisos —uno del #501 pagado el 03-oct: cuenta en el MES DEL VUELO—:
-      fila al final con ingreso = `totales.permiso_afac_mxn` y egreso =
-      `permisos.total_mxn`, bandera última llave y sin `afac`, Σ remanente,
-      bloque VUELATOUR ± 0.01, conservación en DOS identidades —dinero total
-      == el mundo sin AFAC − P, y el doble conteo como aserción VIVA—, sin
+      fila al final con ingreso = `totales.permiso_afac_mxn` y egreso $0.00
+      citando `permisos.total_mxn`, bandera última llave y sin `afac`, Σ
+      remanente, bloque VUELATOUR (ingresos ± 0.01, egresos IGUALES),
+      conservación —dinero total == el mundo sin AFAC (la provisión netea) y
+      el permiso resta UNA vez, en la cascada (`permisos_usd`)—, sin
       AFAC `GOLDEN_OM` byte a byte, dos aviones en el orden de `aviones` con
       el PERMISO de EXTERNOS en su libro, el inverso del caso «consolidado ==
       buildOtrosMovimientos directo», variante general y un PERMISO de
       empresa que sigue en «otros gastos»),
       `aircraft-balance.service.bloque-empresa.spec` (los 3 casos con
-      PERMISO: XB-ANU sin vuelos con el T.C. del cierre y egresos +101.96
-      calculado —y la participación al 30 %: el doble conteo—, XB-DOS y
-      XB-ANU sin T.C. ⇒ lado y resultado vacíos; el caso «consolidado ==
+      PERMISO: XB-ANU sin vuelos con el T.C. del cierre, egresos IGUALES y
+      el resultado baja SOLO la participación al 30 % (−30.59, no −101.96 −
+      30.59), XB-DOS y XB-ANU sin T.C. ⇒ fila $0.00 que no vacía el lado y
+      resultado vacío por la participación; el caso «consolidado ==
       directo» vale SOLO sin AFAC) y `balance-empresa.util.spec` (nota con y
       sin la señal, con el fragmento «a cargo del avión» intacto; `ladoEnUsd`
-      y `movimientosConTc` con una fila AFAC). En pyservices,
-      `tests/test_balance_otros_movimientos_afac.py`.
+      con la fila AFAC informativa —egreso 0 que nunca vacía su lado, ni con
+      «USD sin T.C.»— y `movimientosConTc` con una fila AFAC). En
+      pyservices, `tests/test_balance_otros_movimientos_afac.py`.
 
 ## Convenciones NestJS
 
@@ -7005,8 +7102,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   deja de mandar `afac`). Orden RECOMENDADO pyservices → API; los dos
   órdenes son numéricamente seguros (con el API nuevo y un pyservices
   previo las filas se pintan y SUMAN sin encabezado ni leyendas; al revés,
-  el bloque informativo de siempre). Antes de REGENERAR septiembre: la
-  pregunta del doble conteo del permiso pagado («Pendientes conocidos»).
+  el bloque informativo de siempre). Revisión del 13-oct-2026 (antes del
+  deploy): el permiso PAGADO va en la fila con egreso $0.00 «a cargo del
+  avión» (ya resta en la cascada: sin doble conteo). **Compuerta del
+  verificador final**: avisar al cliente que, desde el deploy, la vista en
+  pantalla y la descarga del Balance general (octubre incluido) muestran la
+  provisión AFAC de cada avión como INGRESO de VuelaTour y los permisos
+  pagados como filas informativas $0.00, y hacerle la pregunta abierta de
+  «Pendientes conocidos» (¿el permiso sale del avión?).
 - **PENDIENTES (13-oct-2026) — `20261013000003_categoria_comision_vendedor_avion.sql`
   y `20261013000004_gasto_comision_vendedor_avion_exige_vuelo.sql`**
   (invariante 61, comisión del vendedor en DOS categorías; NO aplicadas: las
@@ -7035,7 +7138,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   schema_migrations`. Orden: migraciones → pyservices → API 0.0.74 (justo
   antes del push, `select 1 from pg_enum … enumlabel =
   'COMISION_VENDEDOR_AVION'` ⇒ 1 fila) → panel (SIEMPRE después del API:
-  el 0.0.73 rechaza la categoría por IsEnum) → Flutter (commit local).
+  el 0.0.73 rechaza la categoría por IsEnum) → Flutter: commit local +82 —
+  **NO publicar el APK hasta la migración 20261013000001 y el API 0.0.75**
+  (la +82 incluye Comisariato +81: el 0.0.74 rechaza `COMISARIATO` con 400
+  por IsEnum y el outbox deja la captura del piloto en FALLIDO al primer
+  intento). La especificación decía «no hay dependencia dura»: es falso.
   **ROLLBACK del API a ≤ 0.0.73 PROHIBIDO con gastos «(avión)» capturados**
   (reclasificarlos antes a «(VuelaTour)»); el valor del enum se queda
   (inofensivo). **Aviso a Comisariato** (20261013000001/2, reservadas): su
@@ -7798,39 +7905,48 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   (`CATEGORIAS_GASTO_SIN_AVION` no puede llevar el literal); asignarle avión
   al gasto no cambia quién paga: reclasificarla a «(VuelaTour)».
 
-- **Permiso AFAC pagado contado DOS veces (13-oct-2026, invariante 62) —
-  PREGUNTA ABIERTA al cliente, bloqueante para REGENERAR el cierre de
-  septiembre**: el permiso PAGADO hoy resta en la cascada del avión
-  (`buildPayload`: `utilidadDespues` resta `hojaPermisos.usd` ⇒
-  `balance.permisos_usd` ⇒ utilidad cobrada ⇒ socios) y en el reparto
-  (grupo PERMISO de `profit-sharing.service`), y desde el 0.0.74 resta
-  ADEMÁS como egreso de VuelaTour en la fila «AFAC · matrícula» de «otros
-  movimientos» ⇒ el grupo lo cuenta dos veces y VuelaTour lo resta 1 + su %
-  como socia. Cifras de prod citadas por la exploración (cotejar): XB-ANU
-  oct-2026 $5,518 (2,549 + 2,969; empresa socia al 30 %), N4142R sep-2026
-  $2,680. Mensaje al cliente (es-MX): «Con los permisos AFAC ya sumando en
-  'otros movimientos', cada permiso pagado resta hoy dos veces en el grupo:
-  en el avión (hoja 'permisos' y reparto) y en VuelaTour. ¿El permiso AFAC
-  pagado deja de restar en el avión (cascada y reparto) ahora que es egreso
-  de VuelaTour, o se queda en los dos?». Cambio alterno si responde «sale
-  del avión» (SOLO con decisión expresa: mueve utilidades y la cuenta
-  corriente de socios, y el reparto de septiembre ya se entregó):
-  `utilidadDespues` sin `hojaPermisos.usd`, `balance.permisos_usd` como solo
-  nota (mecánica del TUA pagado; pyservices necesita la variante de la
-  fórmula de la cascada `'permisos'!$C$5`), `_NOTA_PERMISOS` de pyservices,
-  el grupo PERMISO del reparto fuera del saldo (y decidir si entonces el
-  reparto cobra la provisión tarifa × horas) y el Libro Dinero
-  (`dinero-report.service`, `permisosPorAvion` ⇒ `utilidades_aviones[].
-  permisos_mxn`). El código de la pestaña NO cambia con ninguna de las dos
-  respuestas. Aserciones vivas: `aircraft-balance.service.afac-om.spec` (5b)
-  y el caso XB-ANU de `aircraft-balance.service.bloque-empresa.spec`.
+- **Permiso AFAC pagado: ¿lo carga el avión o VuelaTour? (13-oct-2026,
+  invariante 62) — PREGUNTA ABIERTA al cliente**. La decisión 2 decía «cada
+  permiso pagado = egreso» de VuelaTour, pero el permiso PAGADO ya resta en
+  la cascada del avión (`buildPayload`: `utilidadDespues` resta
+  `hojaPermisos.usd` ⇒ `balance.permisos_usd` ⇒ utilidad cobrada ⇒ socios) y
+  en el reparto (grupo PERMISO de `profit-sharing.service`). La versión
+  c9ac1022 lo egresaba ADEMÁS en la fila «AFAC · matrícula» ⇒ el grupo lo
+  contaba dos veces y VuelaTour lo restaba 1 + su % como socia, visible en
+  cualquier Balance general (pantalla y descarga) desde el deploy.
+  **Resuelto en el código ANTES del deploy (revisión del 13-oct-2026)**: la
+  fila lo CITA con egreso $0.00 «a cargo del avión» (un permiso, una vez;
+  los socios quedan como en el reparto de septiembre ya entregado). Cifras
+  de prod (cotejar): XB-ANU oct-2026 $5,518 (2,549 + 2,969; empresa socia al
+  30 %), N4142R sep-2026 $2,680. **Compuerta para el verificador final /
+  mensaje al cliente** (es-MX): «Con los permisos AFAC ya como filas en
+  'otros movimientos', la provisión AFAC de cada avión entra como ingreso de
+  VuelaTour y cada permiso pagado aparece en su fila con egreso $0.00
+  porque ya lo descuenta el avión (hoja 'permisos' y reparto a socios); así
+  no se cuenta dos veces. ¿El permiso AFAC pagado debe dejar de restar en el
+  avión y pagarlo VuelaTour, o se queda en el avión?». Cambio alterno si
+  responde «sale del avión» (SOLO con decisión expresa y TODO en un mismo
+  deploy: mueve utilidades y la cuenta corriente de socios, y el reparto de
+  septiembre ya se entregó): `utilidadDespues` sin `hojaPermisos.usd`,
+  `balance.permisos_usd` como solo nota (mecánica del TUA pagado; pyservices
+  necesita la variante de la fórmula de la cascada `'permisos'!$C$5`),
+  `_NOTA_PERMISOS` de pyservices, el grupo PERMISO del reparto fuera del
+  saldo (y decidir si entonces el reparto cobra la provisión tarifa × horas),
+  el Libro Dinero (`dinero-report.service`, `permisosPorAvion` ⇒
+  `utilidades_aviones[].permisos_mxn`) y, en la fila AFAC, `egreso_mxn` =
+  Σ `monto_mxn` con la marca «sin TC» de siempre (`filasAfacOtrosMovimientos`)
+  más los 4 textos de pyservices (`_OM_SECCION_AFAC`, `_OM_AFAC_EN_FILAS`,
+  `_EMPRESA_PAGOS_AFAC`, `_EMPRESA_AFAC_EN_FILAS`). Aserciones que cambian
+  juntas: `aircraft-balance.service.afac-om.spec` (5) y el caso XB-ANU de
+  `aircraft-balance.service.bloque-empresa.spec`.
 - **Todo PERMISO se rotula «permiso AFAC pagado» (13-oct-2026, invariante
-  62)**: la fila AFAC egresa TODA la hoja «permisos» del avión (internación,
+  62)**: la fila AFAC cita TODA la hoja «permisos» del avión (internación,
   nocturno, «mochada al comandante de AFAC MMCT»…), no solo los de AFAC;
-  hasta el 0.0.73 era informativo y ahora mueve TOTALES y el bloque
-  VUELATOUR. Mitigación: concepto y nota llevan el detalle de cada gasto y
-  la leyenda de pyservices lo dice («sean o no de AFAC»). Pendiente del
-  cliente: subcategoría o proveedor AFAC para separarlos.
+  con egreso $0.00 no mueve TOTALES ni el bloque VUELATOUR (si el cliente
+  decide que VuelaTour los paga, sí los movería). Mitigación: concepto y
+  nota llevan el detalle de cada gasto y la leyenda de pyservices lo dice
+  («sean o no de AFAC»). Pendiente del cliente: subcategoría o proveedor AFAC
+  para separarlos.
 
 - **Comisiones a cargo del avión (pedido del cliente, 6-oct-2026)**:
   IMPLEMENTADO en el 0.0.65 (invariante 50: cobrado neto, columna
@@ -7838,19 +7954,17 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   desde septiembre de 2026; la provisión del vendedor solo en vuelos
   COMPLETADOS). Pendientes: (a) la decisión del cliente sobre la comisión
   bancaria ya cobrada al cliente como EXTRA (#293; detalle en la invariante
-  50); (b) FUERA del API (el contrato dejó el panel sin cambios): el panel
-  (`avion-reparto-card.tsx`, comentario de `kpi-strip.tsx`) rotula
-  `comisiones_venta_usd` «Comisiones de venta · regla anterior — hoy es
-  ingreso/egreso de VuelaTour» y el PDF/XLSX del reparto «(-) Comisiones de
-  venta», aunque desde septiembre son la parte del avión de la comisión
-  bancaria + la provisión del vendedor. Ajuste 0.0.66 (7-oct-2026, pedido
-  del cliente): sin ingreso duplicado en «otros movimientos» y
-  `comisiones_usd` en la cascada del general (invariante 50). Desde el
-  0.0.74 (invariante 61) lo del vendedor es su PAGO REAL: el panel sigue
-  rotulando «provisión del vendedor» (`avion-reparto-card.tsx:199`,
-  comentario de `kpi-strip.tsx:39`, `AYUDA_COMISION_VENDEDOR`) — texto
-  desfasado para el lote del panel (el PDF/XLSX del reparto ya dicen «pago
-  real» con la bandera). (c) RESUELTO el 13-oct-2026 (invariante 61): ya
+  50); (b) RESUELTO el 13-oct-2026 (panel 4eefb3b, invariante 61): el
+  sublabel de «Comisiones (banco + vendedor)» de `avion-reparto-card.tsx`
+  es `SUBLABEL_COMISIONES_REPARTO` («parte del avión de la comisión
+  bancaria (regla sep-2026) + pagos «Comisión del vendedor (avión)»», sin
+  «provisión»; lo vigila `categorias-gasto.test.ts`), el comentario de
+  `kpi-strip.tsx` habla de los pagos «(avión)» y el PDF/XLSX del reparto
+  dicen «pago real» con la bandera. (Historia: hasta el 0.0.73 el panel
+  rotulaba «Comisiones de venta · regla anterior» y luego «+ provisión del
+  vendedor»; ajuste 0.0.66 del 7-oct-2026: sin ingreso duplicado en «otros
+  movimientos» y `comisiones_usd` en la cascada del general, invariante
+  50.) (c) RESUELTO el 13-oct-2026 (invariante 61): ya
   no hay provisión que un pago menor pueda no cubrir — el avión carga lo
   pagado y el «parcial: faltan» solo informa contra lo cobrado. (d) Avisar al
   cliente con el deploy: «(−) COMISIONES» del general no es al centavo la
@@ -7862,26 +7976,28 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   ninguna fila de «otros movimientos» lleva la marca de PROVISIÓN ni el
   amarillo; el test `_FILA_CUBIERTA` de pyservices se adapta en su propio
   contrato (bandera `sin_provision_vendedor`). (g) RESUELTO el 13-oct-2026
-  (invariante 61): el Libro Dinero ya no provisiona (sin gasto real no
-  resta nada). Queda la diferencia ESPERADA con el bloque VUELATOUR en los
-  vuelos completados de la regla (el Dinero resta el gasto entero; el
-  Balance lo carga al avión): unificarla exige columna por avión en
-  'dinero-vlos', decisión aparte. (h) HECHO en la revisión del 12-oct-2026:
+  (invariante 61, dos categorías): el Libro Dinero ya no provisiona (sin
+  gasto real no resta nada). Queda la diferencia ESPERADA con el bloque
+  VUELATOUR == Σ de los pagos «Comisión del vendedor (avión)» que CARGA un
+  avión (vuelo COMPLETADO, o CANCELADO con cobros retenidos, en CUALQUIER
+  fecha —también antes de la vigencia—; llave informativa
+  `utilidades_comision_vendedor_avion_mxn`): el Dinero, caja de VuelaTour,
+  resta el pago; el Balance lo carga al avión en su columna COMISIONES. La
+  «Comisión del vendedor (VuelaTour)» resta IGUAL en los dos libros (no
+  abre diferencia). Unificarla exige columna por avión en 'dinero-vlos',
+  decisión aparte. (h) HECHO en la revisión del 12-oct-2026:
   la `nota` del bloque VUELATOUR dice «pago al vendedor (solo el gasto real
   «Comisión del vendedor» capturado; …)» (invariante 47) y pyservices
   cambia con la bandera la base del pie del bloque («lo pagado (el pago al
-  vendedor solo cuando se captura el gasto real …)»). (i) Panel
-  (`vuelatour-next/src/lib/admin/categorias-gasto.ts`): la ayuda
-  `AYUDA_COMISION_VENDEDOR` de la categoría «Comisión del vendedor» (y los
-  comentarios de ese archivo y de `app/admin/expenses/schema.ts`) sigue
-  diciendo que el gasto «reemplaza la PROVISIÓN de ese vuelo» en 'otros
-  movimientos'; con el 0.0.73 ahí no hay provisión que reemplazar (solo en
-  el Libro Dinero) y desde el 0.0.74 (invariante 61) en ningún libro: el
-  gasto es lo ÚNICO que resta (en los vuelos completados de la regla, en
-  la columna COMISIONES del avión). Texto nada más y fuera del contrato
-  («el panel no cambia»): se ajusta en el panel DESPUÉS del deploy del API
-  (su test `src/lib/admin/__tests__/categorias-gasto.test.ts` fija la
-  frase).
+  vendedor solo cuando se captura el gasto real …)»). (i) RESUELTO el
+  13-oct-2026 (panel 4eefb3b, invariante 61): `AYUDA_COMISION_VENDEDOR`
+  dice «La paga VuelaTour… No es costo del avión. Si el pago le toca al
+  avión, usa «Comisión del vendedor (avión)»…» (sin «reemplaza la
+  PROVISIÓN»; su test lo prohíbe), nace `AYUDA_COMISION_VENDEDOR_AVION` y
+  ningún comentario de `categorias-gasto.ts` ni de
+  `app/admin/expenses/schema.ts` habla de provisión. OJO a quien toque esa
+  ayuda: la «Comisión del vendedor (VuelaTour)» NUNCA resta en la columna
+  COMISIONES (tampoco en los vuelos de la vigencia); solo la «(avión)».
 
 - **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
   gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito

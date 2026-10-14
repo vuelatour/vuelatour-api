@@ -40,7 +40,10 @@ type CobroFila = CobroExigeFacturaRow & { id?: unknown; vuelo_id?: unknown };
 export interface FacturaDeVuelo {
   /** Pasos 1-4 de la cascada (CFDI vivo → emitidas → folio → estatus). */
   registrada: string | null;
-  /** Según TODOS los cobros positivos del vuelo (`vueloExigeFactura`). */
+  /**
+   * Según TODOS los cobros del vuelo, neto de reembolsos por cuenta y moneda
+   * (`vueloExigeFactura`).
+   */
   exigencia: ExigenciaFacturaVuelo;
   /** Solicitud VIVA (`vuelo.factura_solicitada_at`; false sin la migración). */
   solicitada: boolean;
@@ -74,7 +77,9 @@ async function cobrosDeVuelosPaginado(
     const desde = pagina * PAGINA_COBROS;
     const { data, error } = await sb
       .from('cobro_vuelo')
-      .select('id, vuelo_id, monto, cuenta_destino, metodo_cobro')
+      // `moneda` (revisión 13-oct-2026): la exigencia se decide por el NETO
+      // de cada cuenta y moneda (un reembolso total ya no exige factura).
+      .select('id, vuelo_id, monto, moneda, cuenta_destino, metodo_cobro')
       .in('vuelo_id', lote)
       .order('id', { ascending: true })
       .range(desde, desde + PAGINA_COBROS - 1);
@@ -95,8 +100,9 @@ async function cobrosDeVuelosPaginado(
  * a mano VIGENTES del registro («A-123, A-130») → `vuelo.factura_folio`
  * (legado) → etiqueta del estatus («Facturado» / «Factura elaborada y
  * enviada») → paso 5 (13-oct-2026): sin factura registrada, «Pendiente de
- * factura» si algún cobro positivo cayó en una cuenta que exige factura
- * (`vueloExigeFactura`) o si hay solicitud VIVA desde el vuelo; «No lleva
+ * factura» si en una cuenta que exige factura QUEDÓ dinero (neto de sus
+ * reembolsos por moneda, `vueloExigeFactura`; revisión 13-oct-2026) o si
+ * hay solicitud VIVA desde el vuelo; «No lleva
  * factura» si hay cobros y ninguno exige; `null` = SIN COBROS (desde ahora
  * la celda vacía significa «sin cobros», no «sin factura»).
  *

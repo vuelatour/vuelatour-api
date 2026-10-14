@@ -44,7 +44,9 @@ import {
  *
  * Contrato: `payloadGeneral` ANEXA al final de `filas` una fila «AFAC ·
  * matrícula» por avión real (ingreso = `totales.permiso_afac_mxn` de su
- * libro; egreso = Σ `monto_mxn` de su hoja «permisos»), empuja su T.C.
+ * libro; los permisos de su hoja «permisos» CITADOS con egreso $0.00 «a
+ * cargo del avión» —revisión del 13-oct-2026: ya restan en la cascada del
+ * avión y egresarlos aquí los contaba dos veces—), empuja su T.C.
  * (`totales.tc_promedio`) y su «por cobrar» 0 en `tcFilasOM` y pone
  * `afac_en_filas: true` como ÚLTIMA llave; el bloque informativo `afac` ya
  * no viaja. Sin tarifa AFAC ni PERMISO con avión, el payload es el de
@@ -176,7 +178,7 @@ function dineroTotal(g: General): number {
 }
 
 describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movimientos» (invariante 62)', () => {
-  it('(1) la fila «AFAC · XB-TST» va AL FINAL de `filas`: ingreso = la provisión del libro (Σ columna T), egreso = su hoja «permisos» (g3 en el MES DEL VUELO)', async () => {
+  it('(1) la fila «AFAC · XB-TST» va AL FINAL de `filas`: ingreso = la provisión del libro (Σ columna T); su hoja «permisos» (g3 en el MES DEL VUELO) va CITADA con egreso $0.00', async () => {
     const g = await general(mundoAfac());
     const tst = libroDe(g, 'XB-TST');
     const filas = om(g).filas;
@@ -210,13 +212,15 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
         })}`,
       ].join('\n'),
     );
-    // EGRESO = Σ de la hoja «permisos» del libro: g1 + g2 (1,800) + g3 (del
-    // #501 aunque se pagó el 03-oct: cuenta en el mes del vuelo).
+    // Los permisos pagados = la hoja «permisos» del libro: g1 + g2 (1,800)
+    // + g3 (del #501 aunque se pagó el 03-oct: cuenta en el mes del vuelo),
+    // CITADOS con su Σ pero con egreso $0.00: ya restan en la cascada del
+    // avión (un gasto, una vez).
     expect(tst.permisos.filas).toHaveLength(3);
     expect(tst.permisos.total_mxn).toBe(P);
-    expect(fila.egreso_mxn).toBe(tst.permisos.total_mxn);
+    expect(fila.egreso_mxn).toBe(0);
     expect(fila.concepto_egreso).toBe(
-      'permisos AFAC pagados · 3 conceptos (ver nota)',
+      'permisos AFAC pagados · 3 conceptos (ver nota) · a cargo del avión XB-TST ($5,300.00 en su hoja «permisos»)',
     );
     expect(fila.fecha_egreso).toBe('2026-09-05');
     expect(fila.nota_egreso).toBe(
@@ -258,7 +262,7 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
     expect(s('remanente_mxn')).toBe(r2(s('ingreso_mxn') - s('egreso_mxn')));
   });
 
-  it('(4) bloque VUELATOUR: ingresos y egresos propios suben EXACTAMENTE la fila AFAC ÷ el T.C. promedio del libro; la nota lo dice', async () => {
+  it('(4) bloque VUELATOUR: los ingresos propios suben EXACTAMENTE la provisión de la fila AFAC ÷ el T.C. promedio del libro y los egresos propios NO cambian (permisos informativos); la nota lo dice', async () => {
     const base = await general(mundoCon());
     const g = await general(mundoAfac());
     const tst = libroDe(g, 'XB-TST');
@@ -273,12 +277,8 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
           r2(base.empresa.ingresos_propios_usd! + fila.ingreso_mxn! / tc),
       ),
     ).toBeLessThanOrEqual(0.01 + 1e-9);
-    expect(
-      Math.abs(
-        e.pagos_vendedor_usd! -
-          r2(base.empresa.pagos_vendedor_usd! + fila.egreso_mxn! / tc),
-      ),
-    ).toBeLessThanOrEqual(0.01 + 1e-9);
+    expect(fila.egreso_mxn).toBe(0);
+    expect(e.pagos_vendedor_usd).toBe(base.empresa.pagos_vendedor_usd);
     expect(e.nota).toContain(
       "hoja 'otros movimientos' (por vuelo, AFAC por avión y sueltas)",
     );
@@ -289,28 +289,28 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
       'más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC)',
     );
     expect(e.nota).toContain(
-      'comisión bancaria, permisos AFAC pagados y gastos sueltos.',
+      'comisión bancaria y gastos sueltos; los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).',
     );
   });
 
-  it('(5) CONSERVACIÓN en dos identidades: la provisión NETEA (−T en el avión, +T en la pestaña) y el permiso pagado egresa UNA vez en la pestaña… además de restar en la cascada del avión (doble conteo VIVO, pregunta abierta)', async () => {
+  it('(5) CONSERVACIÓN — UN PERMISO PAGADO, UNA VEZ: la provisión NETEA (−T en el avión, +T en la pestaña) y el permiso pagado resta SOLO en la cascada del avión (la fila AFAC lo cita con egreso $0.00)', async () => {
     const base = await general(mundoCon());
     const g = await general(mundoAfac());
     const tst = libroDe(g, 'XB-TST');
     const fila = filasAfac(g)[0];
     // (a) Σ ganancia de los vuelos (ya sin la provisión T) + Σ remanente
-    // de la pestaña (+T − P) == el mundo sin AFAC − P.
-    expect(dineroTotal(g)).toBe(r2(dineroTotal(base) - P));
-    // (b) ALERTA DE DINERO (riesgo 1 de la decisión 2; «Pendientes
-    // conocidos» del CLAUDE.md): el MISMO permiso pagado YA resta en la
-    // cascada del avión (hoja «permisos» → `permisos_usd` → utilidad
-    // cobrada → socios y, en el reparto, el grupo PERMISO) Y ADEMÁS egresa
-    // en VuelaTour. Pregunta al cliente: «¿el permiso AFAC pagado deja de
-    // restar en el avión ahora que es egreso de VuelaTour, o se queda en
-    // los dos?». Si responde «sale del avión», ESTA aserción cambia (la
-    // cascada), no la pestaña.
+    // de la pestaña (+T) == el mundo sin AFAC: la provisión es una
+    // transferencia avión → VuelaTour y la pestaña no egresa el permiso.
+    expect(dineroTotal(g)).toBe(dineroTotal(base));
+    // (b) Revisión del 13-oct-2026 (antes del deploy; pregunta ABIERTA al
+    // cliente en «Pendientes conocidos» del CLAUDE.md): el permiso pagado
+    // resta UNA vez — en la cascada del avión (hoja «permisos» →
+    // `permisos_usd` → utilidad cobrada → socios y, en el reparto, el grupo
+    // PERMISO) — y NO egresa en VuelaTour. Si el cliente responde «sale del
+    // avión», cambian JUNTAS esta aserción (la cascada) y la de la pestaña.
     expect(tst.balance.permisos_usd).toBe(r2(P / tst.totales.tc_promedio!));
-    expect(fila.egreso_mxn).toBe(P);
+    expect(fila.egreso_mxn).toBe(0);
+    expect(g.empresa.pagos_vendedor_usd).toBe(base.empresa.pagos_vendedor_usd);
   });
 
   it('(6) SIN tarifa AFAC ni PERMISO con avión: payload de la pestaña BYTE A BYTE el de siempre y la nota del bloque sin AFAC', async () => {
@@ -445,7 +445,10 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
         String(f.detalle).includes('Permiso del operador externo'),
       ),
     ).toBe(true);
-    expect(afac[1].egreso_mxn).toBe(P);
+    expect(afac[1].egreso_mxn).toBe(0);
+    expect(afac[1].concepto_egreso).toContain(
+      '· a cargo del avión XB-TST ($5,300.00 en su hoja «permisos»)',
+    );
   });
 
   it('(8) inverso del caso «consolidado == buildOtrosMovimientos directo»: con AFAC, las filas son las directas MÁS las AFAC al final', async () => {

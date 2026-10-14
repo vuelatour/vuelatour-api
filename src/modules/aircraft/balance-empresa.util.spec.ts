@@ -486,7 +486,9 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
  * PERMISOS AFAC COMO FILAS QUE SUMAN (13-oct-2026, API 0.0.74, invariante
  * 62): las filas «AFAC · matrícula» de «otros movimientos» entran a la
  * aritmética como cualquier fila (cada una ÷ su T.C. = `totales.tc_promedio`
- * del libro de su avión); la señal `afacEnFilas` solo cambia la NOTA.
+ * del libro de su avión); la señal `afacEnFilas` solo cambia la NOTA. Desde
+ * la revisión del 13-oct-2026 su egreso es $0.00 informativo (los permisos
+ * pagados ya restan en la cascada de su avión: un gasto, una vez).
  */
 describe('afacEnFilas (invariante 62)', () => {
   const baseAfac = {
@@ -515,13 +517,14 @@ describe('afacEnFilas (invariante 62)', () => {
     'las sueltas con su T.C. o el oficial del día. ' +
     'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
     'COTIZADO y RESERVA incluidos, más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC). ' +
-    `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.`;
+    `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos; ` +
+    'los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).';
   const PAGO_CORTO =
     'pago al vendedor (solo los gastos reales de comisión del vendedor capturados)';
   const PAGO_A_CARGO =
     'pago al vendedor (solo los gastos reales capturados: la «Comisión del vendedor (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en su columna COMISIONES aquí egresa $0.00)';
 
-  it('con la señal: la nota dice que el ingreso incluye la provisión AFAC y el egreso los permisos pagados, con su T.C.; el resto de la nota y TODOS los números, idénticos', () => {
+  it('con la señal: la nota dice que el ingreso incluye la provisión AFAC, con su T.C., y que los permisos pagados van con egreso $0.00 (ya restan en el avión); el resto de la nota y TODOS los números, idénticos', () => {
     const hoy = armarBalanceEmpresa(baseAfac);
     const afac = armarBalanceEmpresa({ ...baseAfac, afacEnFilas: true });
     expect(afac.nota).toContain('(por vuelo, AFAC por avión y sueltas)');
@@ -532,8 +535,9 @@ describe('afacEnFilas (invariante 62)', () => {
       'más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC)',
     );
     expect(afac.nota).toContain(
-      'comisión bancaria, permisos AFAC pagados y gastos sueltos.',
+      'comisión bancaria y gastos sueltos; los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).',
     );
+    expect(afac.nota).not.toContain('permisos AFAC pagados y');
     // La ÚNICA diferencia con la nota de hoy es esa frase, completa.
     expect(afac.nota).toContain(fraseAfac(PAGO_CORTO));
     expect(hoy.nota).toContain(fraseHoy(PAGO_CORTO));
@@ -570,33 +574,34 @@ describe('afacEnFilas (invariante 62)', () => {
     expect(aCargo.nota).not.toContain('AFAC');
   });
 
-  it('ladoEnUsd con una fila AFAC: cada lado ÷ el T.C. de la fila; sin T.C. o con la marca «sin TC», ese lado vacío', () => {
+  it('ladoEnUsd con una fila AFAC: el ingreso ÷ el T.C. de la fila; el egreso informativo $0.00 suma 0 y NUNCA vacía su lado (ni sin T.C. ni con permisos «USD sin T.C.», que no llevan la marca «sin TC»)', () => {
     const filaAfac = mov({
       concepto_ingreso:
         'provisión AFAC del periodo · 3 vuelos · tarifa 25.00 USD/hr',
       ingreso_mxn: 3465,
-      concepto_egreso: 'permiso AFAC pagado · AFAC anual',
-      egreso_mxn: 2500,
+      concepto_egreso:
+        'permiso AFAC pagado · AFAC anual · a cargo del avión XA-TST ($2,500.00 en su hoja «permisos»)',
+      egreso_mxn: 0,
       tc: 18.5,
     });
     expect(ladoEnUsd([filaAfac], 'ingreso')).toEqual({ usd: 187.3, sinTc: 0 });
-    expect(ladoEnUsd([filaAfac], 'egreso')).toEqual({ usd: 135.14, sinTc: 0 });
-    // Libro sin T.C. promedio ⇒ la fila sin T.C. ⇒ los dos lados vacíos.
+    expect(ladoEnUsd([filaAfac], 'egreso')).toEqual({ usd: 0, sinTc: 0 });
+    // Libro sin T.C. promedio ⇒ el ingreso (con pesos) queda vacío; el
+    // egreso $0.00 no le quita nada a su lado.
     const sinTc = { ...filaAfac, tc: null };
     expect(ladoEnUsd([sinTc], 'ingreso')).toEqual({ usd: null, sinTc: 1 });
-    expect(ladoEnUsd([sinTc], 'egreso')).toEqual({ usd: null, sinTc: 1 });
-    // Permisos en USD sin T.C. (parcial o total): el egreso queda vacío
-    // aunque traiga los pesos de los convertibles — jamás un USD a medias.
-    for (const sufijo of [' (parcial: USD sin TC)', ' (USD sin TC)']) {
-      const marcada = mov({
+    expect(ladoEnUsd([sinTc], 'egreso')).toEqual({ usd: 0, sinTc: 0 });
+    // Permisos en USD sin T.C.: «sin T.C.» (con puntos) no es la marca.
+    for (const cifra of [
+      '$2,500.00 en su hoja «permisos»; 1 en USD sin T.C.',
+      'en USD sin T.C. en su hoja «permisos»',
+    ]) {
+      const usd = mov({
         ...filaAfac,
-        concepto_egreso: `permisos AFAC pagados · 2 conceptos (ver nota)${sufijo}`,
+        concepto_egreso: `permisos AFAC pagados · 2 conceptos (ver nota) · a cargo del avión XA-TST (${cifra})`,
       });
-      expect(ladoEnUsd([marcada], 'egreso')).toEqual({ usd: null, sinTc: 1 });
-      expect(ladoEnUsd([marcada], 'ingreso')).toEqual({
-        usd: 187.3,
-        sinTc: 0,
-      });
+      expect(ladoEnUsd([usd], 'egreso')).toEqual({ usd: 0, sinTc: 0 });
+      expect(ladoEnUsd([usd], 'ingreso')).toEqual({ usd: 187.3, sinTc: 0 });
     }
   });
 
@@ -611,8 +616,9 @@ describe('afacEnFilas (invariante 62)', () => {
       concepto_ingreso:
         'provisión AFAC del periodo · 3 vuelos · tarifa 25.00 USD/hr',
       ingreso_mxn: 3465,
-      concepto_egreso: 'permiso AFAC pagado · AFAC anual',
-      egreso_mxn: 2500,
+      concepto_egreso:
+        'permiso AFAC pagado · AFAC anual · a cargo del avión XA-TST ($2,500.00 en su hoja «permisos»)',
+      egreso_mxn: 0,
     };
     expect(() =>
       movimientosConTc([filaVuelo, filaAfac], [20], 'filas', [0, 0]),

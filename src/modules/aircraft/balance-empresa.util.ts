@@ -223,8 +223,10 @@ export interface InsumosBalanceEmpresa {
    * API 0.0.74, invariante 62)? Solo cambia la NOTA —mismo patrón que
    * `pagoVendedorACargoDelAvion`—: la aritmética ya toma las filas AFAC por
    * `movimientos`, cada una ÷ su `tc` = `totales.tc_promedio` del libro de
-   * su avión (ingreso = la provisión AFAC del periodo; egreso = los
-   * permisos pagados). Ausente o false ⇒ la nota de siempre, byte a byte.
+   * su avión (ingreso = la provisión AFAC del periodo; los permisos pagados
+   * van con egreso $0.00 «a cargo del avión»: ya restan en su cascada, y la
+   * fila no lleva «sin TC» ni baja `pagos_vendedor_usd`). Ausente o false ⇒
+   * la nota de siempre, byte a byte.
    */
   afacEnFilas?: boolean;
 }
@@ -361,8 +363,9 @@ function notaBalanceEmpresa(n: {
     : 'pago al vendedor (solo los gastos reales de comisión del vendedor capturados)';
   // Revisión 13-oct-2026 (API 0.0.74, invariante 62): con filas «AFAC ·
   // matrícula» en la pestaña, la nota dice que el ingreso incluye la
-  // provisión AFAC del periodo de cada avión y el egreso los permisos AFAC
-  // pagados, y con qué T.C. regresan a USD. Sin ellas, el texto de siempre
+  // provisión AFAC del periodo de cada avión, con qué T.C. regresa a USD y
+  // que los permisos pagados van ahí con egreso $0.00 (ya restan en el
+  // balance de su avión: un gasto, una vez). Sin ellas, el texto de siempre
   // byte a byte. `pagoVendedor` va TAL CUAL en los dos.
   partes.push(
     n.afacEnFilas
@@ -371,7 +374,8 @@ function notaBalanceEmpresa(n: {
           'las sueltas con su T.C. o el oficial del día. ' +
           'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
           'COTIZADO y RESERVA incluidos, más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC). ' +
-          `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.`
+          `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos; ` +
+          'los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).'
       : "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
           'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +
           'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +

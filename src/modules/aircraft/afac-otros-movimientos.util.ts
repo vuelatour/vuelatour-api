@@ -18,11 +18,18 @@ import type {
  *  - INGRESO = la provisión AFAC del periodo de ese avión, TAL CUAL la trae
  *    su libro (`totales.permiso_afac_mxn` = Σ de su columna T «PERMISO AFAC
  *    (PROVISIÓN)», round2(tarifa × z × D) por vuelo). Nadie la recalcula.
- *  - EGRESO = Σ `monto_mxn` de las filas de su hoja «permisos» (TODOS los
- *    gastos PERMISO del avión del periodo, con o sin vuelo —no solo los de
- *    AFAC—: exactamente `filasPermisos` de `buildPayload`).
- *  - Apareados en la MISMA fila (como las TUAS), remanente = ingreso −
- *    egreso.
+ *  - EGRESO INFORMATIVO = $0.00 (revisión del 13-oct-2026, antes del
+ *    deploy): las filas de su hoja «permisos» (TODOS los gastos PERMISO del
+ *    avión del periodo, con o sin vuelo —no solo los de AFAC—: exactamente
+ *    `filasPermisos` de `buildPayload`) se LISTAN en el concepto y la nota
+ *    con su monto, «· a cargo del avión XB-PEV ($5,518.00 en su hoja
+ *    «permisos»)», pero NO egresan aquí: ya restan en el avión (hoja
+ *    «permisos» → `permisos_usd` de su cascada → utilidad cobrada → socios,
+ *    y el grupo PERMISO del reparto). Egresarlos también aquí los contaba
+ *    DOS veces en el grupo (y VuelaTour pagaba 1 + su % como socia). Mismo
+ *    patrón que la «Comisión del vendedor (avión)» de la invariante 61.
+ *  - Apareados en la MISMA fila (como las TUAS), remanente = ingreso (la
+ *    provisión; 0 si solo hay permisos).
  *
  * POR QUÉ DENTRO DE `filas` (y no en una lista aparte): así un pyservices
  * previo las pinta y las SUMA como filas normales (TOTALES y bloque
@@ -40,28 +47,38 @@ import type {
  * de un vuelo EXTERNO se queda en el libro EXTERNOS. Reconstruir estas filas
  * con una consulta propia a `gasto` rompería esa identidad.
  *
- * USD Y MXN NUNCA SE SUMAN: el egreso son pesos ya convertidos por el libro;
- * un permiso sin `monto_mxn` (USD sin T.C.) rotula el concepto con «sin TC»
- * («(parcial: USD sin TC)» / «(USD sin TC)»), la marca con que
- * `balance-empresa.util#ladoEnUsd` deja ese lado del bloque VUELATOUR vacío.
+ * USD Y MXN NUNCA SE SUMAN: el monto que cita el concepto son pesos ya
+ * convertidos por el libro; un permiso sin `monto_mxn` (USD sin T.C.) se
+ * cuenta aparte («1 en USD sin T.C.»). Como el egreso es $0.00, el concepto
+ * NUNCA lleva la marca «sin TC» (palabra completa, la que
+ * `balance-empresa.util#ladoEnUsd` usa para vaciar ese lado del bloque
+ * VUELATOUR): el permiso no egresa aquí, así que no le falta nada a ese
+ * lado (el avión, sin T.C., deja su propia utilidad vacía).
  *
  * T.C. de la fila (bloque VUELATOUR, invariante 47; NO viaja a pyservices):
  * `totales.tc_promedio` del libro de su avión —promedio de las z de costos
  * redondeado a 2 con vuelos; sin vuelos, el oficial del cierre que el libro
- * ya escribió ahí— y null se propaga. DRIFT DOCUMENTADO: (a) la provisión en
+ * ya escribió ahí— y null se propaga. DRIFT DOCUMENTADO: la provisión en
  * USD (Σ X_i ÷ promedio de z) difiere de tarifa × Σ horas cuando z varía
- * dentro del mes; (b) el egreso en USD difiere de `permisos.usd` del libro
- * por centavos (`tc_promedio` va redondeado a 2; `tcHojas`, crudo). Si el
- * cliente exige USD exacto, el refinamiento es aditivo (T.C. ponderado solo
- * para el ingreso + `tc_egreso` en `MovimientoParaEmpresa`).
+ * dentro del mes (el egreso es $0.00: no tiene drift). Si el cliente exige
+ * USD exacto, el refinamiento es aditivo (T.C. ponderado solo para el
+ * ingreso). Si algún día el permiso egresa aquí (ver abajo), su USD
+ * diferiría de `permisos.usd` del libro por centavos (`tc_promedio` va
+ * redondeado a 2; `tcHojas`, crudo): `tc_egreso` en `MovimientoParaEmpresa`.
  *
- * ALERTA DE DINERO (pregunta ABIERTA al cliente, «Pendientes conocidos» del
- * CLAUDE.md): el permiso PAGADO ya resta en el avión (hoja «permisos» →
- * `permisos_usd` de la cascada → utilidad cobrada → socios, y en el reparto
- * el grupo PERMISO) y desde el 0.0.74 resta ADEMÁS como egreso de VuelaTour
- * aquí: el grupo lo cuenta dos veces. La provisión NO es doble (sale del
- * avión en su columna T y entra a VuelaTour aquí). Esta fuente única NO toca
- * cascada ni reparto: mueve dinero de socios solo con decisión expresa.
+ * UN PERMISO PAGADO, UNA VEZ (revisión del 13-oct-2026; pregunta ABIERTA al
+ * cliente en «Pendientes conocidos» del CLAUDE.md): la decisión 2 decía
+ * «cada permiso pagado = egreso», pero el permiso PAGADO ya resta en el avión
+ * (hoja «permisos» → `permisos_usd` de la cascada → utilidad cobrada →
+ * socios, y en el reparto el grupo PERMISO) desde antes del 0.0.74 y el
+ * reparto de septiembre ya se entregó así. Mientras el cliente no diga si
+ * sale del avión, el egreso aquí es $0.00 INFORMATIVO: el grupo lo resta UNA
+ * vez (en el avión) y los socios no cambian. Si responde «sale del avión»,
+ * el cambio va JUNTO, en un solo deploy: `utilidadDespues` sin
+ * `hojaPermisos.usd`, el grupo PERMISO fuera del saldo del reparto, y aquí
+ * `egreso_mxn` = Σ `monto_mxn` (con la marca «sin TC» de siempre). La
+ * provisión NO es doble (sale del avión en su columna T y entra a VuelaTour
+ * aquí).
  *
  * PROHIBIDO en cualquier texto generado aquí: la secuencia «· PROVISIÓN (»
  * (marca `_MARCA_PROVISION` del amarillo de pyservices). Por eso «provisión»
@@ -162,7 +179,8 @@ export function filasAfacOtrosMovimientos(
       ].join('\n');
     }
 
-    // ===== Lado EGRESO: los permisos pagados (hoja «permisos» del libro).
+    // ===== Lado EGRESO: los permisos pagados (hoja «permisos» del libro),
+    // INFORMATIVOS con $0.00: ya restan en el avión (ver la cabecera).
     let conceptoEgreso: string | null = null;
     let egresoMxn: number | null = null;
     let fechaEgreso: string | null = null;
@@ -170,22 +188,25 @@ export function filasAfacOtrosMovimientos(
     if (hayEgreso) {
       const conMonto = permisos.filter((f) => f.monto_mxn != null);
       const sinMonto = permisos.length - conMonto.length;
-      egresoMxn =
+      const pagadoMxn =
         conMonto.length > 0
           ? r2(conMonto.reduce((acc, f) => acc + (f.monto_mxn ?? 0), 0))
           : null;
-      // La marca «sin TC» (palabra completa) es la que `ladoEnUsd` respeta:
-      // ese lado del bloque VUELATOUR queda vacío, jamás un USD incompleto.
-      const sufijo =
-        sinMonto === 0
-          ? ''
-          : conMonto.length > 0
-            ? ' (parcial: USD sin TC)'
-            : ' (USD sin TC)';
+      // UN GASTO, UNA VEZ: el permiso ya restó en la cascada del avión.
+      egresoMxn = 0;
+      // «$5,518.00 en su hoja «permisos»» (+ «; 1 en USD sin T.C.»). Jamás
+      // la marca «sin TC» (la fila egresa $0.00: a ese lado no le falta
+      // nada) ni un USD sumado como pesos.
+      const cifra =
+        pagadoMxn != null
+          ? `$${fmt(pagadoMxn)} en su hoja «permisos»` +
+            (sinMonto > 0 ? `; ${sinMonto} en USD sin T.C.` : '')
+          : 'en USD sin T.C. en su hoja «permisos»';
+      const aCargo = ` · a cargo del avión ${p.matricula} (${cifra})`;
       conceptoEgreso =
         permisos.length === 1
-          ? `permiso AFAC pagado · ${permisos[0].detalle}${sufijo}`
-          : `permisos AFAC pagados · ${permisos.length} conceptos (ver nota)${sufijo}`;
+          ? `permiso AFAC pagado · ${permisos[0].detalle}${aCargo}`
+          : `permisos AFAC pagados · ${permisos.length} conceptos (ver nota)${aCargo}`;
       // La fecha NO nula más antigua (misma regla que `colapsarFilasDeVuelo`).
       fechaEgreso =
         permisos
@@ -216,8 +237,10 @@ export function filasAfacOtrosMovimientos(
       concepto_ingreso: conceptoIngreso,
       ingreso_mxn: ingresoMxn,
       fecha_ingreso: null,
-      // Como `colapsarFilasDeVuelo`: un lado sin monto cuenta 0; los DOS sin
-      // monto (solo permisos USD sin T.C.) ⇒ null, jamás un $0.00 falso.
+      // Como `colapsarFilasDeVuelo`: un lado sin monto cuenta 0. Con permisos
+      // el egreso es SIEMPRE 0 (informativo), así que el remanente es la
+      // provisión (0 si solo hay permisos: la fila informativa no mueve
+      // TOTALES, como la de la «Comisión del vendedor (avión)»).
       remanente_mxn:
         ingresoMxn == null && egresoMxn == null
           ? null

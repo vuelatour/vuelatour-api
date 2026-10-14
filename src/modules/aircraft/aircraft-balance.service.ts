@@ -1163,7 +1163,9 @@ export class AircraftBalanceService {
     // invariante 62; SUPERSEDE el bloque informativo de la invariante 53):
     // una fila «AFAC · matrícula» por avión REAL (orden de `librosAviones`,
     // EXTERNOS nunca), armada de los libros YA calculados — ingreso = su
-    // provisión AFAC del periodo, egreso = su hoja «permisos». Van al FINAL
+    // provisión AFAC del periodo; su hoja «permisos» va CITADA con egreso
+    // $0.00 «a cargo del avión» (revisión 13-oct-2026: ya resta en SU
+    // cascada; egresarla aquí la contaba dos veces). Van al FINAL
     // de `filas` (pyservices las pinta después de los vuelos y antes de
     // «MOVIMIENTOS SIN AVIÓN / SIN VUELO») y su T.C. y su «por cobrar» 0 van
     // alineados en `tcFilasOM` — SIEMPRE después de `buildOtrosMovimientos`

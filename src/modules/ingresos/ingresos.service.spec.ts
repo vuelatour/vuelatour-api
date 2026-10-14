@@ -367,6 +367,7 @@ interface Mocks {
     assertAccess: jest.Mock;
     cobroStatus: jest.Mock;
     listCobros: jest.Mock;
+    solicitarFacturaPorCobros: jest.Mock;
   };
   conciliacion: {
     linkIngreso: jest.Mock;
@@ -404,6 +405,7 @@ function armar(
       assertAccess: jest.fn().mockResolvedValue(undefined),
       cobroStatus: jest.fn().mockResolvedValue({}),
       listCobros: jest.fn().mockResolvedValue([]),
+      solicitarFacturaPorCobros: jest.fn().mockResolvedValue(null),
     },
     conciliacion: {
       linkIngreso: jest.fn().mockResolvedValue({}),
@@ -1399,6 +1401,10 @@ describe('«Es el pago de un vuelo» (cobro-de-vuelo desde un abono)', () => {
       },
       'u-admin',
       Rol.ADMIN,
+      undefined,
+      undefined,
+      // Sin el gancho de factura de `createCobro`: se dispara tras la liga.
+      { omitirSolicitudFactura: true },
     );
     expect(w.mocks.conciliacion.linkCobro).toHaveBeenCalledWith(
       'm-leticia',
@@ -1406,6 +1412,29 @@ describe('«Es el pago de un vuelo» (cobro-de-vuelo desde un abono)', () => {
       'u-admin',
     );
     expect(r.movimiento_id).toBe('m-leticia');
+  });
+
+  // Revisión 13-oct-2026 (invariante 60): la solicitud automática de factura
+  // sale SOLO con la liga hecha — si la liga fallaba, la compensación borraba
+  // el cobro pero la solicitud y el aviso a facturación ya habían salido.
+  it('la solicitud automática de factura sale DESPUÉS de la liga, con el cobro creado', async () => {
+    const w = armar(conAbono());
+    await w.svc.cobroDeVueloDesdeAbono('m-leticia', dto(), ADMIN);
+    const solicitar = w.mocks.flights.solicitarFacturaPorCobros;
+    expect(solicitar).toHaveBeenCalledTimes(1);
+    expect(solicitar).toHaveBeenCalledWith({
+      vueloIds: [V_1],
+      cobro: {
+        monto: 95000,
+        cuenta_destino: null,
+        metodo_cobro: 'TRANSFERENCIA',
+      },
+      actorId: 'u-admin',
+      cobroId: 'c-nuevo',
+    });
+    expect(solicitar.mock.invocationCallOrder[0]).toBeGreaterThan(
+      w.mocks.conciliacion.linkCobro.mock.invocationCallOrder[0],
+    );
   });
 
   it('cuenta PASARELA sin comision_monto ⇒ método PAYWISE y comisión 0 EXPLÍCITA', async () => {
@@ -1434,6 +1463,8 @@ describe('«Es el pago de un vuelo» (cobro-de-vuelo desde un abono)', () => {
       'c-nuevo',
       'u-admin',
     );
+    // Ni solicitud ni aviso a facturación por un cobro que ya no existe.
+    expect(w.mocks.flights.solicitarFacturaPorCobros).not.toHaveBeenCalled();
   });
 
   it('monto que no cuadra ⇒ 409 INGRESO_MONTO_DISTINTO ANTES de crear nada', async () => {

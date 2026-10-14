@@ -2961,12 +2961,17 @@ export class IngresosService {
       notas: `Registrado desde el banco (${fecha})${dto.notas?.trim() ? ` · ${dto.notas.trim()}` : ''}`,
       client_request_id: dto.client_request_id,
     } as unknown as CreateCobroDto;
-    // 2) El cobro por el único camino de alta (hereda COBRO_EXCEDE_SALDO…).
+    // 2) El cobro por el único camino de alta (hereda COBRO_EXCEDE_SALDO…),
+    // SIN el gancho de factura (7.º parámetro INTERNO): se dispara en el
+    // paso 4, solo con la liga hecha.
     const creado = (await this.flights.createCobro(
       dto.vuelo_id,
       dtoCobro,
       actor.userId,
       actor.rol,
+      undefined,
+      undefined,
+      { omitirSolicitudFactura: true },
     )) as Record<string, unknown>;
     // 3) Liga con COMPENSACIÓN.
     try {
@@ -2985,6 +2990,25 @@ export class IngresosService {
       }
       throw err;
     }
+    // 4) FACTURA OBLIGATORIA POR CUENTA DE COBRO (invariante 60; revisión
+    // 13-oct-2026): la solicitud automática sale SOLO con la liga hecha. Si
+    // la disparaba `createCobro` y la liga fallaba, la compensación borraba
+    // el cobro pero la solicitud («Por facturar», «Pendiente de factura») y
+    // el aviso a facturación ya habían salido por un cobro que no existe.
+    // Mismo gancho best-effort y fire-and-forget de `createCobro` (nunca
+    // 5xx; en un reintento el CAS de la solicitud no duplica).
+    void this.flights
+      .solicitarFacturaPorCobros({
+        vueloIds: [dto.vuelo_id],
+        cobro: {
+          monto: creado.monto,
+          cuenta_destino: creado.cuenta_destino ?? null,
+          metodo_cobro: creado.metodo_cobro,
+        },
+        actorId: actor.userId,
+        cobroId: creado.id as string,
+      })
+      .catch(() => undefined);
     return {
       cobro: await this.cobroPublico(dto.vuelo_id, creado.id as string, creado),
       movimiento_id: movId,

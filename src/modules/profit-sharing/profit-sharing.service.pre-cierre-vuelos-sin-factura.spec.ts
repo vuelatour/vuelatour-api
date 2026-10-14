@@ -379,6 +379,9 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: false,
         cuentas: ['HSBC Pesos'],
+        // CANCELADO: el chip lo dice (ahí se registra directo en Facturas
+        // emitidas; «pídela desde el vuelo» no existe para él).
+        estado: 'CANCELADO',
       },
       {
         id: 'v404',
@@ -437,6 +440,43 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
     const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
     expect(itemDe(r).count).toBe(1);
     expect(r.listo).toBe(true);
+  });
+
+  // Revisión 13-oct-2026: la exigencia es por el NETO de cada cuenta y
+  // moneda (`vueloExigeFactura`): un anticipo devuelto completo en la MISMA
+  // cuenta ya no pide factura; devuelto en parte, sí.
+  it('CANCELADO con anticipo en HSBC Dólares devuelto COMPLETO ⇒ NO entra; devuelto en PARTE ⇒ entra con `estado: CANCELADO`', async () => {
+    const hsbc = (id: string, vueloId: string, monto: number): Fila =>
+      cobro(id, vueloId, {
+        monto,
+        metodo_cobro: 'TRANSFERENCIA',
+        cuenta_destino: 'HSBC Dólares',
+      });
+    const { svc } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [
+        vuelo('d1', 450, { estado: 'CANCELADO' }),
+        vuelo('d2', 451, { estado: 'CANCELADO' }),
+      ],
+      cobro_vuelo: [
+        hsbc('c1', 'd1', 1000),
+        hsbc('c2', 'd1', -1000),
+        hsbc('c3', 'd2', 1000),
+        hsbc('c4', 'd2', -400),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = itemDe(r);
+    expect(item.count).toBe(1);
+    expect(item.vuelos).toEqual([
+      expect.objectContaining({
+        id: 'd2',
+        folio: 451,
+        cuentas: ['HSBC Dólares'],
+        estado: 'CANCELADO',
+      }),
+    ]);
   });
 
   it('cada regla por separado', async () => {
