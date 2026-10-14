@@ -42,6 +42,8 @@ const MEDIO_LABEL: Record<string, string> = {
   PERSONAL_PABLO: 'Personal Pablo',
   PERSONAL_ALE: 'Personal Ale',
   BODEGA: 'Bodega',
+  // Cargo automático a la cuenta (13-oct-2026, invariante 64).
+  DOMICILIADO: 'Pago domiciliado',
 };
 
 /** Etiqueta legible del medio (reportes y avisos los lee gente de oficina). */
@@ -142,7 +144,8 @@ export interface CruceMedioIa {
  * - Medio de bolsillo (EFECTIVO / PERSONAL_*) con voucher bancario (medio
  *   IA tarjeta/transferencia o una terminación leída): discrepancia
  *   "medio capturado Efectivo, el voucher parece pago con tarjeta •1234".
- * - TRANSFERENCIA / PAYWISE / BODEGA: nada (la conciliación bancaria decide).
+ * - TRANSFERENCIA / PAYWISE / DOMICILIADO / BODEGA: nada (la conciliación
+ *   bancaria decide; un pago domiciliado no tiene ticket).
  */
 export function cruzarMedioConIa(
   capturado: {

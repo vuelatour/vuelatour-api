@@ -1,3 +1,5 @@
+import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
+
 /**
  * ESTADO DE CONCILIACIÓN CON EL BANCO de un gasto (9-oct-2026; pedido de
  * oficina: «un apartado donde me diga si el gasto está conciliado con el
@@ -10,7 +12,8 @@
  *  - PARCIAL: hay cargos ligados pero no cubren (`monto_vinculado` > 0 sin
  *    `conciliado`; aditivos de `list()`).
  *  - SIN_CONCILIAR: medio bancario (tarjeta corporativa, transferencia,
- *    Paywise) sin cargo ligado: lo que la oficina persigue.
+ *    Paywise, pago domiciliado) sin cargo ligado: lo que la oficina
+ *    persigue.
  *  - NO_APLICA: efectivo / personal / bodega sin cargo ligado — no se
  *    concilia con el banco.
  */
@@ -20,12 +23,13 @@ export type EstadoBanco =
   | 'SIN_CONCILIAR'
   | 'NO_APLICA';
 
-/** Espejo de `MEDIOS_BANCARIOS` (conciliación): los únicos que cruzan con el banco. */
-const MEDIOS_BANCO: ReadonlySet<string> = new Set([
-  'TARJETA_CORP',
-  'TRANSFERENCIA',
-  'PAYWISE',
-]);
+/**
+ * Los únicos medios que cruzan con el banco: se LEEN de la fuente única
+ * `MEDIOS_BANCARIOS` (conciliación) — hasta el 13-oct-2026 era una copia a
+ * mano y un medio nuevo (DOMICILIADO, invariante 64) podía quedar «—» en la
+ * columna «Banco» aunque la conciliación sí lo persiguiera.
+ */
+const MEDIOS_BANCO: ReadonlySet<string> = new Set(MEDIOS_BANCARIOS);
 
 const ETIQUETA: Record<EstadoBanco, string> = {
   CONCILIADO: 'Conciliado',
@@ -52,4 +56,24 @@ export function estadoBancoGasto(g: {
 /** Texto de la columna «Banco» del Excel (vacío = no aplica). */
 export function etiquetaEstadoBanco(estado: EstadoBanco): string {
   return ETIQUETA[estado];
+}
+
+/**
+ * Columna «Medio» del Excel de GASTOS SIN BANCO (13-oct-2026, invariante
+ * 64). Antes era un ternario en `reporteGastosSinBancoXlsx` que rotulaba
+ * «Transferencia» a todo lo que no fuera tarjeta ni PayWise: un pago
+ * domiciliado salía como transferencia (mentira en un reporte). Los textos
+ * de los medios de siempre son byte a byte los de antes («Tarjeta **** 1234»,
+ * «Tarjeta», «PayWise», «Transferencia»).
+ */
+export function etiquetaMedioSinBanco(
+  medio: string | null | undefined,
+  terminacion?: string | null,
+): string {
+  if (medio === 'TARJETA_CORP') {
+    return `Tarjeta${terminacion ? ` **** ${terminacion}` : ''}`;
+  }
+  if (medio === 'PAYWISE') return 'PayWise';
+  if (medio === 'DOMICILIADO') return 'Pago domiciliado';
+  return 'Transferencia';
 }

@@ -7,6 +7,7 @@ import {
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
+import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): vigencia por
 // configuración y la aritmética en la fuente única pura (la MISMA del
 // balance por avión).
@@ -2871,13 +2872,13 @@ export class ProfitSharingService {
     // El espejo que faltaba: los MOVIMIENTOS sin conciliar ya se vigilan,
     // pero un GASTO bancario que nadie cruzó (p. ej. el sobrante de un
     // duplicado cuya pareja ya se concilió) era invisible para siempre.
-    // Mismo set que MEDIOS_BANCARIOS de conciliación (invariante 7):
-    // medios cuyo cargo aparece en el estado de cuenta.
+    // LEE la fuente única MEDIOS_BANCARIOS de conciliación (invariante 7;
+    // desde el 13-oct-2026 incluye DOMICILIADO, invariante 64): medios cuyo
+    // cargo aparece en el estado de cuenta.
     const bancariosSinConciliar = gastos.filter(
       (g) =>
-        (g.medio_pago === 'TARJETA_CORP' ||
-          g.medio_pago === 'TRANSFERENCIA' ||
-          g.medio_pago === 'PAYWISE') &&
+        typeof g.medio_pago === 'string' &&
+        MEDIOS_BANCARIOS.includes(g.medio_pago) &&
         g.conciliado !== true,
     );
     // Matrícula del comprobante ≠ avión asignado (26-ago, cruce ASUR MID):
@@ -3120,7 +3121,7 @@ export class ProfitSharingService {
         clave: 'gastos_bancarios_sin_conciliar',
         titulo: 'Gastos bancarios sin conciliar al corte',
         detalle:
-          'Tarjeta corporativa, transferencia o PayWise sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
+          'Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
         count: bancariosSinConciliar.length,
       },
       {

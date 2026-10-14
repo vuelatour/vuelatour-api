@@ -233,11 +233,28 @@ describe('errorSinMonedaCuenta (candidatos y liga de un lote)', () => {
  * entra al universo con `incluir_no_bancarios` y qué pide el PATCH.
  */
 describe('medios del vínculo', () => {
-  it('bancarios: TARJETA_CORP, TRANSFERENCIA y PAYWISE; sin medio ⇒ no', () => {
+  it('bancarios: TARJETA_CORP, TRANSFERENCIA, PAYWISE y DOMICILIADO; sin medio ⇒ no', () => {
+    // ORDEN EXACTO: el panel lee este arreglo por regex y lo compara con su
+    // espejo (`MEDIOS_BANCARIOS_CONCILIACION`); los nuevos van AL FINAL.
+    expect(MEDIOS_BANCARIOS).toEqual([
+      'TARJETA_CORP',
+      'TRANSFERENCIA',
+      'PAYWISE',
+      'DOMICILIADO',
+    ]);
     for (const m of MEDIOS_BANCARIOS) expect(esMedioBancario(m)).toBe(true);
     for (const m of ['EFECTIVO', 'PERSONAL_PABLO', 'BODEGA', null, '']) {
       expect(esMedioBancario(m)).toBe(false);
     }
+  });
+
+  it('«Pago domiciliado» (13-oct-2026): bancario, se liga como una transferencia (sin justificación)', () => {
+    expect(esMedioBancario('DOMICILIADO')).toBe(true);
+    expect(esMedioNoBancarioVinculable('DOMICILIADO')).toBe(false);
+    const g = (id: string, medio_pago: string | null) => ({ id, medio_pago });
+    expect(
+      clasificarMediosVinculo([g('dom', 'DOMICILIADO')], new Set()),
+    ).toEqual({ bodega: [], noBancariosNuevos: [] });
   });
 
   it('vinculables con justificación: todo lo NO bancario menos BODEGA (y sin medio)', () => {

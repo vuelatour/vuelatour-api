@@ -224,8 +224,10 @@ aéreo`. El `breakdown` de `POST /v1/quotes/calculate` los expone como
    `calculo_snapshot`, no con la escala viva: ver invariante 24.
 
 7. **Conciliación**: auto-match solo `medio_pago IN (TARJETA_CORP,
-TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
-   el 2-sep-2026; caja chica sigue mirando SOLO EFECTIVO). `BODEGA` (cargo
+TRANSFERENCIA, PAYWISE, DOMICILIADO)` + moneda de la cuenta (PAYWISE es
+   bancario desde el 2-sep-2026; DOMICILIADO = «Pago domiciliado», cargo
+   automático a la cuenta, bancario y solo oficina desde el 13-oct-2026,
+   invariante 64; caja chica sigue mirando SOLO EFECTIVO). `BODEGA` (cargo
    contable de inventario), `EFECTIVO` (caja chica) y `PERSONAL_*`
    (reintegros) nunca se cruzan con el banco. ABONOS se cruzan con
    `cobro_vuelo` vía `movimiento_bancario.cobro_id`.
@@ -6468,6 +6470,74 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vuelo rebotan al PILOTO; oficina sin vuelo; hereda avión; 22P02 ⇒
       400; reclasificar OTRO→Comisariato con cargo ligado).
 
+64. **«PAGO DOMICILIADO» (DOMICILIADO) COMO MEDIO DE PAGO BANCARIO
+    (13-oct-2026, API 0.0.75, migración `20261013000009`).** Pedido del
+    cliente (13-oct-2026, 12:16): «a la hora de vincular un gasto… no viene
+    en método de pago algo que diga Pago domiciliado». En el estado de
+    cuenta ya hay cargos automáticos («STR*AMAZON RET REC Carg Recur.»,
+    «DLO*STARLINK Carg Recur.», «03 POR COBRANZA DOMICILIADA») que la
+    oficina capturaba como tarjeta o transferencia.
+    - **Valor**: `DOMICILIADO`, 8.º y último de `public.medio_pago`
+      (`MedioPago.DOMICILIADO` del DTO). Etiqueta ÚNICA «Pago domiciliado»
+      en las dos tablas del API (`common/medio-pago.util#MEDIO_PAGO_LABEL`
+      —reportes, columna PAGO del balance— y
+      `expenses/medio-tarjeta.util#MEDIO_LABEL` —Excel de gastos y avisos—),
+      en el panel (`MEDIO_PAGO_LABELS`) y en la app.
+    - **Bancario** ⇒ entra a `MEDIOS_BANCARIOS`
+      (`conciliacion/gastos-candidatos.util`, FUENTE ÚNICA, el valor AL
+      FINAL: el panel lee ese arreglo por regex y compara el ORDEN con su
+      espejo `MEDIOS_BANCARIOS_CONCILIACION`). Desde hoy los lectores del API
+      lo LEEN de ahí en vez de copiarlo: `estado-banco.util` (columna y
+      filtro «Banco»: SIN_CONCILIAR / PARCIAL / CONCILIADO),
+      `expenses.service#MEDIOS_PAGO_BANCARIOS` (auto-cruce best-effort al
+      crear/editar y aditivos `monto_vinculado`/`faltante`/`parcial` de
+      `list()`) y el pre-cierre `gastos_bancarios_sin_conciliar` (texto:
+      «Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin
+      cruzar con el banco: …»). Consecuencias automáticas: auto-cruce de la
+      importación, candidato de «Vincular gasto» SIN justificación
+      (`no_bancario: false`, `esMedioNoBancarioVinculable` false), «Gastos
+      sin banco» y su Excel (columna «Medio» = «Pago domiciliado» vía
+      `etiquetaMedioSinBanco`; tarjeta/PayWise/transferencia byte a byte
+      como antes), pagos parciales y lotes como cualquier bancario. Se
+      concilia como una transferencia.
+    - **Solo oficina**: en el ALTA (`crearGasto`, antes de la regla del
+      visitante y ANTES de tocar la BD) PILOTO/MECANICO/VISITANTE ⇒ 400
+      `{ message: 'El pago domiciliado lo registra la oficina: elige otro
+      medio de pago.', error: 'MEDIO_SOLO_OFICINA' }`
+      (`MENSAJE_MEDIO_SOLO_OFICINA`). En la EDICIÓN no se bloquea: la app
+      re-manda el medio vigente de un gasto que la oficina ya puso en
+      DOMICILIADO (`_medioExtra`). La carga masiva de combustibles
+      (`Object.values(MedioPago)`) lo acepta (es de oficina).
+    - **Sin tarjeta**: `terminacionPrevia` y `acoplarTarjetaEnUpdate` ⇒ null /
+      'limpiar' fuera de TARJETA_CORP (y el CHECK `gasto_check`). La IA de
+      tickets NO lo sugiere y `cruzarMedioConIa` no lo cruza (un domiciliado
+      no tiene ticket).
+    - **Dependencia dura (la más fuerte del lote)**: el API arma
+      `.in('medio_pago', MEDIOS_BANCARIOS)` CON el valor en la importación,
+      candidatos, gastos sin banco y su Excel, y `?medio_pago=DOMICILIADO`
+      en la lista ⇒ contra una BD sin la migración: 22P02 ⇒ 500 en TODA la
+      conciliación. La migración 000009 va ANTES del push del API (comprobar
+      `pg_enum` justo antes). Panel nuevo con API ≤ 0.0.74 ⇒ el selector lo
+      ofrece y el API responde 400 legible de IsEnum (panel DESPUÉS del API).
+      pyservices y app: tolerantes (str / `_medioExtra`). ROLLBACK del API a
+      ≤ 0.0.74 solo con 0 gastos DOMICILIADO.
+    - **Panel** (contrato que el API respeta): selector tras «Transferencia»
+      (sin preselección), filtro «Medio» `?medio=DOMICILIADO`, ayuda bajo el
+      selector y prellenado desde el cargo con `pareceCargoRecurrente`
+      («Carg Recur.», «DOMICILIA…», «CARGO AUTOM…», «SUSCRIP…» ⇒
+      DOMICILIADO sin tarjeta, aunque la referencia traiga 8+ dígitos).
+    - Specs: `gastos-candidatos.util.spec` (arreglo EXACTO con DOMICILIADO al
+      final, bancario, sin justificación), `candidatos-excluidos.util.spec`,
+      `estado-banco.util.spec` (SIN_CONCILIAR/PARCIAL/CONCILIADO y
+      `etiquetaMedioSinBanco`), `medio-pago.util.spec` y
+      `medio-tarjeta.util.spec` (etiqueta, sin cruce con la IA, limpia la
+      tarjeta), `expenses.service.medio-domiciliado.spec` (400
+      MEDIO_SOLO_OFICINA en los 3 roles de campo sin tocar la BD; oficina
+      sin tarjeta y con auto-cruce; aditivos de `list()`),
+      `conciliacion.service.lote.spec` (candidato bancario y liga sin
+      justificación ni notas) y `profit-sharing.service.pre-cierre-vuelos-
+      sin-factura.spec` (renglón de bancarios sin conciliar).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7199,6 +7269,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000009_medio_pago_domiciliado.sql`**
+  (invariante 64; era la 000004 del diseño, renumerada: la 000004 es el
+  CHECK de la comisión del avión). SOLO `alter type public.medio_pago add
+  value if not exists 'DOMICILIADO'` (AL FINAL: 7 ⇒ 8; sola en su archivo).
+  Dry-run de su cabecera por `execute_sql` (UN bloque ⇒ `DRYRUN_OK
+  20261013000009 · A–C4`: conteo RELATIVO, DOMICILIADO al final,
+  `gasto_check` intacto, idempotente, INSERT+UPDATE REALES de un gasto
+  TRANSFERENCIA después del DDL con bitácora +2, 55P04 al usar el valor
+  antes del commit) ⇒ comprobar que no quedó nada ⇒ `apply_migration`
+  (name `20261013000009_medio_pago_domiciliado`) ⇒ `pg_enum` (8, último
+  DOMICILIADO) ⇒ `get_advisors`. **DEPENDENCIA DURA: ANTES del push del
+  API 0.0.75** (sin ella, 22P02 en TODA la conciliación); justo antes del
+  push, `select 1 from pg_enum … enumlabel = 'DOMICILIADO'` ⇒ 1 fila. Sin
+  palabras destructivas. El cuerpo plpgsql del dry-run se compiló en prod el
+  13-oct-2026 dentro de un bloque que termina en `raise exception`.
 - **PENDIENTES (lote 2 del 13-oct-2026) — `20261013000001_categoria_comisariato.sql`
   y `20261013000002_comisariato_reclasificacion.sql`** (invariante 63,
   Comisariato; NO aplicadas: las aplica el orquestador por el MCP). 000001

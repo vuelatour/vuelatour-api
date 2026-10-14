@@ -1,4 +1,8 @@
-import { MEDIO_PAGO_LABEL, etiquetaMedioPago } from './medio-pago.util';
+import {
+  MEDIO_PAGO_LABEL,
+  MENSAJE_MEDIO_SOLO_OFICINA,
+  etiquetaMedioPago,
+} from './medio-pago.util';
 
 /**
  * Columna PAGO de la hoja "combustible" del balance (11-sep-2026): la
@@ -12,10 +16,13 @@ describe('etiquetaMedioPago', () => {
     expect(etiquetaMedioPago('PERSONAL_PABLO')).toBe('Personal Pablo');
     expect(etiquetaMedioPago('PERSONAL_ALE')).toBe('Personal Ale');
     expect(etiquetaMedioPago('BODEGA')).toBe('Bodega (inventario)');
+    // «Pago domiciliado» (13-oct-2026, invariante 64).
+    expect(etiquetaMedioPago('DOMICILIADO')).toBe('Pago domiciliado');
     // El catálogo completo del panel, sin sobras ni faltantes.
     expect(Object.keys(MEDIO_PAGO_LABEL).sort()).toEqual(
       [
         'BODEGA',
+        'DOMICILIADO',
         'EFECTIVO',
         'PAYWISE',
         'PERSONAL_ALE',
@@ -41,6 +48,13 @@ describe('etiquetaMedioPago', () => {
   it('la terminación se IGNORA en otros medios (solo vive con TARJETA_CORP)', () => {
     expect(etiquetaMedioPago('EFECTIVO', '1234')).toBe('Efectivo');
     expect(etiquetaMedioPago('TRANSFERENCIA', '9999')).toBe('Transferencia');
+    expect(etiquetaMedioPago('DOMICILIADO', '1234')).toBe('Pago domiciliado');
+  });
+
+  it('«Pago domiciliado» solo oficina: texto EXACTO del 400 MEDIO_SOLO_OFICINA', () => {
+    expect(MENSAJE_MEDIO_SOLO_OFICINA).toBe(
+      'El pago domiciliado lo registra la oficina: elige otro medio de pago.',
+    );
   });
 
   it('código desconocido → capitalizado (dato viejo o valor libre)', () => {

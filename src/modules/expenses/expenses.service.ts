@@ -21,6 +21,8 @@ import {
   SEGUNDOS_URL_PUNTUAL,
 } from '../../common/url-firmada.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
+import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
+import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 // Refacción a Inventario/Tienda desde el alta (12-oct-2026, invariante 57):
@@ -166,14 +168,13 @@ function quitarAvisoAvionTramo(
 const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))`;
 
 /**
- * Medios de pago que cruzan con el banco (espejo de `MEDIOS_BANCARIOS` de
- * conciliación): los únicos cuyos gastos pueden traer cargos ligados.
+ * Medios de pago que cruzan con el banco: los únicos cuyos gastos pueden
+ * traer cargos ligados. Se LEEN de la fuente única `MEDIOS_BANCARIOS` de
+ * conciliación (hasta el 13-oct-2026 era una copia a mano; con «Pago
+ * domiciliado», invariante 64, una copia olvidada dejaba al gasto sin
+ * auto-cruce ni aditivos de pago parcial).
  */
-const MEDIOS_PAGO_BANCARIOS: string[] = [
-  'TARJETA_CORP',
-  'TRANSFERENCIA',
-  'PAYWISE',
-];
+const MEDIOS_PAGO_BANCARIOS: readonly string[] = MEDIOS_BANCARIOS;
 
 /** Ventana en días para considerar dos gastos como posible duplicado.
  *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
@@ -1500,6 +1501,22 @@ export class ExpensesService {
       throw new BadRequestException(
         'El mecánico solo puede cargar combustible (GAS).',
       );
+    }
+    // «PAGO DOMICILIADO» SOLO LO REGISTRA LA OFICINA (13-oct-2026,
+    // invariante 64): es un cargo automático a la cuenta (suscripción,
+    // seguro, servicio) que la oficina ve en el estado de cuenta; ningún rol
+    // de campo lo paga. ANTES de tocar la BD (y antes de la regla del
+    // visitante, para que el mensaje sea el mismo en los tres roles). SOLO
+    // en el alta: la app re-manda el medio vigente al editar un gasto que la
+    // oficina ya puso en DOMICILIADO y esa edición no debe rebotar.
+    if (
+      (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE) &&
+      dto.medio_pago === MedioPago.DOMICILIADO
+    ) {
+      throw new BadRequestException({
+        message: MENSAJE_MEDIO_SOLO_OFICINA,
+        error: 'MEDIO_SOLO_OFICINA',
+      });
     }
     // VISITANTE (27-ago): SOLO gastos de visita — la categoría se fija en
     // VISITA sin fricción (la app ni la muestra) y el medio queda acotado a

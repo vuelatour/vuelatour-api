@@ -96,6 +96,8 @@ describe('acoplarTarjetaEnUpdate (PATCH medio↔tarjeta)', () => {
       'PAYWISE',
       'PERSONAL_PABLO',
       'PERSONAL_ALE',
+      // «Pago domiciliado» (13-oct-2026): no lleva tarjeta.
+      'DOMICILIADO',
     ]) {
       expect(
         acoplarTarjetaEnUpdate(
@@ -219,8 +221,8 @@ describe('cruzarMedioConIa (la IA JAMÁS reescribe el medio)', () => {
     ).toEqual(nada);
   });
 
-  it('TRANSFERENCIA / PAYWISE / BODEGA capturados: no se cruzan (lo decide el banco)', () => {
-    for (const medio of ['TRANSFERENCIA', 'PAYWISE', 'BODEGA']) {
+  it('TRANSFERENCIA / PAYWISE / DOMICILIADO / BODEGA capturados: no se cruzan (lo decide el banco)', () => {
+    for (const medio of ['TRANSFERENCIA', 'PAYWISE', 'DOMICILIADO', 'BODEGA']) {
       expect(
         cruzarMedioConIa(
           { medio_pago: medio, tarjeta_terminacion: null },
@@ -295,6 +297,7 @@ describe('etiquetaMedioPago / mensajeCheckGasto', () => {
   it('etiquetas legibles y fallback al código', () => {
     expect(etiquetaMedioPago('TARJETA_CORP')).toBe('Tarjeta corporativa');
     expect(etiquetaMedioPago('PAYWISE')).toBe('PayWise');
+    expect(etiquetaMedioPago('DOMICILIADO')).toBe('Pago domiciliado');
     expect(etiquetaMedioPago('RARO')).toBe('RARO');
     expect(etiquetaMedioPago(null)).toBe('—');
   });

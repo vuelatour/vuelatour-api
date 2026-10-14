@@ -35,7 +35,19 @@ export const MEDIO_PAGO_LABEL: Record<string, string> = {
   PERSONAL_ALE: 'Personal Ale',
   /** Cargo contable de inventario (salida de cardex): nunca toca el banco. */
   BODEGA: 'Bodega (inventario)',
+  /** Cargo automático a la cuenta (suscripciones, seguros, servicios);
+   *  bancario, se concilia como transferencia (13-oct-2026, invariante 64). */
+  DOMICILIADO: 'Pago domiciliado',
 };
+
+/**
+ * «Pago domiciliado» lo registra SOLO la oficina (13-oct-2026, invariante
+ * 64): un PILOTO, MECANICO o VISITANTE que lo manda en el ALTA de un gasto
+ * recibe 400 `MEDIO_SOLO_OFICINA` con este texto (la edición no se bloquea:
+ * la app re-manda el medio vigente).
+ */
+export const MENSAJE_MEDIO_SOLO_OFICINA =
+  'El pago domiciliado lo registra la oficina: elige otro medio de pago.';
 
 /**
  * Etiqueta amable del medio de pago de un gasto, con la terminación de la

@@ -1983,6 +1983,35 @@ describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => 
     ]);
   });
 
+  it('«Pago domiciliado» (13-oct-2026, invariante 64): candidato BANCARIO sin la bandera y el PATCH liga SIN justificación ni notas de vínculo', async () => {
+    const { svc, db, log } = armar(
+      mundoAsur([
+        saesa('g-dom', 212, 315, {
+          fecha_gasto: '2026-09-06',
+          medio_pago: 'DOMICILIADO',
+          categoria: 'SERVICIOS',
+        }),
+      ]),
+    );
+    const c = await svc.gastosCandidatosDeMovimiento('m212', { q: '212' });
+    expect(c.candidatos.map((x) => [x.id, x.no_bancario])).toEqual([
+      ['g-dom', false],
+    ]);
+    const r = (await svc.link('m212', 'g-dom', USER)) as Row;
+    expect(partesDe(db, 'm212').map((p) => p.gasto_id)).toEqual(['g-dom']);
+    expect(gasto(db, 'g-dom')).toMatchObject({
+      conciliado: true,
+      medio_pago: 'DOMICILIADO',
+    });
+    expect(r).not.toHaveProperty('vinculo_no_bancario');
+    expect(r.gastos_estado).toEqual([
+      expect.objectContaining({ gasto_id: 'g-dom', medio_pago: 'DOMICILIADO' }),
+    ]);
+    // Como una transferencia: ninguna línea «Vinculado a gasto en …».
+    expect(updatesDe(log, 'gasto')).toHaveLength(0);
+    expect(updatesDe(log, 'movimiento_bancario')).toHaveLength(0);
+  });
+
   it('con incluir_no_bancarios: bancarios primero, luego efectivo / PERSONAL_* (orden de siempre); BODEGA y conciliados nunca', async () => {
     const { svc, log } = armar(
       mundoAsur([

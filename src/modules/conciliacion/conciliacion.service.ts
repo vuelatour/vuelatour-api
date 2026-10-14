@@ -243,6 +243,7 @@ import {
 import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
 import { ordenArchivoDisponible } from '../../common/orden-archivo-disponible.util';
 import { ordenarComoEstadoDeCuenta } from './orden-estado-cuenta.util';
+import { etiquetaMedioSinBanco } from '../expenses/estado-banco.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -6801,11 +6802,13 @@ export class ConciliacionService {
         unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre ??
           (g.lugar as string | null) ??
           '',
-        g.medio_pago === 'TARJETA_CORP'
-          ? `Tarjeta${g.tarjeta_terminacion ? ` **** ${g.tarjeta_terminacion as string}` : ''}`
-          : g.medio_pago === 'PAYWISE'
-            ? 'PayWise'
-            : 'Transferencia',
+        // Columna «Medio»: fuente única `etiquetaMedioSinBanco` (13-oct-2026,
+        // invariante 64: «Pago domiciliado» ya no sale como «Transferencia»;
+        // los demás textos, byte a byte).
+        etiquetaMedioSinBanco(
+          g.medio_pago as string | null,
+          g.tarjeta_terminacion as string | null,
+        ),
         unwrapOne(g.captura as { nombre?: string } | null)?.nombre ?? '',
         vuelo?.folio != null ? `#${vuelo.folio}` : '',
         this.matriculaDeGasto(

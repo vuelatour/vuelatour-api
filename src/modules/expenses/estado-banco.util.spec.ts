@@ -1,4 +1,9 @@
-import { estadoBancoGasto, etiquetaEstadoBanco } from './estado-banco.util';
+import {
+  estadoBancoGasto,
+  etiquetaEstadoBanco,
+  etiquetaMedioSinBanco,
+} from './estado-banco.util';
+import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 
 describe('estadoBancoGasto (columna Banco, 9-oct-2026)', () => {
   it('conciliado manda sobre el medio (también un efectivo ligado con justificación)', () => {
@@ -28,11 +33,34 @@ describe('estadoBancoGasto (columna Banco, 9-oct-2026)', () => {
   });
 
   it('medio bancario sin cargo = sin conciliar; efectivo/personal/bodega = no aplica', () => {
-    for (const medio of ['TARJETA_CORP', 'TRANSFERENCIA', 'PAYWISE']) {
+    for (const medio of [
+      'TARJETA_CORP',
+      'TRANSFERENCIA',
+      'PAYWISE',
+      // «Pago domiciliado» (13-oct-2026, invariante 64): bancario.
+      'DOMICILIADO',
+    ]) {
       expect(estadoBancoGasto({ conciliado: false, medio_pago: medio })).toBe(
         'SIN_CONCILIAR',
       );
     }
+    // La columna lee la fuente única de conciliación: ningún medio bancario
+    // se queda en «no aplica».
+    for (const medio of MEDIOS_BANCARIOS) {
+      expect(estadoBancoGasto({ conciliado: false, medio_pago: medio })).toBe(
+        'SIN_CONCILIAR',
+      );
+    }
+    expect(
+      estadoBancoGasto({
+        conciliado: false,
+        medio_pago: 'DOMICILIADO',
+        monto_vinculado: 100,
+      }),
+    ).toBe('PARCIAL');
+    expect(
+      estadoBancoGasto({ conciliado: true, medio_pago: 'DOMICILIADO' }),
+    ).toBe('CONCILIADO');
     for (const medio of [
       'EFECTIVO',
       'PERSONAL_PABLO',
@@ -50,6 +78,19 @@ describe('estadoBancoGasto (columna Banco, 9-oct-2026)', () => {
       ).toBe('NO_APLICA');
     }
     expect(estadoBancoGasto({ monto_vinculado: '0' })).toBe('NO_APLICA');
+  });
+
+  it('columna «Medio» del Excel de gastos sin banco: los de siempre byte a byte y «Pago domiciliado»', () => {
+    expect(etiquetaMedioSinBanco('TARJETA_CORP', '1234')).toBe(
+      'Tarjeta **** 1234',
+    );
+    expect(etiquetaMedioSinBanco('TARJETA_CORP', null)).toBe('Tarjeta');
+    expect(etiquetaMedioSinBanco('TARJETA_CORP')).toBe('Tarjeta');
+    expect(etiquetaMedioSinBanco('PAYWISE')).toBe('PayWise');
+    expect(etiquetaMedioSinBanco('TRANSFERENCIA')).toBe('Transferencia');
+    expect(etiquetaMedioSinBanco('DOMICILIADO', '1234')).toBe(
+      'Pago domiciliado',
+    );
   });
 
   it('etiquetas del Excel (vacío cuando no aplica)', () => {

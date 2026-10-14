@@ -132,6 +132,15 @@ export enum MedioPago {
    *  banco" y al pre-cierre de bancarios sin conciliar, como TARJETA_CORP y
    *  TRANSFERENCIA. Caja chica NO lo cuenta (esa solo mira EFECTIVO). */
   PAYWISE = 'PAYWISE',
+  /** «Pago domiciliado» (13-oct-2026, API 0.0.75, migración
+   *  20261013000009, invariante 64): cargo AUTOMÁTICO a la cuenta
+   *  (suscripciones, seguros, servicios). Medio BANCARIO: entra a
+   *  MEDIOS_BANCARIOS (auto-cruce, candidatos sin justificación, gastos sin
+   *  banco, pre-cierre, columna Banco) y se concilia como TRANSFERENCIA (1
+   *  cargo ↔ 1 gasto; parciales como cualquier bancario). Sin tarjeta (CHECK
+   *  `gasto_check`). Solo oficina: PILOTO/MECANICO/VISITANTE ⇒ 400
+   *  `MEDIO_SOLO_OFICINA` en el alta. La IA de tickets no lo sugiere. */
+  DOMICILIADO = 'DOMICILIADO',
 }
 
 export enum TipoCombustible {

@@ -1,0 +1,133 @@
+-- 13-oct-2026 · MEDIO DE PAGO «Pago domiciliado» (DOMICILIADO). API 0.0.75,
+-- invariante 64 del CLAUDE.md del API. (Numeración del lote 2: era la
+-- 20261013000004 en el diseño; esa la usa el CHECK de la comisión del
+-- vendedor del avión.)
+--
+-- PEDIDO DEL CLIENTE (13-oct-2026, 12:16): «a la hora de vincular un gasto…
+-- no viene en método de pago algo que diga Pago domiciliado». En el estado de
+-- cuenta ya hay cargos automáticos reales («STR*AMAZON RET REC Carg Recur.»,
+-- «DLO*STARLINK Carg Recur.», «03 POR COBRANZA DOMICILIADA») que hoy la
+-- oficina captura como tarjeta o transferencia.
+--
+-- QUÉ HACE: agrega el valor `DOMICILIADO` AL FINAL del enum
+-- `public.medio_pago` (hoy 7 valores: EFECTIVO, TARJETA_CORP, PERSONAL_PABLO,
+-- PERSONAL_ALE, TRANSFERENCIA, BODEGA, PAYWISE ⇒ 8). Nada más: sin filas, sin
+-- triggers, sin CHECK — `gasto_check` («tarjeta_terminacion is null or
+-- medio_pago = TARJETA_CORP») ya impide que un domiciliado lleve tarjeta.
+--
+-- REGLAS (las aplica el API 0.0.75; invariante 64):
+--   1. Medio BANCARIO: entra a `MEDIOS_BANCARIOS` (fuente única,
+--      `conciliacion/gastos-candidatos.util`) ⇒ auto-cruce al importar el
+--      estado de cuenta y best-effort al crear/editar, candidato de
+--      «Vincular gasto» SIN justificación, «Gastos sin banco» y su Excel,
+--      pre-cierre `gastos_bancarios_sin_conciliar`, columna «Banco»; se
+--      concilia como una transferencia (1 cargo ↔ 1 gasto; parciales y
+--      lotes como cualquier bancario).
+--   2. Solo OFICINA: PILOTO/MECANICO/VISITANTE ⇒ 400 `MEDIO_SOLO_OFICINA`
+--      en el alta (la edición no se bloquea).
+--   3. Sin tarjeta; la IA de tickets no lo sugiere; etiqueta «Pago
+--      domiciliado» (API, panel y app).
+--
+-- SOLA EN SU ARCHIVO A PROPÓSITO (patrón 20260902000001 / 20260928000001):
+-- un valor nuevo de enum no se puede USAR —ni escribir ni leer con el
+-- literal: 55P04— en la transacción que lo crea.
+--
+-- DEPENDENCIA DURA DEL API 0.0.75 (la más fuerte del lote): el API arma
+-- `.in('medio_pago', MEDIOS_BANCARIOS)` CON el valor nuevo en el auto-cruce
+-- de la importación del estado de cuenta, los candidatos de «Vincular
+-- gasto», «Gastos sin banco» y su Excel, y `.eq('medio_pago','DOMICILIADO')`
+-- en el filtro de la lista ⇒ contra una BD sin el valor: 22P02 ⇒ 500 en
+-- TODA la conciliación, no solo en el valor nuevo. ⇒ ESTA MIGRACIÓN VA ANTES
+-- DEL PUSH DEL API, comprobando `pg_enum` justo antes.
+--
+-- ROLLBACK: no hay; el valor no se retira sin recrear el tipo, y sin filas
+-- es inofensivo (hoy 0 gastos lo usan). Regresar el API a ≤ 0.0.74 solo con
+-- `select count(*) from public.gasto where medio_pago::text = 'DOMICILIADO'`
+-- = 0 (el 0.0.74 listaría esos gastos pero IsEnum rechazaría crearlos o
+-- editarlos y la columna «Banco» los pintaría «—»).
+--
+-- Por MCP se aplica SOLO el CUERPO (apply_migration, name
+-- '20261013000009_medio_pago_domiciliado'). Sin palabras destructivas: el MCP
+-- la acepta.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN (ANTES de aplicar). UNA sentencia por MCP `execute_sql`; el `raise
+-- exception` final revierte todo. Cualquier 'DRYRUN_FALLA …' u otro error =
+-- NO aplicar. Conteo RELATIVO (hoy 7 ⇒ 8). El DDL va ANTES de cualquier
+-- escritura de prueba. Si el MCP rechazara el ADD VALUE dentro del DO, se
+-- repite como `begin; …; rollback;` en una sola llamada (patrón del 28-sep).
+--
+-- do $dry$
+-- declare
+--   v_n0 int; v_n int; v_ult text;
+--   v_usr uuid; v_avion uuid; v_g uuid; v_b int;
+-- begin
+--   -- A) CONTEXTO
+--   if exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--              where n.nspname = 'public' and t.typname = 'medio_pago' and e.enumlabel = 'DOMICILIADO') then
+--     raise exception 'DRYRUN_FALLA A: DOMICILIADO ya existe (¿migración aplicada?)';
+--   end if;
+--   if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--                  where n.nspname = 'public' and t.typname = 'medio_pago' and e.enumlabel = 'PAYWISE') then
+--     raise exception 'DRYRUN_FALLA A: el enum no tiene PAYWISE (¿otro proyecto?)';
+--   end if;
+--   if not exists (select 1 from pg_constraint where conrelid = 'public.gasto'::regclass and conname = 'gasto_check'
+--                  and pg_get_constraintdef(oid) ilike '%TARJETA_CORP%') then
+--     raise exception 'DRYRUN_FALLA A: gasto_check no es el de siempre (tarjeta solo con TARJETA_CORP)';
+--   end if;
+--   select count(*) into v_n0 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'medio_pago';
+--   select u.id into v_usr from public.usuario u where u.rol::text = 'ADMIN' and u.estado::text = 'ACTIVO' order by u.created_at limit 1;
+--   select a.id into v_avion from public.aeronave a order by a.matricula limit 1;
+--   if v_usr is null or v_avion is null then raise exception 'DRYRUN_FALLA A: sin ADMIN activo o sin aeronave'; end if;
+--   raise notice 'okA · % valores (esperado 7)', v_n0;
+--   -- B) CUERPO REAL (pegado TAL CUAL, antes de cualquier escritura)
+--   alter type public.medio_pago add value if not exists 'DOMICILIADO';
+--   -- C1) uno más y AL FINAL por enumsortorder
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'medio_pago';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C1: % valores tras el ADD (esperado %)', v_n, v_n0 + 1; end if;
+--   select e.enumlabel into v_ult from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'medio_pago' order by e.enumsortorder desc limit 1;
+--   if v_ult is distinct from 'DOMICILIADO' then raise exception 'DRYRUN_FALLA C1: el último valor es % (esperado DOMICILIADO)', v_ult; end if;
+--   -- C2) re-ejecutar el cuerpo es no-op (IF NOT EXISTS)
+--   alter type public.medio_pago add value if not exists 'DOMICILIADO';
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'medio_pago';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C2: el cuerpo no es idempotente (% valores)', v_n; end if;
+--   -- C3) ESCRITURA REAL con el tipo ya alterado (los 4 triggers de gasto), con un medio que YA existía
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto, medio_pago, aeronave_id, notas, origen, created_by, updated_by)
+--   values (v_usr, 'SERVICIOS', 1499.00, 'MXN', date '2026-10-13', 'TRANSFERENCIA', v_avion, 'DRYRUN 20261013000009', 'OFICINA', v_usr, v_usr)
+--   returning id into v_g;
+--   update public.gasto set monto = 1500.00, updated_by = v_usr where id = v_g;
+--   select count(*) into v_b from public.gasto_bitacora where gasto_id = v_g;
+--   if v_b <> 2 then raise exception 'DRYRUN_FALLA C3: bitácora = % (esperado INSERT + UPDATE)', v_b; end if;
+--   -- C4) el valor nuevo NO se puede usar antes del COMMIT (55P04): por eso el API sale DESPUÉS
+--   begin
+--     update public.gasto set medio_pago = 'DOMICILIADO', updated_by = v_usr where id = v_g;
+--     raise exception 'DRYRUN_FALLA C4: se escribió el valor nuevo antes del commit';
+--   exception when sqlstate '55P04' then
+--     raise notice 'okC4 · 55P04 al escribir antes del commit';
+--   end;
+--   raise exception 'DRYRUN_OK 20261013000009 · A–C4 (% → % valores, DOMICILIADO al final, gasto_check intacto, idempotente, triggers de gasto intactos, 55P04 antes del commit)', v_n0, v_n0 + 1;
+-- end $dry$;
+--
+-- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada:
+--   select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'medio_pago' and e.enumlabel = 'DOMICILIADO';        ⇒ 0
+--   select count(*) from public.gasto where notas = 'DRYRUN 20261013000009'; ⇒ 0
+--
+-- APLICAR el CUERPO con apply_migration y VERIFICAR:
+--   - 8 valores y el último por enumsortorder es DOMICILIADO;
+--   - select 'DOMICILIADO'::public.medio_pago;  ⇒ sin error;
+--   - select count(*) from public.gasto where medio_pago in
+--     ('TARJETA_CORP','TRANSFERENCIA','PAYWISE','DOMICILIADO') ⇒ sin 22P02;
+--   - get_advisors sin hallazgos nuevos.
+-- JUSTO ANTES DEL PUSH DEL API 0.0.75:
+--   select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'medio_pago' and e.enumlabel = 'DOMICILIADO';  ⇒ 1 fila
+-- SMOKE post-deploy: GET /v1/expenses?medio_pago=DOMICILIADO ⇒ 200 [];
+-- GET /v1/conciliacion/gastos-sin-banco ⇒ 200.
+-- ---------------------------------------------------------------------------
+
+alter type public.medio_pago add value if not exists 'DOMICILIADO';

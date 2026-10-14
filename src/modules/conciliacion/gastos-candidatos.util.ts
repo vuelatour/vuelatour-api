@@ -12,10 +12,19 @@ import { TOLERANCIA_CONCILIACION } from './conciliacion-parcial.util';
 /**
  * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
  * estado de cuenta (PAYWISE entró el 2-sep-2026: sus cargos también aparecen
- * en el estado de cuenta). EFECTIVO sale de caja chica (del cajón), BODEGA es
- * un cargo contable de inventario y los PERSONAL_* llegan al banco después
- * como reintegro, no como el gasto original. Cruzarlos generaba matches
- * falsos.
+ * en el estado de cuenta; DOMICILIADO —«Pago domiciliado»— el 13-oct-2026,
+ * invariante 64: cargo automático a la cuenta, también sale en el estado de
+ * cuenta y se concilia como una transferencia). EFECTIVO sale de caja chica
+ * (del cajón), BODEGA es un cargo contable de inventario y los PERSONAL_*
+ * llegan al banco después como reintegro, no como el gasto original.
+ * Cruzarlos generaba matches falsos.
+ *
+ * ORDEN: los valores nuevos van AL FINAL — el panel
+ * (`conciliacion-no-bancario.test.ts`) lee ESTE arreglo por regex y lo
+ * compara con su espejo `MEDIOS_BANCARIOS_CONCILIACION` con `toEqual`.
+ * Espejos en el API que lo LEEN de aquí: `estado-banco.util` (columna
+ * «Banco»), `expenses.service` (auto-cruce best-effort y aditivos de
+ * `list()`) y el pre-cierre del reparto (`gastos_bancarios_sin_conciliar`).
  *
  * FUENTE ÚNICA del universo de candidatos de conciliación (auto-cruce,
  * «Vincular gasto», gastos sin banco, IA) y de la clasificación de los
@@ -27,6 +36,7 @@ export const MEDIOS_BANCARIOS: readonly string[] = [
   'TARJETA_CORP',
   'TRANSFERENCIA',
   'PAYWISE',
+  'DOMICILIADO',
 ];
 
 /**

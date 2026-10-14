@@ -215,6 +215,18 @@ describe('motivoExclusion — precedencia', () => {
     }
   });
 
+  it('«Pago domiciliado» (13-oct-2026) es del universo: jamás EFECTIVO_U_OTRO_MEDIO', () => {
+    expect(
+      motivoExclusion(g('x', { medio_pago: 'DOMICILIADO' }), CTX),
+    ).toBeNull();
+    expect(
+      motivoExclusion(
+        g('x', { medio_pago: 'DOMICILIADO', conciliado: true }),
+        CTX,
+      ),
+    ).toBe('YA_CONCILIADO');
+  });
+
   it('incluirNoBancarios (6-oct-2026): efectivo / PERSONAL_* ya son del universo; BODEGA y sin medio NO', () => {
     const CON = { ...CTX, incluirNoBancarios: true };
     for (const medio of ['EFECTIVO', 'PERSONAL_PABLO', 'PERSONAL_ALE']) {

@@ -661,3 +661,55 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
     }
   });
 });
+
+/**
+ * «PAGO DOMICILIADO» (13-oct-2026, invariante 64): medio BANCARIO. El
+ * renglón `gastos_bancarios_sin_conciliar` del pre-cierre LEE la fuente
+ * única `MEDIOS_BANCARIOS`: un domiciliado sin cruzar con el banco aparece
+ * (como una transferencia); conciliado, no; efectivo jamás.
+ */
+describe('ProfitSharingService.preCierre — gastos bancarios sin conciliar con «Pago domiciliado»', () => {
+  const gasto = (
+    id: string,
+    medio_pago: string,
+    conciliado: boolean,
+  ): Fila => ({
+    id,
+    vuelo_id: null,
+    aeronave_id: 'av-vgv',
+    escala_id: null,
+    categoria: 'SERVICIOS',
+    monto: 1499,
+    moneda: 'MXN',
+    tc_gasto: null,
+    fecha_gasto: '2026-09-15',
+    estatus_facturacion: 'FACTURADA',
+    medio_pago,
+    conciliado,
+    duplicado_sospechado: false,
+    matricula_ia: null,
+    escala: null,
+    vuelo: null,
+  });
+
+  it('DOMICILIADO sin cruzar ⇒ cuenta; conciliado ⇒ no; EFECTIVO ⇒ nunca', async () => {
+    const { svc } = armar({
+      ...septiembre(),
+      gasto: [
+        gasto('g-dom', 'DOMICILIADO', false),
+        gasto('g-dom-ok', 'DOMICILIADO', true),
+        gasto('g-transf', 'TRANSFERENCIA', false),
+        gasto('g-efe', 'EFECTIVO', false),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = r.items.find(
+      (i) => i.clave === 'gastos_bancarios_sin_conciliar',
+    )!;
+    expect(item).toBeDefined();
+    expect(item.count).toBe(2);
+    expect(item.detalle).toBe(
+      'Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
+    );
+  });
+});
