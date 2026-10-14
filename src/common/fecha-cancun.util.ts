@@ -31,6 +31,25 @@ export function diaCancun(iso: string): string {
 }
 
 /**
+ * Mes calendario COMPLETO de un día de pared YYYY-MM-DD: `{desde:
+ * 'YYYY-MM-01', hasta: 'YYYY-MM-<último>'}` (la misma cuenta del mes
+ * corriente del balance: `Date.UTC(y, mes, 0)`). Es el periodo con que
+ * Conciliación abre el libro de un gasto (13-oct-2026, invariante 72). Una
+ * fecha que no es YYYY-MM-DD o un mes fuera de 1..12 LANZA.
+ */
+export function mesCalendarioDe(dia: string): { desde: string; hasta: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
+  const mes = m ? Number(m[2]) : NaN;
+  if (!m || mes < 1 || mes > 12) throw new Error(`Fecha inválida: ${dia}`);
+  const y = Number(m[1]);
+  const ultimo = new Date(Date.UTC(y, mes, 0)).getUTCDate();
+  return {
+    desde: `${m[1]}-${m[2]}-01`,
+    hasta: `${m[1]}-${m[2]}-${String(ultimo).padStart(2, '0')}`,
+  };
+}
+
+/**
  * Resta meses calendario a una fecha de pared YYYY-MM-DD (sin zona: mediodía
  * UTC). Si el día no existe en el mes destino, JS lo desborda al siguiente
  * (31-mar − 1 mes → 3-mar): aceptable para ventanas "últimos N meses".

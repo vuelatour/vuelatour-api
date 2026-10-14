@@ -7590,6 +7590,110 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       bancarios con y sin la puente) y `expenses.service.spec` (orden con
       `id`).
 
+72. **VÍNCULO GASTO → CELDA DEL BALANCE Y ENLACES DESDE CONCILIACIÓN
+    (13-oct-2026, lote 2 punto 5, API 0.0.75, SIN migración).** Desde
+    Conciliación, «Ver en balance del avión N4142R» / «Ver en balance
+    general» abren el libro en pestaña nueva EN LA CELDA del gasto. Tres
+    piezas, todas ADITIVAS; ningún número, consulta de dinero ni regla de
+    acreditación cambia.
+    - **(i) Metadatos del payload** (`aircraft-balance.service.ts`): cada
+      fila del vuelo lleva `op_vinculos`, `piloto_vinculos` y
+      `otros_vinculos` (`BalanceVinculoGastoPayload {id, rol: 'suma' |
+      'nota' | 'sin_tc', monto_mxn, gasto_mxn?}`) — TODA rama del bucle `for
+      (const g of vGastos)` que empuja una línea de `*_detalle` nacida de un
+      GASTO empuja su vínculo con el MISMO monto (helper local `vincular`):
+      PILOTO/OTROS/OPERACIONES 'suma' con el gasto entero; factura con
+      desglose IA ⇒ op 'suma' con `opParte` y FBO 'suma' con `fboParte`, las
+      dos con `gasto_mxn` (la MISMA factura puede salir en las dos celdas);
+      solo traslados ⇒ op 'nota'; TUAS ⇒ op 'nota' con `gasto_mxn` = su
+      MXN; USD sin ningún T.C. ⇒ 'sin_tc' en la columna de su categoría. El
+      costo del operador externo y el encabezado «Op CUN» NO llevan vínculo
+      (no son gastos). Σ de los 'suma' de una lista == la celda (OPERACIONES
+      menos el costo del operador) ±0.01 por el redondeo de USD convertidos.
+      Las listas van JUSTO después de `otros_detalle` y ANTES de
+      `permiso_afac_mxn` (comisiones.spec congela las últimas llaves). Cada
+      fila de las hojas ledger (`buildHoja`) termina en `gasto_id` (en un
+      parcial del reparto, el del PADRE) + `gasto_parte: 'reparto' |
+      'remanente'` (el remanente lo marca `gastosEmpresaYSueltos` con
+      `es_remanente_reparto`). Metadatos: JAMÁS se suman.
+    - **(ii) La regla «a qué libro y a qué mes»** vive en
+      `common/ubicacion-balance-gasto.util.ts` (`ubicacionBalanceDeGasto`,
+      PURO, nunca lanza), ESPEJO de los libros, con los conjuntos y lectores
+      compartidos en `common/hojas-balance.util.ts` (`embebido`,
+      `vueloEmbebido`, `esVueloExternoSinAvion`, `avionDeGastoEmbebido`,
+      `HOJAS_APARTE_BALANCE`, `PARCIAL_A_INDIRECTOS`, `parcialEntraAlAvion`;
+      se MUDARON del servicio sin cambio de conducta). Reglas en orden: R1
+      PERSONAL_DUENO ⇒ null; R2 las DOS categorías del pago al vendedor ⇒
+      null (restan en COMISIONES o en «otros movimientos», celdas sin
+      vínculos); R3 GAS ⇒ su avión (`avionDelGasto`), eje gasto, combustible
+      en los dos libros; de un externo sin avión ⇒ eje VUELO y solo el
+      general; si no, null; R4 reparto manual (categoría repartible y
+      `parcialEntraAlAvion`) ⇒ eje gasto, los aviones del reparto en «Gastos
+      Indirectos» y en el general «otros gastos» si hay remanente y
+      `gastosEmpresaYSueltos` lo lee (EMPRESA o suelto sin vuelo ni avión),
+      si no «repartidos a aviones» salvo INDIRECTO/NOMINA (sin general); R5
+      EMPRESA ⇒ solo «otros gastos», eje gasto; R6 con vuelo ⇒ el mes del
+      VUELO (día Cancún): externo sin avión ⇒ «reporte horas FLOTA» (PERMISO
+      e INDIRECTO ⇒ null: el general no pinta esas hojas); si no, el avión
+      de `avionDelGasto` — PERMISO ⇒ «permisos» sin general, INDIRECTO ⇒
+      «Gastos Indirectos» (con inventario: refacciones / inventario), el
+      resto (TUAS, COMISARIATO, REFACCION y categorías futuras) ⇒ la fila del
+      vuelo en los dos; un gasto SIN tramo sellado a un avión distinto del
+      del vuelo (también un vuelo aún sin avión) vive en el libro de ese
+      avión SOLO si voló un tramo VIVO (`necesitaTramosVivos` +
+      `aviones_con_tramo_vivo`; si no, null — caso #255); R7 sin vuelo ⇒ el
+      mes del GASTO: TUAS ⇒ null, con avión PERMISO ⇒ «permisos», el resto
+      ⇒ «Gastos Indirectos» (inventario ⇒ refacciones / inventario), sin
+      avión ⇒ «otros gastos»; R8 periodo = `mesCalendarioDe` (nuevo en
+      `fecha-cancun.util`) de la fecha del eje. **Mover una categoría de hoja
+      o de eje en el libro obliga a tocar los dos lados**: la ALARMA DE
+      PARIDAD de `ubicacion-balance-gasto.util.spec` lee
+      `aircraft-balance.service.ts` como texto (sin espacios) y exige sus
+      consultas y reglas (fecha_vuelo, externos, GAS de flota y de externos,
+      sin vuelo del avión, salto PERMISO/INDIRECTO/GAS, `CAT_FUERA_DEL_AVION`,
+      hojas del avión, «otros gastos», reparto por la fecha del padre y los
+      conjuntos importados de `hojas-balance.util` sin copias locales).
+    - **(iii) `balance` en `GET /v1/conciliacion/movimientos`** (en `gasto`
+      1 ↔ 1 y en cada `gastos[]`): `{periodo: {desde, hasta}, eje: 'vuelo' |
+      'gasto', aviones: [{id, matricula}] (por matrícula, null al final),
+      general, hoja_avion, hoja_general}` o null (no vive en ningún libro: sin
+      enlace). Lo pone `anotarUbicacionBalance` con lecturas PROPIAS en lote
+      (`GASTO_UBICACION_COLS` con los embeds por columna, `fetchRepartos`,
+      escalas vivas solo de los que lo necesitan, matrículas cosméticas) —
+      NUNCA en el select principal de la bandeja. Best-effort: si falla la
+      lectura de gastos o de repartos no hay campo (el panel no pinta
+      enlaces); si fallan las escalas, no se verifica; si fallan las
+      matrículas, `matricula: null`. `hoja_general` = la PRIMERA hoja del
+      general donde aparece (informativo).
+    - **(iv) `vinculos_gasto: true`** viaja SOLO en las peticiones del libro
+      en pantalla (spread en `libro()` / `libroGeneral()`): pyservices anota
+      `vinculos` en las celdas y la bandera en la raíz del libro JSON
+      (`LibroVista.vinculos_gasto?`, `LibroVistaCelda.vinculos?`, solo
+      transporte). `payloadAvion`, `payloadGeneral` y los `.xlsx` no
+      cambian.
+    - **(v) Sin enlace en esta ronda** (`balance: null`) y siguiente paso:
+      las dos comisiones del vendedor (la «(avión)» resta en COMISIONES del
+      avión que lo absorbe —inv. 61—: anotar `comisiones_vinculos` y saber
+      quién absorbe), PERMISO en la fila «AFAC · matrícula» de «otros
+      movimientos» (inv. 62: anotar el egreso con los gasto_id de su hoja
+      «permisos»; hoy PERMISO solo enlaza a su avión), TUAS sin vuelo, gas
+      sin avión, PERMISO/INDIRECTO de un externo sin avión, vuelos sin
+      fecha y el hueco #255. FACTURACION (quien concilia) no ve los enlaces
+      porque los libros son ADMIN/ANALISTA: abrirlos es decisión del
+      cliente.
+    - Specs: `fecha-cancun.util.spec` (`mesCalendarioDe` 31/30/28/29 y el
+      cruce de mes a las 22:30 de Cancún), `hojas-balance.util.spec`,
+      `ubicacion-balance-gasto.util.spec` (R1–R8 con los repartos reales,
+      externos, #255, vuelo sin avión, embeds en arreglo, EMPRESA congelada y
+      la alarma de paridad), `aircraft-balance.service.vinculos.spec` (Σ por
+      lista == la celda, nota y sin_tc, operador externo sin vínculo,
+      `gasto_id`/`gasto_parte`, orden de llaves, cada gasto una vez salvo
+      op + FBO) y `conciliacion.service.ubicacion-balance.spec` (eje vuelo y
+      gasto, lote, empresa, reparto, #255 ⇒ null con UNA lectura de escalas
+      vivas, best-effort sin campo, matrícula null, bitácora). Siguen verdes
+      sin tocarse comisiones.spec, empresa.spec, modo.spec, afac-om.spec y
+      lote.spec.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -8320,6 +8424,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **13-oct-2026 — SIN migración** para el vínculo gasto → celda del balance
+  y los enlaces desde Conciliación (lote 2 punto 5, invariante 72): nada se
+  persiste (los vínculos y `balance` se derivan en cada petición de columnas
+  que ya existen: `gasto.categoria/fecha_gasto/monto/vuelo_id/aeronave_id/
+  escala_id/inventario_movimiento_id`, `vuelo.fecha_vuelo/aeronave_id/
+  es_externo`, `escala.aeronave_id/cancelada_at`, `gasto_reparto`). Orden
+  pyservices → API → panel; los tres órdenes son seguros (pyservices
+  previo ignora los ids, API previo no manda `balance`, panel previo no lo
+  lee). Tras el deploy: abrir en pantalla un libro de octubre (debe salir
+  igual) y, en Conciliación, el cargo del gasto 2a3e7a09 (OPERACIONES
+  $1,899.09, #430 de N4142R) debe ofrecer los dos enlaces; si no aparecen,
+  revisar en el log el warn «Conciliación sin enlaces al balance».
 
 - **13-oct-2026 — SIN migración** para la conciliación al revés (lote 2,
   invariante 71): solo lecturas de objetos que ya existen en prod (la
@@ -9477,6 +9594,14 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Hueco del libro (13-oct-2026, invariante 72)**: el gasto 12f38801
+  (OPERACIONES $283.15, vuelo #255 de XA-VGV, sellado a N4142R SIN tramo,
+  conciliado) no cuenta en NINGÚN balance: el libro de XA-VGV lo filtra por
+  `avionDelGasto` (= N4142R) y el de N4142R no contiene el vuelo (sin tramo
+  vivo suyo). Conciliación le da `balance: null` (sin enlace). Decide el
+  cliente: corregir el avión del gasto o que el pre-cierre lo grite;
+  verificar además el reparto y el Libro Dinero de ese mes.
 
 - **Conciliación al revés (13-oct-2026, invariante 71)**: (a)
   `?conciliado=false` (filtro «Sin conciliar» de Gastos) también devuelve

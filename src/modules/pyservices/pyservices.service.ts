@@ -701,6 +701,23 @@ export interface BalanceAvionCobroPayload {
   neto_mxn?: number | null;
 }
 
+/**
+ * Un gasto que COMPONE una celda de costos de la fila del vuelo
+ * (OPERACIONES, PILOTO u OTROS) — 13-oct-2026, API 0.0.75, invariante 72
+ * («abrir el balance en la celda del gasto» desde Conciliación). METADATO:
+ * jamás se suma. `monto_mxn` = lo que ESA celda suma del gasto (la parte
+ * op/FBO del desglose IA, o el gasto entero); null con rol 'nota' (TUA o
+ * extensión de horario: solo nota) o 'sin_tc' (USD sin T.C.: aún no suma).
+ * `gasto_mxn` = el gasto completo, SOLO cuando la celda suma una parte o es
+ * nota con monto conocido.
+ */
+export interface BalanceVinculoGastoPayload {
+  id: string;
+  rol: 'suma' | 'nota' | 'sin_tc';
+  monto_mxn: number | null;
+  gasto_mxn?: number | null;
+}
+
 export interface BalanceAvionVueloPayload {
   /** Balance GENERAL: la fila se tiñe con el color del avión. */
   avion_color?: string | null;
@@ -851,6 +868,16 @@ export interface BalanceAvionVueloPayload {
   op_detalle?: string[];
   piloto_detalle?: string[];
   otros_detalle?: string[];
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.75, invariante 72): los gastos de cada
+   * celda, en el orden de `*_detalle` pero NO alineados con él (la nota trae
+   * además «Op CUN $x» y el costo del operador externo, que no son gastos).
+   * Siempre presentes (vacíos si no hay). En el objeto de la fila van ANTES
+   * de `permiso_afac_mxn` (comisiones.spec congela las últimas llaves).
+   */
+  op_vinculos?: BalanceVinculoGastoPayload[];
+  piloto_vinculos?: BalanceVinculoGastoPayload[];
+  otros_vinculos?: BalanceVinculoGastoPayload[];
   // Bloque INDICADORES USD e IVA
   costo_usd: number | null;
   costo_usd_siva: number | null;
@@ -1085,6 +1112,14 @@ export interface BalanceAvionGastoFilaPayload {
    *  del gasto). pyservices pinta GANANCIA = venta − costo. */
   costo_mxn?: number | null;
   venta_mxn?: number | null;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 72): el gasto de la fila
+   * (en un parcial del reparto manual, el del gasto PADRE). Metadato para
+   * marcar la celda en la vista en pantalla; jamás se suma.
+   */
+  gasto_id?: string | null;
+  /** ADITIVO (invariante 72): la fila es la parte de un reparto manual o su remanente. */
+  gasto_parte?: 'reparto' | 'remanente';
 }
 
 export interface BalanceAvionHojaGastosPayload {
@@ -1437,6 +1472,12 @@ export interface BalanceGeneralPayload {
   generado: string;
   periodo_desde: string;
   periodo_hasta: string;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 72): solo la petición del
+   * LIBRO EN PANTALLA (la agrega `libroGeneral()`); el .xlsx no la lleva.
+   * pyservices marca las celdas de los gastos (`vinculos`).
+   */
+  vinculos_gasto?: true;
   resumen: BalanceGeneralResumenFilaPayload[];
   resumen_totales: BalanceGeneralResumenFilaPayload;
   consolidado: BalanceAvionPayload;
@@ -1591,6 +1632,11 @@ export interface BalanceAvionPayload {
   generado: string;
   matricula: string;
   modelo: string | null;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 72): solo la petición del
+   * LIBRO EN PANTALLA (la agrega `libro()`); el .xlsx no la lleva.
+   */
+  vinculos_gasto?: true;
   /** Color del avión (aeronave.color_calendario) — bloques del general. */
   avion_color?: string | null;
   periodo_desde: string;

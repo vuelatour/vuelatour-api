@@ -3,6 +3,7 @@ import {
   diasEntreDiasCancun,
   fechaHoraCancun,
   hoyCancun,
+  mesCalendarioDe,
   moverDiasHoraParedCancun,
   restarMeses,
   fechaCortaCancun,
@@ -170,5 +171,39 @@ describe('moverDiasHoraParedCancun', () => {
     expect(() => moverDiasHoraParedCancun('2026-10-10T14:00:00Z', 1.5)).toThrow(
       /Días inválidos/,
     );
+  });
+});
+
+describe('mesCalendarioDe (mes del libro de un gasto, 13-oct-2026)', () => {
+  it('mes completo: 31, 30, 28 y 29 (bisiesto)', () => {
+    expect(mesCalendarioDe('2026-10-10')).toEqual({
+      desde: '2026-10-01',
+      hasta: '2026-10-31',
+    });
+    expect(mesCalendarioDe('2026-09-15')).toEqual({
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+    });
+    expect(mesCalendarioDe('2026-02-10')).toEqual({
+      desde: '2026-02-01',
+      hasta: '2026-02-28',
+    });
+    expect(mesCalendarioDe('2028-02-10')).toEqual({
+      desde: '2028-02-01',
+      hasta: '2028-02-29',
+    });
+  });
+
+  it('una fecha inválida lanza', () => {
+    for (const x of ['2026-13-01', '2026-00-10', '10/10/2026', '', 'x']) {
+      expect(() => mesCalendarioDe(x)).toThrow('Fecha inválida');
+    }
+  });
+
+  it('con diaCancun: las 22:30 del 30-sep en Cancún son SEPTIEMBRE aunque en UTC ya sea octubre', () => {
+    expect(mesCalendarioDe(diaCancun('2026-10-01T03:30:00Z'))).toEqual({
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+    });
   });
 });

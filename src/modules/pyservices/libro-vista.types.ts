@@ -31,6 +31,25 @@ export interface LibroVistaEstilo {
   nf?: string;
 }
 
+/**
+ * Vínculo celda → gasto (13-oct-2026, invariante 72): solo transporte (el
+ * API no lee celdas). `rol`: 'fila' = la celda es el MONTO de la fila de ese
+ * gasto; 'suma' = la celda lo suma junto con otros; 'nota' = solo va en la
+ * nota (TUA o extensión de horario); 'sin_tc' = USD sin T.C. que aún no suma.
+ */
+export interface LibroVistaVinculo {
+  tipo: 'gasto';
+  id: string;
+  rol: 'fila' | 'suma' | 'nota' | 'sin_tc';
+  monto_mxn?: number | null;
+  gasto_mxn?: number | null;
+  parte?: 'reparto' | 'remanente';
+  /** Clave del vuelo de la fila (hoja maestra). */
+  fila?: string;
+  /** Encabezado de la columna, sin salto de línea. */
+  columna?: string;
+}
+
 export interface LibroVistaCelda {
   r: number;
   c: number;
@@ -46,6 +65,8 @@ export interface LibroVistaCelda {
   n?: string;
   /** Fase 2 (edición): registro del API al que pertenece la celda. */
   vinculo?: Record<string, unknown>;
+  /** Gastos que componen la celda (invariante 72; solo con `vinculos_gasto`). */
+  vinculos?: LibroVistaVinculo[];
 }
 
 export interface LibroVistaHoja {
@@ -76,4 +97,6 @@ export interface LibroVista {
   alto_fila_default: number;
   estilos: LibroVistaEstilo[];
   hojas: LibroVistaHoja[];
+  /** true = este libro marca las celdas de los gastos (invariante 72). */
+  vinculos_gasto?: boolean;
 }

@@ -73,6 +73,17 @@ import {
   claveOtrosMovimientos,
 } from '../../common/clave-cliente.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+// Conjuntos y lectores COMPARTIDOS con el espejo de Conciliación
+// (`ubicacion-balance-gasto.util`, 13-oct-2026, invariante 72).
+import {
+  avionDeGastoEmbebido,
+  embebido,
+  esVueloExternoSinAvion,
+  HOJAS_APARTE_BALANCE as HOJAS_APARTE,
+  PARCIAL_A_INDIRECTOS,
+  parcialEntraAlAvion,
+  vueloEmbebido,
+} from '../../common/hojas-balance.util';
 import {
   cobradoParteAvion,
   cobradoParteVuelatour,
@@ -96,6 +107,7 @@ import {
   type BalanceAvionCobroPayload,
   type BalanceAvionGastoFilaPayload,
   type BalanceAvionHojaGastosPayload,
+  type BalanceVinculoGastoPayload,
   type BalanceAvionPayload,
   type BalanceGeneralPayload,
   type BalanceAvionVueloPayload,
@@ -381,6 +393,12 @@ interface GastoRow {
   /** Clon parcial del reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
   /**
+   * Remanente del reparto manual en «otros gastos» del general
+   * (`gastosEmpresaYSueltos`, 13-oct-2026, invariante 72): solo marca la
+   * fila (`gasto_parte: 'remanente'`); el monto ya es el remanente.
+   */
+  es_remanente_reparto?: boolean;
+  /**
    * Referencia que `buildHoja` AGREGA al detalle de la fila (11-sep-2026):
    * un gasto de categoría de empresa con vuelo vive en la hoja "otros
    * gastos" del general y ahí el vuelo se cita como "· vuelo #123" — el
@@ -400,12 +418,6 @@ interface GastoRow {
     | { aeronave_id?: string | null; es_externo?: boolean | null }
     | { aeronave_id?: string | null; es_externo?: boolean | null }[]
     | null;
-}
-
-/** Fila embebida (objeto o [objeto]) de PostgREST → objeto o null. */
-function embebido<T extends object>(raw: T | T[] | null | undefined): T | null {
-  const v: unknown = Array.isArray(raw) ? raw[0] : raw;
-  return v && typeof v === 'object' ? (v as T) : null;
 }
 
 /** Etiqueta legible de la fuente del TC oficial (para celdas y avisos). */
@@ -468,47 +480,6 @@ function round2(x: number): number {
 
 function r2(x: number | null): number | null {
   return x == null ? null : round2(x);
-}
-
-/** Fila embebida `vuelo:vuelo_id(…)` de un gasto (PostgREST: objeto o [objeto]). */
-function vueloEmbebido(
-  g: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const raw: unknown = g.vuelo;
-  const v: unknown = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
-  return v && typeof v === 'object' ? (v as Record<string, unknown>) : null;
-}
-
-/**
- * Vuelo EXTERNO sin avión de referencia: su dinero (gastos, GAS sin avión
- * sellado, costo del operador) vive en el libro EXTERNOS del mes del vuelo —
- * NO es "sin avión" para los avisos de flota ni para el pre-cierre.
- */
-function esVueloExternoSinAvion(v: Record<string, unknown> | null): boolean {
-  return v != null && v.es_externo === true && v.aeronave_id == null;
-}
-
-/**
- * Avión de un gasto leído con `escala:escala_id(aeronave_id)` y
- * `vuelo:vuelo_id(aeronave_id)` embebidos — la MISMA fuente única
- * `avionDelGasto` (escala → gasto → vuelo, con herencia) sin necesitar el
- * mapa de escalas del libro. Para avisos y filas sueltas.
- */
-function avionDeGastoEmbebido(g: Record<string, unknown>): string | null {
-  const esc = embebido(
-    g.escala as { aeronave_id?: string | null } | null | undefined,
-  );
-  const mapa = new Map<string, { aeronave_id?: string | null }>();
-  if (typeof g.escala_id === 'string' && esc) mapa.set(g.escala_id, esc);
-  const vuelo = vueloEmbebido(g);
-  return avionDelGasto(
-    {
-      escala_id: (g.escala_id as string | null) ?? null,
-      aeronave_id: (g.aeronave_id as string | null) ?? null,
-    },
-    mapa,
-    (vuelo?.aeronave_id as string | null) ?? null,
-  );
 }
 
 /** "$1,234.00 MXN + $56.00 USD" — resumen por moneda para los avisos. */
@@ -744,7 +715,12 @@ export class AircraftBalanceService {
       desde: d,
       hasta: h,
     } = await this.payloadAvion(aircraftId, desde, hasta);
-    const libro = await this.pyservices.generateBalanceAvionLibro(payload);
+    // Solo la VISTA EN PANTALLA pide los vínculos gasto → celda (13-oct-2026,
+    // invariante 72): el .xlsx (`xlsx()`) manda el payload de siempre.
+    const libro = await this.pyservices.generateBalanceAvionLibro({
+      ...payload,
+      vinculos_gasto: true,
+    });
     return { libro, matricula: payload.matricula, desde: d, hasta: h };
   }
 
@@ -838,7 +814,11 @@ export class AircraftBalanceService {
       desde: d,
       hasta: h,
     } = await this.payloadGeneral(desde, hasta, modo);
-    const libro = await this.pyservices.generateBalanceGeneralLibro(payload);
+    // Solo la vista en pantalla (invariante 72); el .xlsx no cambia.
+    const libro = await this.pyservices.generateBalanceGeneralLibro({
+      ...payload,
+      vinculos_gasto: true,
+    });
     return { libro, desde: d, hasta: h, modo };
   }
 
@@ -2113,8 +2093,9 @@ export class AircraftBalanceService {
         if (!padre) return false;
         // Gasto SIN vuelo: el caso de siempre. CON vuelo: solo las
         // categorías de EMPRESA (11-sep-2026) — las demás ya restan en la
-        // fila del vuelo o en las hojas por `gastosVueloDelAvion`.
-        return padre.vuelo_id == null || CAT_EMPRESA.has(padre.categoria);
+        // fila del vuelo o en las hojas por `gastosVueloDelAvion`. Regla
+        // ÚNICA `parcialEntraAlAvion` (hojas-balance.util, invariante 72).
+        return parcialEntraAlAvion(padre);
       })
       .map((r) => {
         const padre = (Array.isArray(r.gasto)
@@ -2839,6 +2820,36 @@ export class AircraftBalanceService {
       const opDetalle: string[] = [];
       const pilotoDetalle: string[] = [];
       const otrosDetalle: string[] = [];
+      // VÍNCULOS gasto → celda (13-oct-2026, API 0.0.75, invariante 72):
+      // TODA rama de abajo que empuja una línea de *Detalle nacida de un
+      // GASTO empuja su vínculo con el MISMO monto. TUA y traslados van
+      // como 'nota' (no suman); un USD sin T.C. como 'sin_tc'. El costo del
+      // operador externo y el encabezado «Op CUN» NO llevan vínculo (no son
+      // gastos). Metadatos: jamás se suman.
+      const opVinculos: BalanceVinculoGastoPayload[] = [];
+      const pilotoVinculos: BalanceVinculoGastoPayload[] = [];
+      const otrosVinculos: BalanceVinculoGastoPayload[] = [];
+      const vincular = (
+        lista: BalanceVinculoGastoPayload[],
+        g: GastoRow,
+        rol: BalanceVinculoGastoPayload['rol'],
+        montoMxn: number | null,
+        gastoMxn?: number | null,
+      ): void => {
+        if (!g.id) return;
+        const v: BalanceVinculoGastoPayload = {
+          id: g.id,
+          rol,
+          monto_mxn: montoMxn == null ? null : round2(montoMxn),
+        };
+        if (
+          gastoMxn != null &&
+          (montoMxn == null || Math.abs(gastoMxn - montoMxn) >= 0.005)
+        ) {
+          v.gasto_mxn = round2(gastoMxn);
+        }
+        lista.push(v);
+      };
       const fmtMonto = (n: number) =>
         round2(n).toLocaleString('es-MX', {
           minimumFractionDigits: 2,
@@ -2923,6 +2934,7 @@ export class AircraftBalanceService {
                 : `TUA $${fmtMonto(num(g.monto) ?? 0)} ${g.moneda ?? 'USD'} sin TC**`,
             ),
           );
+          vincular(opVinculos, g, 'nota', null, mxnTua);
           if (mxnTua != null) {
             tuaPagadoMxn = (tuaPagadoMxn ?? 0) + mxnTua;
           } else {
@@ -2938,6 +2950,17 @@ export class AircraftBalanceService {
         if (mxn == null) {
           usdSinTc += 1;
           usdSinTcMonto += num(g.monto) ?? 0;
+          // Aún no suma: el vínculo dice en qué columna caerá con su T.C.
+          vincular(
+            CAT_PILOTO.has(g.categoria)
+              ? pilotoVinculos
+              : CAT_OTROS.has(g.categoria)
+                ? otrosVinculos
+                : opVinculos,
+            g,
+            'sin_tc',
+            null,
+          );
           continue;
         }
         // "(efectivo)" en la nota es informativo: NO cambia la columna.
@@ -3001,6 +3024,7 @@ export class AircraftBalanceService {
         if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
           pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
+          vincular(pilotoVinculos, g, 'suma', mxn);
         } else {
           // OPERACIONES, ATERRIZAJE, REFACCION, SERVICIOS, FBO, COMISARIATO
           // y cualquier categoría futura no mapeada (FIJO/OTRO ya no llegan:
@@ -3050,9 +3074,11 @@ export class AircraftBalanceService {
             if (sep.opParte > 0) {
               sumarOp(g, sep.opParte);
               opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
+              vincular(opVinculos, g, 'suma', sep.opParte, mxn);
             }
             if (sep.fboParte > 0) {
               otrosMxn = (otrosMxn ?? 0) + sep.fboParte;
+              vincular(otrosVinculos, g, 'suma', sep.fboParte, mxn);
               otrosDetalle.push(
                 lineaDetalle(
                   g,
@@ -3077,12 +3103,14 @@ export class AircraftBalanceService {
             // el dinero no desaparece del vistazo.
             if (sep.opParte <= 0 && sep.fboParte <= 0) {
               opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
+              vincular(opVinculos, g, 'nota', null, mxn);
             }
           } else if (CAT_OTROS.has(g.categoria)) {
             // OTROS = FBO sin desglose IA reconocible + COMISARIATO
             // (13-oct-2026, invariante 63): entero, con su línea en
             // `otros_detalle` («Comisariato · <proveedor/nota> — $X»).
             otrosMxn = (otrosMxn ?? 0) + mxn;
+            vincular(otrosVinculos, g, 'suma', mxn);
             otrosDetalle.push(
               tuaAnulada
                 ? lineaDetalle(
@@ -3095,6 +3123,7 @@ export class AircraftBalanceService {
             );
           } else {
             sumarOp(g, mxn);
+            vincular(opVinculos, g, 'suma', mxn);
             opDetalle.push(
               tuaAnulada
                 ? lineaDetalle(
@@ -3928,6 +3957,11 @@ export class AircraftBalanceService {
         op_detalle: opDetalle,
         piloto_detalle: pilotoDetalle,
         otros_detalle: otrosDetalle,
+        // Vínculos gasto → celda (invariante 72): ANTES de
+        // `permiso_afac_mxn` (comisiones.spec congela las últimas llaves).
+        op_vinculos: opVinculos,
+        piloto_vinculos: pilotoVinculos,
+        otros_vinculos: otrosVinculos,
         permiso_afac_mxn: X,
         // Tarifa del avión en CADA fila (12-oct-2026, invariante 53): la
         // hoja de la flota escribe PERMISO AFAC como fórmula por fila.
@@ -4178,14 +4212,15 @@ export class AircraftBalanceService {
               g.vuelo_id ? (avionPorVuelo.get(g.vuelo_id) ?? null) : null,
             ) === aircraftId,
         );
-    // Categorías con destino propio (o sin destino: TUAS).
-    const HOJAS_APARTE = new Set(['GAS', 'PERMISO', 'TUAS']);
-    // Parciales que se buscan por su categoría (excepción 29-ago): van a la
+    // Categorías con destino propio (o sin destino: TUAS) = `HOJAS_APARTE`
+    // y parciales que se buscan por su categoría (excepción 29-ago: van a la
     // lista `gastos_indirectos` junto a los directos — espejo en el Libro
-    // Dinero (dinero-report.acreditar). Desde el 2-sep-2026 el individual
-    // pinta ambas listas en la misma pestaña "Gastos Indirectos"; la
-    // distinción sigue importando para "repartidos a aviones" del general.
-    const PARCIAL_A_INDIRECTOS = new Set(['INDIRECTO', 'NOMINA']);
+    // Dinero, dinero-report.acreditar) = `PARCIAL_A_INDIRECTOS`: los dos
+    // viven en `common/hojas-balance.util.ts` (13-oct-2026, invariante 72),
+    // compartidos con el espejo `ubicacion-balance-gasto.util`. Desde el
+    // 2-sep-2026 el individual pinta ambas listas en la misma pestaña
+    // "Gastos Indirectos"; la distinción sigue importando para "repartidos
+    // a aviones" del general.
     const filasIndirectosTodas = [
       ...gastosAvion.filter(
         (g) =>
@@ -5018,6 +5053,7 @@ export class AircraftBalanceService {
         empresa.push({
           ...fila,
           monto: remanente,
+          es_remanente_reparto: true,
           notas: [
             nota || null,
             `remanente de reparto: $${fmt(remanente)} de $${fmt(
@@ -6472,6 +6508,15 @@ export class AircraftBalanceService {
           // ADITIVO (13-oct-2026, invariante 59): SOLO con la opción — sin
           // ella ni la llave (payload byte-idéntico de las demás hojas).
           ...(opciones.tcPorFila ? { tc_aplicado: tcAplicado } : {}),
+          // ADITIVOS (13-oct-2026, API 0.0.75, invariante 72): el gasto de
+          // la fila (en un parcial del reparto, el PADRE) para marcar la
+          // celda en la vista en pantalla. Metadato: jamás se suma.
+          gasto_id: g.id ?? null,
+          ...(g.es_reparto_parcial
+            ? { gasto_parte: 'reparto' as const }
+            : g.es_remanente_reparto
+              ? { gasto_parte: 'remanente' as const }
+              : {}),
         };
       });
     const totalMxn = round2(
