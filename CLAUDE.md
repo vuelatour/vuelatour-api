@@ -2193,6 +2193,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       detalle y la app no usan. Nombre: «Reposicion caja <responsable>
       <YYYY-MM-DD>.xlsx» / «Por reponer caja <responsable> <hoy>.xlsx»
       (ASCII + `filename*`).
+    - **Caja MADRE (invariante 83)**: el detalle trae `cajas_fondeadas`
+      (por reponer de cada hija = última fila de SU libro, misma fuente) y
+      `repuesto_a` en los espejos; la reposición a una hija se registra con
+      el POST de movimientos de la HIJA (el espejo sale solo).
 
 27. **FACTURAS EMITIDAS (registro manual), «NECESITO FACTURA» y COMPROBANTE
     DEL COBRO (24-sep-2026, API 0.0.32, migración `20260924000003` APLICADA
@@ -9089,6 +9093,71 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       otra moneda, lectura caída ⇒ sin la llave y lo demás idéntico, sin
       gastos ⇒ cero lecturas). `conciliacion.service.ubicacion-balance.spec`
       sigue verde sin tocarse.
+
+83. **CAJA CHICA MADRE: A QUIÉN SE REPUSO Y CAJAS QUE FONDEA (15-oct-2026,
+    sin migración ni ruta nueva).** Pedidos del cliente sobre la caja de
+    Mary Cruz (fondea a Gregorio Jurado, Jimmy Chi, Nelson Hau, Luis
+    Cáceres, Itzi, Alexander E. Saab…): «que diga a quien le repuso en el
+    movimiento» (el renglón «Reintegro a dirección · Espejo automático de la
+    reposición en la caja vinculada» no decía a quién: el panel pinta
+    `descripcion = notas ?? referencia` y la referencia «Fondeo a <nombre>»
+    quedaba tapada) y «que pueda seleccionar a quien le va a reponer el
+    fondo». Vínculo = `caja_chica_fondo.fondo_origen_id` (hija → madre, 20-ago-2026);
+    espejo = `caja_chica_movimiento.espejo_de_id` → la REPOSICIÓN de la hija.
+    Todo ADITIVO en `getFondoDetail` (`GET /v1/caja-chica/fondos/:id`,
+    LECTURA); la app y el panel viejo ignoran las llaves nuevas.
+    - **`repuesto_a: {fondo_id, usuario_id, nombre} | null`** en cada entrada
+      del `historial` con `origen: 'caja'` cuyo movimiento es ESPEJO (como
+      ÚLTIMA llave; las demás entradas no la llevan): la caja de la
+      reposición que originó el espejo y su dueño con el nombre VIVO
+      (`usuario.nombre`, no el texto congelado de la referencia). null = la
+      reposición o su caja no volvieron en la lectura. `descripcion` no
+      cambia. Lectura `repuestoADeEspejos`: DOS consultas en lote
+      (movimientos de origen `id, fondo_id` → cajas con dueño), ≤ 150 ids por
+      `in` (`LOTE_ESPEJOS`), cero consultas sin espejos. BEST-EFFORT: si una
+      falla, NINGUNA entrada lleva la llave (warn «Caja chica sin «a quién se
+      repuso» en los espejos: …»); nunca lanza ni toca el libro.
+    - **`cajas_fondeadas: [{fondo_id, usuario_id, nombre, moneda, activo,
+      por_reponer, ultima_reposicion: {fecha, monto} | null}] | null`**
+      (última llave del detalle): las cajas ACTIVAS con `fondo_origen_id` =
+      este fondo, ordenadas por nombre (`localeCompare` es-MX). `por_reponer`
+      = `por_reponer` de la ÚLTIMA fila del libro de cada hija
+      (`cargarLibro` → `historialConSaldo` → `porReponerCaja`; libro vacío ⇒
+      0) — la MISMA cifra que la tarjeta «Por reponer» de su detalle
+      (`porReponerDeFondo` del panel lee `historial[0].por_reponer`) y que su
+      Excel de lo pendiente (`tramoDeReposicion(…, null).por_reponer_antes`);
+      cero fórmulas nuevas. `ultima_reposicion` con `ultimaReposicion` (la de
+      la lista). Libros en paralelo con tope `TOPE_LIBROS_HIJAS` = 4
+      (`mapConTope`). `[]` = no fondea a nadie; **null = cualquier lectura
+      cayó** (la de hijas o el libro de UNA hija; warn «Caja chica sin «cajas
+      que fondea»: …») — jamás un `[]` falso que diga «no fondea». Corre en
+      paralelo con `balance` (82) y `repuesto_a`; el libro de la madre, sus
+      saldos y su orden no cambian.
+    - **Reponer a una hija desde la madre = la ruta de SIEMPRE**: `POST
+      /v1/caja-chica/fondos/:hijaId/movimientos` con `{tipo: 'REPOSICION',
+      monto, fecha?, autorizado_por?, referencia?, notas?}` (GESTION = ADMIN,
+      FACTURACION; el mismo rol que en la madre, no hace falta otra
+      validación). Ya responde la fila creada (`MOV_COLS`, con `id`) — de
+      ahí el panel baja `GET /v1/caja-chica/movimientos/:id/reposicion.xlsx`
+      — y `insertarEspejo` escribe solo el REINTEGRO espejo en la madre
+      (referencia «Fondeo a <nombre>»; si falla, la reposición se revierte).
+      NO hay ruta nueva ni se duplica esa regla. No existe GET de un
+      movimiento suelto: `createMovimiento`/`updateMovimiento` devuelven la
+      fila cruda (con `espejo_de_id`) y un espejo no se edita (409).
+    - **Filtro Desde/Hasta del historial**: lo hace el panel en el navegador
+      sobre el historial COMPLETO (el saldo corrido es del libro entero);
+      el API no cambió para eso.
+    - Specs: `caja-chica.service.fondeo.spec` (BD en memoria: nombre VIVO
+      vs referencia, origen perdido ⇒ null, solo espejos con la llave y
+      última, cero lecturas en la hija, DOS lecturas en lote sin repetidos,
+      163 orígenes ⇒ 150 + 13, cada lectura caída ⇒ sin la llave con el
+      resto idéntico; hijas activas de ESTA madre ordenadas, acumulada con
+      arrastre 250, clásica nominal 700 sin el gasto USD, libro vacío 0,
+      paridad con la tarjeta de cada hija, no-madre ⇒ [], hijas o un libro
+      caído ⇒ null, tope 4 con 12 hijas; POST de la hija ⇒ fila con id,
+      espejo «Fondeo a Gregorio Jurado» en la madre con `repuesto_a` y por
+      reponer 0). `caja-chica.service.spec` y `.balance.spec` siguen verdes
+      sin tocarse.
 
 ## Convenciones NestJS
 

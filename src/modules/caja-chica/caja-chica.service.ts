@@ -98,6 +98,60 @@ const GASTO_XLSX_COLS =
 /** Ids por consulta `.in(...)` (la URL de PostgREST no crece sin tope). */
 const LOTE_IDS = 200;
 
+/**
+ * Ids por `.in(...)` de las lecturas de «a quién se repuso» (invariante 83):
+ * uuids de 36 caracteres ⇒ ≤ 150 por consulta mantiene la URL corta.
+ */
+const LOTE_ESPEJOS = 150;
+
+/** Libros de cajas hijas que se cargan a la vez (invariante 83). */
+const TOPE_LIBROS_HIJAS = 4;
+
+/**
+ * Caja (y su dueño, nombre VIVO) de la REPOSICIÓN que originó un espejo
+ * (invariante 83): el renglón «Reintegro a dirección» de la caja madre dice
+ * a quién se le repuso.
+ */
+export type RepuestoA = {
+  fondo_id: string;
+  usuario_id: string;
+  nombre: string | null;
+};
+
+/**
+ * Una caja que ESTA caja fondea (`fondo_origen_id` = esta), con lo que tiene
+ * por reponer según la MISMA fuente que su tarjeta y su Excel (invariante 83).
+ */
+export type CajaFondeada = {
+  fondo_id: string;
+  usuario_id: string;
+  nombre: string | null;
+  moneda: string;
+  activo: boolean;
+  por_reponer: number;
+  ultima_reposicion: { fecha: string; monto: number } | null;
+};
+
+/** `fn` sobre cada elemento con a lo más `tope` promesas vivas; mismo orden. */
+async function mapConTope<T, R>(
+  items: T[],
+  tope: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let siguiente = 0;
+  const trabajador = async () => {
+    while (siguiente < items.length) {
+      const i = siguiente++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(tope, items.length) }, trabajador),
+  );
+  return out;
+}
+
 /** PostgREST devuelve el embed como objeto o arreglo según la relación. */
 function unwrapEmbed<T>(v: unknown): T | null {
   const x: unknown = Array.isArray(v) ? (v as unknown[])[0] : v;
@@ -400,9 +454,13 @@ export class CajaChicaService {
     const { movs, efectivo, historial } = await this.cargarLibro(fondo);
     const ultimo = historial[historial.length - 1];
     const esAcumulada = fondo.es_acumulada === true;
-    const balances = await this.balancesDeGastos(
-      historial.filter((e) => e.origen === 'gasto').map((e) => e.id),
-    );
+    const [balances, repuestoA, cajasFondeadas] = await Promise.all([
+      this.balancesDeGastos(
+        historial.filter((e) => e.origen === 'gasto').map((e) => e.id),
+      ),
+      this.repuestoADeEspejos(movs),
+      this.cajasFondeadas(fondo.id),
+    ]);
 
     return {
       ...fondo,
@@ -436,10 +494,134 @@ export class CajaChicaService {
           ...(e.origen === 'gasto' && balances?.has(e.id)
             ? { balance: balances.get(e.id) ?? null }
             : {}),
+          // ADITIVO (15-oct-2026, invariante 83), solo en los ESPEJOS (caja
+          // madre): a quién se le repuso. Sin la llave = no es espejo o la
+          // lectura cayó; null = la reposición/caja de origen ya no se leyó.
+          ...(e.origen === 'caja' && repuestoA?.has(e.id)
+            ? { repuesto_a: repuestoA.get(e.id) ?? null }
+            : {}),
         }))
         .reverse(),
       ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
+      // ADITIVO (15-oct-2026, invariante 83): cajas ACTIVAS que esta caja
+      // fondea, con su por reponer. [] = no fondea ninguna; null = la lectura
+      // cayó (jamás un [] falso).
+      cajas_fondeadas: cajasFondeadas,
     };
+  }
+
+  /**
+   * «A quién se repuso» de cada ESPEJO del libro (invariante 83): espejo →
+   * REPOSICIÓN de origen (`espejo_de_id`) → su caja → dueño (nombre VIVO).
+   * DOS lecturas en lote (≤ 150 ids por `in`). Devuelve el mapa id del
+   * espejo → `RepuestoA | null` (null = origen o caja que no volvió).
+   * BEST-EFFORT: si una lectura falla, null (warn) y NINGUNA entrada lleva la
+   * llave; nunca lanza ni toca el libro. Sin espejos ⇒ mapa vacío sin leer.
+   */
+  private async repuestoADeEspejos(
+    movs: Record<string, unknown>[],
+  ): Promise<Map<string, RepuestoA | null> | null> {
+    const espejos = movs
+      .filter((m) => typeof m.espejo_de_id === 'string' && m.espejo_de_id)
+      .map((m) => ({
+        id: m.id as string,
+        origenId: m.espejo_de_id as string,
+      }));
+    const out = new Map<string, RepuestoA | null>();
+    if (espejos.length === 0) return out;
+    try {
+      const origenIds = [...new Set(espejos.map((e) => e.origenId))];
+      const fondoDeOrigen = new Map<string, string>();
+      for (let i = 0; i < origenIds.length; i += LOTE_ESPEJOS) {
+        const { data, error } = await this.supabase.service
+          .from('caja_chica_movimiento')
+          .select('id, fondo_id')
+          .in('id', origenIds.slice(i, i + LOTE_ESPEJOS));
+        if (error) throw new Error(error.message);
+        for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+          fondoDeOrigen.set(r.id as string, r.fondo_id as string);
+        }
+      }
+      const fondoIds = [...new Set(fondoDeOrigen.values())];
+      const cajas = new Map<string, RepuestoA>();
+      for (let i = 0; i < fondoIds.length; i += LOTE_ESPEJOS) {
+        const { data, error } = await this.supabase.service
+          .from('caja_chica_fondo')
+          .select('id, usuario_id, usuario:usuario!usuario_id(nombre)')
+          .in('id', fondoIds.slice(i, i + LOTE_ESPEJOS));
+        if (error) throw new Error(error.message);
+        for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+          cajas.set(r.id as string, {
+            fondo_id: r.id as string,
+            usuario_id: r.usuario_id as string,
+            nombre: nombreEmbed(r.usuario),
+          });
+        }
+      }
+      for (const e of espejos) {
+        const fondoId = fondoDeOrigen.get(e.origenId);
+        out.set(e.id, (fondoId && cajas.get(fondoId)) || null);
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(
+        `Caja chica sin «a quién se repuso» en los espejos: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Cajas ACTIVAS que esta caja fondea (`caja_chica_fondo.fondo_origen_id` =
+   * esta; el vínculo de las cajas vinculadas del 20-ago-2026), ordenadas por
+   * nombre (es-MX), con `por_reponer` = la ÚLTIMA fila del libro de cada una
+   * (`cargarLibro` → `historialConSaldo` → `porReponerCaja`; libro vacío ⇒
+   * 0): la MISMA cifra que su tarjeta «Por reponer» del panel y su Excel de
+   * lo pendiente — sin fórmula paralela. Libros en paralelo con tope
+   * `TOPE_LIBROS_HIJAS`. BEST-EFFORT: si cualquier lectura falla ⇒ null
+   * (warn), jamás un [] falso; nunca lanza.
+   */
+  private async cajasFondeadas(
+    fondoId: string,
+  ): Promise<CajaFondeada[] | null> {
+    try {
+      const { data, error } = await this.supabase.service
+        .from('caja_chica_fondo')
+        .select(FONDO_COLS)
+        .eq('fondo_origen_id', fondoId)
+        .eq('activo', true);
+      if (error) throw new Error(error.message);
+      const hijas = ((data ?? []) as FondoRow[]).filter(
+        (h) => h.id !== fondoId,
+      );
+      const cajas = await mapConTope(
+        hijas,
+        TOPE_LIBROS_HIJAS,
+        async (h): Promise<CajaFondeada> => {
+          const { movs, historial } = await this.cargarLibro(h);
+          const ultima = historial[historial.length - 1];
+          return {
+            fondo_id: h.id,
+            usuario_id: h.usuario_id,
+            nombre: nombreEmbed(h.usuario),
+            moneda: h.moneda,
+            activo: (h as { activo?: unknown }).activo === true,
+            por_reponer: ultima ? ultima.por_reponer : 0,
+            ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
+          };
+        },
+      );
+      return cajas.sort((a, b) =>
+        (a.nombre ?? '').localeCompare(b.nombre ?? '', 'es-MX', {
+          sensitivity: 'base',
+        }),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Caja chica sin «cajas que fondea»: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**
