@@ -294,6 +294,27 @@ describe('snapshot — cobrado_de_mas (invariante 77, D13)', () => {
     );
   });
 
+  it('#217 con la lectura de la FILA DE PRECIOS caída ⇒ la llave se OMITE (no se pudo verificar ≠ «sin excedente», revisión del 15-oct-2026) y queda un warn', async () => {
+    const { svc } = armar(mundo(cobrosDe(217)), {
+      antes: (op) =>
+        op.tabla === 'vuelo' && op.sel.startsWith('calculo_snapshot')
+          ? {
+              code: '57014',
+              message: 'canceling statement due to statement timeout',
+            }
+          : undefined,
+    });
+    const snap = (await svc.snapshot(ID(217), ADMIN)) as Snap;
+    expect(snap).not.toHaveProperty('cobrado_de_mas');
+    // Lo demás del snapshot sigue (el total cobrado sale de los cobros).
+    expect(snap.total_cobrado).toBe(3595.99);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Snapshot del vuelo ${ID(217)}: no se pudo leer la fila de precios`,
+      ),
+    );
+  });
+
   it('#315 de HOY (corregido) ⇒ cobrado_de_mas null (la llave viaja para oficina) y sin lecturas extra', async () => {
     const { svc, log } = armar(mundo(cobrosDe(315)));
     const snap = (await svc.snapshot(ID(315), SOCIO)) as Snap;

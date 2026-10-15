@@ -4,6 +4,7 @@ import {
   coberturaCobro,
   cobroCubiertoEnBanco,
   cobroDeUnSoloAbono,
+  cobroDeUnSoloAbonoSegunA,
   cubreCobro,
   estadoBancoCobro,
   faltanteFueraDe,
@@ -593,5 +594,59 @@ describe('cobroDeUnSoloAbono (invariante 78, R9) y su paridad con alVincularAbon
       }
     }
     expect(comparados).toBeGreaterThanOrEqual(12);
+  });
+
+  it('cobroDeUnSoloAbonoSegunA (la regla del trigger A SIN el método; frenos, revisión del 15-oct-2026): PARIDAD EXACTA con UN_SOLO_ABONO también en cobros PAYWISE', () => {
+    const paywise = { monto: 10000, moneda: 'MXN', metodo_cobro: 'PAYWISE' };
+    // Un cobro PAYWISE sin comisión con un SPEI de banco: A acepta el 2.º
+    // SPEI (PARCIAL/CONCILIADO), así que «de un solo abono» por A es false
+    // aunque `cobroDeUnSoloAbono` (la regla del auto, con el método) diga true.
+    expect(cobroDeUnSoloAbonoSegunA(paywise, [parte(6000)])).toBe(false);
+    expect(cobroDeUnSoloAbono(paywise, [parte(6000)])).toBe(true);
+    expect(
+      alVincularAbono({
+        cobro: paywise,
+        tcVuelo: null,
+        otras: [parte(6000)],
+        abono: { monto: 4000, moneda_cuenta: 'MXN', pasarela: false },
+        toleranciaTcPct: TOL_TC,
+      }).estado,
+    ).toBe('CONCILIADO');
+    const cobros = [
+      paywise,
+      { ...paywise, comision_banco_monto: 820 },
+      { monto: 3400, moneda: 'MXN', metodo_cobro: 'TRANSFERENCIA' },
+      {
+        monto: 5000,
+        moneda: 'MXN',
+        comision_banco_monto: 250,
+        metodo_cobro: 'HSBC_LINK',
+      },
+      { monto: 1000, moneda: 'USD', metodo_cobro: 'PAYWISE' },
+    ];
+    let comparados = 0;
+    for (const c of cobros) {
+      for (const ligada of [
+        parte(100, { moneda_cuenta: c.moneda }),
+        parte(100, { moneda_cuenta: c.moneda, pasarela: true }),
+        parte(10, { moneda_cuenta: c.moneda === 'MXN' ? 'USD' : 'MXN' }),
+      ]) {
+        const v = alVincularAbono({
+          cobro: c,
+          tcVuelo: null,
+          otras: [ligada],
+          abono: { monto: 50, moneda_cuenta: c.moneda, pasarela: false },
+          toleranciaTcPct: TOL_TC,
+        });
+        if (v.estado === 'YA_CUBIERTO') continue;
+        comparados += 1;
+        expect([c, ligada.pasarela, v.estado === 'UN_SOLO_ABONO']).toEqual([
+          c,
+          ligada.pasarela,
+          cobroDeUnSoloAbonoSegunA(c, [ligada]),
+        ]);
+      }
+    }
+    expect(comparados).toBeGreaterThanOrEqual(10);
   });
 });

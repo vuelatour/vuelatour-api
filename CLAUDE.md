@@ -5346,19 +5346,26 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     (`movimiento_bancario.cobro_id`, índice único).
     - **Modelo (mismo patrón que la invariante 40)**: la liga vive en la
       PUENTE `movimiento_bancario_cobro (movimiento_id, cobro_id,
-      monto_parte)` —índice ÚNICO por `cobro_id`: un cobro se concilia UNA
-      vez— y `movimiento_bancario.cobros_n` es su espejo. `cobro_id` queda
-      como ESPEJO DERIVADO (= la parte con `cobros_n = 1`; NULL con 0 o ≥ 2):
-      lo siguen leyendo panel/app previos y el embed `cobro:cobro_vuelo!
+      monto_parte)` y `movimiento_bancario.cobros_n` es su espejo. Hasta el
+      0.0.77 llevaba índice ÚNICO por `cobro_id` (un cobro se conciliaba UNA
+      vez); desde la invariante 77 (20261014000003) es M:N: sin
+      `uq_mov_cobro_parte_cobro` ni `uq_mov_bancario_cobro`, con el índice NO
+      único `idx_mov_cobro_parte_cobro (cobro_id, movimiento_id)`. `cobro_id`
+      queda como ESPEJO DERIVADO (= la parte con `cobros_n = 1`; NULL con 0
+      o ≥ 2): lo siguen leyendo panel/app previos y el embed `cobro:cobro_vuelo!
       cobro_id(...)`. Triggers: A (candados por fila: ABONO sin
-      gasto/sobre/ingreso/reverso; cobro positivo, sin sobre, sin anticipo,
-      libre), B (espejos `cobros_n`/`cobro_id`/`conciliado`/
+      gasto/sobre/ingreso/reverso; cobro positivo, sin sobre, sin anticipo y
+      —hasta el 0.0.77— libre; desde la 77 decide por COBERTURA: cubierto o
+      «de un solo abono» con otro ⇒ `COBRO_YA_CONCILIADO`, un PARCIAL admite
+      más abonos), B (espejos `cobros_n`/`cobro_id`/`conciliado`/
       `clasificacion_id`/`updated_by`), C (espejo LEGADO: un `cobro_id`
       escrito directo —API ≤ 0.0.70— se traduce a la puente; sobre un lote
       ⇒ `LOTE_SOLO_API_NUEVO`), D (con cobros ligados no entra
-      gasto/sobre/ingreso/reverso —`MOVIMIENTO_YA_LIGADO`— y un LOTE no
-      cambia tipo/monto/cuenta ni se desconcilia —`ABONO_LIGADO`—) y K
-      (constraint trigger DIFERIDO: espejos = puente o `COBROS_INCOHERENTES`).
+      gasto/sobre/ingreso/reverso —`MOVIMIENTO_YA_LIGADO`—; el abono no
+      cambia tipo/monto/cuenta —`ABONO_LIGADO`— con UNO o más cobros desde
+      la 77 (hasta el 0.0.77 solo un LOTE) y un LOTE no se desconcilia a
+      mano) y K (constraint trigger DIFERIDO: espejos = puente o
+      `COBROS_INCOHERENTES`; desde la 77 escucha también monto y cuenta).
       El CHECK de ingresos gana `and cobros_n = 0`. Backfill: cada
       `cobro_id` de hoy ⇒ una parte por |monto| (el abono completo; copió
       `updated_at`/`updated_by` del ABONO, por eso «Registró la liga» de un
@@ -5388,7 +5395,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Con la sonda ENCENDIDA todo `cobro_ids` va por la RPC (también con 1:
       así reemplaza un lote por un cobro en una transacción); `cobro_id`
       suelto sigue por el camino directo (trigger C mantiene la puente) con
-      la pre-validación de ocupados ampliada a la puente; desvincular
+      la pre-validación del trigger A (hasta el 0.0.77, «ocupado» = cualquier
+      liga, también la de la puente; desde la 77, por COBERTURA con
+      `prevalidarCobroUnico`: un PARCIAL admite el abono); desvincular
       (ambos null) sobre un lote llama `conciliacion_desligar_abono_cobros`
       ANTES del camino de siempre. Respuesta ADITIVA: `cobros_n` y
       `cobros_estado[{cobro_id, monto_parte, vuelo_id, folio, cliente,
@@ -7906,8 +7915,16 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (transpilado con el `typescript` del API) contra 3,360 combinaciones +
       filas reales y revisa cómo dibuja la tabla cada caso; corre si
       `../vuelatour-next` está al lado o con `VUELATOUR_NEXT_DIR` (y entonces
-      es OBLIGATORIA: un archivo movido truena); si no, se salta. Si el panel
-      cambia esa columna, se cambian los dos en el mismo lote. Specs:
+      es OBLIGATORIA: un archivo movido truena); si no, se salta. Lee el
+      ÁRBOL DE TRABAJO del panel (no un commit) y solo truena por una REGLA o
+      un TEXTO (revisión del 15-oct-2026): las piezas de la tabla son
+      patrones sin nombres de variables locales (`PIEZAS_TABLA_AVION`) y un
+      paquete npm que importe un módulo del panel (`lib/format.ts`,
+      `categorias-gasto.ts`…) se sustituye por un módulo que truena SOLO si
+      la regla lo usa. Si el panel cambia esa columna, `lib/admin/
+      gasto-avion.ts`, `categorias-gasto.ts` o `format.ts`, se cambian los dos
+      en el mismo lote; el AGENTS.md del panel debe citar esta paridad (lo
+      escribe el lote del panel: este repo no lo toca). Specs:
       `gasto-avion.util.spec`, `gasto-avion.paridad.spec` (con
       `gasto-avion.fixture-spec.ts`: 11 filas reales sin notas ni datos
       personales + la matriz) y `expenses.service.xlsx.spec`.
@@ -8671,7 +8688,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       restan por su cuenta), `cubreCobro`, `coberturaCobro`,
       `faltanteFueraDe`, `estadoBancoCobro`, `cobroCubiertoEnBanco`,
       `tcImplicitoCobro`, `alVincularAbono` (el trigger A en su MISMO orden),
-      `cambiaDineroDelCobro` y `cobroDeUnSoloAbono`. El API calcula desde la
+      `cambiaDineroDelCobro`, `cobroDeUnSoloAbono` (con el método PAYWISE) y
+      `cobroDeUnSoloAbonoSegunA` (la regla de A sola: la de los frenos). El
+      API calcula desde la
       puente de 20261012000002: sus LECTURAS no dependen de la migración.
       `cobro-banco.paridad.spec` lee el archivo SQL; la paridad también se
       corrió contra PostgreSQL 17.2 real con las funciones de la migración
@@ -8703,10 +8722,22 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       del cuerpo, patrón `solo_enriquecer`: el texto `"false"` no es true)
       escribe la comisión real r2(monto − |abono|) con `escribirComisionReal`
       y liga (si la liga falla después, la comisión QUEDA y
-      `details.comision_corregida` lo dice); si no aplica ⇒ 400
+      `details.comision_corregida` lo dice) SOLO si el veredicto SIN corregir
+      es COMISION_NO_CUADRA y la comisión real vale (= `corregible`):
+      `decidirCorregirComision` (PURO, `cobros-lote.util`) decide ANTES de
+      escribir, en los dos caminos (revisión del 15-oct-2026; ENDURECE D6:
+      antes un pago PARCIAL de banco se volvía una comisión de hasta 99.99 %
+      y la PARTE de un sobre por `cobro_ids` quedaba con la comisión escrita
+      aunque la liga rebotara COBRO_DE_GRUPO). No aplica ⇒ 400
       `CORREGIR_COMISION_NO_APLICA` (`motivo` VARIOS_COBROS | SOBRE |
       CON_ABONOS | DEPOSITO_MAYOR | SIN_COBRO | MONEDA_DISTINTA |
-      DEPOSITO_INVALIDO). Otra moneda ⇒ 1↔1 y nunca en lote: banda 15–25 en BD
+      DEPOSITO_INVALIDO | PARCIAL —banco sin comisión: es un pago en partes—
+      | NO_HACE_FALTA —ya cuadra—); la liga rechazada por otra cosa (parte de
+      un sobre, anticipo, reembolso, abono de más) ⇒ ESE 409/400, el mismo
+      que sin la bandera, sin escribir (desviación de la letra de D6, que
+      pedía 400 también ahí: así ya respondía el camino directo). Sin tope
+      de % en el servidor: el aviso de > 15 % es del panel (D6). Otra moneda
+      ⇒ 1↔1 y nunca en lote: banda 15–25 en BD
       (`COBRO_MONEDA_DISTINTA`, motivo TC_FUERA_DE_BANDA) y ±2 %
       (`TOLERANCIA_TC_OFICIAL_PCT`) del T.C. del cobro o, sin él, del vuelo en
       el API (TC_LEJOS). Cubierto, o «de un solo abono» con otro ⇒
@@ -8757,7 +8788,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `cobroOcupadoParaAbono`, la de candidatos y sugeridos): cubierto,
       cruzado, abono de la pasarela o «de un solo abono» (`cobroDeUnSoloAbono`
       también cuenta el MÉTODO PAYWISE: el auto nunca completa ese parcial; a
-      mano sí) ⇒ ocupado. Un parcial que gana solo ⇒ criterio `FALTANTE`;
+      mano sí; los FRENOS no, ver abajo) ⇒ ocupado. Un parcial que gana solo ⇒
+      criterio `FALTANTE`;
       empate ⇒ nombre del ordenante o AMBIGUO; nunca crea un parcial. La IA de
       abonos no recibe parciales y, si un parcial espera EXACTAMENTE ese
       abono, su REGISTRAR_INGRESO o LIGAR a un ingreso pasa a REVISAR. Anti
@@ -8768,14 +8800,32 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `ABONO_TIENE_COBRO_CANDIDATO` en «otro ingreso» y en «Es el pago de un
       vuelo»; faltante ±$1.00; el candidato parcial gana `parcial`,
       `faltante`, `monto_vinculado` y `abonos_n`, los demás byte a byte)
-      cuentan el faltante de los parciales. El replay de «Es el pago de un
+      cuentan el faltante de los parciales con `cobroParaCruce(…, {freno:
+      true})`: «de un solo abono» por la regla del trigger A tal cual
+      (`cobroDeUnSoloAbonoSegunA`: comisión capturada, parte de la pasarela
+      o cruzada), SIN el método PAYWISE, que solo decide si el AUTO liga
+      (revisión del 15-oct-2026: un cobro Paywise sin comisión con un SPEI
+      de banco sí acepta el 2.º SPEI en la BD y antes ese dinero pasaba como
+      «otro ingreso»). Límite HEREDADO (no se cambió): los frenos miran
+      ±30 días por `fecha_cobro`; un parcial registrado antes no frena
+      («Vincular» sí lo ofrece: ±60). «Por conciliar» (`contextoAbonos`) es
+      el espejo del AUTO y sigue con la regla de ligar. El replay de «Es el
+      pago de un
       vuelo» usa `some()` y ese camino pre-valida con `alVincularAbono` ANTES
       de `createCobro` (409 `COMISION_NO_CUADRA` con
       `mensajeComisionAlRegistrarCobro`, sin crear el cobro). «Por conciliar»
       (`contextoAbonos`): ocupado por cobertura y `montoExactoAbono` /
       `difMontoAbono` contra el faltante. Paywise: BRUTO sin comisión del
       archivo infiere la comisión real (`comisionRealDeCruce`) y la escribe
-      (`escribirComisionReal`) antes de ligar; un abono de lote no es «libre»
+      (`escribirComisionReal`) antes de ligar SOLO si con ella el abono cuadra
+      (`comisionAEscribirEnCruce` / `cruceCuadraConComision`, la regla de A
+      para un abono de la pasarela; revisión del 15-oct-2026): si no —NETO
+      exacto con un bruto del archivo distinto del cobro, o una comisión
+      directa que no es bruto − neto— NO se escribe, se liga con la vigente
+      (warn) y la diferencia queda en la auditoría (`comision_distinta`); si
+      tampoco cuadra, la liga rebota SIN haber escrito nada (antes la del
+      archivo quedaba escrita y el par dejaba de cuadrar). Un abono de lote
+      no es «libre»
       (`movimientos_en_lote`); su universo sigue tomando cualquier liga como
       ocupada (un cobro de la pasarela es «de un solo abono»).
     - **Lecturas** (de la puente, también SIN la migración): cobros del vuelo
@@ -8825,7 +8875,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `requiere_revision` falso solo en comisión y redondeo. Textos con
       `fmtDineroTexto` (montos enteros sin decimales: «Cobrado de más: $52
       USD»). Snapshot: `cobrado_de_mas` justo después de `cobros_sin_tc_mxn`
-      (null sin excedente o si falló la lectura del precio; OMITIDO para
+      (null = VERIFICADO y sin aviso; la llave se OMITE si falló la lectura
+      de la fila de precios —con un warn; revisión del 15-oct-2026: antes
+      salía null, igual que «sin excedente»— y para
       PILOTO/MECANICO/VISITANTE) y `cobros[].monto_usd` (`cobroEnUsd`, la
       MISMA cadena de T.C. que `total_cobrado`; a todo rol). Pre-cierre
       `vuelos_cobrados_de_mas`
@@ -8842,7 +8894,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `regla_cobro_cubierto(1, 1, false, 1)` = true ⇒ «sí» PARA SIEMPRE;
       PGRST202 o 42883 que NOMBRA la función ⇒ «no», re-sondeo ≤ 10 min y un
       solo warn; otro error, excepción o `data` ≠ true ⇒ «sí» sin memorizar;
-      un «operator does not exist» NUNCA es «falta la migración»). REGLA DURA:
+      un «operator does not exist» NUNCA es «falta la migración»). Modo
+      ESTRICTO `cobrosParcialesConfirmados` (`SondaCobrosParciales.confirmada`,
+      revisión del 15-oct-2026): «sí» SOLO con el `true` de la función
+      memorizado o recién leído; una respuesta dudosa ⇒ «no»; lo usa SOLO lo
+      que afirma en pantalla (`varios_abonos_por_cobro`, invariante 78), las
+      escrituras siguen con la sonda normal. REGLA DURA:
       el segundo abono de un cobro, los candidatos parciales, el auto-cruce
       por faltante y los faltantes de los frenos de Ingresos van detrás de
       ella; las LECTURAS de estado no. Sin la migración: el segundo abono a un
@@ -8854,7 +8911,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `cobro-conciliado.util.spec`, `cobros-usd.util.spec` (`cobroEnUsd`),
       `cobrado-de-mas.util.spec` (con `cobrado-de-mas.fixture-spec.ts`: filas
       reales de #81, #84, #92, #111, #193, #217, #259, #285, #315 antes y
-      después y #332), `cobros-lote.util.spec`, `abono-cruce.util.spec`,
+      después y #332; el tope ABSOLUTO de $10 de REDONDEO_TC con un total de
+      $5,000: $10.00 explicado, $10.01 y $40 piden revisión),
+      `cobros-lote.util.spec`, `abono-cruce.util.spec`,
       `paywise-cruce.util.spec`, `ligas-cobro.lector.spec`,
       `conciliacion.service.cobros-estado.spec`,
       `conciliacion.service.cobros-parciales.spec` (con
@@ -8946,13 +9005,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ±`PAYWISE_VENTANA_DIAS` en la PASARELA— importados ANTES de
       registrarlo), los dos best-effort. `entrada.cuenta_destino` viaja tal
       cual se capturó (texto, no FK): el API no infiere nada de él.
-      `varios_abonos_por_cobro` = la sonda del 0.0.78 Y `!cobroDeUnSoloAbono`
-      (comisión > 0, método PAYWISE, parte de la pasarela o cruzada); false en
-      un ingreso, la parte de un sobre, un cobro de anticipo o un reembolso, y
-      si la sonda falla.
+      `varios_abonos_por_cobro` = la sonda del 0.0.78 en modo ESTRICTO
+      (`cobrosParcialesConfirmados`: «sí» solo con la migración CONFIRMADA) Y
+      `!cobroDeUnSoloAbono` (comisión > 0, método PAYWISE, parte de la
+      pasarela o cruzada); false en un ingreso, la parte de un sobre, un cobro
+      de anticipo o un reembolso, sin la migración y si la sonda falla o no
+      responde claro (red, timeout, 5xx; revisión del 15-oct-2026: antes la
+      sonda asumía «sí» ante un error raro y la hoja lo afirmaba).
     - **Sondas y anti-tope**: ingresos (503 / nada de `ingreso*` en
       `cobros/:id`), puente (ESPEJO, REGLA DURA de la 56), `orden_archivo` y
-      la del 0.0.78 (`varios_abonos_por_cobro`). Los vuelos del cliente se
+      la del 0.0.78 en modo estricto (`varios_abonos_por_cobro`). Los vuelos
+      del cliente se
       paginan por la PK (`TOPE_VUELOS_CLIENTE` 10,000; truncado ⇒ null); los
       cobros del día y los abonos por id van en lotes de ≤ 150 (`leerPorLotes`
       / `leerPorLotesPaginado` ganaron `tamLote` opcional; default 200).
@@ -8965,8 +9028,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `conciliacion.service.entradas.spec` (con
       `conciliacion-entradas.fixture-spec.ts`: PostgREST falso que proyecta
       columnas como el real + filas reales de prod con los valores «veneno» y
-      los bordes etiquetados; casos a–x, d bis, RC5 y la paridad lista ↔
-      hoja), `conciliacion.controller.entradas.spec` (HTTP real: roles, 400,
+      los bordes etiquetados; casos a–x, d bis, u bis —la sonda que falla
+      sin decir «no está» ⇒ false—, RC5 y la paridad lista ↔ hoja),
+      `conciliacion.controller.entradas.spec` (HTTP real: roles, 400,
       404, 503), `cargos-de-gasto.util.spec` (Gastos con las MISMAS llaves en
       el MISMO orden), `ligas-cobro.lector.spec` (`conAutor`) e
       `ingresos.util.spec` (`conceptoDeCobro`).
@@ -10103,7 +10167,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      los comentarios dentro de las funciones; lo aplicado con
      `apply_migration` queda sin ellos y su md5 ya no es el del archivo—);
      `get_advisors` security y performance (nada nuevo: 0028/0029 no aplican);
-     SELECT de residuos (0 filas con la marca POSTCHECK).
+     residuos con `03b` §8 (las marcas REALES de 01 y 03 en `cobro_vuelo`,
+     `movimiento_bancario` y la puente ⇒ `0 · 0 · 0`) y `03b` §9 (cobros con
+     2+ abonos ⇒ 0 filas recién aplicada; es también la lista de la
+     reversa). Los dos se agregaron en la revisión del 15-oct-2026 (`03b`
+     md5 `dc6f1023e4e837d90b742e51ecc35a44`; los demás archivos, iguales).
   6. Reiniciar el API en Railway (o esperar ≤ 10 min) y comprobar `GET
      /v1/conciliacion/movimientos/:id/candidatos-cobro` ⇒
      `movimiento.cobros_parciales: true`.
@@ -10113,7 +10181,8 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   también es segura por la marca `[ABONO_NO_CUADRA]`). Al aplicarla: cambiar
   PENDIENTE por APLICADA con la fecha (commit aparte). **REVERSA** (SOLO SQL
   Editor, con confirmación del usuario): desvincular antes los abonos de más
-  de todo cobro con 2+ abonos (si no, `REVERSA_ABORTADA` sin cambiar nada);
+  de todo cobro con 2+ abonos —la lista sale de `03b` §9 por MCP— (si no,
+  `REVERSA_ABORTADA: N cobro(s)…` sin cambiar nada);
   `99-rollback.sql` repone A/D/K/G con el md5 de prod, recrea los índices
   únicos, quita E, la vista, las dos funciones y el índice nuevo y borra la
   fila del historial, en UNA transacción; después REINICIAR el API (la sonda
@@ -10126,7 +10195,13 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   concurrencia con dos sesiones reales (la 2.ª espera el candado del cobro y
   rebota `ABONO_EXCEDE_COBRO` —por la RPC y por el espejo legado— o
   `COBRO_CONCILIADO`; 400 + 600 cubren un cobro de 1,000 con dos abonos) y la
-  reversa con los md5 de prod y su aborto.
+  reversa con los md5 de prod y su aborto. Re-corrido el 15-oct-2026
+  (revisión, `03b` con §8 y §9) en una réplica NUEVA: `00` ⇒ `01`
+  `DRYRUN_OK` ⇒ `02` `COMMIT` ⇒ `03` `POSTCHECK_OK` ⇒ `03b` (§8 `0 · 0 · 0`;
+  con filas marcadas dentro de un `begin … rollback` da `1 · 1 · 0`: sí
+  detecta) ⇒ un 2.º abono al parcial ⇒ §9 lo lista y `99` aborta ⇒
+  desligado ⇒ §9 0 filas y `99` `COMMIT` con los md5 de prod ⇒ `02` y `03`
+  otra vez OK.
 - **ORDEN DE DESPLIEGUE 0.0.78 (15-oct-2026: un cobro con varios abonos,
   detalle de «Conciliado» en Ingresos y columna «Avión» del Excel de gastos;
   UN solo despliegue: manda sobre el «Procedimiento» del bullet anterior).**
@@ -10141,7 +10216,10 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      candados) · `045a7b53` (auto-cruce, Paywise e Ingresos) · `2ebf915c`
      («Cobrado de más») · `7fe1a0ea` (detalle de «Conciliado» en Ingresos,
      inv. 78) · `a0616798` (columna «Avión» del Excel de gastos, inv. 71) ·
-     «Versión 0.0.78» (este). Después `GET
+     «Versión 0.0.78» (`6b29b614`) · «Revisión: …» (los hallazgos del
+     15-oct-2026: «Corregir la comisión» solo con COMISION_NO_CUADRA, Paywise
+     sin escritura que no cuadre, frenos con la regla de A, sonda estricta de
+     la hoja, `cobrado_de_mas` omitido si no se pudo verificar). Después `GET
      https://vuelatour-api-production.up.railway.app/v1/version` = `0.0.78`
      (nunca un health). Sin la migración (estado intermedio normal): estados y
      parciales visibles (salen de la puente), «Cobrado de más» completo y la
@@ -10158,31 +10236,57 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      puede seguir en «no», que es lo conservador) y
      `movimiento.cobros_parciales: true` en `GET
      /v1/conciliacion/movimientos/:id/candidatos-cobro`.
-  4. **Panel** (push a `main`, Vercel): LOTE APARTE (su parte del 0.0.78 y de
+  4. **Humo como ADMIN** (SOLO lecturas GET; valores de prod del
+     15-oct-2026 si nadie los movió; jest usa un PostgREST falso, así que
+     las rutas nuevas y sus embeds —`ligador:usuario!created_by(nombre)`,
+     `vuelo:vuelo_id(folio)`— se prueban aquí por primera vez): `GET
+     /v1/flights/<id del #217>/snapshot` ⇒ `cobrado_de_mas` {causa
+     IVA_NO_COTIZADO, excedente_usd 495.99, requiere_revision true}; #193 ⇒
+     IVA_NO_COTIZADO 52.00; #81 ⇒ COMISION_PAGADA_POR_CLIENTE 214.26
+     (requiere_revision false); #315 de hoy ⇒ `cobrado_de_mas: null` con la
+     llave PRESENTE. `GET
+     /v1/profit-sharing/pre-cierre?desde=2026-08-01&hasta=2026-08-31` ⇒
+     `vuelos_cobrados_de_mas` {count 2, monto_usd 547.99, #193 y #217 en
+     `vuelos`, #111 en `explicados`} y `listo` como antes (no bloquea);
+     julio ⇒ count 0 con #81 y #84 en `explicados`; septiembre ⇒ count 0
+     con #259 y #285. `GET /v1/conciliacion/cobros/<cobro de #293>` ⇒ 200
+     CONCILIADO (`fuente` PUENTE, cubierto); `GET
+     /v1/conciliacion/cobros/<cobro de #223>` ⇒ 200 SIN_CONCILIAR con
+     `varios_abonos_por_cobro: true` (false antes del paso 3); `GET
+     /v1/conciliacion/ingresos/<id de ING-3>` ⇒ 200 CONCILIADO (`fuente`
+     COLUMNA). Un 5xx, un 4xx o un valor distinto ⇒ NO avisar a la oficina:
+     pasárselo a Claude.
+  5. **Panel** (push a `main`, Vercel): LOTE APARTE (su parte del 0.0.78 y de
      la hoja de Ingresos se implementa después), SIEMPRE después del API y en
      cuanto se pueda; verificar el commit con la API pública de GitHub (curl).
      Con el panel de ANTES y el API 0.0.78: un parcial pierde su badge verde
      (dice la verdad); su «Editar» puede ofrecer el dinero de un parcial ⇒ 409
      `COBRO_CONCILIADO` con texto (nada se escribe); un abono mayor ⇒ 409 con
      el texto del API; su guía del lote suma netos (puede decir «sobran» y el
-     API aceptar por faltantes): confuso pero inofensivo. Panel nuevo con un
-     API ≤ 0.0.77: la hoja recibe 404 «Cannot GET» (el panel dice
-     RUTA_NO_DISPONIBLE) y los campos nuevos ausentes se pintan como hoy.
-  **Aviso a la oficina**: «Conciliado» de un cobro pasa a ser CUBIERTO (un
-  cobro con un abono menor se ve «Conciliado parcial» y sigue en «Cobros sin
-  banco»); la card del vuelo avisa «Cobrado de más» con su posible causa (hoy
-  7 vuelos de prod pasan de $1.00) y el pre-cierre gana el renglón NO
-  bloqueante «Vuelos cobrados de más»; el Excel de gastos cambia los TEXTOS de
-  la columna «Avión» para todo rol (296 de 1,144 celdas en prod; ningún
-  número). **ROLLBACK** del API a 0.0.77: con la migración aplicada su
-  pre-validación rechaza un segundo abono (conservador), los errores nuevos de
-  la BD le llegan con la marca y responde 409 genérico (no 500), y un parcial
-  ya creado se ve «Conciliado» mientras dure (avisar a la oficina); la reversa
-  de la migración es la del bullet anterior (SOLO SQL Editor, con
-  confirmación) y después se reinicia el API. Cada paso del lote corrió `tsc`
-  (los dos tsconfig), eslint sin --fix y jest de sus módulos (en el mensaje de
-  su commit); la verificación COMPLETA del lote la agrega su commit
-  «Verificación: …».
+     API aceptar por faltantes): confuso pero inofensivo; no pinta
+     `cobrado_de_mas`. Panel nuevo con un API ≤ 0.0.77: la hoja recibe 404
+     «Cannot GET» (el panel dice RUTA_NO_DISPONIBLE) y los campos nuevos
+     ausentes se pintan como hoy.
+  **Aviso a la oficina** en DOS tiempos (revisión del 15-oct-2026: el panel
+  de antes no pinta la card ni el badge nuevos). Con el paso 4 en verde: el
+  pre-cierre gana el renglón NO bloqueante «Vuelos cobrados de más» (el panel
+  de hoy pinta cualquier renglón con `count` > 0) y el Excel de gastos cambia
+  los TEXTOS de la columna «Avión» para todo rol (296 de 1,144 celdas en
+  prod; ningún número). SOLO cuando el panel del lote esté en prod (paso 5):
+  «Conciliado» de un cobro pasa a ser CUBIERTO (un cobro con un abono menor
+  se ve «Conciliado parcial» y sigue en «Cobros sin banco») y la card del
+  vuelo avisa «Cobrado de más» con su posible causa (hoy 7 vuelos de prod
+  pasan de $1.00). **ROLLBACK** del API a 0.0.77: con la migración aplicada
+  su pre-validación rechaza un segundo abono (conservador), los errores
+  nuevos de la BD le llegan con la marca y responde 409 genérico (no 500), y
+  un parcial ya creado se ve «Conciliado» mientras dure (avisar a la
+  oficina); la reversa de la migración es la del bullet anterior (SOLO SQL
+  Editor, con confirmación) y después se reinicia el API. Los mensajes de los
+  commits de paso del lote NO registran sus corridas de `tsc`, eslint y jest
+  (solo listan los specs que agregan); las de la revisión del 15-oct-2026
+  van en su commit «Revisión: …» y la verificación COMPLETA del lote (los dos
+  tsconfig, eslint sin --fix contra `527560b0` y jest completo) la agrega su
+  commit «Verificación: …».
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
@@ -11626,11 +11730,14 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   y el pre-cierre verían una foto recortada (hoy hay 225 cobros en total).
   Lo nuevo de ingresos ya pagina.
 - **Hueco PREEXISTENTE (anotado en la revisión adversaria del 24-sep-2026,
-  no se tocó para cobros normales)**: `FlightsService.updateCobro` recalcula
-  `comision_banco_monto` desde `comision_banco_pct` (4 decimales) siempre
-  que el PATCH trae `monto`, aunque sea el MISMO: en montos grandes mueve
-  centavos (98,765.43 con comisión 8,747.21 ⇒ 8,747.26). Para cobros de
-  ANTICIPO ya se congela; para los normales es decisión aparte.
+  no se tocó para cobros normales SIN abonos)**: `FlightsService.updateCobro`
+  recalcula `comision_banco_monto` desde `comision_banco_pct` (4 decimales)
+  siempre que el PATCH trae `monto`, aunque sea el MISMO: en montos grandes
+  mueve centavos (98,765.43 con comisión 8,747.21 ⇒ 8,747.26). Para cobros
+  de ANTICIPO ya se congela y, desde el 0.0.78 (invariante 77), también para
+  los cobros CON abonos (directos o vía su sobre): el dinero reenviado sin
+  cambio se congela y un cambio real ⇒ 409 `COBRO_CONCILIADO`. Queda abierto
+  solo para los cobros normales sin abonos: decisión aparte.
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.

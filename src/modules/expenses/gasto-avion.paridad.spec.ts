@@ -38,7 +38,12 @@ import {
  * está mal, truena en vez de saltarse.
  *
  * Si un lado cambia una regla o un texto sin el otro, esto truena en
- * pruebas y no en el Excel de la oficina.
+ * pruebas y no en el Excel de la oficina. Revisión del 15-oct-2026: SOLO
+ * por eso — renombrar una variable local de la tabla (las piezas son
+ * patrones sin nombres de variables) o importar un paquete npm que la regla
+ * no usa (se sustituye por un módulo que truena solo si se USA) ya no la
+ * tumban. El acoplamiento lo documenta la invariante 71 del CLAUDE.md del
+ * API (el AGENTS.md del panel debe citarlo en su lote).
  */
 const DESDE_ENV = process.env.VUELATOUR_NEXT_DIR;
 const RAIZ_PANEL = DESDE_ENV
@@ -83,10 +88,32 @@ interface CategoriasPanel {
 }
 
 /**
+ * Un paquete npm que importa un módulo del panel (p. ej. `date-fns` en
+ * `lib/format.ts`): la paridad NO lo carga (no corre código ajeno a las
+ * reglas). En su lugar va un módulo que truena con su nombre SOLO cuando
+ * algo lo USA: si una regla de la paridad empieza a necesitarlo, la prueba
+ * truena y se decide aquí; un import que la regla no toca no la tumba.
+ */
+function paqueteNoCargado(archivo: string, esp: string): Modulo {
+  const usar = (prop: string) => (): never => {
+    throw new Error(
+      `«${archivo}» usa «${esp}».${prop}: la paridad no carga paquetes npm; si la regla lo necesita, decídelo en gasto-avion.paridad.spec`,
+    );
+  };
+  const destino: Modulo = {};
+  return new Proxy(destino, {
+    get(_destino, prop) {
+      if (prop === '__esModule') return true;
+      if (typeof prop === 'symbol' || prop === 'then') return undefined;
+      return usar(prop);
+    },
+  });
+}
+
+/**
  * Carga un módulo TS del panel: lo transpila a CommonJS y lo corre con un
- * `require` que solo resuelve módulos del panel (`@/…` y relativos). Un
- * import de paquete truena con su nombre: si el helper empieza a necesitar
- * uno, se decide aquí, no se carga a ciegas.
+ * `require` que resuelve los módulos del panel (`@/…` y relativos); un
+ * paquete npm se sustituye por `paqueteNoCargado` (truena solo al usarse).
  */
 function cargadorPanel(raiz: string): (archivo: string) => Modulo {
   const ts = jest.requireActual<typeof import('typescript')>('typescript');
@@ -117,9 +144,7 @@ function cargadorPanel(raiz: string): (archivo: string) => Modulo {
       if (esp.startsWith('.')) {
         return cargar(resolverTs(resolve(dirname(archivo), esp)));
       }
-      throw new Error(
-        `«${archivo}» importa «${esp}»: la paridad solo carga módulos del panel`,
-      );
+      return paqueteNoCargado(archivo, esp);
     };
     const envoltura = runInThisContext(
       `(function (require, module, exports) {${outputText}\n})`,
@@ -129,6 +154,45 @@ function cargadorPanel(raiz: string): (archivo: string) => Modulo {
     return modulo.exports;
   };
   return cargar;
+}
+
+/** Un identificador de JS (el nombre de una variable local de la tabla). */
+const ID = '[A-Za-z_$][\\w$]*';
+
+/**
+ * Cómo PINTA la tabla cada estado (`expenses-table.tsx` sin espacios): la
+ * regla (constantes, umbral 0.004, `??` y `&&`) y los textos, SIN los
+ * nombres de las variables locales (revisión del 15-oct-2026: renombrar
+ * `g` ⇒ `gasto` no cambia lo que se pinta).
+ */
+const PIEZAS_TABLA_AVION: ReadonlyArray<[string, RegExp]> = [
+  ['estadoAvionGasto(…)', new RegExp(`estadoAvionGasto\\(${ID}\\)`)],
+  ['{ETIQUETA_REPARTIDO}', /\{ETIQUETA_REPARTIDO\}/],
+  [
+    '{…matricula??MATRICULA_DESCONOCIDA}',
+    new RegExp(`\\{${ID}\\.matricula\\?\\?MATRICULA_DESCONOCIDA\\}`),
+  ],
+  ['{…remanente>0.004&&(', new RegExp(`\\{${ID}\\.remanente>0\\.004&&\\(`)],
+  ['{ETIQUETA_AVION_VUELATOUR}', /\{ETIQUETA_AVION_VUELATOUR\}/],
+  ['{…etiqueta}', new RegExp(`\\{${ID}\\.etiqueta\\}`)],
+  ['{…referencia&&(', new RegExp(`\\{${ID}\\.referencia&&\\(`)],
+  [
+    '{textoReferenciaAvion(…referencia)}',
+    new RegExp(`\\{textoReferenciaAvion\\(${ID}\\.referencia\\)\\}`),
+  ],
+  [
+    '{…matricula??TEXTO_VER_AVION}',
+    new RegExp(`\\{${ID}\\.matricula\\?\\?TEXTO_VER_AVION\\}`),
+  ],
+  ['{ETIQUETA_FALTA_AVION}', /\{ETIQUETA_FALTA_AVION\}/],
+];
+
+/** Las piezas que NO están en el texto de la tabla (sin espacios). */
+function piezasQueFaltan(tabla: string): string[] {
+  const plano = tabla.replace(/\s+/g, '');
+  return PIEZAS_TABLA_AVION.filter(([, re]) => !re.test(plano)).map(
+    ([nombre]) => nombre,
+  );
 }
 
 /**
@@ -246,20 +310,49 @@ function celdaDeLaTabla(e: EstadoPanel, p: HelperAvionPanel): string {
           `La tabla de Gastos del panel ya no está en «${TABLA}»: revisa cómo pinta la columna «Avión · vuelo» y ajusta esta paridad`,
         );
       }
-      const plano = readFileSync(TABLA, 'utf8').replace(/\s+/g, '');
-      const faltan = [
-        'estadoAvionGasto(g)',
-        '{ETIQUETA_REPARTIDO}',
-        '{p.matricula??MATRICULA_DESCONOCIDA}',
-        '{e.remanente>0.004&&(',
-        '{ETIQUETA_AVION_VUELATOUR}',
-        '{e.etiqueta}',
-        '{e.referencia&&(',
-        '{textoReferenciaAvion(e.referencia)}',
-        '{e.matricula??TEXTO_VER_AVION}',
-        '{ETIQUETA_FALTA_AVION}',
-      ].filter((pieza) => !plano.includes(pieza));
-      expect(faltan).toEqual([]);
+      expect(piezasQueFaltan(readFileSync(TABLA, 'utf8'))).toEqual([]);
     });
   },
 );
+
+describe('la paridad solo truena por reglas o textos (revisión del 15-oct-2026)', () => {
+  // La celda «Avión · vuelo» como la escribe hoy la tabla y la MISMA con
+  // otros nombres de variables (sin el panel: corre siempre).
+  const HOY = `const e = estadoAvionGasto(g);
+    {ETIQUETA_REPARTIDO} {e.partes.map((p) => <b>{p.matricula ?? MATRICULA_DESCONOCIDA}</b>)}
+    {e.remanente > 0.004 && (<b>{ETIQUETA_AVION_VUELATOUR}</b>)}
+    {e.etiqueta} {e.referencia && (<i>{textoReferenciaAvion(e.referencia)}</i>)}
+    {e.matricula ?? TEXTO_VER_AVION} {ETIQUETA_FALTA_AVION}`;
+  const RENOMBRADA = HOY.replace(/\bg\b/g, 'gasto')
+    .replace(/\be\./g, 'estado.')
+    .replace(/\(p\)/g, '(parte)')
+    .replace(/\bp\./g, 'parte.');
+
+  it('renombrar variables locales de la tabla NO la tumba', () => {
+    expect(RENOMBRADA).toContain('estadoAvionGasto(gasto)');
+    expect(piezasQueFaltan(HOY)).toEqual([]);
+    expect(piezasQueFaltan(RENOMBRADA)).toEqual([]);
+  });
+
+  it('cambiar la REGLA o un texto sí: otro umbral, otro respaldo o un texto suelto', () => {
+    expect(piezasQueFaltan(HOY.replace('0.004', '0.01'))).toEqual([
+      '{…remanente>0.004&&(',
+    ]);
+    expect(
+      piezasQueFaltan(HOY.replace('?? MATRICULA_DESCONOCIDA', '?? "—"')),
+    ).toEqual(['{…matricula??MATRICULA_DESCONOCIDA}']);
+    expect(
+      piezasQueFaltan(HOY.replace('{ETIQUETA_FALTA_AVION}', 'Falta avión')),
+    ).toEqual(['{ETIQUETA_FALTA_AVION}']);
+  });
+
+  it('un paquete npm que la regla no usa no tumba la carga; usarlo truena con su nombre', () => {
+    const m = paqueteNoCargado('src/lib/format.ts', 'date-fns');
+    expect(m.__esModule).toBe(true);
+    const format = m.format as () => unknown;
+    expect(typeof format).toBe('function');
+    expect(() => format()).toThrow(
+      '«src/lib/format.ts» usa «date-fns».format: la paridad no carga paquetes npm',
+    );
+  });
+});

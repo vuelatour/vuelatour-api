@@ -60,7 +60,7 @@ import {
   alVincularSobre,
   cobroOcupadoParaAbono,
   cobroParaCruce,
-  comisionRealParaCorregir,
+  decidirCorregirComision,
   diferenciaLoteCobros,
   etiquetaConciliadoCobroUnico,
   etiquetaConciliadoCobros,
@@ -97,6 +97,7 @@ import {
   type ParteCobroBanco,
 } from '../../common/cobro-banco.util';
 import {
+  cobrosParcialesConfirmados,
   cobrosParcialesDisponibles,
   errorCobrosParcialesNoDisponibles,
 } from '../../common/cobros-parciales-disponible.util';
@@ -158,7 +159,7 @@ import {
   type CandidatoAbonoCruce,
 } from './abono-cruce.util';
 import {
-  comisionRealDeCruce,
+  comisionAEscribirEnCruce,
   cruzarPaywise,
   difDias,
   PAYWISE_VENTANA_DIAS,
@@ -606,8 +607,10 @@ export interface LigaCobroInput {
   cobro_ids?: string[] | null;
   /**
    * «Corregir la comisión y vincular» (0.0.78, D6): solo con UN cobro de
-   * vuelo sin abonos; antes de ligar escribe la comisión real (monto −
-   * depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica.
+   * vuelo sin abonos cuyo veredicto SIN corregir es COMISION_NO_CUADRA
+   * (revisión del 15-oct-2026); antes de ligar escribe la comisión real
+   * (monto − depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica (o el
+   * 409/400 de siempre, sin escribir, si la liga se rechaza por otra cosa).
    */
   corregir_comision?: boolean;
 }
@@ -4461,8 +4464,12 @@ export class ConciliacionService {
    * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D12): con la sonda de
    * 20261014000003 un cobro PARCIAL cuyo FALTANTE es el abono al centavo
    * cuenta como «libre exacto» (todavía espera ese dinero: es su pago, no
-   * otro ingreso), con la MISMA regla de ocupado que el auto-cruce
-   * (`cobroParaCruce`). Un abono de la PASARELA no completa parciales.
+   * otro ingreso), con la regla de ocupado del auto-cruce
+   * (`cobroParaCruce`) en modo FRENO: «de un solo abono» por la regla del
+   * trigger A, sin el método PAYWISE (un freno solo avisa y debe ver todo
+   * parcial que la BD sí dejaría completar). Un abono de la PASARELA no
+   * completa parciales. La ventana sigue siendo ±30 días por `fecha_cobro`
+   * (heredada del 0.0.77): un parcial registrado antes no frena.
    */
   private async cobrosExactosLibresDeAbono(
     abono: AbonoCruce,
@@ -4595,7 +4602,10 @@ export class ConciliacionService {
     }
     // Con la sonda: la cobertura de cada cobro decide (`cobroParaCruce`):
     // sin otros abonos cuenta si cuadra por neto/bruto; un parcial de banco,
-    // si lo que le falta es el abono al centavo.
+    // si lo que le falta es el abono al centavo. Es un FRENO (solo avisa):
+    // «de un solo abono» por la regla del trigger A, sin el método PAYWISE
+    // (un parcial que la BD sí deja completar todavía espera ese dinero;
+    // revisión del 15-oct-2026).
     const partes = partesDeLigas(ligados);
     const porId = new Map(cobros.map((c) => [c.id as string, c]));
     let libresCobro = 0;
@@ -4605,6 +4615,7 @@ export class ConciliacionService {
       const v = cobroParaCruce({ ...c, moneda }, partes.get(id) ?? [], null, {
         conParciales: true,
         pasarela: false,
+        freno: true,
       });
       if (!v.libre) continue;
       const cuadra =
@@ -4649,10 +4660,13 @@ export class ConciliacionService {
    *   un cobro PARCIAL ⇒ 503 CONCILIACION_COBROS_PARCIALES_NO_DISPONIBLE;
    * - un SOBRE en una cuenta de banco de su moneda ⇒ |abono| = neto del
    *   sobre ± $1.00 o 409 SOBRE_NO_CUADRA (solo API, D8);
-   * - `corregir_comision` (UN cobro de vuelo sin abonos): escribe la
-   *   comisión REAL (monto − depósito) con `escribirComisionReal` y liga por
-   *   el camino normal; si la liga falla después, la comisión QUEDA (es la
-   *   verdad del banco) y el error lo dice (`details.comision_corregida`);
+   * - `corregir_comision` (UN cobro de vuelo sin abonos y SOLO si el
+   *   veredicto sin corregir es COMISION_NO_CUADRA: `decidirCorregirComision`
+   *   decide ANTES de escribir; PARCIAL / NO_HACE_FALTA ⇒ 400 y cualquier
+   *   otro rechazo ⇒ su 409/400, sin escribir): escribe la comisión REAL
+   *   (monto − depósito) con `escribirComisionReal` y liga por el camino
+   *   normal; si la liga falla después, la comisión QUEDA (es la verdad del
+   *   banco) y el error lo dice (`details.comision_corregida`);
    * - con la puente, la respuesta es SIEMPRE la de `respuestaCobros` (fila
    *   releída + `cobros_estado[]`, también con un `cobro_id` suelto) y, al
    *   desvincular, `cobros_liberados[]` con el estado de cada cobro DESPUÉS.
@@ -4983,14 +4997,23 @@ export class ConciliacionService {
       cobro,
       partes.filter((p) => p.movimiento_id !== movId),
     );
+    const ctx: ContextoSugeridos = {
+      fecha: mov.fecha,
+      cuenta_bancaria_id: mov.cuenta_bancaria_id,
+      moneda: cuenta.moneda,
+      tipoCuenta: cuenta.tipo,
+      excluir: [cobro.id],
+    };
     let corregida: ComisionCorregida | null = null;
     if (opts.corregir) {
       corregida = await this.corregirComisionAntesDeLigar(
         c,
         partes,
         mov.monto,
-        cuenta.moneda,
+        { moneda: cuenta.moneda, tipo: cuenta.tipo },
         opts.userId,
+        movId,
+        ctx,
       );
       c.comision_banco_monto = corregida.despues;
     }
@@ -5003,13 +5026,7 @@ export class ConciliacionService {
         cobros: [c],
       });
       if (!veredicto.ok) {
-        throw await this.errorVeredictoCobros(veredicto, movId, {
-          fecha: mov.fecha,
-          cuenta_bancaria_id: mov.cuenta_bancaria_id,
-          moneda: cuenta.moneda,
-          tipoCuenta: cuenta.tipo,
-          excluir: [cobro.id],
-        });
+        throw await this.errorVeredictoCobros(veredicto, movId, ctx);
       }
       if ((c.otras?.length ?? 0) > 0 && !(await this.cobrosParcialesOn())) {
         throw errorCobrosParcialesNoDisponibles();
@@ -5068,41 +5085,53 @@ export class ConciliacionService {
   }
 
   /**
-   * «Corregir la comisión y vincular» (0.0.78, D6): solo un cobro de vuelo
-   * SIN abonos (ni este), en la moneda de la cuenta y con 0 ≤ monto −
-   * |depósito| < monto (400 CORREGIR_COMISION_NO_APLICA si no). Escribe la
-   * comisión real con `escribirComisionReal` (la misma escritura del cruce
-   * Paywise) y devuelve {cobro_id, antes, despues}; si ya era esa, no
-   * escribe.
+   * «Corregir la comisión y vincular» (0.0.78, D6; endurecida en la revisión
+   * del 15-oct-2026). Decide `decidirCorregirComision` ANTES de escribir:
+   * solo si el veredicto SIN corregir (el de la liga, con la comisión
+   * vigente) es COMISION_NO_CUADRA y la comisión real vale; con abonos,
+   * otra moneda, PARCIAL o NO_HACE_FALTA ⇒ 400 CORREGIR_COMISION_NO_APLICA;
+   * cualquier otro rechazo (parte de un sobre, anticipo, reembolso, de más…)
+   * ⇒ el MISMO 409/400 que sin la bandera. Nada se escribe en esos casos.
+   * Escribe la comisión real con `escribirComisionReal` (la misma escritura
+   * del cruce Paywise) y devuelve {cobro_id, antes, despues}; si ya era
+   * esa, no escribe.
    */
   private async corregirComisionAntesDeLigar(
     c: CobroParaLote,
     partes: ReadonlyArray<ParteCobroBanco>,
     montoAbono: number | string,
-    monedaCuenta: string,
+    cuenta: { moneda: string; tipo: string | null },
     userId: string,
+    movId: string,
+    ctx: ContextoSugeridos,
   ): Promise<ComisionCorregida> {
-    if (partes.length > 0) throw errorCorregirComisionNoAplica('CON_ABONOS');
-    if (c.moneda !== monedaCuenta) {
-      throw errorCorregirComisionNoAplica('MONEDA_DISTINTA');
+    const d = decidirCorregirComision({
+      cobro: c,
+      nPartes: partes.length,
+      montoAbono,
+      monedaCuenta: cuenta.moneda,
+      tipoCuenta: cuenta.tipo,
+      toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+    });
+    if (!d.aplica) {
+      if ('rechazo' in d) {
+        throw await this.errorVeredictoCobros(d.rechazo, movId, ctx);
+      }
+      throw errorCorregirComisionNoAplica(d.motivo);
     }
     const monto = r2(Number(c.monto) || 0);
-    const real = comisionRealParaCorregir(monto, montoAbono);
-    if (!real.valida) {
-      throw errorCorregirComisionNoAplica(real.motivo ?? 'DEPOSITO_MAYOR');
-    }
     const antes =
       (Number(c.comision_banco_monto) || 0) > 0
         ? r2(Number(c.comision_banco_monto))
         : null;
-    const nueva = real.comision > 0.01 ? r2(real.comision) : null;
+    const nueva = d.comision > 0.01 ? r2(d.comision) : null;
     if ((antes ?? 0) === (nueva ?? 0)) {
       return { cobro_id: c.id, antes, despues: antes };
     }
     const despues = await this.escribirComisionReal(
       c.id,
       monto,
-      real.comision,
+      d.comision,
       userId,
     );
     this.logger.log(
@@ -5546,12 +5575,17 @@ export class ConciliacionService {
     };
     let corregida: ComisionCorregida | null = null;
     if (opts.corregirComision === true && cobros.length === 1) {
+      // Decide con el veredicto SIN corregir (revisión del 15-oct-2026): la
+      // PARTE de un sobre, un reembolso o cualquier otro rechazo responden
+      // su 409/400 SIN escribir la comisión.
       corregida = await this.corregirComisionAntesDeLigar(
         cobros[0],
         partesPorCobro.get(ids[0]) ?? [],
         mov.monto,
-        cuenta.moneda,
+        { moneda: cuenta.moneda, tipo: cuenta.tipo },
         userId,
+        movId,
+        ctx,
       );
       cobros[0].comision_banco_monto = corregida.despues;
     }
@@ -6815,24 +6849,33 @@ export class ConciliacionService {
    * bruto del cobro − abono (`comisionRealDeCruce`; 0.0.78, D6: el cobro de
    * la pasarela se concilia con UN abono = su neto ± $1.00 y sin la
    * inferencia el auto-cruce rebotaría con COMISION_NO_CUADRA). La escribe
-   * `escribirComisionReal` (la misma de «Corregir la comisión y vincular»).
+   * `escribirComisionReal` (la misma de «Corregir la comisión y vincular»)
+   * SOLO si con ella el abono cuadra (`comisionAEscribirEnCruce`, revisión
+   * del 15-oct-2026): si no, NO se escribe y se liga con la vigente (la
+   * diferencia queda en la auditoría, `comision_distinta`); si tampoco
+   * cuadra, `linkCobro` rechaza SIN que nada se haya escrito.
    */
   private async aplicarCrucePaywise(
     cruce: CrucePaywise,
     userId: string,
   ): Promise<void> {
     const { cobro, movimiento } = cruce;
-    const real = comisionRealDeCruce(cruce);
-    if (
-      cobro.tipo === 'COBRO_VUELO' &&
-      real != null &&
-      Math.abs(real - cruce.comision_sistema) > 0.01 &&
-      real >= 0 &&
-      real < cobro.monto
-    ) {
-      await this.escribirComisionReal(cobro.id, cobro.monto, real, userId);
+    const comision = comisionAEscribirEnCruce(cruce);
+    const origen =
+      cruce.comision_paywise != null ? 'del archivo' : 'inferida por BRUTO';
+    if (comision.escribir != null) {
+      await this.escribirComisionReal(
+        cobro.id,
+        cobro.monto,
+        comision.escribir,
+        userId,
+      );
       this.logger.log(
-        `Paywise: comisión real ${real} escrita en cobro ${cobro.id} (antes ${cruce.comision_sistema}; ${cruce.comision_paywise != null ? 'del archivo' : 'inferida por BRUTO'}).`,
+        `Paywise: comisión real ${comision.escribir} escrita en cobro ${cobro.id} (antes ${cruce.comision_sistema}; ${origen}).`,
+      );
+    } else if (comision.descartada != null) {
+      this.logger.warn(
+        `Paywise: la comisión ${comision.descartada} (${origen}) NO se escribe en el cobro ${cobro.id}: con ella el depósito de ${movimiento.monto} no cuadraría. Se liga con la comisión del sistema (${cruce.comision_sistema}); la diferencia queda en la auditoría Paywise.`,
       );
     }
     await this.linkCobro(
@@ -12301,10 +12344,17 @@ export class ConciliacionService {
       : this.conciliacionDeCobroEntrada(id);
   }
 
-  /** La sonda del 0.0.78 (20261014000003) sin tumbar la hoja: falla ⇒ false. */
+  /**
+   * La sonda del 0.0.78 (20261014000003) en modo ESTRICTO y sin tumbar la
+   * hoja: «sí» solo con la migración CONFIRMADA (`cobrosParcialesConfirmados`);
+   * una respuesta dudosa de la sonda (red, timeout, 5xx, `data` ≠ true) o
+   * una excepción ⇒ false (revisión del 15-oct-2026: antes la sonda asumía
+   * «sí» ante un error raro y la hoja afirmaba `varios_abonos_por_cobro`
+   * sin haberlo comprobado).
+   */
   private async cobrosParcialesOnSeguro(): Promise<boolean> {
     try {
-      return await this.cobrosParcialesOn();
+      return await cobrosParcialesConfirmados(this.supabase.service);
     } catch (err) {
       this.logger.warn(
         `Conciliación al revés: no se pudo sondear 20261014000003: ${err instanceof Error ? err.message : String(err)}`,

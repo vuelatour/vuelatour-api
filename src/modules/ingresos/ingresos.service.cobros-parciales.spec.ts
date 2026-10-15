@@ -467,6 +467,31 @@ describe('«Registrar como otro ingreso» — el 2.º SPEI es lo que le FALTA a 
     expect(await cuadranCon(vieja.svc, M2, db)).toEqual([]);
   });
 
+  it('método PAYWISE sin comisión con un SPEI de banco (la BD SÍ acepta el 2.º SPEI) ⇒ el freno lo ve: 409 ABONO_TIENE_COBRO_CANDIDATO (revisión del 15-oct-2026: antes el método lo daba por «de un solo abono» y los 1,700 contaban dos veces)', async () => {
+    const db = mundo();
+    Object.assign(db.cobro_vuelo[0], {
+      metodo_cobro: 'PAYWISE',
+      comision_banco_monto: 0,
+    });
+    const { svc } = armar(db);
+    const r = await error(svc.crear(otroIngreso(M2, 1700), undefined, ADMIN));
+    expect(r.code).toBe('ABONO_TIENE_COBRO_CANDIDATO');
+    expect((r.details as { candidatos: Row[] }).candidatos).toEqual([
+      expect.objectContaining({ id: C315, parcial: true, faltante: 1700 }),
+    ]);
+    // Con comisión capturada sí es «de un solo abono» (A lo rechaza): ni
+    // un abono EXACTO a su faltante (3,300 − 1,700 = 1,600) lo frena.
+    const conComision = mundo();
+    Object.assign(conComision.cobro_vuelo[0], {
+      metodo_cobro: 'PAYWISE',
+      comision_banco_monto: 100,
+    });
+    const M1600 = 'a0000000-0000-4000-8000-000000001600';
+    conComision.movimiento_bancario.push(abono(M1600, 1600));
+    const otro = armar(conComision);
+    expect(await cuadranCon(otro.svc, M1600, conComision)).toEqual([]);
+  });
+
   it('un cobro CUBIERTO no detiene nada (su faltante es 0)', async () => {
     const db = mundo();
     db.movimiento_bancario_cobro.push({

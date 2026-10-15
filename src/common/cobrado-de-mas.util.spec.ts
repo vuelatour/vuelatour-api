@@ -427,6 +427,34 @@ describe('cobradoDeMas — duplicado, sobre y el orden de las causas', () => {
         entrada({ total_usd: 300, cobrado_usd: 303.5, cobros: [mxn] }),
       )?.causa,
     ).toBe('SIN_CAUSA_CLARA');
+    // El tope ABSOLUTO de $10 (revisión del 15-oct-2026): con un total de
+    // $5,000 el 1 % sería $50, pero el redondeo del T.C. nunca pasa de $10.
+    // $10.00 todavía es redondeo; $10.01 y $40 piden revisión (cuentan en el
+    // pre-cierre).
+    const grande = (excedente: number) =>
+      cobradoDeMas(
+        entrada({
+          total_usd: 5000,
+          cobrado_usd: 5000 + excedente,
+          cobros: [{ ...mxn, monto: 87500, usd: 5000 + excedente }],
+        }),
+      );
+    expect(grande(10)).toMatchObject({
+      causa: 'REDONDEO_TC',
+      requiere_revision: false,
+      tono: 'INFO',
+    });
+    for (const excedente of [10.01, 40]) {
+      expect([excedente, grande(excedente)]).toEqual([
+        excedente,
+        expect.objectContaining({
+          causa: 'SIN_CAUSA_CLARA',
+          requiere_revision: true,
+          tono: 'AVISO',
+          excedente_usd: excedente,
+        }),
+      ]);
+    }
     // Solo dólares ⇒ nunca es redondeo del T.C.
     expect(cobradoDeMas(entrada({ cobrado_usd: 1005 }))?.causa).toBe(
       'SIN_CAUSA_CLARA',

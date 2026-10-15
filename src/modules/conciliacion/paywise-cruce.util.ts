@@ -27,8 +27,10 @@
  * 3. Comisión: la del archivo (`comision_monto`, o `monto_bruto − monto`)
  *    contra `comision_banco_monto` del cobro. Difieren > 1 centavo →
  *    `comision_distinta` (la liga sigue valiendo; el service escribe la
- *    comisión REAL en el cobro de vuelo al ligar).
+ *    comisión REAL en el cobro de vuelo al ligar SOLO si con ella el abono
+ *    cuadra: `comisionAEscribirEnCruce`, revisión del 15-oct-2026).
  */
+import { alVincularAbono } from '../../common/cobro-banco.util';
 
 export type CriterioCrucePaywise =
   | 'YA_CONCILIADO'
@@ -197,6 +199,68 @@ export function comisionRealDeCruce(cruce: CrucePaywise): number | null {
   if (cruce.criterio !== 'BRUTO') return null;
   const x = r2(num(cruce.cobro.monto) - num(cruce.movimiento.monto));
   return Math.abs(x) <= 0.01 ? 0 : x;
+}
+
+/**
+ * ¿El abono de la pasarela CUADRARÍA con el cobro si su comisión fuera
+ * `comision`? La regla del trigger A para UN abono de la PASARELA
+ * (`alVincularAbono`, rama «de un solo abono»: |abono − neto| ≤ $1.00 y no
+ * más que el monto + $1.00), sin otros abonos (el universo Paywise solo trae
+ * cobros libres) y en la moneda del cobro (el cruce solo junta la misma).
+ */
+export function cruceCuadraConComision(
+  cruce: CrucePaywise,
+  comision: number | null,
+): boolean {
+  const al = alVincularAbono({
+    cobro: {
+      monto: cruce.cobro.monto,
+      moneda: cruce.cobro.moneda,
+      comision_banco_monto: comision,
+    },
+    tcVuelo: null,
+    otras: [],
+    abono: {
+      monto: num(cruce.movimiento.monto),
+      moneda_cuenta: cruce.cobro.moneda,
+      pasarela: true,
+    },
+    toleranciaTcPct: Number.POSITIVE_INFINITY,
+  });
+  return al.estado === 'CONCILIADO';
+}
+
+/**
+ * La comisión que el cruce ESCRIBE en el cobro de vuelo antes de ligar
+ * (0.0.78, D6; revisión del 15-oct-2026): la REAL (`comisionRealDeCruce`)
+ * si difiere de la del sistema por más de un centavo, es ≥ 0 y < monto, Y
+ * con ella el abono CUADRARÍA (`cruceCuadraConComision`: la liga de la
+ * pasarela es UN abono = neto ± $1.00). Si con ella NO cuadraría (NETO
+ * exacto con un bruto del archivo distinto del del cobro —el cliente pagó
+ * la comisión encima—, o una comisión directa del archivo que no es bruto −
+ * neto) va en `descartada` y NO se escribe: el cruce se liga con la
+ * comisión vigente si esa cuadra (la diferencia queda en la auditoría como
+ * `comision_distinta`) y, si tampoco, la liga se rechaza sin haber escrito
+ * nada. Un SOBRE nunca se reescribe (su comisión se parte entre los hijos).
+ */
+export function comisionAEscribirEnCruce(cruce: CrucePaywise): {
+  escribir: number | null;
+  descartada: number | null;
+} {
+  const nada = { escribir: null, descartada: null };
+  if (cruce.cobro.tipo !== 'COBRO_VUELO') return nada;
+  const real = comisionRealDeCruce(cruce);
+  if (
+    real == null ||
+    !(Math.abs(real - cruce.comision_sistema) > 0.01) ||
+    real < 0 ||
+    !(real < num(cruce.cobro.monto))
+  ) {
+    return nada;
+  }
+  return cruceCuadraConComision(cruce, real)
+    ? { escribir: real, descartada: null }
+    : { escribir: null, descartada: real };
 }
 
 /** Comisión según el archivo (directa o por diferencia bruto − neto). */

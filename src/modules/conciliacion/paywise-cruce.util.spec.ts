@@ -1,5 +1,7 @@
 import {
+  comisionAEscribirEnCruce,
   comisionRealDeCruce,
+  cruceCuadraConComision,
   cruzarPaywise,
   difDias,
   normalizarReferencia,
@@ -266,5 +268,90 @@ describe('comisionRealDeCruce (0.0.78, invariante 77 D6: la comisión que se esc
     );
     expect(r.coinciden[0].criterio).toBe('NETO');
     expect(comisionRealDeCruce(r.coinciden[0])).toBeNull();
+  });
+});
+
+describe('comisionAEscribirEnCruce (revisión del 15-oct-2026: la comisión del archivo solo se escribe si con ella el abono CUADRA)', () => {
+  it('BRUTO con números coherentes ⇒ se escribe (y cuadra)', () => {
+    // Cobro 7,000 con 620 provisionados; el archivo: bruto 7,000, depósito 6,300 ⇒ 700.
+    const r = cruzarPaywise(
+      [mov({ monto: 6300, monto_bruto: 7000, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    expect(r.coinciden[0].criterio).toBe('BRUTO');
+    expect(comisionAEscribirEnCruce(r.coinciden[0])).toEqual({
+      escribir: 700,
+      descartada: null,
+    });
+    // BRUTO sin datos del archivo (así vienen los de prod): la inferida 0.
+    const prod = cruzarPaywise(
+      [mov({ monto: 7000, monto_bruto: null, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    expect(comisionAEscribirEnCruce(prod.coinciden[0])).toEqual({
+      escribir: 0,
+      descartada: null,
+    });
+  });
+
+  it('NETO exacto con un bruto del archivo DISTINTO del cobro ⇒ NO se escribe (con ella no cuadraría; la vigente sí)', () => {
+    // Depósito 6,380 = 7,000 − 620; el archivo dice bruto 7,100 (comisión 720).
+    const r = cruzarPaywise(
+      [mov({ monto: 6380, monto_bruto: 7100, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    const c = r.coinciden[0];
+    expect([c.criterio, c.comision_paywise, c.comision_distinta]).toEqual([
+      'NETO',
+      720,
+      true,
+    ]);
+    expect(comisionAEscribirEnCruce(c)).toEqual({
+      escribir: null,
+      descartada: 720,
+    });
+    expect(cruceCuadraConComision(c, 720)).toBe(false);
+    expect(cruceCuadraConComision(c, 620)).toBe(true);
+    // El cliente pagó la comisión ENCIMA: cobro 7,000 sin comisión, depósito
+    // 7,000 y el archivo con bruto 7,406 ⇒ los 406 no son del cobro.
+    const encima = cruzarPaywise(
+      [mov({ monto: 7000, monto_bruto: 7406, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: null })],
+    );
+    expect(comisionAEscribirEnCruce(encima.coinciden[0])).toEqual({
+      escribir: null,
+      descartada: 406,
+    });
+  });
+
+  it('una comisión DIRECTA del archivo que no es bruto − neto (p. ej. sin IVA) ⇒ NO se escribe', () => {
+    // Bruto 7,000 = el cobro; depósito 6,380; el archivo dice comisión 534.48.
+    const r = cruzarPaywise(
+      [mov({ monto: 6380, monto_bruto: 7000, comision_monto: 534.48 })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    expect(comisionAEscribirEnCruce(r.coinciden[0])).toEqual({
+      escribir: null,
+      descartada: 534.48,
+    });
+  });
+
+  it('un SOBRE, la misma comisión o fuera de rango ⇒ nada que escribir', () => {
+    const sobre = cruzarPaywise(
+      [mov({ monto: 900, monto_bruto: 1000, comision_monto: null })],
+      [cobro({ tipo: 'SOBRE_GRUPO', comision_banco_monto: 50 })],
+    );
+    expect(comisionAEscribirEnCruce(sobre.coinciden[0])).toEqual({
+      escribir: null,
+      descartada: null,
+    });
+    const igual = cruzarPaywise(
+      [mov({ monto: 911.43, monto_bruto: 1000, comision_monto: null })],
+      [cobro()],
+    );
+    expect(comisionAEscribirEnCruce(igual.coinciden[0])).toEqual({
+      escribir: null,
+      descartada: null,
+    });
   });
 });

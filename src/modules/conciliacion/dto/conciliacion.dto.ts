@@ -466,14 +466,15 @@ export class LinkMovimientoCobroDto {
   /**
    * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D6): «Corregir la
    * comisión y vincular». Solo con UN cobro de vuelo (`cobro_id` o
-   * `cobro_ids` de 1) sin abonos: antes de ligar escribe la comisión real
-   * (monto − depósito). Un API previo responde 400 «property
+   * `cobro_ids` de 1) sin abonos cuyo veredicto SIN corregir es
+   * COMISION_NO_CUADRA (revisión del 15-oct-2026): antes de ligar escribe la
+   * comisión real (monto − depósito). Un API previo responde 400 «property
    * corregir_comision should not exist» (forbidNonWhitelisted): el panel
    * solo lo manda con la capacidad `movimiento.corregir_comision`.
    */
   @ApiPropertyOptional({
     description:
-      'Solo con UN cobro de vuelo sin abonos: antes de ligar escribe la comisión real (monto − depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica.',
+      'Solo con UN cobro de vuelo sin abonos cuyo veredicto sin corregir es COMISION_NO_CUADRA: antes de ligar escribe la comisión real (monto − depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica (o el 409/400 de siempre, sin escribir).',
   })
   @IsOptional()
   // El valor CRUDO del cuerpo (patrón de `solo_enriquecer`): con

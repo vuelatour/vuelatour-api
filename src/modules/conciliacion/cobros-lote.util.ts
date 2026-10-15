@@ -13,6 +13,7 @@
 import {
   alVincularAbono,
   cobroDeUnSoloAbono,
+  cobroDeUnSoloAbonoSegunA,
   coberturaCobro,
   cubreCobro,
   EPSILON_COBRO_BANCO,
@@ -516,7 +517,11 @@ function veredictoUnCobro(
   };
 }
 
-/** Por qué no aplica «Corregir la comisión y vincular» (400 CORREGIR_COMISION_NO_APLICA). */
+/**
+ * Por qué no aplica «Corregir la comisión y vincular» (400
+ * CORREGIR_COMISION_NO_APLICA). `PARCIAL` y `NO_HACE_FALTA` (revisión del
+ * 15-oct-2026): el veredicto SIN corregir no es COMISION_NO_CUADRA.
+ */
 export type MotivoCorregirComisionNoAplica =
   | 'VARIOS_COBROS'
   | 'SOBRE'
@@ -524,7 +529,9 @@ export type MotivoCorregirComisionNoAplica =
   | 'DEPOSITO_MAYOR'
   | 'SIN_COBRO'
   | 'MONEDA_DISTINTA'
-  | 'DEPOSITO_INVALIDO';
+  | 'DEPOSITO_INVALIDO'
+  | 'PARCIAL'
+  | 'NO_HACE_FALTA';
 
 /**
  * La comisión REAL que «Corregir la comisión y vincular» escribiría:
@@ -554,12 +561,76 @@ export function comisionRealParaCorregir(
 export function mensajeCorregirComisionNoAplica(
   motivo: MotivoCorregirComisionNoAplica,
 ): string {
+  if (motivo === 'PARCIAL') {
+    return 'Este cobro no tiene comisión del banco: un depósito menor es un pago parcial, no una comisión. Vincúlalo sin corregir (quedará «Conciliado parcial» hasta que llegue lo que falta) o, si de verdad hubo comisión, captúrala en el cobro del vuelo.';
+  }
+  if (motivo === 'NO_HACE_FALTA') {
+    return 'El depósito ya cuadra con lo que espera el cobro: vincúlalo sin corregir la comisión.';
+  }
   const base =
     'La comisión solo se corrige al vincular UN cobro de vuelo que todavía no tiene abonos, cuando el depósito es menor o igual que el cobro.';
   if (motivo === 'MONEDA_DISTINTA') {
     return `${base} El depósito está en otra moneda que el cobro: corrige el cobro en el vuelo.`;
   }
   return base;
+}
+
+/** Lo que decide `decidirCorregirComision` (sin escribir nada). */
+export type DecisionCorregirComision =
+  | { aplica: true; comision: number }
+  | { aplica: false; motivo: MotivoCorregirComisionNoAplica }
+  | { aplica: false; rechazo: Extract<VeredictoLoteCobros, { ok: false }> };
+
+/**
+ * ¿Aplica «Corregir la comisión y vincular» a ESTE abono y ESTE cobro?
+ * (0.0.78, D6; ENDURECIDA en la revisión del 15-oct-2026: el API es el
+ * candado, no el botón del panel). SOLO cuando el veredicto SIN corregir
+ * —`puedeLigarCobros` con la comisión VIGENTE, el mismo de la liga— es
+ * COMISION_NO_CUADRA (comisión capturada o abono de la pasarela) y la
+ * comisión real vale (= `details.corregible`). En orden, y sin escribir:
+ * - el cobro ya tiene abonos (este incluido) ⇒ CON_ABONOS;
+ * - la cuenta está en otra moneda ⇒ MONEDA_DISTINTA;
+ * - cualquier otro rechazo del veredicto (parte de un sobre, cobro de un
+ *   anticipo, reembolso, abono de más…) ⇒ `rechazo`: ESE 409/400, el mismo
+ *   que sin la bandera (antes la comisión se escribía y el rechazo llegaba
+ *   después: la PARTE de un sobre perdía el reparto de su comisión);
+ * - el abono ya cuadra ⇒ NO_HACE_FALTA; dejaría el cobro PARCIAL (banco sin
+ *   comisión: un pago en partes, no una comisión) ⇒ PARCIAL;
+ * - depósito mayor que el cobro o en 0 ⇒ DEPOSITO_MAYOR / DEPOSITO_INVALIDO
+ *   (`comisionRealParaCorregir`).
+ */
+export function decidirCorregirComision(i: {
+  cobro: CobroParaLote;
+  /** Partes de TODOS los abonos del cobro (este incluido). */
+  nPartes: number;
+  montoAbono: number | string;
+  monedaCuenta: string | null;
+  tipoCuenta?: string | null;
+  toleranciaTcPct?: number | null;
+}): DecisionCorregirComision {
+  if (i.nPartes > 0) return { aplica: false, motivo: 'CON_ABONOS' };
+  if (i.cobro.moneda !== i.monedaCuenta) {
+    return { aplica: false, motivo: 'MONEDA_DISTINTA' };
+  }
+  const v = puedeLigarCobros({
+    montoAbono: i.montoAbono,
+    monedaCuenta: i.monedaCuenta,
+    tipoCuenta: i.tipoCuenta,
+    toleranciaTcPct: i.toleranciaTcPct,
+    cobros: [i.cobro],
+  });
+  if (v.ok) {
+    return {
+      aplica: false,
+      motivo: v.al_vincular?.estado === 'PARCIAL' ? 'PARCIAL' : 'NO_HACE_FALTA',
+    };
+  }
+  if (v.codigo !== 'COMISION_NO_CUADRA') return { aplica: false, rechazo: v };
+  const real = comisionRealParaCorregir(i.cobro.monto, i.montoAbono);
+  if (!real.valida) {
+    return { aplica: false, motivo: real.motivo ?? 'DEPOSITO_MAYOR' };
+  }
+  return { aplica: true, comision: real.comision };
 }
 
 /** Un cobro sugerido para completar un abono que EXCEDE a su cobro (D4). */
@@ -666,9 +737,13 @@ export interface CobroParaCruce {
  * - ocupado para «Vincular» (sin la sonda de 20261014000003: cualquier otro
  *   abono; con ella: cubierto, con un abono en otra moneda, o este abono
  *   es de la PASARELA, que no recibe parciales) ⇒ ocupado;
- * - parcial «de un solo abono» (`cobroDeUnSoloAbono`: comisión capturada,
- *   método o abono de la pasarela) ⇒ ocupado: no admite otro abono (el
- *   trigger A lo rechaza; con el método PAYWISE, el auto no adivina);
+ * - parcial «de un solo abono» ⇒ ocupado: no admite otro abono. Para LIGAR
+ *   (el auto-cruce, por omisión) es `cobroDeUnSoloAbono`: comisión
+ *   capturada, parte de la pasarela o cruzada y también el MÉTODO PAYWISE
+ *   (el auto no adivina: a mano sí se completa). Con `freno: true` (los
+ *   frenos anti doble conteo, que solo AVISAN; revisión del 15-oct-2026) es
+ *   la regla del trigger A sin el método (`cobroDeUnSoloAbonoSegunA`): un
+ *   parcial que la BD sí deja completar todavía espera ese dinero;
  * - parcial de BANCO ⇒ libre con `faltante` = lo que le falta FUERA de este
  *   abono (`faltanteFueraDe`). Quien llama solo lo liga si el abono es
  *   EXACTAMENTE ese faltante: el auto nunca crea un parcial.
@@ -678,15 +753,16 @@ export function cobroParaCruce(
   c: CobroParaCobertura & { metodo_cobro?: unknown },
   partes: ReadonlyArray<ParteCobroBanco>,
   movimientoId: string | null,
-  opts: { conParciales: boolean; pasarela: boolean },
+  opts: { conParciales: boolean; pasarela: boolean; freno?: boolean },
 ): CobroParaCruce {
   const movId = movimientoId ?? '';
   const f = faltanteFueraDe(c, partes, movId);
   if (f.n_otras === 0) return { libre: true, faltante: null };
-  if (
-    cobroOcupadoParaAbono(c, partes, movId, opts) ||
-    cobroDeUnSoloAbono(c, f.otras)
-  ) {
+  const unSolo =
+    opts.freno === true
+      ? cobroDeUnSoloAbonoSegunA(c, f.otras)
+      : cobroDeUnSoloAbono(c, f.otras);
+  if (cobroOcupadoParaAbono(c, partes, movId, opts) || unSolo) {
     return { libre: false, faltante: null };
   }
   return { libre: true, faltante: f.faltante };

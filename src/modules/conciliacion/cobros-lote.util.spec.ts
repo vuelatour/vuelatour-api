@@ -4,6 +4,7 @@ import {
   cobroParaCruce,
   comisionRealParaCorregir,
   CODIGOS_ERROR_COBROS,
+  decidirCorregirComision,
   diferenciaLoteCobros,
   etiquetaConciliadoCobroUnico,
   etiquetaConciliadoCobros,
@@ -1174,6 +1175,96 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
     );
   });
 
+  it('decidirCorregirComision (D6 endurecida, revisión del 15-oct-2026): SOLO con el veredicto sin corregir COMISION_NO_CUADRA; PARCIAL, NO_HACE_FALTA y los demás rechazos no escriben', () => {
+    const cobro = (c: Partial<CobroParaLote>): CobroParaLote => ({
+      id: A,
+      monto: 3400,
+      moneda: 'MXN',
+      folio: 315,
+      ...c,
+    });
+    const decide = (
+      c: Partial<CobroParaLote>,
+      abono: number,
+      extra: { nPartes?: number; tipo?: string; moneda?: string } = {},
+    ) =>
+      decidirCorregirComision({
+        cobro: cobro(c),
+        nPartes: extra.nPartes ?? 0,
+        montoAbono: abono,
+        monedaCuenta: extra.moneda ?? 'MXN',
+        tipoCuenta: extra.tipo ?? 'BANCO',
+        toleranciaTcPct: 2,
+      });
+    // #293: 13,000 con 1,129.76 provisionados y la pasarela depositó 11,800.
+    expect(
+      decide({ monto: 13000, comision_banco_monto: 1129.76 }, 11800, {
+        tipo: 'PASARELA',
+      }),
+    ).toEqual({ aplica: true, comision: 1200 });
+    // Paywise sin comisión capturada (los 3 pendientes de prod).
+    expect(decide({ monto: 36500 }, 33303.64, { tipo: 'PASARELA' })).toEqual({
+      aplica: true,
+      comision: 3196.36,
+    });
+    // Banco con comisión capturada que no cuadra (HSBC link).
+    expect(decide({ monto: 5000, comision_banco_monto: 250 }, 4000)).toEqual({
+      aplica: true,
+      comision: 1000,
+    });
+    // Banco SIN comisión y depósito menor: es un pago PARCIAL, no comisión.
+    expect(decide({}, 1700)).toEqual({ aplica: false, motivo: 'PARCIAL' });
+    // Ya cuadra: no hay nada que corregir.
+    expect(decide({}, 3400)).toEqual({
+      aplica: false,
+      motivo: 'NO_HACE_FALTA',
+    });
+    expect(decide({ monto: 5000, comision_banco_monto: 250 }, 4750.5)).toEqual({
+      aplica: false,
+      motivo: 'NO_HACE_FALTA',
+    });
+    // Con abonos o en otra moneda, como siempre.
+    expect(decide({}, 1700, { nPartes: 1 })).toEqual({
+      aplica: false,
+      motivo: 'CON_ABONOS',
+    });
+    expect(decide({ moneda: 'USD' }, 1700)).toEqual({
+      aplica: false,
+      motivo: 'MONEDA_DISTINTA',
+    });
+    // La PARTE de un sobre: el MISMO rechazo que sin la bandera (antes se
+    // escribía la comisión y el COBRO_DE_GRUPO llegaba después).
+    const parte = decide(
+      { monto: 5750, comision_banco_monto: 349.62, cobro_grupo_id: 's12' },
+      4000,
+    );
+    expect(parte).toMatchObject({
+      aplica: false,
+      rechazo: { ok: false, codigo: 'COBRO_DE_GRUPO' },
+    });
+    expect(decide({ ingreso_anticipo_id: 'ing-3' }, 1700)).toMatchObject({
+      rechazo: { codigo: 'COBRO_DE_ANTICIPO' },
+    });
+    expect(decide({ monto: -500 }, 400)).toMatchObject({
+      rechazo: { codigo: 'COBRO_INVALIDO' },
+    });
+    // Depósito mayor: de más del todo ⇒ el 409 de siempre; dentro del $1.00
+    // del monto ⇒ DEPOSITO_MAYOR (la comisión real sería negativa).
+    expect(
+      decide({ monto: 5000, comision_banco_monto: 250 }, 5500),
+    ).toMatchObject({ rechazo: { codigo: 'ABONO_EXCEDE_COBRO' } });
+    expect(decide({ monto: 5000, comision_banco_monto: 250 }, 5000.5)).toEqual({
+      aplica: false,
+      motivo: 'DEPOSITO_MAYOR',
+    });
+    expect(mensajeCorregirComisionNoAplica('PARCIAL')).toBe(
+      'Este cobro no tiene comisión del banco: un depósito menor es un pago parcial, no una comisión. Vincúlalo sin corregir (quedará «Conciliado parcial» hasta que llegue lo que falta) o, si de verdad hubo comisión, captúrala en el cobro del vuelo.',
+    );
+    expect(mensajeCorregirComisionNoAplica('NO_HACE_FALTA')).toBe(
+      'El depósito ya cuadra con lo que espera el cobro: vincúlalo sin corregir la comisión.',
+    );
+  });
+
   it('sugeridosParaExcedente: faltante ≈ excedente (±0.02), por cercanía de fecha, sin excluidos ni repetidos, ≤ 3', () => {
     const s = (id: string, faltante: number, fecha: string): SugeridoCobro => ({
       cobro_id: id,
@@ -1288,6 +1379,32 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
         null,
         con,
       ).libre,
+    ).toBe(false);
+    // FRENO anti doble conteo (revisión del 15-oct-2026): la regla del
+    // trigger A, sin el método. Un cobro PAYWISE sin comisión con un SPEI de
+    // banco SÍ acepta el 2.º SPEI en la BD ⇒ todavía espera su faltante.
+    const freno = { ...con, freno: true };
+    expect(
+      cobroParaCruce(
+        { ...c, metodo_cobro: 'PAYWISE' },
+        [parteDe('m1', 1700)],
+        null,
+        freno,
+      ),
+    ).toEqual({ libre: true, faltante: 1700 });
+    // …pero con comisión capturada, una parte de la pasarela o cruzada,
+    // también el freno lo da por ocupado (A lo rechaza).
+    expect(
+      cobroParaCruce(
+        { ...c, metodo_cobro: 'PAYWISE', comision_banco_monto: 250 },
+        [parteDe('m1', 1700)],
+        null,
+        freno,
+      ).libre,
+    ).toBe(false);
+    expect(
+      cobroParaCruce(c, [parteDe('m1', 1700, { pasarela: true })], null, freno)
+        .libre,
     ).toBe(false);
     expect(
       cobroParaCruce(c, [parteDe('m1', 1700, { pasarela: true })], null, con)

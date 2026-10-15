@@ -49,6 +49,13 @@ export interface OpcionesFakeEntradas {
   tablasAusentes?: string[];
   /** 20261014000003 sin aplicar: la sonda `regla_cobro_cubierto` ⇒ PGRST202. */
   sinParciales?: boolean;
+  /**
+   * La sonda `regla_cobro_cubierto` FALLA sin decir «no está» (revisión del
+   * 15-oct-2026): `timeout` (57014), `red` (la forma de postgrest-js cuando
+   * falla el fetch de un POST: `{code: '', message: 'TypeError: fetch
+   * failed'}`) o `excepcion` (la promesa se rechaza).
+   */
+  sondaParcialesFalla?: 'timeout' | 'red' | 'excepcion';
   /** Lectura que falla a pedido (tabla + texto acumulado de la consulta). */
   falla?: (tabla: string, texto: string) => boolean;
   /** Filas por respuesta (max-rows de PostgREST). */
@@ -379,6 +386,21 @@ export function fakeEntradas(db: Tablas, opts: OpcionesFakeEntradas = {}) {
         head: false,
         count: null,
       });
+      if (nombre === 'regla_cobro_cubierto' && opts.sondaParcialesFalla) {
+        if (opts.sondaParcialesFalla === 'excepcion') {
+          return Promise.reject(new Error('fetch failed'));
+        }
+        return Promise.resolve({
+          data: null,
+          error:
+            opts.sondaParcialesFalla === 'timeout'
+              ? {
+                  code: '57014',
+                  message: 'canceling statement due to statement timeout',
+                }
+              : { code: '', message: 'TypeError: fetch failed' },
+        });
+      }
       if (nombre === 'regla_cobro_cubierto') {
         return Promise.resolve(
           opts.sinParciales

@@ -322,10 +322,12 @@ export interface ConciliacionDeEntradaRespuesta {
   /** Solo cobro SIN_CONCILIAR; null = 0 abonos previos o la lectura falló. */
   cruce_no_corrio: CruceNoCorrio | null;
   /**
-   * `cobrosParcialesDisponibles` (0.0.78) Y `!cobroDeUnSoloAbono(cobro,
-   * partes)` (comisión > 0, PAYWISE, parte de PASARELA o cruzada). Ingreso ⇒
-   * false; cobro de sobre / de anticipo / reembolso ⇒ false (la BD jamás le
-   * liga un abono directo); falla ⇒ false.
+   * `cobrosParcialesConfirmados` (la sonda del 0.0.78 en modo ESTRICTO) Y
+   * `!cobroDeUnSoloAbono(cobro, partes)` (comisión > 0, PAYWISE, parte de
+   * PASARELA o cruzada). Ingreso ⇒ false; cobro de sobre / de anticipo /
+   * reembolso ⇒ false (la BD jamás le liga un abono directo); sin la
+   * migración o con una respuesta dudosa de la sonda (red, timeout, 5xx) ⇒
+   * false.
    */
   varios_abonos_por_cobro: boolean;
 }

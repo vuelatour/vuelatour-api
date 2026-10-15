@@ -1884,9 +1884,11 @@ export class IngresosService {
    * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D12): con la sonda de
    * 20261014000003 también los cobros PARCIALES cuyo FALTANTE cuadra con el
    * abono (`montoCuadraIngreso` con {monto: faltante, comision_monto:
-   * null}): todavía esperan ese dinero. Ocupado = la MISMA regla del
-   * auto-cruce (`cobroParaCruce`); un abono de la PASARELA no completa
-   * parciales (`opts.pasarela`; si no se sabe, se lee la cuenta). El
+   * null}): todavía esperan ese dinero. Ocupado = la regla del auto-cruce
+   * (`cobroParaCruce`) en modo FRENO (`freno: true`: «de un solo abono» por
+   * la regla del trigger A, sin el método PAYWISE; revisión del
+   * 15-oct-2026); un abono de la PASARELA no completa parciales
+   * (`opts.pasarela`; si no se sabe, se lee la cuenta). El
    * candidato parcial gana `parcial: true`, `faltante` y `monto_vinculado`
    * (los demás, byte a byte como siempre).
    */
@@ -2021,7 +2023,9 @@ export class IngresosService {
     // Con la sonda de parciales la COBERTURA decide (`cobroParaCruce`): sin
     // otros abonos, cuenta si cuadró por neto/bruto (lo de siempre); un
     // parcial de banco, SOLO si lo que le falta cuadra (±1.00, la misma
-    // regla). Sin la sonda: cualquier liga ocupa (0.0.77).
+    // regla). Es un FRENO: «de un solo abono» por la regla del trigger A,
+    // sin el método PAYWISE (`freno: true`, revisión del 15-oct-2026). Sin
+    // la sonda: cualquier liga ocupa (0.0.77).
     const parcialDe = new Map<
       string,
       { faltante: number; monto_vinculado: number; abonos_n: number }
@@ -2035,6 +2039,7 @@ export class IngresosService {
         const v = cobroParaCruce({ ...c, moneda }, p, null, {
           conParciales: true,
           pasarela: false,
+          freno: true,
         });
         if (!v.libre) return false;
         if (v.faltante == null) return yaCuadran.has(id);

@@ -622,27 +622,44 @@ export function cambiaDineroDelCobro(
 const METODOS_PASARELA: ReadonlySet<string> = new Set(METODOS_COBRO_PASARELA);
 
 /**
+ * La regla «de un solo abono» del TRIGGER A tal cual (sin el método): un
+ * cobro con comisión bancaria capturada > 0, o con alguna parte de la
+ * pasarela o de una cuenta en OTRA moneda, no admite otro abono de banco
+ * (la rama UN_SOLO_ABONO de `alVincularAbono` vista desde el cobro). La usan
+ * los FRENOS anti doble conteo (revisión del 15-oct-2026, D12): un parcial
+ * que la BD sí deja completar todavía espera dinero aunque su método sea
+ * PAYWISE.
+ */
+export function cobroDeUnSoloAbonoSegunA(
+  c: CobroParaCobertura,
+  partes: ReadonlyArray<ParteCobroBanco>,
+): boolean {
+  if (num(c.comision_banco_monto) > 0) return true;
+  const moneda = textoONull(c.moneda);
+  return partes.some(
+    (p) => p.pasarela === true || distinto(p.moneda_cuenta, moneda),
+  );
+}
+
+/**
  * ¿Este cobro se concilia con UN solo abono? (conciliación al revés de
  * Ingresos, invariante 78, R9): comisión bancaria capturada > 0, método de
  * la PASARELA (Paywise: su abono vendrá de la pasarela), o alguna de sus
  * partes es de la pasarela o de una cuenta en OTRA moneda. Es la rama
  * UN_SOLO_ABONO de `alVincularAbono` (y del trigger A) extraída para quien
  * no tiene un abono a la mano; el método PAYWISE la ANTICIPA para un cobro
- * todavía sin partes (A no mira el método: decide por la cuenta del abono).
+ * todavía sin partes (A no mira el método: decide por la cuenta del abono;
+ * para la regla de A sola, `cobroDeUnSoloAbonoSegunA`).
  */
 export function cobroDeUnSoloAbono(
   c: CobroParaCobertura & { metodo_cobro?: unknown },
   partes: ReadonlyArray<ParteCobroBanco>,
 ): boolean {
-  if (num(c.comision_banco_monto) > 0) return true;
   if (
     typeof c.metodo_cobro === 'string' &&
     METODOS_PASARELA.has(c.metodo_cobro)
   ) {
     return true;
   }
-  const moneda = textoONull(c.moneda);
-  return partes.some(
-    (p) => p.pasarela === true || distinto(p.moneda_cuenta, moneda),
-  );
+  return cobroDeUnSoloAbonoSegunA(c, partes);
 }

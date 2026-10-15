@@ -809,6 +809,92 @@ describe('corregir_comision — cuándo NO aplica (400 CORREGIR_COMISION_NO_APLI
     expect(escrituras()).toEqual([]);
   });
 
+  for (const camino of ['cobro_id', 'cobro_ids'] as const) {
+    const liga = (id: string) =>
+      camino === 'cobro_id'
+        ? { cobro_id: id, corregir_comision: true }
+        : { cobro_ids: [id], corregir_comision: true };
+
+    it(`${camino}: la PARTE de un sobre ⇒ 409 COBRO_DE_GRUPO SIN escribir la comisión (revisión del 15-oct-2026: por cobro_ids se escribía antes del rechazo)`, async () => {
+      const db = mundo({
+        cobro_grupo: [
+          {
+            id: 's12',
+            grupo_id: 'g12',
+            monto: 11500,
+            moneda: 'MXN',
+            metodo_cobro: 'TRANSFERENCIA',
+            fecha_cobro: '2026-09-15T17:00:00Z',
+            referencia: null,
+            comision_banco_monto: 699.24,
+          },
+        ],
+        cobro_vuelo: [
+          cobro('cParte', 'v315', 5750, {
+            comision_banco_monto: 349.62,
+            comision_banco_pct: 6.0803,
+            cobro_grupo_id: 's12',
+          }),
+        ],
+        movimiento_bancario: [abono('a1', 4000)],
+      });
+      const { svc, escrituras } = armar(db);
+      const r = await error(svc.linkCobro('a1', liga('cParte'), USER));
+      expect(r.e).toBeInstanceOf(ConflictException);
+      expect(r.code).toBe('COBRO_DE_GRUPO');
+      expect(r.details).not.toHaveProperty('comision_corregida');
+      expect(r.message).not.toContain('ya quedó corregida');
+      expect(db.cobro_vuelo[0]).toMatchObject({
+        comision_banco_monto: 349.62,
+        comision_banco_pct: 6.0803,
+      });
+      expect(db.movimiento_bancario_cobro).toEqual([]);
+      expect(escrituras()).toEqual([]);
+    });
+
+    it(`${camino}: banco SIN comisión y depósito menor ⇒ 400 PARCIAL sin escribir (es un pago en partes, no una comisión); sin la bandera liga PARCIAL`, async () => {
+      const db = mundo({
+        cobro_vuelo: [cobro('c315', 'v315', 3400)],
+        movimiento_bancario: [abono('m1', 1700)],
+      });
+      const { svc, escrituras } = armar(db);
+      const r = await error(svc.linkCobro('m1', liga('c315'), USER));
+      expect(r.e).toBeInstanceOf(BadRequestException);
+      expect(r.code).toBe('CORREGIR_COMISION_NO_APLICA');
+      expect(r.details).toEqual({ motivo: 'PARCIAL' });
+      expect(r.message).toContain('un depósito menor es un pago parcial');
+      expect(escrituras()).toEqual([]);
+      expect(db.cobro_vuelo[0].comision_banco_monto).toBeNull();
+      const ok = await svc.linkCobro(
+        'm1',
+        camino === 'cobro_id' ? { cobro_id: 'c315' } : { cobro_ids: ['c315'] },
+        USER,
+      );
+      expect(ok.cobros_estado).toEqual([
+        expect.objectContaining({ cobro_estado: 'PARCIAL' }),
+      ]);
+      expect(db.cobro_vuelo[0].comision_banco_monto).toBeNull();
+    });
+
+    it(`${camino}: el depósito ya cuadra con la comisión capturada ⇒ 400 NO_HACE_FALTA sin escribir`, async () => {
+      const db = mundo({
+        cobro_vuelo: [
+          cobro('cH', 'v315', 5000, {
+            comision_banco_monto: 250,
+            comision_banco_pct: 5,
+          }),
+        ],
+        movimiento_bancario: [abono('a4750', 4750.5)],
+      });
+      const { svc, escrituras } = armar(db);
+      const r = await error(svc.linkCobro('a4750', liga('cH'), USER));
+      expect(r.code).toBe('CORREGIR_COMISION_NO_APLICA');
+      expect(r.details).toEqual({ motivo: 'NO_HACE_FALTA' });
+      expect(escrituras()).toEqual([]);
+      expect(db.cobro_vuelo[0].comision_banco_monto).toBe(250);
+    });
+  }
+
   it('cobro en OTRA moneda ⇒ 400 MONEDA_DISTINTA', async () => {
     const { svc } = base();
     const r = await error(
@@ -1367,6 +1453,60 @@ describe('Paywise — comisión real inferida por BRUTO antes de ligar y lotes f
       comision_banco_pct: null,
     });
     expect(partesDe(db, 'cB')).toEqual([['mB', 7000]]);
+  });
+
+  it('NETO exacto con un bruto del archivo DISTINTO del cobro (revisión del 15-oct-2026): NO escribe la comisión del archivo y liga con la vigente; la diferencia queda en la auditoría', async () => {
+    const db = mundo({
+      cobro_vuelo: [
+        cobro('cN', 'v293', 7000, {
+          metodo_cobro: 'PAYWISE',
+          comision_banco_monto: 620,
+          comision_banco_pct: 8.8571,
+        }),
+      ],
+      movimiento_bancario: [
+        abono('mN', 6380, { cuenta_bancaria_id: CTA_PW, monto_bruto: 7100 }),
+      ],
+    });
+    const { svc, escrituras } = armar(db);
+    const r = await svc.conciliarPaywise(
+      { desde: '2026-09-01', hasta: '2026-09-30', dias: 5 },
+      USER,
+    );
+    expect(r.resumen).toMatchObject({ conciliados_ahora: 1, errores: 0 });
+    // La comisión del cobro NO cambió (antes: 720 escrita y la liga rebotaba).
+    expect(db.cobro_vuelo[0]).toMatchObject({
+      comision_banco_monto: 620,
+      comision_banco_pct: 8.8571,
+    });
+    expect(escrituras().some((e) => e.tabla === 'cobro_vuelo')).toBe(false);
+    expect(partesDe(db, 'cN')).toEqual([['mN', 6380]]);
+    // La auditoría releída lo reporta YA ligado con la comisión distinta.
+    expect(
+      r.comision_distinta.map((c) => [c.criterio, c.comision_paywise]),
+    ).toEqual([['YA_CONCILIADO', 720]]);
+    expect(r.solo_paywise).toEqual([]);
+    expect(r.solo_sistema).toEqual([]);
+  });
+
+  it('el cliente pagó la comisión ENCIMA (cobro 7,000 sin comisión, depósito 7,000, bruto del archivo 7,406): «Conciliar lo que cuadra» liga sin escribir los 406', async () => {
+    const db = mundo({
+      cobro_vuelo: [cobro('cF', 'v293', 7000, { metodo_cobro: 'PAYWISE' })],
+      movimiento_bancario: [
+        abono('mF', 7000, { cuenta_bancaria_id: CTA_PW, monto_bruto: 7406 }),
+      ],
+    });
+    const { svc } = armar(db);
+    const r = await svc.conciliarPaywise(
+      { desde: '2026-09-01', hasta: '2026-09-30', dias: 5 },
+      USER,
+    );
+    expect(r.resumen).toMatchObject({ conciliados_ahora: 1, errores: 0 });
+    expect(db.cobro_vuelo[0]).toMatchObject({
+      comision_banco_monto: null,
+      comision_banco_pct: null,
+    });
+    expect(partesDe(db, 'cF')).toEqual([['mF', 7000]]);
   });
 
   it('un abono de la pasarela que paga 2+ cobros (lote) no es «libre»: fuera del cruce y contado en movimientos_en_lote', async () => {

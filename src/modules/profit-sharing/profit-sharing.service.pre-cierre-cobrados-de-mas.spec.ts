@@ -281,6 +281,23 @@ describe('ProfitSharingService.preCierre — «Vuelos cobrados de más» con los
     ]);
   });
 
+  it('el tope ABSOLUTO de $10 del redondeo (revisión del 15-oct-2026): #259 con $20 de más —el 1 % de su total serían $26— CUENTA como SIN_CAUSA_CLARA', async () => {
+    const db = prod();
+    const c259 = db.cobro_vuelo.find(
+      (c) => c.id === 'b13a2664-1937-40f6-b215-28a970d20069',
+    )!;
+    // 24,540.01 + 20,000 = 44,540.01 MXN a 17.00 = $2,620.00 sobre $2,600.
+    c259.monto = '24540.01';
+    const { svc } = armar(db);
+    const r = (await svc.preCierre(SEPTIEMBRE)) as unknown as Respuesta;
+    const item = renglon(r);
+    expect(item).toMatchObject({ count: 1, monto_usd: 20, explicados_n: 1 });
+    expect(
+      (item.vuelos as Fila[]).map((v) => [v.folio, v.excedente_usd, v.causa]),
+    ).toEqual([[259, 20, 'SIN_CAUSA_CLARA']]);
+    expect((item.explicados as Fila[]).map((v) => v.folio)).toEqual([285]);
+  });
+
   it('el renglón va JUSTO DESPUÉS de cobros_pendientes y NO entra a los bloqueantes', async () => {
     const { svc } = armar(prod());
     const r = (await svc.preCierre(AGOSTO)) as unknown as Respuesta;

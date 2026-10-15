@@ -16,6 +16,13 @@
  *   índice único siguen rechazando el segundo abono, nada se corrompe) y un
  *   solo `warn` por instancia.
  *
+ * Modo ESTRICTO (`cobrosParcialesConfirmados`, revisión del 15-oct-2026):
+ * «sí» SOLO con el `true` de la función ya memorizado o recién leído;
+ * cualquier respuesta dudosa ⇒ «no». Lo usa lo que solo AFIRMA algo en
+ * pantalla (`varios_abonos_por_cobro` de la hoja de Ingresos, invariante
+ * 78): un best-effort jamás afirma lo que no pudo leer. Las escrituras
+ * siguen con `cobrosParcialesDisponibles` (la BD es el candado).
+ *
  * REGLA DURA: el SEGUNDO abono de un cobro, los candidatos parciales, el
  * auto-cruce por faltante y los faltantes de los frenos de Ingresos van
  * detrás de `cobrosParcialesDisponibles(sb)`. Las LECTURAS de estado
@@ -115,6 +122,17 @@ export class SondaCobrosParciales {
     return this.sondeoEnCurso;
   }
 
+  /**
+   * Modo ESTRICTO: `true` SOLO si la migración está CONFIRMADA (el `true`
+   * de la función, memorizado o recién leído); «no», un error raro, una
+   * excepción o un `data` ≠ true ⇒ `false`. Comparte el sondeo y la memoria
+   * de `disponible()` (no sondea de más).
+   */
+  async confirmada(): Promise<boolean> {
+    if (this.estado !== true) await this.disponible();
+    return this.estado === true;
+  }
+
   /** Olvida lo memorizado (specs). */
   reset(): void {
     this.estado = null;
@@ -203,6 +221,18 @@ export function cobrosParcialesDisponibles(
   opts?: SondaCobrosParcialesOpciones,
 ): Promise<boolean> {
   return sondaCobrosParciales(supabase, opts).disponible();
+}
+
+/**
+ * ¿La migración 20261014000003 está CONFIRMADA? (modo estricto: una
+ * respuesta dudosa ⇒ false). Para lo que solo AFIRMA en pantalla; las
+ * escrituras van con `cobrosParcialesDisponibles`.
+ */
+export function cobrosParcialesConfirmados(
+  supabase: SupabaseClient,
+  opts?: SondaCobrosParcialesOpciones,
+): Promise<boolean> {
+  return sondaCobrosParciales(supabase, opts).confirmada();
 }
 
 /** 503 estructurado `CONCILIACION_COBROS_PARCIALES_NO_DISPONIBLE`. */

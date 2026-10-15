@@ -3071,6 +3071,9 @@ export class FlightsService {
       // aquí alimenta, junto con las columnas de precio, la partición de la
       // venta del avión por participante (regla B 28-ago,
       // `particionIngresoVuelo` rama desglose / columnas).
+      // Una lectura caída deja `snapRow` en null (como siempre) pero ya no en
+      // silencio: warn, y «Cobrado de más» OMITE su llave (no se pudo
+      // verificar ≠ «sin excedente»; revisión del 15-oct-2026).
       this.supabase.service
         .from('vuelo')
         .select(
@@ -3078,7 +3081,14 @@ export class FlightsService {
         )
         .eq('id', id)
         .maybeSingle()
-        .then((r) => r.data),
+        .then((r) => {
+          if (r.error) {
+            this.logger.warn(
+              `Snapshot del vuelo ${id}: no se pudo leer la fila de precios (${r.error.message}); «Cobrado de más» no se verifica en esta carga.`,
+            );
+          }
+          return r.data;
+        }),
       // Tripulación de apoyo 0..N (29-ago): fuente única vuelo_apoyo.
       apoyosDeVuelo(this.supabase.service, id),
       // Cliente con razón social (5-sep-2026, buscador de la app): findById
@@ -3180,7 +3190,9 @@ export class FlightsService {
     // «COBRADO DE MÁS» (14-oct-2026, API 0.0.78, invariante 77, D13): excedente
     // (la MISMA cifra que el balance manda a «otros movimientos»), causa
     // probable y qué hacer. Detalle de dinero de oficina: la llave se OMITE
-    // para PILOTO/MECANICO/VISITANTE (ni se calcula).
+    // para PILOTO/MECANICO/VISITANTE (ni se calcula) y también si la fila de
+    // precios no se pudo leer (`undefined`: no se pudo verificar; `null` =
+    // verificado y sin aviso).
     const cobradoDeMasBloque = FlightsService.esRolDeCampo(current)
       ? undefined
       : await this.cobradoDeMasDelVuelo(
@@ -3223,8 +3235,9 @@ export class FlightsService {
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
       cobros_sin_tc_count: conv.sin_tc_count,
       cobros_sin_tc_mxn: conv.sin_tc_mxn,
-      // «COBRADO DE MÁS» (ADITIVO): `CobradoDeMas | null`; omitida para la
-      // tripulación y el visitante.
+      // «COBRADO DE MÁS» (ADITIVO): `CobradoDeMas | null` (null = verificado
+      // y sin aviso); omitida para la tripulación y el visitante y cuando la
+      // fila de precios no se pudo leer (no se afirma «sin excedente»).
       ...(cobradoDeMasBloque === undefined
         ? {}
         : { cobrado_de_mas: cobradoDeMasBloque }),
@@ -3259,15 +3272,17 @@ export class FlightsService {
    * cuando ninguna causa 1–5 lo explica (SIN_CAUSA_CLARA) se leen,
    * best-effort, los cobros sin banco de OTROS vuelos del cliente para la
    * causa OTRO_VUELO_DEL_CLIENTE. Sin la fila de precios (`snapRow` null:
-   * lectura caída) no se afirma nada: null.
+   * lectura caída) no se afirma nada: `undefined` y el snapshot OMITE la
+   * llave (revisión del 15-oct-2026: `null` quedaba igual que «verificado y
+   * sin excedente»).
    */
   private async cobradoDeMasDelVuelo(
     vuelo: Record<string, unknown>,
     snapRow: Record<string, unknown> | null,
     cobros: ReadonlyArray<CobroConSobre>,
     tcCobros: number | null,
-  ): Promise<CobradoDeMas | null> {
-    if (!snapRow) return null;
+  ): Promise<CobradoDeMas | null | undefined> {
+    if (!snapRow) return undefined;
     const grupo = vuelo.grupo as
       | { folio?: unknown }
       | Array<{ folio?: unknown }>

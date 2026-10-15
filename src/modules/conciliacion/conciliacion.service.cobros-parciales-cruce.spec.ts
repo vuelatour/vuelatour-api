@@ -362,7 +362,7 @@ describe('Auto-cruce — UN universo con los PARCIALES por su FALTANTE (D11)', (
     expect(b.escrituras()).toEqual([]);
   });
 
-  it('un parcial «de un solo abono» (comisión del link o método Paywise) NO entra: ni lo liga ni lo cuenta', async () => {
+  it('un parcial «de un solo abono» (comisión del link o método Paywise) NO entra al auto: no lo liga; el FRENO sí cuenta el Paywise sin comisión (la BD le acepta el 2.º SPEI) y no el de la comisión', async () => {
     const db = mundo({
       cobro_vuelo: [
         cobro('c-hsbc', 'v293', 5000, {
@@ -385,7 +385,11 @@ describe('Auto-cruce — UN universo con los PARCIALES por su FALTANTE (D11)', (
     });
     expect(escrituras()).toEqual([]);
     expect(await exactosLibres(svc, 2750, '2026-09-16')).toBe(0);
-    expect(await exactosLibres(svc, 1700, '2026-09-16')).toBe(0);
+    // El freno usa la regla del trigger A sin el método (revisión del
+    // 15-oct-2026): al cobro Paywise SIN comisión le faltan 1,700 que la BD
+    // sí le dejaría ligar ⇒ cuenta (antes 0: el abono se iba a «otro
+    // ingreso» y los 1,700 contaban dos veces).
+    expect(await exactosLibres(svc, 1700, '2026-09-16')).toBe(1);
   });
 
   it('un cobro CUBIERTO sigue ocupado: un 3.er abono de $100 no encuentra cobro', async () => {
@@ -742,10 +746,12 @@ describe('Paywise con abonos como los de prod (sin bruto ni comisión, D6)', () 
     expect(escrituras()).toEqual([]);
   });
 
-  it('«Conciliar lo que cuadra»: un 409 de la liga llega a errores[] con el texto es-MX (sin la marca de la BD)', async () => {
+  it('«Conciliar lo que cuadra»: un 409 de la liga llega a errores[] con el texto es-MX (sin la marca de la BD) y SIN haber escrito la comisión', async () => {
     // El archivo trae bruto y una comisión que NO explica el depósito
-    // (10,000 − 500 ≠ 9,000): cruza por BRUTO, se escribe la comisión del
-    // archivo y la liga rebota COMISION_NO_CUADRA (la del archivo queda).
+    // (10,000 − 500 ≠ 9,000): cruza por BRUTO; con la comisión del archivo
+    // el abono no cuadraría, así que NO se escribe (revisión del
+    // 15-oct-2026: antes quedaba escrita y la liga rebotaba igual) y la liga
+    // con la vigente rebota COMISION_NO_CUADRA.
     const db = mundo({
       cobro_vuelo: [cobro('c-x', 'v293', 10000, { metodo_cobro: 'PAYWISE' })],
       movimiento_bancario: [
@@ -762,8 +768,15 @@ describe('Paywise con abonos como los de prod (sin bruto ni comisión, D6)', () 
     expect(r.resumen).toMatchObject({ conciliados_ahora: 0, errores: 1 });
     const e = r.errores[0] as { error: string; cobro_id: string };
     expect(e.cobro_id).toBe('c-x');
-    expect(e.error).toMatch(/espera un depósito de \$9,500\.00 MXN/);
+    expect(e.error).toBe(
+      'El cobro del vuelo #293 ($10,000.00 MXN) espera un depósito de $10,000.00 MXN y el banco depositó $9,000.00 MXN: la comisión real fue $1,000.00 MXN (10.00 %). Corrige la comisión del cobro o usa «Corregir la comisión a $1,000.00 y vincular».',
+    );
     expect(e.error).not.toMatch(/ABONO_NO_CUADRA|COMISION_NO_CUADRA:/);
     expect(partesDe(db, 'c-x')).toEqual([]);
+    // Nada escrito en el cobro: la comisión sigue como estaba.
+    expect(db.cobro_vuelo[0]).toMatchObject({
+      comision_banco_monto: null,
+      comision_banco_pct: null,
+    });
   });
 });

@@ -1269,6 +1269,27 @@ describe('CONCILIACIÓN AL REVÉS DE ENTRADAS — conciliacionDeEntrada', () => 
     }
   });
 
+  it('u bis) la sonda FALLA sin decir «no está» (timeout, red, excepción) ⇒ varios_abonos_por_cobro false y la hoja responde 200 (modo estricto, revisión del 15-oct-2026)', async () => {
+    for (const falla of ['timeout', 'red', 'excepcion'] as const) {
+      const f = armar(mundoProd(), { sondaParcialesFalla: falla });
+      for (const id of [C.C332, C.C223, C.C379]) {
+        const r = await cobro(f.svc, id);
+        expect([falla, id, r.varios_abonos_por_cobro]).toEqual([
+          falla,
+          id,
+          false,
+        ]);
+      }
+      expect(f.escrituras()).toEqual([]);
+    }
+    // La sonda avisó que no tuvo respuesta clara (un warn por instancia).
+    expect(
+      (warn.mock.calls as unknown[][]).some((c) =>
+        String(c[0]).includes('sin respuesta clara'),
+      ),
+    ).toBe(true);
+  });
+
   it('v) mismo_dia_cliente de #379 (Palma): vuelos del cliente paginados + cobros del día por lotes; los ligados fuera; la lectura que falla ⇒ null y 200', async () => {
     const f = armar(mundoProd());
     const desde = f.log.length;

@@ -1,6 +1,7 @@
 import { HttpStatus, Logger } from '@nestjs/common';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  cobrosParcialesConfirmados,
   cobrosParcialesDisponibles,
   errorCobrosParcialesNoDisponibles,
   esCobrosParcialesAusente,
@@ -154,6 +155,56 @@ describe('SondaCobrosParciales', () => {
     const sb = {} as unknown as SupabaseClient;
     expect(await new SondaCobrosParciales(sb).disponible()).toBe(true);
   });
+
+  it('confirmada() — modo ESTRICTO (revisión del 15-oct-2026): red / 500 / timeout / data false / excepción ⇒ false (disponible() sigue diciendo «sí»); solo el true de la función ⇒ true, memorizado', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const { sb, rpc } = cliente([
+      new Error('fetch failed'),
+      // La forma que devuelve postgrest-js cuando falla el fetch de un POST.
+      { error: { code: '', message: 'TypeError: fetch failed' } },
+      {
+        error: {
+          code: '57014',
+          message: 'canceling statement due to statement timeout',
+        },
+      },
+      { data: false },
+      SI,
+    ]);
+    const s = new SondaCobrosParciales(sb);
+    expect(await s.confirmada()).toBe(false);
+    expect(await s.confirmada()).toBe(false);
+    expect(await s.confirmada()).toBe(false);
+    // La sonda de las escrituras no cambia: ante lo dudoso, «sí».
+    expect(await s.disponible()).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(4);
+    expect(await s.confirmada()).toBe(true);
+    expect(await s.confirmada()).toBe(true);
+    expect(await s.disponible()).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(5);
+    // Sin `rpc`: false (jamás afirma lo que no pudo leer).
+    expect(
+      await new SondaCobrosParciales(
+        {} as unknown as SupabaseClient,
+      ).confirmada(),
+    ).toBe(false);
+  });
+
+  it('confirmada() con el PGRST202 REAL ⇒ false y comparte la memoria del «no» (≤ 10 min sin llamar); un error raro después del «no» sigue siendo false', async () => {
+    let ahora = 1_000;
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const { sb, rpc } = cliente([
+      PGRST202_REAL,
+      { error: { code: 'PGRST001', message: 'Database client error' } },
+    ]);
+    const s = new SondaCobrosParciales(sb, { ahora: () => ahora });
+    expect(await s.confirmada()).toBe(false);
+    expect(await s.disponible()).toBe(false);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    ahora += TRIGGER_UPDATED_AT_REINTENTO_MS;
+    expect(await s.confirmada()).toBe(false);
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('registro, 503 y detección del «no está»', () => {
@@ -162,6 +213,7 @@ describe('registro, 503 y detección del «no está»', () => {
     expect(sondaCobrosParciales(sb)).toBe(sondaCobrosParciales(sb));
     expect(await cobrosParcialesDisponibles(sb)).toBe(true);
     expect(await cobrosParcialesDisponibles(sb)).toBe(true);
+    expect(await cobrosParcialesConfirmados(sb)).toBe(true);
     expect(rpc).toHaveBeenCalledTimes(1);
     const antes = sondaCobrosParciales(sb);
     reiniciarSondaCobrosParciales();
