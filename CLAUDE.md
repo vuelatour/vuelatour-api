@@ -10347,6 +10347,27 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `99` ⇒ `REVERSA_ABORTADA` sin cambios; desligado ⇒ `99` `COMMIT` con la
   foto de antes.
 
+- **15-oct-2026 — 0.0.79, SIN migración** (revisión del 0.0.78; base
+  `c1a4ce22`, el 0.0.78 en prod con `20261014000003` APLICADA). Corrige: (1)
+  «Por conciliar» y la guarda D12 de «Sugerir con IA» deciden con la regla
+  del FRENO (`contextoAbonos` ⇒ `freno` por cobro ⇒ `manualesFreno`), como
+  `cobrosExactosLibresDeAbono` del auto: un parcial PAYWISE sin comisión con
+  un SPEI de banco ya no deja «Se puede cruzar» cuando el auto queda AMBIGUO,
+  y la IA ya no propone LIGAR a un ingreso (o registrarlo) el dinero que le
+  falta a ese parcial (0 casos en prod: los 4 cobros PAYWISE llevan
+  comisión); (2) el 409 `ABONO_TIENE_COBRO_CANDIDATO` de Ingresos ya no dice
+  «vincúlalo» para un candidato que cuadra por BRUTO con comisión capturada
+  (o por el bruto de la pasarela): el candidato gana `liga_no_cuadra` /
+  `comision_real` (ADITIVOS) y el texto pide corregir la comisión (0 casos
+  hoy; #374 sería el primero); (3) el 409 `COMISION_NO_CUADRA` ya no nombra
+  el botón «Corregir la comisión y vincular». Todo ADITIVO o de texto: panel
+  e85d74c y 0e3ffbb siguen igual (el panel pinta el `message` del API);
+  rollback a 0.0.78 inofensivo. Push a `main` ⇒ `GET /v1/version` =
+  `0.0.79`. Pendiente del PANEL (no bloquea): en «Registrar como otro
+  ingreso», con `liga_no_cuadra: 'COMISION_NO_CUADRA'` ofrecer «Corregir la
+  comisión a $X y vincular» (PATCH con `corregir_comision: true`,
+  confirmando) en vez del «Vincular» que rebota; con SOBRE_NO_CUADRA,
+  ocultar «Vincular» y remitir al grupo.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
