@@ -9579,31 +9579,97 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   lotes de 200), luego `03-reversa…sql` (2 triggers, 6 funciones, renglón
   del historial POR `name`; la canónica queda inactiva) y REINICIAR el API
   (la sonda memoriza el «sí»).
-- **ORDEN DE DESPLIEGUE 0.0.77 (lote A + lote B, 14-oct-2026).** El lote A
-  no trae migración y exige pyservices ANTES del API (su compuerta, bullet
-  anterior); el lote B trae `20261014000002` y ningún cambio de pyservices
-  ni de la app. Orden: pyservices (lote A) ⇒ COMPUERTA ⇒ migración
-  `20261014000002` (dry-run ⇒ aplicar ⇒ postchecks ⇒ advisors; puede ir
-  después del API sin romper nada) ⇒ API 0.0.77 (`GET /v1/version` =
-  `0.0.77`, tras el commit «Versión 0.0.77») ⇒ panel SIEMPRE después del
-  API: un API 0.0.76 rechaza con 400 (`forbidNonWhitelisted`)
-  `esperado_clasificacion_id` de «Clasificar» y `?solo_omitidos`, y
-  responde 404 a las rutas nuevas (el panel detecta el API nuevo por la
-  llave `omision` de cada fila de `GET movimientos`). Humo como ADMIN: `POST
-  /v1/conciliacion/movimientos/omitir/revisar` con un pendiente ⇒ 200 con
-  su `estado` y `riesgo`; `GET /v1/conciliacion/movimientos?solo_omitidos=
-  true` ⇒ `{data: [], count: 0}` antes de la primera omisión; `GET
-  /v1/conciliacion/clasificaciones` sin «Omitido de la conciliación»; el
-  pre-cierre de septiembre con `movimientos_omitidos` count 0 y `listo` como
-  antes. **ROLLBACK del API a 0.0.76 con omitidos en la BD**: posible, pero
-  el 0.0.76 ofrece la canónica como una clasificación más y un intento de
-  ligar un omitido —o de desvincularlo o reclasificarlo, desde la
-  revisión— lo rechaza el trigger con un código que ese API no conoce (500
-  en la liga de gastos y en «Clasificar», 400 genérico en la de cobros):
-  deshacer antes las omisiones o avanzar. **Con el panel de ANTES y el API
-  0.0.77** (el panel de estos lotes sale después): el aviso «Ya no aplica»
-  lleva al detalle del vuelo (`#cobros`, donde ese panel ofrece «Retirar»),
-  no a la tarjeta «ya no aplican» que aún no existe.
+- **ORDEN DE DESPLIEGUE 0.0.77 (lote A + lote B, 14-oct-2026; UN solo
+  despliegue: manda sobre el «Orden» de los dos bullets anteriores).** Base:
+  API sobre `77558c66` (0.0.76, en prod: `GET /v1/version` lo confirmó el
+  14-oct-2026 por la noche; = `origin/main`) y pyservices sobre `b66df98`
+  (= `origin/main`). El lote A no trae migración y exige pyservices ANTES del
+  API; el lote B trae `20261014000002` (sin dependencia dura: el 0.0.77 la
+  sondea) y ningún cambio de pyservices ni de la app. Cada paso SOLO con el
+  anterior verificado:
+  1. **pyservices** (push a `main`, Railway): `f0c8ad1` (hoja «Otros
+     ingresos» por ingreso con `usd_por_ingreso`, nota al pie de FACTURA
+     VUELATOUR con `factura_vuelatour_devolucion` y la ruta `GET /version`).
+     Sin las dos banderas los libros salen byte a byte con el API 0.0.76 de
+     prod.
+  2. **COMPUERTA de pyservices** (invariante 49): `curl
+     <PYSERVICES_BASE_URL>/version` (la variable del API en Railway; la ruta
+     no pide token) ⇒ `{"commit": "f0c8ad1934ba3f90fbf4187c5503fdd04d4868fc",
+     "servicio": "vuelatour-pyservices"}`, o el deployment ACTIVO de Railway
+     en ese commit. Mientras diga otro commit (o `null`), NO se empuja el
+     API: con un pyservices viejo el 0.0.77 publica la hoja «Otros ingresos»
+     con los números buenos pero con B5 y TRES notas falsas, sin un solo
+     error.
+  3. **API 0.0.77** (push a `main`, Railway): `77ef4012` (lote A) ·
+     `8e91e15b` (lote B) · `a9ed9ecd` (revisión) · «Versión 0.0.77» (este).
+     Después `GET https://vuelatour-api-production.up.railway.app/v1/version`
+     = `0.0.77` (nunca un health) y el humo del lote A (bullet del lote A).
+     Sin la migración, lo nuevo de Conciliación responde 503
+     `CONCILIACION_OMITIR_NO_DISPONIBLE` /
+     `CONCILIACION_CARGOS_A_GASTO_NO_DISPONIBLE` y TODO lo demás como el
+     0.0.76; el panel de prod sigue igual (todo es ADITIVO).
+  4. **Migración `20261014000002` por el MCP** (proyecto
+     `bjesduasnzbzywofukbf`; hay DOS: confirmar con un SELECT), con el
+     paquete de `docs/sql-20261014000002/`: `02b` (todo vacío) ⇒ dry-run
+     `01…transporte.sql` por `execute_sql` ⇒ `DRYRUN_OK 20261014000002 ·
+     T1–T31 · …` con `md5 del bloque 7ff0af6591515e360bc1e10fa89efe69` ⇒
+     comprobar por SELECT que no quedó nada ⇒ `apply_migration` con el
+     archivo COMPLETO (name
+     `20261014000002_conciliacion_omitir_y_cargos_a_gasto`; no lleva
+     sentencias que el MCP decline) ⇒ postchecks (`02b`: 6 funciones
+     `prosecdef = false` y `search_path=""`, 2 triggers, RLS sin políticas,
+     0 canónicas y 1 renglón del historial por `name`; `02-postcheck` ⇒
+     `POSTCHECK_OK`) ⇒ `get_advisors` security y performance (sin
+     0028/0029: nada es SECURITY DEFINER). La sonda del API la enciende sola
+     en ≤ 10 min, sin redeploy. Humo como ADMIN: `POST
+     /v1/conciliacion/movimientos/omitir/revisar` con un pendiente ⇒ 200 con
+     su `estado` y `riesgo`; `GET
+     /v1/conciliacion/movimientos?solo_omitidos=true` ⇒ `{data: [], count:
+     0}` antes de la primera omisión; `GET /v1/conciliacion/clasificaciones`
+     sin «Omitido de la conciliación»; el pre-cierre de septiembre con
+     `movimientos_omitidos` count 0 y `listo` como antes.
+  5. **Panel** (push a `main`, Vercel): LOTE APARTE, SIEMPRE después del API
+     (su parte de estos lotes se implementa después). Un API 0.0.76 rechaza
+     con 400 (`forbidNonWhitelisted`) `esperado_clasificacion_id` de
+     «Clasificar» y `?solo_omitidos`, y responde 404 a las rutas nuevas (el
+     panel detecta el API nuevo por la llave `omision` de cada fila de `GET
+     movimientos`).
+  **Con el panel de ANTES y el API 0.0.77**: el aviso «Ya no aplica» lleva
+  al detalle del vuelo (`#cobros`, donde ese panel ofrece «Retirar»), no a
+  la tarjeta «ya no aplican» que aún no existe; la canónica no sale en
+  «Clasificar» y un omitido se ve como clasificado. **ROLLBACK**: primero el
+  API a 0.0.76 y solo después pyservices (nunca pyservices solo con el
+  0.0.77 arriba). Con omitidos en la BD el 0.0.76 ofrece la canónica como
+  una clasificación más y un intento de ligar un omitido —o de
+  desvincularlo o reclasificarlo— lo rechaza el trigger con un código que
+  ese API no conoce (500 en la liga de gastos y en «Clasificar», 400
+  genérico en la de cobros): deshacer antes las omisiones o avanzar. La
+  reversa de la migración, la del bullet anterior (SOLO SQL Editor).
+  Verificado en local el 14-oct-2026 (API, `77558c66..HEAD`): `tsc
+  --noEmit` limpio (también con `tsconfig.build.json`); eslint (sin --fix)
+  de los 66 `.ts` cambiados (18 nuevos): 74 errores y 5 avisos, idénticos
+  (regla, mensaje y renglón de código) a `77558c66` (aircraft-balance 5,
+  expenses 5, flights 64 + 5; 0 nuevos; los 18 archivos nuevos, limpios);
+  jest `--maxWorkers=4` completo: 326 suites / 5,509 pruebas, 0 fallos (en
+  `77558c66`: 313 / 5,203, 0 fallos; 11 de la base cambiaron de nombre a
+  propósito —tabla del anticipo devuelto, 2,327.54 ⇒ 2,586.16 y la hoja
+  «Otros ingresos» por ingreso— y hay 317 nuevas). Dry-run de
+  `20261014000002` vuelto a correr en prod sobre el archivo FINAL (md5 del
+  archivo `2e169f29ed5c85993a5ba0a8888fc6e1`; el transporte regenerado es
+  el de `docs/` byte a byte; el archivo no contiene drop/delete/revoke):
+  `ERROR: P0001: DRYRUN_OK 20261014000002 · T1–T31 · canónica
+  cc0b9db4-5b54-4a19-b1ba-c98d7d677328 · authenticated:MOVIMIENTO_NO_EXISTE
+  authenticated:MOVIMIENTO_NO_EXISTE authenticated:MOVIMIENTO_NO_EXISTE
+  authenticated:42501 anon:MOVIMIENTO_NO_EXISTE anon:MOVIMIENTO_NO_EXISTE
+  anon:MOVIMIENTO_NO_EXISTE anon:42501 · md5 del bloque
+  7ff0af6591515e360bc1e10fa89efe69 · todo se revierte`; después, por
+  SELECT, 0 residuos (6 funciones y 2 triggers ausentes, 0
+  canónicas/DRYRUN, 0 movimientos `DRYRUN`, 0 gastos `DRYRUN%`; 999
+  movimientos y 7 pares de reverso, como antes). pyservices `f0c8ad1`:
+  `pytest` 7 fallas, las MISMAS 7 de entorno de esta Mac que `b66df98`
+  (WeasyPrint sin libgobject y el SDK de Anthropic con `httpx`; 0 nuevas;
+  las dos pruebas de `/version` pasan) y `ruff check app tests` con los
+  mismos 19 de la base.
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
