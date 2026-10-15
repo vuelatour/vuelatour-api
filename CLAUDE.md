@@ -8208,6 +8208,276 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Versión**: `package.json` = `0.0.76` desde la revisión del
       14-oct-2026 (`GET /v1/version` es la compuerta del panel).
 
+75. **OMITIR LA CONCILIACIÓN (14-oct-2026, API 0.0.77, lote B, migración
+    `20261014000002`).** Pedido del usuario con la captura de
+    /admin/conciliacion: «Necesitamos una opción de pendientes de conciliar
+    venga una opción de Omitir la conciliación.» Un movimiento del banco que
+    la oficina decide NO conciliar (comisión o IVA del banco, cargo
+    duplicado por el banco, prueba de la terminal…) deja de ser «pendiente»
+    CON UN MOTIVO FIRMADO y se puede deshacer. Ningún número cambia: los
+    movimientos bancarios no entran al dinero (invariante 33).
+    - **Marca**: la clasificación CANÓNICA «Omitido de la conciliación»
+      (por NOMBRE, sin distinguir mayúsculas ni espacios —`lower()` en la
+      BD, `esClasificacionOmitida` en el API—; NO se siembra: la crea
+      `conciliacion_clasificacion_omitido` en la primera omisión y la
+      REACTIVA si está de baja) + `conciliado = true` + la línea firmada
+      ARRIBA de las notas: «Omitido de la conciliación: <motivo> —
+      <usuario>, dd-mmm-aaaa» (día Cancún; motivo 10–300 en UNA línea;
+      firmante ≤ 80, sin nombre «Oficina»; la línea ≤ 500; lo que había
+      queda debajo byte a byte). Fuente única PURA
+      `conciliacion/omision.util.ts` (con spec): la línea
+      (`lineaOmision`), su lectura (`leerOmision`, `omisionDeFila`), el
+      espejo del UPDATE que deshace (`quitarLineaOmision`: solo la PRIMERA
+      línea canónica; ida y vuelta byte a byte, `\r\n` incluido), el espejo
+      del CASE de la RPC (`estadoMovimientoParaOmitir`: gasto > cobro >
+      sobre > ingreso > reverso —también un cargo al que apunta una
+      devolución— > omitido > clasificado > conciliado), el riesgo y TODOS
+      los textos. El panel NO arma la línea ni decide el estado.
+    - **Escritura SOLO por las RPC** (SECURITY INVOKER, `search_path ''`,
+      23514 con `hint = CODIGO` y `detail` jsonb):
+      `conciliacion_omitir_movimientos(ids, linea, actor)` — 1..200 sin
+      repetir (LOTE_INVALIDO), línea canónica (OMISION_INVALIDA), FOR
+      UPDATE por id, inexistentes ⇒ MOVIMIENTO_NO_EXISTE {ids} (el API los
+      expone como `details.faltan`), TODO O NADA pendientes y libres ⇒
+      MOVIMIENTO_NO_PENDIENTE {movimientos[{id, fecha, tipo, monto,
+      descripcion, estado}]}, UN UPDATE —; `conciliacion_quitar_omision(ids,
+      actor)` — mismas listas; todos deben tener la canónica
+      (MOVIMIENTO_NO_OMITIDO); vuelven a Pendientes sin la primera línea
+      canónica (vacío ⇒ null). Interbloqueo (40P01) ⇒ 409
+      CONFLICTO_CONCURRENTE.
+    - **Candado en BD** `trg_mov_bancario_omitido_sin_ligas` (BEFORE UPDATE
+      OF gasto_id, gastos_n, cobro_id, cobros_n, cobro_grupo_id, ingreso_id,
+      reverso_de_id WHEN old.clasificacion_id is not null; no modifica NEW):
+      un omitido NO recibe ninguna liga por ningún camino (RPC G, RPC de
+      cobros por su UPDATE de sincronía, `cobro_id` directo, sobre,
+      ingreso, `gasto_id` legado, reverso) ⇒ 23514 MOVIMIENTO_OMITIDO. Una
+      clasificación que NO es la canónica se sigue pisando al ligar, como
+      siempre. El API lo traduce a 409 en `errorRpcPartes`,
+      `errorRpcCobros` y la rama 23514 de `linkCobro` (`mensajeErrorPartes`
+      / `mensajeErrorCobros`), nunca 500.
+    - **Rutas** (literales bajo `movimientos/`, ANTES de `movimientos/:id`;
+      roles de la CLASE = `ROLES_CONCILIACION`; 200):
+      `POST movimientos/omitir/revisar {movimiento_ids}` (SOLO LECTURA;
+      funciona aun sin la migración) ⇒ `{movimientos[{id, fecha, tipo,
+      monto, moneda, descripcion, cuenta_alias, estado, texto_estado,
+      riesgo, texto_riesgo, candidatos_n}], no_existen, resumen {n,
+      pendientes, no_pendientes, con_riesgo}}`;
+      `POST movimientos/omitir {movimiento_ids, motivo, aceptar_riesgo_ids?}`
+      ⇒ `{omitidos, clasificacion_id, movimientos}` (relectura con
+      `omision`); `POST movimientos/quitar-omision {movimiento_ids}` ⇒
+      `{restaurados, movimientos}`. DTO (`RevisarOmisionDto`,
+      `OmitirMovimientosDto`, `QuitarOmisionDto`): 1..200 uuid sin repetir
+      y el motivo recortado 10..300, con textos es-MX («Elige al menos un
+      movimiento.», «El motivo debe tener al menos 10 caracteres.»…).
+      Orden de `omitir`: sonda ⇒ filas (lotes de ≤ 150) ⇒ 404 ⇒ 409
+      MOVIMIENTO_NO_PENDIENTE SIN llamar la RPC ⇒ 400
+      ACEPTAR_RIESGO_INVALIDO (un aviso confirmado fuera de la selección) ⇒
+      409 OMITIR_CON_RIESGO ⇒ la línea (`c.nombre`, `hoyCancun()`) ⇒ la
+      RPC (re-exige el pendiente bajo FOR UPDATE: una carrera es su 409
+      traducido) ⇒ relectura. `logger.log` con quién, cuántos y el motivo.
+    - **Riesgo (falla CERRADO: lo que no se pudo revisar se confirma)**:
+      CARGO ⇒ `anotarMotivoPendiente` sobre COPIAS (las MISMAS reglas del
+      auto-cruce y del badge): SE_PUEDE_CRUZAR ⇒ GASTO_QUE_CUADRA, AMBIGUO
+      ⇒ GASTOS_AMBIGUOS, sin anotar (lectura caída o truncada, cuenta sin
+      moneda) ⇒ SIN_VERIFICAR; ABONO ⇒ `cobrosExactosLibresDeAbono` (≤ 5 en
+      paralelo) > 0 ⇒ COBRO_QUE_CUADRA, null o error ⇒ SIN_VERIFICAR, y
+      `esDevolucionDeCargo` ⇒ DEVOLUCION; los dos ⇒ `patronTraspaso` ⇒
+      TRASPASO. Prioridad GASTO_QUE_CUADRA > GASTOS_AMBIGUOS >
+      COBRO_QUE_CUADRA > TRASPASO > DEVOLUCION > SIN_VERIFICAR. Cada
+      movimiento con riesgo exige estar en `aceptar_riesgo_ids`.
+    - **«Clasificar» endurecido** (`ClasificarMovimientoDto.
+      esperado_clasificacion_id?: uuid | null`, 5.º parámetro OPCIONAL
+      `{esperado, usuarioNombre}`; ausente = la conducta de siempre): (0) la
+      canónica como destino ⇒ 400 USA_OMITIR antes de leer nada; (1) lee
+      clasificación, conciliado, notas (+ `cobros_n` con su sonda); (2) con
+      `esperado` distinto de lo vigente (o null y ya conciliado) ⇒ 409
+      MOVIMIENTO_CAMBIO `{actual {conciliado, clasificacion_id,
+      clasificacion}}`, ANTES de la rama del reverso; (3) reverso como
+      siempre; (4) omitido + null ⇒ deshacer por la RPC; omitido + otra ⇒
+      409 MOVIMIENTO_OMITIDO con su motivo; (5) un lote de cobros
+      (`cobros_n > 0`) no se clasifica; (6) UPDATE con CAS sobre lo leído
+      (`conciliado` + `clasificacion_id`): 0 filas ⇒ 409 MOVIMIENTO_CAMBIO.
+      La respuesta suma `omision: null`. El catálogo (`GET clasificaciones`)
+      NO ofrece la canónica y `POST clasificaciones` con su nombre ⇒ 400
+      USA_OMITIR sin insertar.
+    - **Candados TS** (antes del trigger, con mejor texto; sin escribir):
+      `ligarPartes` (al ligar; `leerMovimientoPartes` suma
+      `clasificacion_id, notas`), `linkCobro` (ligar Y «desvincular»: su
+      UPDATE pone `clasificacion_id = null` y borraría la omisión) y
+      `ligarCobrosPorRpc` ⇒ 409 MOVIMIENTO_OMITIDO (`bloquearSiOmitido`);
+      `linkIngreso` ⇒ el 409 MOVIMIENTO_YA_LIGADO de siempre con el motivo
+      y `details.omitido: true`. Reversos, auto-cruce e Ingresos ya no
+      tocan un movimiento clasificado/conciliado.
+    - **Lectores (ADITIVOS)**: `GET movimientos` ⇒ cada fila con `omision:
+      {motivo, por, fecha} | null` SIEMPRE (del embed de la clasificación y
+      las notas: cero consultas; el panel detecta el API nuevo por la
+      LLAVE) y `?solo_omitidos=true|1` (pestaña «Omitidos»: filtra en el
+      API; sin la canónica ⇒ `{data: [], count: 0}` sin leer movimientos;
+      lectura del id caída ⇒ 503 OMITIDOS_NO_DISPONIBLE, jamás un vacío
+      falso); `GET resumen` ⇒ por cuenta `omitidos` y `monto_omitido` (Σ
+      |monto| en la moneda de la cuenta; null si no se pudo leer la
+      canónica — los «conciliados» los INCLUYEN); Excel de conciliación ⇒
+      Estatus «Omitido», «Conciliado con» = `etiquetaOmisionReporte`
+      («Omitido: Comisión o IVA del banco (Alejandro Canales,
+      14-oct-2026)»), Notas sin la línea canónica y el subtítulo «N
+      conciliados (M omitidos)» SOLO con M > 0 (sin omitidos, byte a
+      byte); auditoría Paywise ⇒ los abonos omitidos fuera del universo y
+      el conteo `resumen.movimientos_omitidos` (null si no se pudo leer la
+      canónica). El id de la canónica: `leerIdClasificacionOmitido` (por
+      NOMBRE, memo POSITIVO de 10 min; `fallo` ≠ «no existe»).
+    - **Pre-cierre**: renglón INFORMATIVO `movimientos_omitidos`
+      («Movimientos del banco omitidos de la conciliación», `count`,
+      `monto_mxn`, `monto_usd`, `informativo: true`) JUSTO después de
+      `sin_conciliar`, fuera de `bloqueantes`; lo calcula
+      `ConciliacionService.omitidosDelPeriodo(desde, hasta)` (fecha DATE
+      del movimiento, paginado, NUNCA lanza; una cuenta sin moneda ⇒ null)
+      con el patrón de `ligasUsdTcPrecierre` (stub sin el método, null o
+      excepción ⇒ `lectura_fallida: true` y «No se pudo leer cuántos
+      movimientos se omitieron.»).
+    - **Sonda ÚNICA** `common/omision-cargos-disponible.util.ts` (la
+      comparte la invariante 76): llama `conciliacion_omitir_movimientos`
+      con la lista VACÍA ⇒ 23514 LOTE_INVALIDO (o sin error) ⇒ «sí» PARA
+      SIEMPRE; PGRST202 o un «function … does not exist» que NOMBRA una de
+      sus RPC (`esOmisionCargosAusente`; un «operator does not exist» es un
+      BUG de plpgsql, no la migración ausente) ⇒ «no», re-sondeo ≤ 10 min
+      (se enciende sola al aplicarla) y un solo `warn`; otro error o
+      excepción ⇒ «sí» SIN memorizar. Sin la migración: omitir / deshacer
+      ⇒ 503 `CONCILIACION_OMITIR_NO_DISPONIBLE` («Esta opción todavía no
+      está activa: avisa a sistemas.», `details.migracion`) y TODO lo demás
+      como el 0.0.76. Tras la reversa de la migración hay que REINICIAR el
+      API (el «sí» se memoriza).
+    - **De paso** (revisión del mismo lote): `anotarMotivoPendiente` lee los
+      gastos PAGINADOS por la PK (`leerPaginado`, tope
+      `MOTIVO_GASTOS_MAX`): el `.limit()` de antes lo cortaba PostgREST en
+      1000 sin avisar y anotaba con una foto recortada.
+    - Specs: `omision.util.spec`, `omision-cargos-disponible.util.spec`,
+      `omision-cargos.paridad.spec` (lee el ARCHIVO SQL: nombre canónico,
+      prefijo, topes, las 7 columnas del trigger, el orden del CASE, los
+      códigos que el API traduce, todo SECURITY INVOKER con `search_path
+      ''` y ni una palabra que el MCP decline),
+      `conciliacion.service.omitir.spec` (PostgREST falso con CAS y embeds
+      + las RPC emuladas en `omision-cargos.fixture-spec.ts`: la línea
+      exacta y las notas de vuelta byte a byte, 404/409/400/503 sin
+      escribir, riesgos y su confirmación, carreras de la RPC, revisar,
+      deshacer, lista/resumen/Excel/Paywise, clasificar con `esperado` y
+      CAS, candados de gasto/cobro/ingreso y el trigger, pre-cierre),
+      `conciliacion.controller.omitir.spec` (HTTP real: rutas, roles, DTO,
+      `esperado`, `?solo_omitidos`) y
+      `profit-sharing.service.pre-cierre-omitidos.spec`.
+
+76. **VARIOS CARGOS → UN GASTO (14-oct-2026, API 0.0.77, lote B, migración
+    `20261014000002`).** Pedido del usuario con la captura de
+    /admin/conciliacion: «necesitamos poder seleccionar varias filas de
+    conciliaciones pendientes para todo eso ponerlas a un solo gasto, si no
+    existe el gasto que permita crearlo por la cantidad de la suma». Es el
+    sentido 1 gasto ↔ N cargos de la invariante 40 (la puente
+    `movimiento_bancario_gasto`), ahora de un golpe y con la SUMA calculada
+    por el API. Jamás se encadena la RPC G de un cargo para N cargos.
+    - **Regla y textos PUROS** en `conciliacion/cargos-a-gasto.util.ts`
+      (con spec): `resultadoCargosSobreGasto` (en CENTAVOS, tolerancia
+      `TOLERANCIA_CONCILIACION` = 1.00 sobre lo que le FALTA al gasto:
+      |Σ − faltante| ≤ 1.00 ⇒ CUBRE; Σ < faltante − 1.00 ⇒ PARCIAL
+      `faltante_tras`; si no ⇒ EXCEDE `excedente`),
+      `ordenarCandidatosPorSuma` (CUBRE → PARCIAL → EXCEDE; |faltante − Σ|;
+      distancia de la fecha al rango de los cargos; fecha desc; id),
+      `terminacionComun`, `validarCargosParaGasto` (espejo de la RPC con
+      sus códigos y su ORDEN) y los mensajes («Los 3 cargos suman $9,700.00
+      y al gasto le faltan $9,591.49 (vale $9,591.49): se pasarían por
+      $108.51 (tolerancia $1.00). Revisa la selección o el monto del
+      gasto.», etc.).
+    - **`POST cargos/gastos-candidatos`** (SOLO LECTURA; roles de la clase;
+      `CargosGastosCandidatosDto {movimiento_ids 2..50, q?, dias 1..180 =
+      30, limite 1..300 = 100}`) ⇒ `{cargos {ids, n, suma, moneda,
+      fecha_min, fecha_max, cuentas[{id, alias}], terminacion_comun},
+      ventana, candidatos (ficha de `aCandidatoGasto` + no_bancario,
+      resultado, faltante_tras, excedente), truncado,
+      cargos_con_candidato_propio [{id, motivo, candidatos_n}] | null,
+      excluidos?, excluidos_monto?}`. Valida como la RPC (404, SOLO_CARGOS,
+      MOVIMIENTO_NO_PENDIENTE —acción «vincular»—, CARGOS_MONEDA_DISTINTA;
+      cuenta sin moneda ⇒ 503 CUENTA_SIN_MONEDA; sin partes ⇒ 503). El
+      UNIVERSO es el MISMO lector de «Vincular gasto» de un cargo
+      (`leerUniversoGastos` + `orTextoBusquedaGasto`, EXTRAÍDOS de
+      `gastosCandidatosDeMovimiento` sin cambio de conducta: bancarios, sin
+      conciliar, moneda de las cuentas, la búsqueda de siempre, tope 1,000
+      ⇒ `truncado`) en `[fecha_min − dias, fecha_max + dias]`; los cruzados
+      (USD contra cuenta MXN) NO entran. `cargos_con_candidato_propio` =
+      `anotarMotivoPendiente` sobre COPIAS (null si alguno no se pudo
+      anotar: jamás un «ninguno» falso). Sin candidatos ⇒
+      `excluidosDeCandidatos` con el monto = Σ.
+    - **`POST gastos/:id/cargos {movimiento_ids 2..50}`** (otro MÉTODO que
+      `GET gastos/:id`; `:id` con ParseUUIDPipe) ⇒ `{gasto_id,
+      idempotente, nuevos, partes[{movimiento_id, monto_parte, moneda}],
+      gasto_estado {monto, moneda, n_partes, monto_vinculado, faltante,
+      cubierto}, movimientos}` (relectura con `omision`). SOLO por la RPC
+      `conciliacion_ligar_cargos_a_gasto(gasto, ids, actor)` (SECURITY
+      INVOKER): cargos FOR UPDATE por id y DESPUÉS el gasto (mismo orden
+      global que la RPC G y el trigger A); MOVIMIENTO_NO_EXISTE, SOLO_CARGOS
+      {abonos}, los ya ligados a ESTE gasto como su única parte = reenvío
+      IDEMPOTENTE, los demás pendientes y libres (MOVIMIENTO_NO_PENDIENTE
+      con OMITIDO incluido), una moneda de cuenta (CARGOS_MONEDA_DISTINTA),
+      GASTO_NO_EXISTE, moneda del gasto = la de los cargos
+      (LOTE_MONEDA_DISTINTA: un USD pagado en pesos va con UN cargo), medio
+      ∈ `MEDIOS_BANCARIOS` en el MISMO orden (GASTO_NO_BANCARIO; BODEGA ⇒
+      409 GASTO_BODEGA con el texto de siempre), parte cruzada previa ⇒
+      GASTO_YA_CUBIERTO (MONEDA_DISTINTA), Σ ligado + Σ nuevos ≤ monto +
+      1.00 (CARGOS_EXCEDEN_GASTO); UN INSERT … SELECT de UNA parte por
+      cargo ENTERO (`abs(monto)`): los triggers A/B/K de siempre validan y
+      recalculan y `gasto.conciliado` lo escribe SOLO
+      `recalcular_gasto_conciliado`. Los textos salen de los helpers, nunca
+      del texto de la BD; MOVIMIENTO_NO_PENDIENTE relee la moneda de cada
+      cuenta (best-effort). 40P01 ⇒ 409 CONFLICTO_CONCURRENTE; PGRST202 ⇒
+      503 `CONCILIACION_CARGOS_A_GASTO_NO_DISPONIBLE`; la sonda (la de la
+      invariante 75) en «no» ⇒ el mismo 503 sin llamar la RPC.
+    - **«Créalo por la suma»**: `POST /v1/expenses` con
+      `CreateGastoDto.conciliar_con_movimientos?: uuid[]` (2..50 sin
+      repetir; ADITIVO). Controller: el campo presente (`!== undefined`) y
+      el rol fuera de `ROLES_CONCILIACION` ⇒ 403
+      CONCILIAR_SOLO_ADMIN_FACTURACION antes del servicio. Servicio
+      (`create` ⇒ `crearConCargos`; `null` = ausente): (1) refacción a
+      Inventario ⇒ 400 INVENTARIO_NO_DESDE_CARGOS; (2) sin
+      `client_request_id` ⇒ 400 CLIENT_REQUEST_ID_REQUERIDO; (3) sin el
+      módulo de conciliación o la sonda en «no» ⇒ 503 sin crear; (4)
+      REPLAY: la llave ya creó un gasto ⇒ con los MISMOS monto, moneda y
+      medio, la RPC (idempotente) y `idempotente: true` (si falla, NO se
+      retira nada: el error sale con `details.gasto_id`); con otros datos
+      ⇒ 409 CLIENT_REQUEST_ID_EN_USO; (5) prevalidación PURA
+      (`prevalidarCargosParaGastoNuevo` ⇒ `validarCargosParaGasto`) ⇒ los
+      4xx con «No se registró el gasto: » y SIN crear; (6) el alta por
+      `crearGastoInterno(…, {autoCruce: false})`, que devuelve `{data,
+      despues, replay}` —`despues` = lo que el alta hace tras el insert en
+      su orden de SIEMPRE: aviso de matrícula, aviso de combustible
+      corregido, lectura IA offline, auto-cruce y «gasto_registrado»— SIN
+      ejecutarlo (un 23505 de la llave ⇒ el replay de (4)); (7)
+      `ligarCargosAGasto(…, {accion: 'crear'})` (los textos de validación
+      ya con el prefijo); bien ⇒ corre `despues` y responde 201 = el gasto
+      RELEÍDO (`conciliado` ya recalculado por la BD) + `conciliacion
+      {movimiento_ids, idempotente, partes, gasto_estado}`; (8) mal ⇒
+      `remove` del gasto y el error relanzado con «No se registró el
+      gasto: » y `details.compensado: true` (un error que no es HTTP ⇒ 500
+      GASTO_NO_REGISTRADO con `details.tecnico`); (9) si el retiro también
+      falla ⇒ 500 GASTO_SIN_VINCULAR {gasto_id} («…vuelve a pulsar
+      «Guardar» para reintentar la liga (no se duplica)…»: el reintento
+      con la misma llave es el replay). `crearGasto` = `crearGastoInterno`
+      + correr `despues` de inmediato: el alta de siempre (app, panel,
+      carga masiva) es byte a byte la de antes, avisos y auto-cruce en su
+      orden. PATCH con la llave ⇒ 400 CONCILIAR_SOLO_AL_CREAR antes de
+      tocar nada (junto al rebote de `inventario`).
+    - Specs: `cargos-a-gasto.util.spec`, `omision-cargos.paridad.spec`
+      (topes 2..50, tolerancia 1.00, MEDIOS en el mismo orden, códigos),
+      `conciliacion.service.cargos-gasto.spec` (suma y orden, ventana,
+      pagos previos, búsqueda, terminación común, cargos con su propio
+      gasto, excluidos, rechazos en el orden de la RPC, la liga con UNA
+      llamada y sin la G, idempotente, parciales, cada código con su texto,
+      omitido, interbloqueo, un 42883 que NO es «migración ausente», sin la
+      migración, `accion: 'crear'`, prevalidación),
+      `conciliacion.controller.cargos-gasto.spec` (HTTP real),
+      `expenses.service.crear-con-cargos.spec` (PostgREST falso: alta de
+      siempre con auto-cruce y aviso; alta por la suma sin auto-cruce y con
+      el aviso DESPUÉS de la liga; rechazos sin crear; compensación,
+      GASTO_NO_REGISTRADO y GASTO_SIN_VINCULAR; replay, llave en uso,
+      carrera 23505; PATCH) y `expenses.controller.crear-con-cargos.spec`
+      (403 a quien no concilia, DTO).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -9132,6 +9402,70 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   USD 16.9479 y NETO USD 2,746.70 (= reparto y tablero). Regenerar SOLO
   N990GG sep-2026 (individual y general) dentro de la regeneración de
   septiembre (después del PASO 0 de ING-4 y del checklist de datos).
+
+- **PENDIENTE (14-oct-2026, lote B del 0.0.77) —
+  `20261014000002_conciliacion_omitir_y_cargos_a_gasto.sql`** (invariantes
+  75 y 76; NO aplicada: la aplica el orquestador). SOLO funciones nuevas +
+  UN trigger nuevo: `conciliacion_clasificacion_omitido`,
+  `conciliacion_omitir_movimientos`, `conciliacion_quitar_omision`,
+  `conciliacion_ligar_cargos_a_gasto` y `tg_mov_bancario_omitido_sin_ligas`
+  + `trg_mov_bancario_omitido_sin_ligas`; ninguna tabla, columna, CHECK,
+  índice, vista ni función existente cambia y NO siembra datos. Las 5
+  funciones son SECURITY INVOKER con `search_path ''` y el archivo NO toca
+  permisos ni lleva drop/delete/revoke/grant (ni en comentarios): se aplica
+  ENTERO por `apply_migration`. anon/authenticated conservan el EXECUTE por
+  default pero, con RLS sin políticas (invariante 51), no ven ninguna fila
+  ni pueden insertar (lo prueba el dry-run, T28). Paquete en
+  `docs/sql-20261014000002/` (README con el orden): `01-dryrun…sql` (legible)
+  y `01-dryrun….transporte.sql` (lo que se manda por `execute_sql`),
+  `02b-postcheck-lecturas…sql`, `02-postcheck…sql` (T1–T29 ya aplicada, termina
+  en `POSTCHECK_OK`) y `03-reversa…sql` (SOLO SQL Editor, con confirmación).
+  **Dry-run corrido en prod el 14-oct-2026** (bloque autoabortado con
+  escrituras REALES; filas de prueba DESPUÉS del DDL; `set constraints all
+  immediate` en T29):
+  `ERROR: P0001: DRYRUN_OK 20261014000002 · T1–T29 · canónica
+  0ec662fc-f07c-42f3-80d2-c729492d6c4c · authenticated:MOVIMIENTO_NO_EXISTE
+  authenticated:MOVIMIENTO_NO_EXISTE authenticated:MOVIMIENTO_NO_EXISTE
+  authenticated:42501 anon:MOVIMIENTO_NO_EXISTE anon:MOVIMIENTO_NO_EXISTE
+  anon:MOVIMIENTO_NO_EXISTE anon:42501 · md5 del bloque
+  278693a0f4bf976c161bf72ecf2fcc9b · todo se revierte`; después, por
+  SELECT: las 5 funciones y el trigger no existen, 0 clasificaciones
+  canónicas/DRYRUN, 0 movimientos `DRYRUN`, 0 gastos `DRYRUN%`, 0 partes.
+  Procedimiento (proyecto `bjesduasnzbzywofukbf`; hay DOS: confirmar con un
+  SELECT): `02b` (todo vacío) ⇒ dry-run (si pasó tiempo) ⇒ `apply_migration`
+  (name `20261014000002_conciliacion_omitir_y_cargos_a_gasto`) ⇒ `02b` (5
+  funciones `prosecdef = false` y `search_path=""`, trigger, RLS sin
+  políticas, 0 canónicas) ⇒ `02-postcheck` ⇒ `POSTCHECK_OK` ⇒
+  `get_advisors` (sin 0028/0029: nada es SECURITY DEFINER). **Sin dependencia
+  dura** con el API: el 0.0.77 la sondea (sin ella, lo nuevo responde 503 y
+  lo demás como el 0.0.76; se enciende sola ≤ 10 min después de aplicarla) y
+  con un API ≤ 0.0.76 nadie llama las RPC y, sin omitidos, el trigger nunca
+  actúa. **REVERSA** (SOLO SQL Editor, con confirmación): deshacer antes
+  TODAS las omisiones (pestaña «Omitidos» o `conciliacion_quitar_omision` en
+  lotes de 200), luego `03-reversa…sql` (trigger, 5 funciones, renglón del
+  historial; la canónica queda inactiva) y REINICIAR el API (la sonda
+  memoriza el «sí»).
+- **ORDEN DE DESPLIEGUE 0.0.77 (lote A + lote B, 14-oct-2026).** El lote A
+  no trae migración y exige pyservices ANTES del API (su compuerta, bullet
+  anterior); el lote B trae `20261014000002` y ningún cambio de pyservices
+  ni de la app. Orden: pyservices (lote A) ⇒ COMPUERTA ⇒ migración
+  `20261014000002` (dry-run ⇒ aplicar ⇒ postchecks ⇒ advisors; puede ir
+  después del API sin romper nada) ⇒ API 0.0.77 (`GET /v1/version` =
+  `0.0.77`, tras el commit «Versión 0.0.77») ⇒ panel SIEMPRE después del
+  API: un API 0.0.76 rechaza con 400 (`forbidNonWhitelisted`)
+  `esperado_clasificacion_id` de «Clasificar» y `?solo_omitidos`, y
+  responde 404 a las rutas nuevas (el panel detecta el API nuevo por la
+  llave `omision` de cada fila de `GET movimientos`). Humo como ADMIN: `POST
+  /v1/conciliacion/movimientos/omitir/revisar` con un pendiente ⇒ 200 con
+  su `estado` y `riesgo`; `GET /v1/conciliacion/movimientos?solo_omitidos=
+  true` ⇒ `{data: [], count: 0}` antes de la primera omisión; `GET
+  /v1/conciliacion/clasificaciones` sin «Omitido de la conciliación»; el
+  pre-cierre de septiembre con `movimientos_omitidos` count 0 y `listo` como
+  antes. **ROLLBACK del API a 0.0.76 con omitidos en la BD**: posible, pero
+  el 0.0.76 ofrece la canónica como una clasificación más y un intento de
+  ligar un omitido lo rechaza el trigger con un código que ese API no
+  conoce (500 en la liga de gastos, 400 genérico en la de cobros): deshacer
+  antes las omisiones o avanzar.
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del

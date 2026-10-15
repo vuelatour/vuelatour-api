@@ -170,6 +170,7 @@ import {
   rangoBandaMxnDeUsd,
   rangoBandaUsd,
   rangosUsdDeBusqueda,
+  type BusquedaGasto,
 } from './gastos-candidatos.util';
 import {
   agregarNotaVinculo,
@@ -306,6 +307,65 @@ import {
 } from './reverso-cruce.util';
 import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
 import { ordenArchivoDisponible } from '../../common/orden-archivo-disponible.util';
+import {
+  errorCargosAGastoNoDisponible,
+  errorOmitirNoDisponible,
+  esOmisionCargosAusente,
+  omisionCargosDisponible,
+} from '../../common/omision-cargos-disponible.util';
+import {
+  CLASIFICACION_OMITIDO,
+  esClasificacionOmitida,
+  estadoMovimientoParaOmitir,
+  etiquetaOmisionReporte,
+  ESTATUS_OMITIDO,
+  leerErrorOmision,
+  leerOmision,
+  lineaOmision,
+  MENSAJE_ACEPTAR_RIESGO_INVALIDO,
+  MENSAJE_CONFLICTO_CONCURRENTE,
+  MENSAJE_MOVIMIENTO_CAMBIO,
+  MENSAJE_USA_OMITIR,
+  mensajeMovimientoOmitido,
+  mensajeMovimientosNoExisten,
+  mensajeNoOmitidos,
+  mensajeNoPendientes,
+  mensajeOmitirConRiesgo,
+  OMISION_SIN_DATOS,
+  omisionDeFila,
+  OMITIR_MAX,
+  quitarLineaOmision,
+  riesgoDeOmision,
+  textoConciliadosReporte,
+  textoEstadoNoPendiente,
+  textoRiesgoOmision,
+  type EstadoParaOmitir,
+  type OmitidosPeriodo,
+  type RiesgoOmision,
+} from './omision.util';
+import {
+  CARGOS_A_GASTO_MAX,
+  CARGOS_A_GASTO_MIN,
+  conPrefijoNoSeRegistro,
+  leerErrorCargosGasto,
+  MENSAJE_GASTO_NO_EXISTE,
+  MENSAJE_GASTO_YA_CUBIERTO_CARRERA,
+  MENSAJE_GASTO_YA_CUBIERTO_OTRA_MONEDA,
+  MENSAJE_LOTE_CARGOS_INVALIDO,
+  mensajeCargosExcedenGasto,
+  mensajeCargosMonedaDistinta,
+  mensajeGastoBodegaCargos,
+  mensajeGastoNoBancario,
+  mensajeLoteMonedaDistintaGasto,
+  mensajeSoloCargos,
+  ordenarCandidatosPorSuma,
+  resultadoCargosSobreGasto,
+  terminacionComun,
+  validarCargosParaGasto,
+  type CargoParaGasto,
+  type ResultadoSuma,
+  type ValidacionCargosGasto,
+} from './cargos-a-gasto.util';
 import { ordenarComoEstadoDeCuenta } from './orden-estado-cuenta.util';
 import {
   estadoBancoGasto,
@@ -849,6 +909,23 @@ const MATCH_MONTO_PCT = 0.05;
 const MOTIVO_GASTOS_MAX = 4000;
 
 /**
+ * OMITIR / VARIOS CARGOS (14-oct-2026, invariantes 75 y 76): ids por lote en
+ * las lecturas `.in('id', …)` de movimientos (URL de PostgREST acotada).
+ */
+const LOTE_IDS_OMISION = 150;
+/** Memo POSITIVO del id de la canónica «Omitido de la conciliación». */
+const OMITIDO_MEMO_MS = 10 * 60_000;
+/** Tope de omitidos que lee el renglón del pre-cierre (paginado). */
+const OMITIDOS_PRECIERRE_TOPE = 20_000;
+
+/** Rango de monto de la búsqueda de «Vincular gasto» (`interpretarBusquedaGasto`). */
+interface RangoMontoGasto {
+  min: number;
+  max: number;
+  maxExclusivo: boolean;
+}
+
+/**
  * Parte de la puente `movimiento_bancario_gasto` (2-oct-2026, migración
  * 20261002000002): lo que UN cargo aporta a UN gasto, en la moneda de la
  * CUENTA del cargo.
@@ -1060,6 +1137,102 @@ export type ResultadoImportacion = {
     factura: string | null;
   }>;
 };
+
+// =====================================================================
+// OMITIR LA CONCILIACIÓN y VARIOS CARGOS → UN GASTO (14-oct-2026, API
+// 0.0.77, invariantes 75 y 76): formas de las respuestas nuevas.
+// =====================================================================
+
+/** Un movimiento revisado antes de omitirlo (`POST movimientos/omitir/revisar`). */
+export interface MovimientoRevisadoOmision {
+  id: string;
+  fecha: string | null;
+  /** 'CARGO' | 'ABONO' (texto de la BD). */
+  tipo: string;
+  monto: number;
+  moneda: string | null;
+  descripcion: string | null;
+  cuenta_alias: string | null;
+  estado: EstadoParaOmitir;
+  texto_estado: string | null;
+  riesgo: RiesgoOmision | null;
+  texto_riesgo: string | null;
+  candidatos_n: number | null;
+}
+
+export interface RevisionOmisionRespuesta {
+  movimientos: MovimientoRevisadoOmision[];
+  no_existen: string[];
+  resumen: {
+    n: number;
+    pendientes: number;
+    no_pendientes: number;
+    con_riesgo: number;
+  };
+}
+
+/** Candidato de «Vincular a un gasto» con la cuenta de la suma. */
+export type CandidatoGastoPorSuma =
+  SugerenciaConciliacion['candidatos'][number] & {
+    no_bancario: boolean;
+    resultado: ResultadoSuma;
+    faltante_tras: number;
+    excedente: number;
+  };
+
+/** `POST cargos/gastos-candidatos`. */
+export interface CargosGastosCandidatosRespuesta {
+  cargos: {
+    ids: string[];
+    n: number;
+    suma: number;
+    moneda: string;
+    fecha_min: string;
+    fecha_max: string;
+    cuentas: Array<{ id: string; alias: string | null }>;
+    terminacion_comun: string | null;
+  };
+  ventana: { desde: string; hasta: string };
+  candidatos: CandidatoGastoPorSuma[];
+  truncado: boolean;
+  /** Cargos que tienen SU propio gasto que cuadra (null = no se pudo revisar). */
+  cargos_con_candidato_propio: Array<{
+    id: string;
+    motivo: 'SE_PUEDE_CRUZAR' | 'AMBIGUO';
+    candidatos_n: number | null;
+  }> | null;
+  excluidos?: ExcluidosCandidatos['excluidos'];
+  excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
+}
+
+/** Lo que devuelve la RPC `conciliacion_ligar_cargos_a_gasto`. */
+export interface LigaCargosAGasto {
+  gasto_id: string;
+  idempotente: boolean;
+  nuevos: string[];
+  partes: Array<{ movimiento_id: string; monto_parte: number; moneda: string }>;
+  gasto_estado: {
+    monto: number;
+    moneda: string;
+    n_partes: number;
+    monto_vinculado: number;
+    faltante: number;
+    cubierto: boolean;
+  };
+}
+
+/** `POST gastos/:id/cargos` (= la RPC + los movimientos RELEÍDOS). */
+export interface LigarCargosAGastoRespuesta extends LigaCargosAGasto {
+  movimientos: Array<Record<string, unknown>>;
+}
+
+/** Gasto contra el que se prevalida el alta por la suma. */
+export interface GastoNuevoParaCargos {
+  moneda: string;
+  monto: number;
+  medio_pago: string;
+  fecha_gasto?: string | null;
+}
 
 @Injectable()
 export class ConciliacionService {
@@ -3990,7 +4163,7 @@ export class ConciliacionService {
       this.partesOn(),
       this.cobrosLoteOn(),
     ]);
-    const colsMov = `id, gasto_id${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
+    const colsMov = `id, gasto_id, clasificacion_id, notas${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4001,10 +4174,17 @@ export class ConciliacionService {
     const mov = movRaw as unknown as {
       id: string;
       gasto_id: string | null;
+      clasificacion_id?: string | null;
+      notas?: string | null;
       gastos_n?: number | null;
       ingreso_id?: string | null;
       cobros_n?: number | null;
     };
+    // OMITIDO (14-oct-2026, invariante 75): ni se liga ni se «desliga» — el
+    // UPDATE de abajo pone `clasificacion_id = null` y borraría la omisión
+    // en silencio. 409 sin escribir (una clasificación NO canónica se sigue
+    // pisando al ligar un cobro, como siempre).
+    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
     // Un abono conciliado con un INGRESO no se liga ni se desvincula por
     // aquí (su camino es PATCH movimientos/:id/ingreso).
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
@@ -4242,7 +4422,7 @@ export class ConciliacionService {
       this.ingresosOn(),
       this.partesOn(),
     ]);
-    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
+    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n, clasificacion_id, notas${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
     const { data: movRaw, error: movErr } = await sb
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4259,6 +4439,8 @@ export class ConciliacionService {
       gastos_n: number | null;
       cobro_grupo_id: string | null;
       cobros_n: number | null;
+      clasificacion_id?: string | null;
+      notas?: string | null;
       ingreso_id?: string | null;
     };
     if (mov.tipo !== (TipoMovimientoBancario.ABONO as string)) {
@@ -4267,6 +4449,8 @@ export class ConciliacionService {
         error: 'SOLO_ABONOS',
       });
     }
+    // OMITIDO (invariante 75): 409 sin llamar la RPC.
+    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
@@ -5447,12 +5631,22 @@ export class ConciliacionService {
     const movsLeidos = (movsTodos ?? []) as unknown as Array<
       Record<string, unknown>
     >;
-    const movsRaw = conIngresos
+    const movsSinIngreso = conIngresos
       ? movsLeidos.filter(
           (m) => !(typeof m.ingreso_id === 'string' && m.ingreso_id),
         )
       : movsLeidos;
-    const movimientosConIngreso = movsLeidos.length - movsRaw.length;
+    const movimientosConIngreso = movsLeidos.length - movsSinIngreso.length;
+    // OMITIDOS (0.0.77, invariante 75): un abono omitido no es de la
+    // auditoría (ni «Conciliar los que cuadran» lo toca); contado aparte. Si
+    // no se puede leer la canónica, no se filtra y el conteo va null.
+    const omitidoPw = await this.leerIdClasificacionOmitido();
+    const movsRaw = omitidoPw.id
+      ? movsSinIngreso.filter((m) => m.clasificacion_id !== omitidoPw.id)
+      : movsSinIngreso;
+    const movimientosOmitidos = omitidoPw.fallo
+      ? null
+      : movsSinIngreso.length - movsRaw.length;
     const movimientos: MovimientoPaywise[] = movsRaw.map((m) => ({
       id: m.id as string,
       fecha: m.fecha as string,
@@ -5490,6 +5684,7 @@ export class ConciliacionService {
       cobros,
       cobrosConciliadosFuera,
       movimientosConIngreso: conIngresos ? movimientosConIngreso : null,
+      movimientosOmitidos,
     };
   }
 
@@ -5504,6 +5699,7 @@ export class ConciliacionService {
       conciliados_ahora?: number;
       errores?: unknown[];
       movimientos_con_ingreso?: number | null;
+      movimientos_omitidos?: number | null;
     } = {},
   ) {
     const ya = r.coinciden.filter((c) => c.criterio === 'YA_CONCILIADO');
@@ -5542,6 +5738,11 @@ export class ConciliacionService {
         ...(extra.movimientos_con_ingreso != null
           ? { movimientos_con_ingreso: extra.movimientos_con_ingreso }
           : {}),
+        // ADITIVO (0.0.77, invariante 75): abonos omitidos fuera del
+        // universo (null = no se pudo leer la canónica).
+        ...('movimientos_omitidos' in extra
+          ? { movimientos_omitidos: extra.movimientos_omitidos ?? null }
+          : {}),
       },
       coinciden: r.coinciden,
       comision_distinta: r.comision_distinta,
@@ -5572,7 +5773,10 @@ export class ConciliacionService {
       u.cobros,
       u.cobrosConciliadosFuera,
       r,
-      { movimientos_con_ingreso: u.movimientosConIngreso },
+      {
+        movimientos_con_ingreso: u.movimientosConIngreso,
+        movimientos_omitidos: u.movimientosOmitidos,
+      },
     );
   }
 
@@ -5622,6 +5826,7 @@ export class ConciliacionService {
         conciliados_ahora: conciliados,
         errores,
         movimientos_con_ingreso: u2.movimientosConIngreso,
+        movimientos_omitidos: u2.movimientosOmitidos,
       },
     );
   }
@@ -5933,7 +6138,11 @@ export class ConciliacionService {
     };
   }
 
-  /** Catálogo de clasificaciones "sin vuelo" (activas, orden alfabético). */
+  /**
+   * Catálogo de clasificaciones "sin vuelo" (activas, orden alfabético).
+   * SIN la canónica «Omitido de la conciliación» (14-oct-2026, invariante
+   * 75): omitir exige motivo firmado y se hace con «Omitir la conciliación».
+   */
   async listClasificaciones() {
     const { data, error } = await this.supabase.service
       .from('conciliacion_clasificacion')
@@ -5941,7 +6150,10 @@ export class ConciliacionService {
       .eq('activo', true)
       .order('nombre', { ascending: true });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    return ((data ?? []) as Array<{ nombre?: unknown }>).filter(
+      (c) =>
+        !esClasificacionOmitida(typeof c.nombre === 'string' ? c.nombre : null),
+    );
   }
 
   /**
@@ -5955,6 +6167,14 @@ export class ConciliacionService {
       throw new BadRequestException(
         'El nombre de la clasificación es muy corto.',
       );
+    }
+    // La canónica (invariante 75) no se crea a mano: la crea la RPC de
+    // omitir, con su motivo firmado.
+    if (esClasificacionOmitida(limpio)) {
+      throw new BadRequestException({
+        message: MENSAJE_USA_OMITIR,
+        error: 'USA_OMITIR',
+      });
     }
     const { data: existente, error: exErr } = await this.supabase.service
       .from('conciliacion_clasificacion')
@@ -5994,12 +6214,61 @@ export class ConciliacionService {
     clasificacionId: string | null,
     notas: string | undefined,
     userId: string,
+    // ENDURECIDO (14-oct-2026, invariante 75): `esperado` = la clasificación
+    // que el panel VIO (presente = !== undefined; null = «estaba pendiente»).
+    opts: { esperado?: string | null; usuarioNombre?: string | null } = {},
   ) {
-    // REVERSOS (30-sep-2026): un movimiento emparejado como cargo devuelto /
-    // devolución. «Quitar clasificación» (null) en CUALQUIERA de los dos
-    // deja AMBOS pendientes; cambiarle la clasificación rompería el par en
-    // silencio ⇒ 409 (se quita primero); la MISMA clasificación (editar
-    // notas) sí se permite.
+    // (0) La canónica «Omitido de la conciliación» NO se pone por aquí:
+    // omitir exige motivo firmado (400 USA_OMITIR antes de leer nada más).
+    const idOmitido = await this.idClasificacionOmitido();
+    if (
+      clasificacionId &&
+      idOmitido &&
+      normalizarUuid(clasificacionId) === idOmitido
+    ) {
+      throw new BadRequestException({
+        message: MENSAJE_USA_OMITIR,
+        error: 'USA_OMITIR',
+      });
+    }
+    // (1) Lo VIGENTE del movimiento (clasificación, conciliado, notas y,
+    // con sus sondas, ingreso / gastos_n / cobros_n).
+    const [conIngresosCl, conPartesCl, conCobrosCl] = await Promise.all([
+      this.ingresosOn(),
+      this.partesOn(),
+      this.cobrosLoteOn(),
+    ]);
+    const colsMov = `id, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, conciliado, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conIngresosCl ? ', ingreso_id' : ''}${conPartesCl ? ', gastos_n' : ''}${conCobrosCl ? ', cobros_n' : ''}`;
+    const { data: movRaw, error: movErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(colsMov)
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!movRaw) throw new NotFoundException(`Movimiento ${movId} not found`);
+    const mov = movRaw as unknown as Record<string, unknown>;
+    const clasifActual =
+      typeof mov.clasificacion_id === 'string' && mov.clasificacion_id
+        ? mov.clasificacion_id
+        : null;
+    const conciliadoActual = mov.conciliado === true;
+    // (2) Lo que el panel vio ya no es lo vigente (otro lo vinculó, lo
+    // clasificó o lo omitió) ⇒ 409 ANTES de la rama del reverso: con un par
+    // emparejado NO se desempareja a ciegas.
+    if (opts.esperado !== undefined) {
+      const esperado =
+        opts.esperado === null ? null : normalizarUuid(opts.esperado);
+      const cambio =
+        esperado === null
+          ? clasifActual !== null || conciliadoActual
+          : clasifActual !== esperado;
+      if (cambio) throw this.conflictoMovimientoCambio(mov);
+    }
+    // (3) REVERSOS (30-sep-2026): un movimiento emparejado como cargo
+    // devuelto / devolución. «Quitar clasificación» (null) en CUALQUIERA de
+    // los dos deja AMBOS pendientes; cambiarle la clasificación rompería el
+    // par en silencio ⇒ 409 (se quita primero); la MISMA clasificación
+    // (editar notas) sí se permite.
     const par = await this.parDeReverso(movId);
     if (par) {
       if (clasificacionId === null) {
@@ -6015,19 +6284,16 @@ export class ConciliacionService {
         throw this.conflictoEnReverso(par);
       }
     }
-    const [conIngresosCl, conPartesCl] = await Promise.all([
-      this.ingresosOn(),
-      this.partesOn(),
-    ]);
-    const colsMov = `id, gasto_id, cobro_id, cobro_grupo_id${conIngresosCl ? ', ingreso_id' : ''}${conPartesCl ? ', gastos_n' : ''}`;
-    const { data: movRaw, error: movErr } = await this.supabase.service
-      .from('movimiento_bancario')
-      .select(colsMov)
-      .eq('id', movId)
-      .maybeSingle();
-    if (movErr) throw new Error(movErr.message);
-    if (!movRaw) throw new NotFoundException(`Movimiento ${movId} not found`);
-    const mov = movRaw as unknown as Record<string, unknown>;
+    // (4) OMITIDO (invariante 75): «Quitar clasificación» = deshacer la
+    // omisión por la RPC (quita su línea de las notas); cualquier otra
+    // clasificación ⇒ 409 MOVIMIENTO_OMITIDO.
+    if (clasifActual && idOmitido && clasifActual === idOmitido) {
+      if (clasificacionId === null) {
+        const r = await this.quitarOmision([movId], userId);
+        return r.movimientos[0] ?? { id: movId, omision: null };
+      }
+      throw this.conflictoMovimientoOmitido(movId, mov.notas);
+    }
     // Ligado a gasto(s) = `gasto_id` (espejo) o `gastos_n > 0` (lote).
     const conGasto = ligadoAGasto(mov);
     // Conciliado con un INGRESO: ni se clasifica ni se «des-clasifica» por
@@ -6035,7 +6301,15 @@ export class ConciliacionService {
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
-    if (clasificacionId && (conGasto || mov.cobro_id || mov.cobro_grupo_id)) {
+    // (5) Un lote de COBROS (`cobros_n > 0`, 12-oct-2026) cuenta como un
+    // cobro: no se clasifica encima.
+    if (
+      clasificacionId &&
+      (conGasto ||
+        mov.cobro_id ||
+        mov.cobro_grupo_id ||
+        Number(mov.cobros_n) > 0)
+    ) {
       throw new ConflictException(
         'El movimiento ya está conciliado con un gasto/cobro: desvincúlalo antes de clasificarlo.',
       );
@@ -6059,14 +6333,1394 @@ export class ConciliacionService {
       updated_by: userId,
     };
     if (notas !== undefined) patch.notas = notas.trim() || null;
-    const { data, error } = await this.supabase.service
+    // (6) CAS sobre lo LEÍDO (conciliado + clasificación): si alguien lo
+    // vinculó, lo clasificó o lo omitió entre la lectura y la escritura, 0
+    // filas ⇒ 409 MOVIMIENTO_CAMBIO (jamás se pisa).
+    let upd = this.supabase.service
       .from('movimiento_bancario')
       .update(patch)
       .eq('id', movId)
+      .eq('conciliado', conciliadoActual);
+    upd =
+      clasifActual === null
+        ? upd.is('clasificacion_id', null)
+        : upd.eq('clasificacion_id', clasifActual);
+    const { data, error } = await upd
       .select(await this.movCols())
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return data as unknown as Record<string, unknown>;
+    if (!data) {
+      let actual: Record<string, unknown> | null = null;
+      try {
+        const { data: rel } = await this.supabase.service
+          .from('movimiento_bancario')
+          .select(
+            'id, conciliado, clasificacion_id, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)',
+          )
+          .eq('id', movId)
+          .maybeSingle();
+        actual = rel ?? null;
+      } catch {
+        actual = null;
+      }
+      throw this.conflictoMovimientoCambio(actual);
+    }
+    return {
+      ...(data as unknown as Record<string, unknown>),
+      omision: null,
+    };
+  }
+
+  // =====================================================================
+  // OMITIR LA CONCILIACIÓN (invariante 75) y VARIOS CARGOS → UN GASTO
+  // (invariante 76) — 14-oct-2026, API 0.0.77, migración 20261014000002.
+  // Sonda ÚNICA `omisionCargosDisponible` (las RPC y el trigger entran
+  // juntos). Reglas y textos PUROS en `omision.util.ts` y
+  // `cargos-a-gasto.util.ts`; el candado real son las RPC atómicas
+  // (FOR UPDATE, todo o nada) y el trigger `trg_mov_bancario_omitido_sin_ligas`
+  // (ningún camino liga un omitido). Sin la migración, lo nuevo responde 503
+  // con código estable y lo demás como el 0.0.76.
+  // =====================================================================
+
+  /** ¿Migración 20261014000002 aplicada? (sonda única; el «sí» se memoriza). */
+  async omitirDisponible(): Promise<boolean> {
+    return omisionCargosDisponible(this.supabase.service);
+  }
+
+  /** La MISMA sonda: la migración trae las RPC de omitir y la de cargos. */
+  async cargosAGastoDisponible(): Promise<boolean> {
+    return omisionCargosDisponible(this.supabase.service);
+  }
+
+  /** Memo POSITIVO (≤ 10 min) del id de la canónica; el «no hay» no se memoriza. */
+  private omitidoMemo: { id: string; hasta: number } | null = null;
+
+  /**
+   * Id de la clasificación canónica «Omitido de la conciliación» por NOMBRE
+   * (ilike + `esClasificacionOmitida`). El API nunca la crea: lo hace la RPC
+   * en la primera omisión. `fallo` = la lectura falló (≠ «no existe»).
+   */
+  private async leerIdClasificacionOmitido(): Promise<{
+    id: string | null;
+    fallo: boolean;
+  }> {
+    const ahora = Date.now();
+    if (this.omitidoMemo && this.omitidoMemo.hasta > ahora) {
+      return { id: this.omitidoMemo.id, fallo: false };
+    }
+    try {
+      const { data, error } = await this.supabase.service
+        .from('conciliacion_clasificacion')
+        .select('id, nombre')
+        .ilike('nombre', CLASIFICACION_OMITIDO)
+        .limit(5);
+      if (error) throw new Error(error.message);
+      const fila = ((data ?? []) as Array<{ id?: unknown; nombre?: unknown }>)
+        .filter((c) => typeof c.id === 'string')
+        .find((c) =>
+          esClasificacionOmitida(
+            typeof c.nombre === 'string' ? c.nombre : null,
+          ),
+        );
+      const id = typeof fila?.id === 'string' ? fila.id : null;
+      if (id) this.omitidoMemo = { id, hasta: ahora + OMITIDO_MEMO_MS };
+      return { id, fallo: false };
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer la clasificación «${CLASIFICACION_OMITIDO}»: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { id: null, fallo: true };
+    }
+  }
+
+  /** Id de la canónica o null (no existe o la lectura falló, con warn). */
+  private async idClasificacionOmitido(): Promise<string | null> {
+    return (await this.leerIdClasificacionOmitido()).id;
+  }
+
+  /** 409 MOVIMIENTO_OMITIDO con el motivo leído de las notas. */
+  private conflictoMovimientoOmitido(
+    movId: string,
+    notas: unknown,
+  ): ConflictException {
+    const omision = leerOmision(typeof notas === 'string' ? notas : null) ?? {
+      ...OMISION_SIN_DATOS,
+    };
+    return new ConflictException({
+      message: mensajeMovimientoOmitido(omision),
+      error: 'MOVIMIENTO_OMITIDO',
+      details: { movimiento_id: movId, omision },
+    });
+  }
+
+  /**
+   * CANDADO TS (invariante 75): un movimiento OMITIDO no se liga ni se
+   * desliga por los caminos viejos (gasto, cobro, sobre): 409 sin tocar
+   * nada. Sin la canónica (o con su lectura caída) no aplica — el trigger
+   * de la BD sigue siendo el candado real.
+   */
+  private async bloquearSiOmitido(
+    movId: string,
+    clasificacionId: unknown,
+    notas: unknown,
+  ): Promise<void> {
+    if (typeof clasificacionId !== 'string' || !clasificacionId) return;
+    const idOmitido = await this.idClasificacionOmitido();
+    if (!idOmitido || idOmitido !== clasificacionId) return;
+    throw this.conflictoMovimientoOmitido(movId, notas);
+  }
+
+  /** 409 MOVIMIENTO_CAMBIO con lo vigente (`clasificar` con `esperado` / CAS). */
+  private conflictoMovimientoCambio(
+    actual: Record<string, unknown> | null,
+  ): ConflictException {
+    const clasif = unwrapOne(
+      (actual?.clasificacion as { nombre?: unknown } | null) ?? null,
+    );
+    return new ConflictException({
+      message: MENSAJE_MOVIMIENTO_CAMBIO,
+      error: 'MOVIMIENTO_CAMBIO',
+      details: {
+        actual: actual
+          ? {
+              conciliado: actual.conciliado === true,
+              clasificacion_id:
+                typeof actual.clasificacion_id === 'string'
+                  ? actual.clasificacion_id
+                  : null,
+              clasificacion:
+                typeof clasif?.nombre === 'string' ? clasif.nombre : null,
+            }
+          : null,
+      },
+    });
+  }
+
+  /**
+   * Movimientos por id (lotes de ≤ 150) con `movCols()` + `reverso_de_id`
+   * (con su sonda) + la clasificación y la cuenta embebidas. Un error se
+   * LANZA (jamás «no existe» por una lectura caída).
+   */
+  private async leerMovimientosPorIds(
+    ids: ReadonlyArray<string>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const unicos = [...new Set(ids.filter(Boolean))];
+    if (unicos.length === 0) return [];
+    const [cols, conReversos] = await Promise.all([
+      this.movCols(),
+      this.reversosOn(),
+    ]);
+    const select = `${cols}${conReversos ? ', reverso_de_id' : ''}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, moneda, tipo)`;
+    const out: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < unicos.length; i += LOTE_IDS_OMISION) {
+      const { data, error } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select(select)
+        .in('id', unicos.slice(i, i + LOTE_IDS_OMISION));
+      if (error) throw new Error(error.message);
+      out.push(...((data ?? []) as unknown as Array<Record<string, unknown>>));
+    }
+    return out;
+  }
+
+  /** Cargos que YA tienen una devolución apuntándoles (par de reverso). */
+  private async devolucionesDe(
+    ids: ReadonlyArray<string>,
+  ): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (ids.length === 0 || !(await this.reversosOn())) return out;
+    const filas = await this.leerPorLotes(ids, (lote) =>
+      this.supabase.service
+        .from('movimiento_bancario')
+        .select('id, reverso_de_id')
+        .in('reverso_de_id', lote),
+    );
+    for (const f of filas) {
+      if (typeof f.reverso_de_id === 'string') out.add(f.reverso_de_id);
+    }
+    return out;
+  }
+
+  /** Moneda de la CUENTA del movimiento (embed `cuenta`), null si no vino. */
+  private monedaDeFila(m: Record<string, unknown>): string | null {
+    const c = unwrapOne(
+      m.cuenta as { moneda?: unknown } | { moneda?: unknown }[] | null,
+    );
+    return typeof c?.moneda === 'string' && c.moneda ? c.moneda : null;
+  }
+
+  /** Fila de un 409 (id, fecha, tipo, monto, moneda, descripción y estado). */
+  private filaMensajeOmision(
+    m: Record<string, unknown>,
+    estado: string | null,
+  ): {
+    id: string;
+    fecha: string | null;
+    tipo: string | null;
+    monto: number;
+    moneda: string | null;
+    descripcion: string | null;
+    estado: string | null;
+  } {
+    return {
+      id: String(m.id),
+      fecha: typeof m.fecha === 'string' ? m.fecha.slice(0, 10) : null,
+      tipo: typeof m.tipo === 'string' ? m.tipo : null,
+      monto: r2(Math.abs(Number(m.monto)) || 0),
+      moneda: this.monedaDeFila(m),
+      descripcion:
+        typeof m.descripcion === 'string' ? m.descripcion.slice(0, 80) : null,
+      estado,
+    };
+  }
+
+  /**
+   * Riesgo de omitir cada PENDIENTE (falla CERRADO: lo que no se pudo
+   * revisar es SIN_VERIFICAR). CARGO ⇒ `anotarMotivoPendiente` sobre COPIAS
+   * (las MISMAS reglas del auto-cruce y del badge de la lista); ABONO ⇒
+   * `cobrosExactosLibresDeAbono` (≤ 5 en paralelo); los dos ⇒
+   * `patronTraspaso`; ABONO ⇒ `esDevolucionDeCargo`.
+   */
+  private async riesgosDeOmision(
+    pendientes: Array<Record<string, unknown>>,
+  ): Promise<
+    Map<string, { riesgo: RiesgoOmision | null; candidatos_n: number | null }>
+  > {
+    const out = new Map<
+      string,
+      { riesgo: RiesgoOmision | null; candidatos_n: number | null }
+    >();
+    const copias: Array<Record<string, unknown>> = pendientes
+      .filter((m) => m.tipo === TipoMovimientoBancario.CARGO)
+      .map((m) => ({ ...m, conciliado: false }));
+    if (copias.length > 0) await this.anotarMotivoPendiente(copias);
+    const copiaDe = new Map(copias.map((c) => [String(c.id), c]));
+    const abonos = pendientes.filter(
+      (m) => m.tipo === (TipoMovimientoBancario.ABONO as string),
+    );
+    const cobrosDe = new Map<string, number | null>();
+    for (let i = 0; i < abonos.length; i += 5) {
+      await Promise.all(
+        abonos.slice(i, i + 5).map(async (a) => {
+          const moneda = this.monedaDeFila(a);
+          const cuenta = unwrapOne(
+            a.cuenta as { tipo?: unknown } | { tipo?: unknown }[] | null,
+          );
+          if (!moneda || typeof a.fecha !== 'string') {
+            cobrosDe.set(String(a.id), null);
+            return;
+          }
+          try {
+            const n = await this.cobrosExactosLibresDeAbono(
+              {
+                monto: r2(Math.abs(Number(a.monto)) || 0),
+                monto_bruto:
+                  a.monto_bruto == null ? null : r2(Number(a.monto_bruto)),
+                descripcion:
+                  typeof a.descripcion === 'string' ? a.descripcion : null,
+                cuenta_bancaria_id: String(a.cuenta_bancaria_id),
+              },
+              a.fecha.slice(0, 10),
+              moneda,
+              cuenta?.tipo === TIPO_CUENTA_PASARELA,
+            );
+            cobrosDe.set(String(a.id), n);
+          } catch {
+            cobrosDe.set(String(a.id), null);
+          }
+        }),
+      );
+    }
+    for (const m of pendientes) {
+      const id = String(m.id);
+      const desc = typeof m.descripcion === 'string' ? m.descripcion : null;
+      const copia = copiaDe.get(id);
+      const riesgo = riesgoDeOmision({
+        tipo: typeof m.tipo === 'string' ? m.tipo : null,
+        motivoCargo:
+          copia && typeof copia.motivo_pendiente === 'string'
+            ? copia.motivo_pendiente
+            : null,
+        cobrosExactos: cobrosDe.has(id) ? (cobrosDe.get(id) ?? null) : null,
+        traspaso: patronTraspaso(desc) !== null,
+        devolucion: esDevolucionDeCargo(desc),
+      });
+      const n = copia?.candidatos_n;
+      out.set(id, {
+        riesgo,
+        candidatos_n: typeof n === 'number' && Number.isFinite(n) ? n : null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * `POST movimientos/omitir/revisar` — SOLO LECTURA (funciona aun sin la
+   * migración): por cada movimiento, si sigue PENDIENTE y LIBRE (o el estado
+   * que lo ocupa, espejo del CASE de la RPC) y, si está pendiente, el
+   * riesgo de omitirlo (un gasto o cobro que cuadra, traspaso, devolución o
+   * no verificado).
+   */
+  async revisarOmision(idsRaw: string[]): Promise<RevisionOmisionRespuesta> {
+    const ids = [...new Set(idsRaw.map((x) => normalizarUuid(x)))];
+    const [filas, idOmitido, devueltos] = await Promise.all([
+      this.leerMovimientosPorIds(ids),
+      this.idClasificacionOmitido(),
+      this.devolucionesDe(ids),
+    ]);
+    const porId = new Map(filas.map((f) => [String(f.id), f]));
+    const vivos = ids
+      .map((id) => porId.get(id))
+      .filter((m): m is Record<string, unknown> => !!m);
+    const estados = new Map(
+      vivos.map((m) => [
+        String(m.id),
+        estadoMovimientoParaOmitir(m, {
+          idOmitido,
+          tieneDevolucion: devueltos.has(String(m.id)),
+        }),
+      ]),
+    );
+    const pendientes = vivos.filter(
+      (m) => estados.get(String(m.id)) === 'PENDIENTE',
+    );
+    const riesgos = await this.riesgosDeOmision(pendientes);
+    const movimientos: MovimientoRevisadoOmision[] = vivos.map((m) => {
+      const id = String(m.id);
+      const estado = estados.get(id) ?? 'PENDIENTE';
+      const r = riesgos.get(id) ?? null;
+      const cuenta = unwrapOne(
+        m.cuenta as { alias?: unknown } | { alias?: unknown }[] | null,
+      );
+      return {
+        id,
+        fecha: typeof m.fecha === 'string' ? m.fecha.slice(0, 10) : null,
+        tipo: typeof m.tipo === 'string' ? m.tipo : '',
+        monto: r2(Math.abs(Number(m.monto)) || 0),
+        moneda: this.monedaDeFila(m),
+        descripcion: typeof m.descripcion === 'string' ? m.descripcion : null,
+        cuenta_alias: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
+        estado,
+        texto_estado:
+          estado === 'PENDIENTE' ? null : textoEstadoNoPendiente(estado),
+        riesgo: r?.riesgo ?? null,
+        texto_riesgo: r?.riesgo
+          ? textoRiesgoOmision(r.riesgo, r.candidatos_n)
+          : null,
+        candidatos_n: r?.candidatos_n ?? null,
+      };
+    });
+    return {
+      movimientos,
+      no_existen: ids.filter((id) => !porId.has(id)),
+      resumen: {
+        n: vivos.length,
+        pendientes: pendientes.length,
+        no_pendientes: vivos.length - pendientes.length,
+        con_riesgo: movimientos.filter((m) => m.riesgo !== null).length,
+      },
+    };
+  }
+
+  /** `omision` en cada fila (de la clasificación embebida y las notas). */
+  private anotarOmision(filas: Array<Record<string, unknown>>): void {
+    for (const m of filas) m.omision = omisionDeFila(m);
+  }
+
+  /** Relee los movimientos (orden de la petición) con su `omision`. */
+  private async releerMovimientosConOmision(
+    ids: ReadonlyArray<string>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const filas = await this.leerMovimientosPorIds(ids);
+    const porId = new Map(filas.map((f) => [String(f.id), f]));
+    const out = ids
+      .map((id) => porId.get(id))
+      .filter((m): m is Record<string, unknown> => !!m);
+    for (const m of out) {
+      m.omision = omisionDeFila(m);
+      delete m.cuenta;
+    }
+    return out;
+  }
+
+  /**
+   * Error de las RPC de omitir / deshacer ⇒ 400/404/409/503 con código y
+   * texto es-MX (`omision.util`), NUNCA el texto de la BD (trae uuids).
+   */
+  private errorRpcOmision(
+    error: {
+      code?: string | null;
+      message?: string | null;
+      hint?: string | null;
+      details?: string | null;
+    },
+    ctx: {
+      accion: 'omitir' | 'quitar';
+      total: number;
+      porId: Map<string, Record<string, unknown>>;
+    },
+  ): Error {
+    if (error.code === '40P01') {
+      return new ConflictException({
+        message: MENSAJE_CONFLICTO_CONCURRENTE,
+        error: 'CONFLICTO_CONCURRENTE',
+      });
+    }
+    const { codigo, details } = leerErrorOmision(error);
+    if (!codigo) {
+      this.logger.error(
+        `Omisión (${ctx.accion}): la base respondió ${error.code ?? 'sin código'}: ${error.message ?? ''}`,
+      );
+      if (esOmisionCargosAusente(error)) return errorOmitirNoDisponible();
+      return new Error(error.message ?? 'Error de la base de datos');
+    }
+    this.logger.warn(
+      `Omisión (${ctx.accion}): la base rechazó la operación (${codigo}): ${error.message ?? ''}`,
+    );
+    const movsBd = Array.isArray(details?.movimientos)
+      ? (details.movimientos as Array<Record<string, unknown>>)
+      : [];
+    const conMoneda = movsBd.map((x) => {
+      const leido = ctx.porId.get(String(x.id));
+      return {
+        id: String(x.id),
+        fecha: typeof x.fecha === 'string' ? x.fecha.slice(0, 10) : null,
+        tipo: typeof x.tipo === 'string' ? x.tipo : null,
+        monto: r2(Math.abs(Number(x.monto)) || 0),
+        moneda: leido ? this.monedaDeFila(leido) : null,
+        descripcion: typeof x.descripcion === 'string' ? x.descripcion : null,
+        estado: typeof x.estado === 'string' ? x.estado : null,
+      };
+    });
+    switch (codigo) {
+      case 'MOVIMIENTO_NO_EXISTE': {
+        const faltan = Array.isArray(details?.ids)
+          ? (details.ids as unknown[]).map(String)
+          : [];
+        return new NotFoundException({
+          message: mensajeMovimientosNoExisten(Math.max(1, faltan.length)),
+          error: 'MOVIMIENTO_NO_EXISTE',
+          details: { faltan },
+        });
+      }
+      case 'MOVIMIENTO_NO_PENDIENTE':
+        return new ConflictException({
+          message: mensajeNoPendientes(conMoneda, ctx.total, 'omitir'),
+          error: 'MOVIMIENTO_NO_PENDIENTE',
+          details: { movimientos: conMoneda },
+        });
+      case 'MOVIMIENTO_NO_OMITIDO':
+        return new ConflictException({
+          message: mensajeNoOmitidos(conMoneda, ctx.total),
+          error: 'MOVIMIENTO_NO_OMITIDO',
+          details: { movimientos: conMoneda },
+        });
+      case 'MOVIMIENTO_OMITIDO':
+        return new ConflictException({
+          message: mensajeMovimientoOmitido(null),
+          error: 'MOVIMIENTO_OMITIDO',
+          details: details ?? undefined,
+        });
+      case 'LOTE_INVALIDO':
+      case 'OMISION_INVALIDA':
+      default:
+        return new BadRequestException({
+          message:
+            codigo === 'OMISION_INVALIDA'
+              ? 'El motivo de la omisión no es válido: escríbelo en una sola línea (10 a 300 caracteres).'
+              : `Elige de 1 a ${OMITIR_MAX} movimientos sin repetir.`,
+          error: codigo,
+          details: details ?? undefined,
+        });
+    }
+  }
+
+  /**
+   * `POST movimientos/omitir` (invariante 75). Orden: sonda ⇒ filas (404 si
+   * falta alguna) ⇒ todas PENDIENTES y LIBRES (409 sin llamar la RPC) ⇒
+   * `aceptar_riesgo_ids` ⊆ la selección (400) ⇒ riesgos aceptados uno por
+   * uno (409 OMITIR_CON_RIESGO) ⇒ la línea firmada (usuario, día Cancún) ⇒
+   * la RPC todo-o-nada (re-exige el pendiente bajo FOR UPDATE: una carrera
+   * es su 409 traducido) ⇒ relectura con `omision`.
+   */
+  async omitirMovimientos(
+    dto: {
+      movimiento_ids: string[];
+      motivo: string;
+      aceptar_riesgo_ids?: string[] | null;
+    },
+    userId: string,
+    usuarioNombre?: string | null,
+  ): Promise<{
+    omitidos: number;
+    clasificacion_id: string;
+    movimientos: Array<Record<string, unknown>>;
+  }> {
+    if (!(await this.omitirDisponible())) throw errorOmitirNoDisponible();
+    const ids = [...new Set(dto.movimiento_ids.map((x) => normalizarUuid(x)))];
+    const [filas, idOmitido, devueltos] = await Promise.all([
+      this.leerMovimientosPorIds(ids),
+      this.idClasificacionOmitido(),
+      this.devolucionesDe(ids),
+    ]);
+    const porId = new Map(filas.map((f) => [String(f.id), f]));
+    const faltan = ids.filter((id) => !porId.has(id));
+    if (faltan.length > 0) {
+      throw new NotFoundException({
+        message: mensajeMovimientosNoExisten(faltan.length),
+        error: 'MOVIMIENTO_NO_EXISTE',
+        details: { faltan },
+      });
+    }
+    const vivos = ids.map((id) => porId.get(id)!);
+    const noPendientes = vivos
+      .map((m) => ({
+        m,
+        estado: estadoMovimientoParaOmitir(m, {
+          idOmitido,
+          tieneDevolucion: devueltos.has(String(m.id)),
+        }),
+      }))
+      .filter((x) => x.estado !== 'PENDIENTE')
+      .map((x) => this.filaMensajeOmision(x.m, x.estado));
+    if (noPendientes.length > 0) {
+      throw new ConflictException({
+        message: mensajeNoPendientes(noPendientes, ids.length, 'omitir'),
+        error: 'MOVIMIENTO_NO_PENDIENTE',
+        details: { movimientos: noPendientes },
+      });
+    }
+    const aceptados = new Set(
+      (dto.aceptar_riesgo_ids ?? []).map((x) => normalizarUuid(x)),
+    );
+    if ([...aceptados].some((id) => !porId.has(id))) {
+      throw new BadRequestException({
+        message: MENSAJE_ACEPTAR_RIESGO_INVALIDO,
+        error: 'ACEPTAR_RIESGO_INVALIDO',
+      });
+    }
+    const riesgos = await this.riesgosDeOmision(vivos);
+    const conRiesgo = vivos
+      .map((m) => ({ m, r: riesgos.get(String(m.id)) }))
+      .filter((x) => x.r?.riesgo && !aceptados.has(String(x.m.id)))
+      .map((x) => ({
+        ...this.filaMensajeOmision(x.m, null),
+        riesgo: x.r!.riesgo as RiesgoOmision,
+        candidatos_n: x.r!.candidatos_n,
+        texto: textoRiesgoOmision(
+          x.r!.riesgo as RiesgoOmision,
+          x.r!.candidatos_n,
+        ),
+      }));
+    if (conRiesgo.length > 0) {
+      throw new ConflictException({
+        message: mensajeOmitirConRiesgo(conRiesgo, ids.length),
+        error: 'OMITIR_CON_RIESGO',
+        details: {
+          movimientos: conRiesgo.map((x) => ({
+            id: x.id,
+            fecha: x.fecha,
+            tipo: x.tipo,
+            monto: x.monto,
+            moneda: x.moneda,
+            descripcion: x.descripcion,
+            riesgo: x.riesgo,
+            texto: x.texto,
+          })),
+        },
+      });
+    }
+    const linea = lineaOmision({
+      motivo: dto.motivo,
+      usuario: usuarioNombre ?? null,
+      hoy: hoyCancun(),
+    });
+    const res = await this.supabase.service.rpc(
+      'conciliacion_omitir_movimientos',
+      { p_movimiento_ids: ids, p_linea: linea, p_actor: userId },
+    );
+    const { error } = res;
+    const data: unknown = res.data;
+    if (error) {
+      throw this.errorRpcOmision(error, {
+        accion: 'omitir',
+        total: ids.length,
+        porId,
+      });
+    }
+    const r = (data ?? {}) as {
+      omitidos?: unknown;
+      clasificacion_id?: unknown;
+    };
+    const clasificacionId =
+      typeof r.clasificacion_id === 'string' ? r.clasificacion_id : idOmitido;
+    if (clasificacionId) {
+      this.omitidoMemo = {
+        id: clasificacionId,
+        hasta: Date.now() + OMITIDO_MEMO_MS,
+      };
+    }
+    this.logger.log(
+      `Omisión: ${usuarioNombre ?? userId} omitió ${ids.length} movimiento(s) de la conciliación — motivo: ${limpiarJustificacion(dto.motivo)}`,
+    );
+    return {
+      omitidos: Number(r.omitidos) || ids.length,
+      clasificacion_id: clasificacionId ?? '',
+      movimientos: await this.releerMovimientosConOmision(ids),
+    };
+  }
+
+  /**
+   * `POST movimientos/quitar-omision` (invariante 75): 1..200 OMITIDOS
+   * vuelven a Pendientes (todo o nada); de sus notas se quita SOLO la
+   * primera línea canónica.
+   */
+  async quitarOmision(
+    idsRaw: string[],
+    userId: string,
+  ): Promise<{
+    restaurados: number;
+    movimientos: Array<Record<string, unknown>>;
+  }> {
+    if (!(await this.omitirDisponible())) throw errorOmitirNoDisponible();
+    const ids = [...new Set(idsRaw.map((x) => normalizarUuid(x)))];
+    const [filas, omitido] = await Promise.all([
+      this.leerMovimientosPorIds(ids),
+      this.leerIdClasificacionOmitido(),
+    ]);
+    const idOmitido = omitido.id;
+    const porId = new Map(filas.map((f) => [String(f.id), f]));
+    const faltan = ids.filter((id) => !porId.has(id));
+    if (faltan.length > 0) {
+      throw new NotFoundException({
+        message: mensajeMovimientosNoExisten(faltan.length),
+        error: 'MOVIMIENTO_NO_EXISTE',
+        details: { faltan },
+      });
+    }
+    // Sin poder leer la canónica no se adivina «no está omitido»: la RPC lo
+    // decide bajo FOR UPDATE (y su 409 se traduce igual).
+    const noOmitidos = (omitido.fallo ? [] : ids)
+      .map((id) => porId.get(id)!)
+      .filter((m) => !idOmitido || m.clasificacion_id !== idOmitido)
+      .map((m) =>
+        this.filaMensajeOmision(
+          m,
+          m.conciliado !== true
+            ? 'PENDIENTE'
+            : typeof m.clasificacion_id === 'string' && m.clasificacion_id
+              ? 'CLASIFICADO'
+              : 'CONCILIADO',
+        ),
+      );
+    if (noOmitidos.length > 0) {
+      throw new ConflictException({
+        message: mensajeNoOmitidos(noOmitidos, ids.length),
+        error: 'MOVIMIENTO_NO_OMITIDO',
+        details: { movimientos: noOmitidos },
+      });
+    }
+    const res = await this.supabase.service.rpc('conciliacion_quitar_omision', {
+      p_movimiento_ids: ids,
+      p_actor: userId,
+    });
+    const { error } = res;
+    const data: unknown = res.data;
+    if (error) {
+      throw this.errorRpcOmision(error, {
+        accion: 'quitar',
+        total: ids.length,
+        porId,
+      });
+    }
+    const r = (data ?? {}) as { restaurados?: unknown };
+    this.logger.log(
+      `Omisión deshecha: ${ids.length} movimiento(s) vuelven a Pendientes (usuario ${userId}).`,
+    );
+    return {
+      restaurados: Number(r.restaurados) || ids.length,
+      movimientos: await this.releerMovimientosConOmision(ids),
+    };
+  }
+
+  /**
+   * Cargos de «Vincular a un gasto» / del alta por la suma (lectura común):
+   * 404 si falta alguno; el estado (espejo de la RPC) y la moneda de su
+   * cuenta (503 CUENTA_SIN_MONEDA si no se pudo leer).
+   */
+  private async cargosParaGasto(ids: string[]): Promise<{
+    filas: Array<Record<string, unknown>>;
+    porId: Map<string, Record<string, unknown>>;
+    cargos: CargoParaGasto[];
+  }> {
+    const [filas, idOmitido, devueltos] = await Promise.all([
+      this.leerMovimientosPorIds(ids),
+      this.idClasificacionOmitido(),
+      this.devolucionesDe(ids),
+    ]);
+    const porId = new Map(filas.map((f) => [String(f.id), f]));
+    const faltan = ids.filter((id) => !porId.has(id));
+    if (faltan.length > 0) {
+      throw new NotFoundException({
+        message: mensajeMovimientosNoExisten(faltan.length),
+        error: 'MOVIMIENTO_NO_EXISTE',
+        details: { faltan },
+      });
+    }
+    const cargos: CargoParaGasto[] = ids.map((id) => {
+      const m = porId.get(id)!;
+      return {
+        id,
+        tipo: typeof m.tipo === 'string' ? m.tipo : null,
+        monto: r2(Math.abs(Number(m.monto)) || 0),
+        moneda: this.monedaDeFila(m),
+        estado: estadoMovimientoParaOmitir(m, {
+          idOmitido,
+          tieneDevolucion: devueltos.has(id),
+        }),
+        fecha: typeof m.fecha === 'string' ? m.fecha.slice(0, 10) : null,
+        descripcion:
+          typeof m.descripcion === 'string' ? m.descripcion.slice(0, 80) : null,
+      };
+    });
+    // La moneda de la cuenta es NOT NULL: null = lectura caída ⇒ 503 (jamás
+    // un CARGOS_MONEDA_DISTINTA que culpa al operador).
+    if (
+      cargos.some(
+        (c) => c.tipo === (TipoMovimientoBancario.CARGO as string) && !c.moneda,
+      )
+    ) {
+      throw errorSinMonedaCuenta();
+    }
+    return { filas, porId, cargos };
+  }
+
+  /**
+   * Traduce el veredicto del espejo PURO (`validarCargosParaGasto`) a la
+   * excepción del endpoint (con el prefijo del alta por la suma si aplica).
+   */
+  private errorValidacionCargos(
+    v: Exclude<ValidacionCargosGasto, { ok: true }>,
+    ctx: {
+      total: number;
+      accion: 'vincular' | 'crear';
+      fechaGasto?: string | null;
+    },
+  ): Error {
+    const pref = (msg: string) =>
+      ctx.accion === 'crear' ? conPrefijoNoSeRegistro(msg) : msg;
+    const d = v.details;
+    switch (v.codigo) {
+      case 'LOTE_INVALIDO':
+        return new BadRequestException({
+          message: pref(MENSAJE_LOTE_CARGOS_INVALIDO),
+          error: 'LOTE_INVALIDO',
+          details: d,
+        });
+      case 'SOLO_CARGOS': {
+        const n = Array.isArray(d.abonos) ? d.abonos.length : 1;
+        return new BadRequestException({
+          message: pref(mensajeSoloCargos(n)),
+          error: 'SOLO_CARGOS',
+          details: d,
+        });
+      }
+      case 'MOVIMIENTO_NO_PENDIENTE': {
+        const movs = (
+          Array.isArray(d.movimientos) ? d.movimientos : []
+        ) as Array<Record<string, unknown>>;
+        return new ConflictException({
+          message: mensajeNoPendientes(
+            movs.map((x) => ({
+              fecha: (x.fecha as string | null) ?? null,
+              descripcion: (x.descripcion as string | null) ?? null,
+              monto: Number(x.monto) || 0,
+              moneda: (x.moneda as string | null) ?? null,
+              estado: (x.estado as string | null) ?? null,
+            })),
+            ctx.total,
+            ctx.accion,
+          ),
+          error: 'MOVIMIENTO_NO_PENDIENTE',
+          details: d,
+        });
+      }
+      case 'CARGOS_MONEDA_DISTINTA':
+        return new ConflictException({
+          message: pref(
+            mensajeCargosMonedaDistinta(
+              (Array.isArray(d.monedas) ? d.monedas : []) as string[],
+            ),
+          ),
+          error: 'CARGOS_MONEDA_DISTINTA',
+          details: d,
+        });
+      case 'LOTE_MONEDA_DISTINTA':
+        return new ConflictException({
+          message: pref(
+            mensajeLoteMonedaDistintaGasto({
+              monedaGasto: (d.moneda_gasto as string | null) ?? null,
+              monedaCuenta: (d.moneda_cuenta as string | null) ?? null,
+            }),
+          ),
+          error: 'LOTE_MONEDA_DISTINTA',
+          details: d,
+        });
+      case 'GASTO_BODEGA':
+        return new ConflictException({
+          message: pref(mensajeGastoBodegaCargos(ctx.fechaGasto ?? null)),
+          error: 'GASTO_BODEGA',
+          details: d,
+        });
+      case 'GASTO_NO_BANCARIO':
+        return new ConflictException({
+          message: pref(
+            mensajeGastoNoBancario((d.medio_pago as string | null) ?? null),
+          ),
+          error: 'GASTO_NO_BANCARIO',
+          details: d,
+        });
+      case 'GASTO_YA_CUBIERTO':
+        return new ConflictException({
+          message: pref(MENSAJE_GASTO_YA_CUBIERTO_OTRA_MONEDA),
+          error: 'GASTO_YA_CUBIERTO',
+          details: d,
+        });
+      case 'CARGOS_EXCEDEN_GASTO':
+      default:
+        return new ConflictException({
+          message: pref(
+            mensajeCargosExcedenGasto({
+              n: ctx.total,
+              moneda: (d.moneda as string | null) ?? null,
+              monto_gasto: Number(d.monto_gasto) || 0,
+              suma_ligada: Number(d.suma_ligada) || 0,
+              suma_cargos: Number(d.suma_cargos) || 0,
+              tolerancia:
+                d.tolerancia == null ? null : Number(d.tolerancia) || null,
+            }),
+          ),
+          error: 'CARGOS_EXCEDEN_GASTO',
+          details: d,
+        });
+    }
+  }
+
+  /**
+   * Prevalidación del ALTA POR LA SUMA (`POST /v1/expenses` con
+   * `conciliar_con_movimientos`): lee los cargos y aplica el espejo PURO de
+   * la RPC contra el gasto que se VA a crear. 4xx con el prefijo «No se
+   * registró el gasto: » y SIN crear nada. La RPC vuelve a validar todo
+   * bajo FOR UPDATE (una carrera ⇒ compensación en expenses).
+   */
+  async prevalidarCargosParaGastoNuevo(
+    idsRaw: string[],
+    gasto: GastoNuevoParaCargos,
+  ): Promise<{ moneda: string; suma: number }> {
+    if (!(await this.partesOn())) throw errorPartesNoDisponibles();
+    const ids = [...new Set(idsRaw.map((x) => normalizarUuid(x)))];
+    const { cargos } = await this.cargosParaGasto(ids);
+    const v = validarCargosParaGasto(cargos, {
+      moneda: gasto.moneda,
+      monto: gasto.monto,
+      medio_pago: gasto.medio_pago,
+      vinculado: 0,
+      cruzadas: 0,
+      fecha_gasto: gasto.fecha_gasto ?? null,
+    });
+    if (!v.ok) {
+      throw this.errorValidacionCargos(v, {
+        total: ids.length,
+        accion: 'crear',
+        fechaGasto: gasto.fecha_gasto ?? null,
+      });
+    }
+    return { moneda: v.moneda, suma: v.suma };
+  }
+
+  /**
+   * Error de la RPC `conciliacion_ligar_cargos_a_gasto` (y de los triggers
+   * A/K que dispara) ⇒ 400/404/409/503 con los textos de
+   * `cargos-a-gasto.util`.
+   */
+  private async errorRpcCargosGasto(
+    error: {
+      code?: string | null;
+      message?: string | null;
+      hint?: string | null;
+      details?: string | null;
+    },
+    ctx: { gastoId: string; ids: string[]; accion: 'vincular' | 'crear' },
+  ): Promise<Error> {
+    if (error.code === '40P01') {
+      return new ConflictException({
+        message: MENSAJE_CONFLICTO_CONCURRENTE,
+        error: 'CONFLICTO_CONCURRENTE',
+      });
+    }
+    const { codigo, details } = leerErrorCargosGasto(error);
+    if (!codigo) {
+      this.logger.error(
+        `Varios cargos → gasto ${ctx.gastoId}: la base respondió ${error.code ?? 'sin código'}: ${error.message ?? ''}`,
+      );
+      if (esOmisionCargosAusente(error)) return errorCargosAGastoNoDisponible();
+      if (esPartesAusentes(error)) return errorPartesNoDisponibles();
+      return new Error(error.message ?? 'Error de la base de datos');
+    }
+    this.logger.warn(
+      `Varios cargos → gasto ${ctx.gastoId}: la base rechazó la liga (${codigo}): ${error.message ?? ''}`,
+    );
+    const d = details ?? {};
+    switch (codigo) {
+      case 'MOVIMIENTO_NO_EXISTE': {
+        const faltan = Array.isArray(d.ids)
+          ? (d.ids as unknown[]).map(String)
+          : [];
+        return new NotFoundException({
+          message: mensajeMovimientosNoExisten(Math.max(1, faltan.length)),
+          error: 'MOVIMIENTO_NO_EXISTE',
+          details: { faltan },
+        });
+      }
+      case 'GASTO_NO_EXISTE':
+        return new NotFoundException({
+          message: MENSAJE_GASTO_NO_EXISTE,
+          error: 'GASTO_NO_EXISTE',
+          details: { gasto_id: ctx.gastoId },
+        });
+      case 'GASTO_NO_BANCARIO': {
+        const medio = (d.medio_pago as string | null) ?? null;
+        if (medio === MEDIO_BODEGA) {
+          let fecha: string | null = null;
+          try {
+            const { data } = await this.supabase.service
+              .from('gasto')
+              .select('fecha_gasto')
+              .eq('id', ctx.gastoId)
+              .maybeSingle();
+            fecha =
+              (data as { fecha_gasto?: string | null } | null)?.fecha_gasto ??
+              null;
+          } catch {
+            fecha = null;
+          }
+          return new ConflictException({
+            message: mensajeGastoBodegaCargos(fecha),
+            error: 'GASTO_BODEGA',
+            details: { gasto_id: ctx.gastoId, medio_pago: medio },
+          });
+        }
+        return new ConflictException({
+          message: mensajeGastoNoBancario(medio),
+          error: 'GASTO_NO_BANCARIO',
+          details: d,
+        });
+      }
+      case 'LOTE_INVALIDO':
+      case 'SOLO_CARGOS':
+      case 'MOVIMIENTO_NO_PENDIENTE':
+      case 'CARGOS_MONEDA_DISTINTA':
+      case 'LOTE_MONEDA_DISTINTA':
+      case 'CARGOS_EXCEDEN_GASTO': {
+        let det: Record<string, unknown> = d;
+        if (
+          codigo === 'MOVIMIENTO_NO_PENDIENTE' &&
+          Array.isArray(d.movimientos)
+        ) {
+          // La BD no manda la moneda de la cuenta: se relee (best-effort;
+          // sin ella el texto va en pesos).
+          const monedaDe = new Map<string, string | null>();
+          try {
+            for (const m of await this.leerMovimientosPorIds(ctx.ids)) {
+              monedaDe.set(String(m.id), this.monedaDeFila(m));
+            }
+          } catch {
+            monedaDe.clear();
+          }
+          det = {
+            ...d,
+            gasto_id: ctx.gastoId,
+            movimientos: (d.movimientos as Array<Record<string, unknown>>).map(
+              (x) => ({ ...x, moneda: monedaDe.get(String(x.id)) ?? null }),
+            ),
+          };
+        }
+        return this.errorValidacionCargos(
+          { ok: false, codigo, details: det },
+          { total: ctx.ids.length, accion: ctx.accion },
+        );
+      }
+      case 'GASTO_YA_CUBIERTO':
+        return new ConflictException({
+          message:
+            d.motivo === 'MONEDA_DISTINTA' ||
+            String(error.message ?? '').includes('MONEDA')
+              ? MENSAJE_GASTO_YA_CUBIERTO_OTRA_MONEDA
+              : MENSAJE_GASTO_YA_CUBIERTO_CARRERA,
+          error: 'GASTO_YA_CUBIERTO',
+          details: { gasto_id: ctx.gastoId, ...d },
+        });
+      case 'MOVIMIENTO_OMITIDO':
+        return new ConflictException({
+          message: mensajeMovimientoOmitido(null),
+          error: 'MOVIMIENTO_OMITIDO',
+          details: d,
+        });
+      case 'CARGO_NO_CUADRA':
+      case 'CARGO_EXCEDIDO':
+      case 'PARTES_INCOHERENTES':
+      case 'CARGO_LIGADO':
+      case 'REVERSO_INVALIDO':
+      case 'MOVIMIENTO_YA_LIGADO':
+      default:
+        return new ConflictException({
+          message: mensajeErrorPartes(
+            codigo === 'CARGO_NO_CUADRA' ? 'CARGO_LIGADO' : codigo,
+            d,
+          ),
+          error: codigo,
+          details: { gasto_id: ctx.gastoId, ...d },
+        });
+    }
+  }
+
+  /**
+   * VARIOS CARGOS → UN GASTO (`POST gastos/:id/cargos`; también el alta por
+   * la suma de expenses). SOLO la RPC atómica: valida TODO bajo FOR UPDATE
+   * y escribe UNA parte por cargo; `gasto.conciliado` lo sigue escribiendo
+   * solo la BD. Re-envío idéntico ⇒ `idempotente: true`. Jamás se encadena
+   * la RPC G de un cargo.
+   */
+  async ligarCargosAGasto(
+    gastoIdRaw: string,
+    idsRaw: string[],
+    userId: string,
+    // 'crear' = el alta por la suma de expenses: los textos de validación
+    // dicen «No se registró el gasto: …» (el gasto se retira).
+    opts: { accion?: 'vincular' | 'crear' } = {},
+  ): Promise<LigarCargosAGastoRespuesta> {
+    if (!(await this.partesOn())) throw errorPartesNoDisponibles();
+    if (!(await this.cargosAGastoDisponible())) {
+      throw errorCargosAGastoNoDisponible();
+    }
+    const gastoId = normalizarUuid(gastoIdRaw);
+    const ids = [...new Set(idsRaw.map((x) => normalizarUuid(x)))];
+    if (ids.length < CARGOS_A_GASTO_MIN || ids.length > CARGOS_A_GASTO_MAX) {
+      throw new BadRequestException({
+        message: MENSAJE_LOTE_CARGOS_INVALIDO,
+        error: 'LOTE_INVALIDO',
+      });
+    }
+    const res = await this.supabase.service.rpc(
+      'conciliacion_ligar_cargos_a_gasto',
+      { p_gasto_id: gastoId, p_movimiento_ids: ids, p_actor: userId },
+    );
+    const { error } = res;
+    const data: unknown = res.data;
+    if (error) {
+      throw await this.errorRpcCargosGasto(error, {
+        gastoId,
+        ids,
+        accion: opts.accion ?? 'vincular',
+      });
+    }
+    const r = (data ?? {}) as Partial<LigaCargosAGasto>;
+    const estado = (r.gasto_estado ?? {}) as Partial<
+      LigaCargosAGasto['gasto_estado']
+    >;
+    const liga: LigaCargosAGasto = {
+      gasto_id: typeof r.gasto_id === 'string' ? r.gasto_id : gastoId,
+      idempotente: r.idempotente === true,
+      nuevos: Array.isArray(r.nuevos) ? r.nuevos.map(String) : [],
+      partes: Array.isArray(r.partes)
+        ? r.partes.map((p) => ({
+            movimiento_id: String(p.movimiento_id),
+            monto_parte: r2(Number(p.monto_parte) || 0),
+            moneda: String(p.moneda ?? ''),
+          }))
+        : [],
+      gasto_estado: {
+        monto: r2(Number(estado.monto) || 0),
+        moneda: String(estado.moneda ?? ''),
+        n_partes: Math.trunc(Number(estado.n_partes) || 0),
+        monto_vinculado: r2(Number(estado.monto_vinculado) || 0),
+        faltante: r2(Number(estado.faltante) || 0),
+        cubierto: estado.cubierto === true,
+      },
+    };
+    this.logger.log(
+      `Varios cargos → gasto ${gastoId}: ${liga.idempotente ? 're-envío idempotente' : `${liga.nuevos.length} cargo(s) vinculado(s)`} (usuario ${userId}); cubierto=${liga.gasto_estado.cubierto}`,
+    );
+    return {
+      ...liga,
+      movimientos: await this.releerMovimientosConOmision(ids),
+    };
+  }
+
+  /**
+   * `POST cargos/gastos-candidatos` (invariante 76) — SOLO LECTURA: los
+   * gastos que podrían pagar JUNTOS estos 2..50 cargos. Valida como la RPC
+   * (404, SOLO_CARGOS, MOVIMIENTO_NO_PENDIENTE, CARGOS_MONEDA_DISTINTA; cuenta
+   * sin moneda ⇒ 503). Universo = el de «Vincular gasto» de un cargo
+   * (bancarios, sin conciliar, moneda de las cuentas; nunca cruzados) en
+   * [fecha_min − dias, fecha_max + dias], con la MISMA búsqueda. Cada
+   * candidato con `resultado` (CUBRE/PARCIAL/EXCEDE), `faltante_tras` y
+   * `excedente` (lo calcula el API; el panel solo pinta).
+   */
+  async gastosCandidatosDeCargos(dto: {
+    movimiento_ids: string[];
+    q?: string;
+    dias?: number;
+    limite?: number;
+  }): Promise<CargosGastosCandidatosRespuesta> {
+    if (!(await this.partesOn())) throw errorPartesNoDisponibles();
+    const dias = Math.min(180, Math.max(1, Math.trunc(dto.dias ?? 30)));
+    const limite = Math.min(300, Math.max(1, Math.trunc(dto.limite ?? 100)));
+    const ids = [...new Set(dto.movimiento_ids.map((x) => normalizarUuid(x)))];
+    if (ids.length < CARGOS_A_GASTO_MIN || ids.length > CARGOS_A_GASTO_MAX) {
+      throw new BadRequestException({
+        message: MENSAJE_LOTE_CARGOS_INVALIDO,
+        error: 'LOTE_INVALIDO',
+      });
+    }
+    const { porId, cargos } = await this.cargosParaGasto(ids);
+    // Mismo orden que la RPC hasta la moneda (el gasto aún no se elige).
+    const abonos = cargos.filter(
+      (c) => c.tipo !== (TipoMovimientoBancario.CARGO as string),
+    );
+    if (abonos.length > 0) {
+      throw this.errorValidacionCargos(
+        {
+          ok: false,
+          codigo: 'SOLO_CARGOS',
+          details: {
+            abonos: abonos.map((c) => ({
+              id: c.id,
+              fecha: c.fecha,
+              monto: c.monto,
+              descripcion: c.descripcion,
+            })),
+          },
+        },
+        { total: ids.length, accion: 'vincular' },
+      );
+    }
+    const ocupados = cargos.filter((c) => c.estado !== 'PENDIENTE');
+    if (ocupados.length > 0) {
+      throw this.errorValidacionCargos(
+        {
+          ok: false,
+          codigo: 'MOVIMIENTO_NO_PENDIENTE',
+          details: {
+            movimientos: ocupados.map((c) => ({
+              id: c.id,
+              fecha: c.fecha,
+              tipo: c.tipo,
+              monto: c.monto,
+              moneda: c.moneda,
+              descripcion: c.descripcion,
+              estado: c.estado,
+            })),
+          },
+        },
+        { total: ids.length, accion: 'vincular' },
+      );
+    }
+    const monedas = [...new Set(cargos.map((c) => c.moneda ?? '?'))].sort();
+    if (monedas.length !== 1) {
+      throw this.errorValidacionCargos(
+        { ok: false, codigo: 'CARGOS_MONEDA_DISTINTA', details: { monedas } },
+        { total: ids.length, accion: 'vincular' },
+      );
+    }
+    const moneda = monedas[0];
+    const sumaCent = cargos.reduce(
+      (a, c) => a + Math.round(Math.abs(c.monto) * 100),
+      0,
+    );
+    const suma = sumaCent / 100;
+    const fechas = cargos
+      .map((c) => c.fecha)
+      .filter((f): f is string => typeof f === 'string')
+      .sort();
+    const fechaMin = fechas[0] ?? hoyCancun();
+    const fechaMax = fechas[fechas.length - 1] ?? fechaMin;
+    const ventana = {
+      desde: ventanaDias(fechaMin, dias).desde,
+      hasta: ventanaDias(fechaMax, dias).hasta,
+    };
+    // Cuentas (alias) y terminación común de tarjeta (catálogo del cruce).
+    const cuentas = new Map<string, string | null>();
+    for (const id of ids) {
+      const m = porId.get(id)!;
+      const c = unwrapOne(
+        m.cuenta as { alias?: unknown } | { alias?: unknown }[] | null,
+      );
+      cuentas.set(
+        String(m.cuenta_bancaria_id),
+        typeof c?.alias === 'string' ? c.alias : null,
+      );
+    }
+    const ctxCruce = await this.cargarCtxCruce();
+    const terminacion = terminacionComun(
+      ids.map((id) => {
+        const m = porId.get(id)!;
+        return terminacionDeMovimiento(
+          typeof m.referencia === 'string' ? m.referencia : null,
+          typeof m.descripcion === 'string' ? m.descripcion : null,
+          ctxCruce.terminaciones,
+        );
+      }),
+    );
+    // Universo y búsqueda: el MISMO lector de «Vincular gasto» de un cargo.
+    const busqueda = interpretarBusquedaGasto(dto.q);
+    const orTexto = await this.orTextoBusquedaGasto(busqueda);
+    const filas = await this.leerUniversoGastos({
+      cols: await this.gastoRicoCols(),
+      moneda,
+      conNoBancarios: false,
+      ventana,
+      montos:
+        busqueda.tipo === 'monto'
+          ? {
+              min: busqueda.min,
+              max: busqueda.max,
+              maxExclusivo: busqueda.maxExclusivo,
+            }
+          : null,
+      orTexto,
+    });
+    const vinculado = await this.sumasLigadasDe(
+      filas.map((g) => g.id as string),
+    );
+    const candidatos = filas.map((g) => {
+      const ligado = vinculado.get(g.id as string) ?? 0;
+      const base = this.aCandidatoGasto(g, null, ligado);
+      const r = resultadoCargosSobreGasto({
+        montoGasto: Number(g.monto) || 0,
+        vinculado: ligado,
+        sumaCargos: suma,
+      });
+      const candidato: CandidatoGastoPorSuma = {
+        ...base,
+        no_bancario: !esMedioBancario(base.medio_pago),
+        resultado: r.resultado,
+        faltante_tras: r.faltante_tras,
+        excedente: r.excedente,
+      };
+      return candidato;
+    });
+    const ordenados: CandidatoGastoPorSuma[] = ordenarCandidatosPorSuma(
+      candidatos.map((c) => ({ ...c, fecha: c.fecha ?? null })),
+      { suma, fechaMin, fechaMax },
+    );
+    // ¿Algún cargo tiene SU propio gasto que cuadra? (aviso ámbar del panel;
+    // null = no se pudo revisar: jamás un «ninguno» falso).
+    const copias: Array<Record<string, unknown>> = ids.map((id) => ({
+      ...porId.get(id)!,
+      conciliado: false,
+    }));
+    await this.anotarMotivoPendiente(copias);
+    const cargosConPropio = copias.some(
+      (c) => typeof c.motivo_pendiente !== 'string',
+    )
+      ? null
+      : copias
+          .filter(
+            (c) =>
+              c.motivo_pendiente === 'SE_PUEDE_CRUZAR' ||
+              c.motivo_pendiente === 'AMBIGUO',
+          )
+          .map((c) => ({
+            id: String(c.id),
+            motivo: c.motivo_pendiente as 'SE_PUEDE_CRUZAR' | 'AMBIGUO',
+            candidatos_n:
+              typeof c.candidatos_n === 'number' ? c.candidatos_n : null,
+          }));
+    const respuesta: CargosGastosCandidatosRespuesta = {
+      cargos: {
+        ids,
+        n: ids.length,
+        suma,
+        moneda,
+        fecha_min: fechaMin,
+        fecha_max: fechaMax,
+        cuentas: [...cuentas.entries()].map(([id, alias]) => ({ id, alias })),
+        terminacion_comun: terminacion,
+      },
+      ventana,
+      candidatos: ordenados.slice(0, limite),
+      truncado:
+        ordenados.length > limite || filas.length >= CANDIDATOS_GASTO_TOPE,
+      cargos_con_candidato_propio: cargosConPropio,
+    };
+    if (ordenados.length > 0) return respuesta;
+    const excluidos = await this.excluidosDeCandidatos({
+      movId: ids[0],
+      q: dto.q,
+      montoCargo: suma,
+      monedaCuenta: moneda,
+      fecha: fechaMax,
+      dias,
+      ventana,
+    });
+    return excluidos ? { ...respuesta, ...excluidos } : respuesta;
+  }
+
+  /**
+   * Pre-cierre (renglón INFORMATIVO `movimientos_omitidos`): omitidos del
+   * periodo por la fecha DATE del movimiento, con su monto por moneda de la
+   * cuenta. Paginado; NUNCA lanza (null = no se pudo leer). Sin la canónica
+   * no hay omitidos (0).
+   */
+  async omitidosDelPeriodo(
+    desde: string,
+    hasta: string,
+  ): Promise<OmitidosPeriodo | null> {
+    try {
+      const r = await this.leerIdClasificacionOmitido();
+      if (r.fallo) return null;
+      if (!r.id) return { count: 0, monto_mxn: 0, monto_usd: 0 };
+      const idOmitido = r.id;
+      const { filas, truncado } = await this.leerPaginado(
+        (a, b) =>
+          this.supabase.service
+            .from('movimiento_bancario')
+            .select(
+              'id, monto, cuenta:cuenta_bancaria!cuenta_bancaria_id(moneda)',
+            )
+            .eq('clasificacion_id', idOmitido)
+            .gte('fecha', desde.slice(0, 10))
+            .lte('fecha', hasta.slice(0, 10))
+            .order('id', { ascending: true })
+            .range(a, b),
+        OMITIDOS_PRECIERRE_TOPE,
+      );
+      if (truncado) return null;
+      let mxn = 0;
+      let usd = 0;
+      for (const f of filas) {
+        const c = unwrapOne(
+          f.cuenta as { moneda?: unknown } | { moneda?: unknown }[] | null,
+        );
+        const cent = Math.round(Math.abs(Number(f.monto) || 0) * 100);
+        // Sin la moneda de la cuenta (lectura fallida: es NOT NULL) no se
+        // adivina: jamás se suman dólares como pesos.
+        if (c?.moneda === 'USD') usd += cent;
+        else if (c?.moneda === 'MXN') mxn += cent;
+        else return null;
+      }
+      return {
+        count: filas.length,
+        monto_mxn: mxn / 100,
+        monto_usd: usd / 100,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: omitidos de la conciliación no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   // =====================================================================
@@ -7235,9 +8889,11 @@ export class ConciliacionService {
     // 1 cargo ↔ N gastos (2-oct-2026): con la migración, `gastos_n` para el
     // ADITIVO `diferencia_lotes` por cuenta.
     const conPartes = await this.partesOn();
+    // OMITIDOS (14-oct-2026, invariante 75): `clasificacion_id` para contar
+    // los omitidos por cuenta (ADITIVOS `omitidos` / `monto_omitido`).
     const colsResumen: string = conPartes
-      ? 'id, cuenta_bancaria_id, tipo, monto, conciliado, gastos_n'
-      : 'id, cuenta_bancaria_id, tipo, monto, conciliado';
+      ? 'id, cuenta_bancaria_id, tipo, monto, conciliado, clasificacion_id, gastos_n'
+      : 'id, cuenta_bancaria_id, tipo, monto, conciliado, clasificacion_id';
     // PAGINADO por la PK (revisión del lote 2, 14-oct-2026): la vista por
     // default de Conciliación (sin ?desde/?hasta) lee TODA la tabla y
     // PostgREST corta en max-rows = 1000 SIN avisar — con la fila 1,001 las
@@ -7262,6 +8918,8 @@ export class ConciliacionService {
     const difLotes = conPartes
       ? await this.diferenciaLotesPorCuenta(data)
       : null;
+    // Sin la canónica ⇒ 0; si su lectura falla ⇒ null (jamás un 0 inventado).
+    const omitidoResumen = await this.leerIdClasificacionOmitido();
 
     const { data: cuentas } = await this.supabase.service
       .from('cuenta_bancaria')
@@ -7280,6 +8938,8 @@ export class ConciliacionService {
         conciliados: number;
         pendientes: number;
         monto_pendiente: number;
+        omitidos: number;
+        monto_omitido_cent: number;
       }
     >();
     for (const m of data) {
@@ -7289,12 +8949,20 @@ export class ConciliacionService {
         conciliados: 0,
         pendientes: 0,
         monto_pendiente: 0,
+        omitidos: 0,
+        monto_omitido_cent: 0,
       };
       cur.total += 1;
       if (m.conciliado === true) cur.conciliados += 1;
       else {
         cur.pendientes += 1;
         cur.monto_pendiente += Number(m.monto);
+      }
+      if (omitidoResumen.id && m.clasificacion_id === omitidoResumen.id) {
+        cur.omitidos += 1;
+        cur.monto_omitido_cent += Math.round(
+          Math.abs(Number(m.monto) || 0) * 100,
+        );
       }
       porCuenta.set(key, cur);
     }
@@ -7316,6 +8984,10 @@ export class ConciliacionService {
         ...(difLotes
           ? { diferencia_lotes: difLotes.has(id) ? difLotes.get(id) : 0 }
           : {}),
+        // ADITIVOS (0.0.77, invariante 75): los «conciliados» INCLUYEN a los
+        // omitidos y la tarjeta lo dice. null = no se pudo leer la canónica.
+        omitidos: omitidoResumen.fallo ? null : v.omitidos,
+        monto_omitido: omitidoResumen.fallo ? null : v.monto_omitido_cent / 100,
       };
     });
   }
@@ -7783,6 +9455,10 @@ export class ConciliacionService {
     let totalCargos = 0;
     let totalAbonos = 0;
     let conciliados = 0;
+    // OMITIDOS (0.0.77, invariante 75): Estatus «Omitido», «Conciliado con»
+    // = el motivo firmado y Notas SIN la línea canónica. Sin omitidos, el
+    // libro sale byte a byte igual.
+    let omitidos = 0;
     // Montos SIN conciliar en NARANJA: celda de Cargo o Abono según cuál
     // tenga valor (índices 0-based NUEVOS tras insertar Matrícula: Cargo=4,
     // Abono=5).
@@ -7795,6 +9471,8 @@ export class ConciliacionService {
       const ok = m.conciliado === true;
       if (ok) conciliados += 1;
       else resaltes.push({ fila: i, col: esCargo ? 4 : 5 });
+      const omision = ok ? omisionDeFila(m) : null;
+      if (omision) omitidos += 1;
       return [
         (m.fecha as string) ?? '',
         (m.descripcion as string | null) ?? '',
@@ -7802,15 +9480,18 @@ export class ConciliacionService {
         matriculaDeMov(m),
         esCargo ? monto : null,
         esCargo ? null : monto,
-        ok ? 'Conciliado' : 'PENDIENTE',
-        ok ? conQue(m) : '',
+        omision ? ESTATUS_OMITIDO : ok ? 'Conciliado' : 'PENDIENTE',
+        omision ? etiquetaOmisionReporte(omision) : ok ? conQue(m) : '',
         // «Notas» = número de la(s) factura(s) del/los gasto(s) ligado(s) +
         // la nota del banco (5-oct-2026, pedido del cliente). Sin gasto con
         // folio (cobros, ingresos, clasificaciones, reversos, gastos sin
-        // número) queda la nota del banco como hasta el 0.0.56.
+        // número) queda la nota del banco como hasta el 0.0.56. Un omitido:
+        // la nota SIN su línea canónica (el motivo ya va en «Conciliado con»).
         notasReporteConFactura(
           etiquetaFacturasReporte(foliosDeMov(m)),
-          m.notas as string | null,
+          omision
+            ? quitarLineaOmision(m.notas as string | null)
+            : (m.notas as string | null),
         ),
       ];
     });
@@ -7824,7 +9505,7 @@ export class ConciliacionService {
     }[estado];
     const buffer = await this.pyservices.generateTablaXlsx({
       titulo: `Conciliación · ${etiquetaCuenta}`,
-      subtitulo: `${movs.length} movimientos (${etiquetaEstado}) · ${conciliados} conciliados · ${pendientes} pendientes · ${desde} a ${hasta}`,
+      subtitulo: `${movs.length} movimientos (${etiquetaEstado}) · ${textoConciliadosReporte(conciliados, omitidos)} · ${pendientes} pendientes · ${desde} a ${hasta}`,
       columnas: [
         { label: 'Fecha', tipo: 'texto' },
         { label: 'Descripción', tipo: 'texto' },
@@ -8066,6 +9747,30 @@ export class ConciliacionService {
     // NÚMERO DE FACTURA (5-oct-2026): `gasto.folio_comprobante` y el de cada
     // `gastos[]` del lote (ADITIVOS; los campos crudos no viajan).
     const embedFolioLista = await this.embedFolio();
+    // OMITIDOS (14-oct-2026, invariante 75): la pestaña «Omitidos» filtra en
+    // el API (no un filtro del panel sobre la lista recortada). Sin la
+    // canónica no hay omitidos (sin consultar movimientos); si su lectura
+    // falla, error (la pestaña lo dice): jamás un vacío falso.
+    let idOmitidoLista: string | null = null;
+    if (filters.solo_omitidos === true) {
+      const r = await this.leerIdClasificacionOmitido();
+      if (r.fallo) {
+        throw new ServiceUnavailableException({
+          message:
+            'No se pudo consultar la lista de omitidos: recarga la página.',
+          error: 'OMITIDOS_NO_DISPONIBLE',
+        });
+      }
+      if (!r.id) {
+        return {
+          data: [],
+          count: 0,
+          limit: filters.limit,
+          offset: filters.offset,
+        };
+      }
+      idOmitidoLista = r.id;
+    }
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
@@ -8088,6 +9793,7 @@ export class ConciliacionService {
     if (filters.tipo) q = q.eq('tipo', filters.tipo);
     if (filters.desde) q = q.gte('fecha', filters.desde);
     if (filters.hasta) q = q.lte('fecha', filters.hasta);
+    if (idOmitidoLista) q = q.eq('clasificacion_id', idOmitidoLista);
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -8123,6 +9829,10 @@ export class ConciliacionService {
     await this.anotarUbicacionBalance(filas);
     // ADITIVO (0.0.75, invariante 69): `factura_concepto` («Factura 7360»).
     await this.anotarFacturaConcepto(filas, foliosPorMov);
+    // ADITIVO (0.0.77, invariante 75): `omision {motivo, por, fecha} | null`
+    // SIEMPRE presente (de la clasificación embebida y las notas: cero
+    // consultas). El panel detecta el API nuevo por la LLAVE.
+    this.anotarOmision(filas);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
       data: filas,
@@ -8589,15 +10299,27 @@ export class ConciliacionService {
       const fechas = pendientes.map((m) => m.fecha as string).sort();
       const desde = ventanaDias(fechas[0], MATCH_DAYS).desde;
       const hasta = ventanaDias(fechas[fechas.length - 1], MATCH_DAYS).hasta;
-      const { data: gastos, error } = await this.gastosCandidatos({
-        moneda: null, // la moneda se filtra por cuenta, fila por fila
-        desde,
-        hasta,
-        limite: MOTIVO_GASTOS_MAX,
-      });
+      // PAGINADA por la PK (14-oct-2026): PostgREST corta en max-rows = 1000
+      // SIN avisar y el `.limit(MOTIVO_GASTOS_MAX)` de antes nunca veía el
+      // corte (con 1,050 gastos en la ventana anotaba con una foto recortada).
+      // La moneda se filtra por cuenta, fila por fila. Un error se LANZA (el
+      // catch de abajo no anota nada).
+      const { filas: gastos, truncado } = await this.leerPaginado(
+        (a, b) =>
+          this.supabase.service
+            .from('gasto')
+            .select(GASTO_CRUCE_COLS)
+            .eq('conciliado', false)
+            .in('medio_pago', MEDIOS_BANCARIOS)
+            .gte('fecha_gasto', desde)
+            .lte('fecha_gasto', hasta)
+            .order('id', { ascending: true })
+            .range(a, b),
+        MOTIVO_GASTOS_MAX,
+      );
       // Truncado = foto incompleta: mejor no decir nada que decir «sin
       // candidato» de un gasto que sí existe.
-      if (error || !gastos || gastos.length >= MOTIVO_GASTOS_MAX) return;
+      if (truncado) return;
 
       // Índice por monto (centavos) para no comparar N×M.
       const porMonto = new Map<string, Array<Record<string, unknown>>>();
@@ -9326,10 +11048,12 @@ export class ConciliacionService {
     gasto_id: string | null;
     gastos_n: number;
     ingreso_id: string | null;
+    clasificacion_id: string | null;
+    notas: string | null;
   }> {
     const cols: string = (await this.ingresosOn())
-      ? 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, ingreso_id'
-      : 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id';
+      ? 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas, ingreso_id'
+      : 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas';
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
       .select(cols)
@@ -9347,6 +11071,11 @@ export class ConciliacionService {
       gastos_n: Math.max(0, Math.trunc(Number(m.gastos_n) || 0)),
       ingreso_id:
         typeof m.ingreso_id === 'string' && m.ingreso_id ? m.ingreso_id : null,
+      clasificacion_id:
+        typeof m.clasificacion_id === 'string' && m.clasificacion_id
+          ? m.clasificacion_id
+          : null,
+      notas: typeof m.notas === 'string' ? m.notas : null,
     };
   }
 
@@ -9376,6 +11105,9 @@ export class ConciliacionService {
     if (mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
+    // OMITIDO (14-oct-2026, invariante 75): 409 sin llamar la RPC (el
+    // trigger de la BD lo rechazaría igual). Desligar sigue siendo un no-op.
+    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
     if (mov.tipo !== (TipoMovimientoBancario.CARGO as string)) {
       throw new BadRequestException({
         message: MENSAJE_SOLO_CARGOS,
@@ -10152,13 +11884,17 @@ export class ConciliacionService {
       }
       // PARTES_INCOHERENTES (constraint diferido: cargo «a medias») y
       // CARGO_LIGADO (candado de monto / cuenta): el cargo cambió entre la
-      // lectura y la escritura ⇒ 409, ya no un 500 técnico.
+      // lectura y la escritura ⇒ 409, ya no un 500 técnico. MOVIMIENTO_OMITIDO
+      // (14-oct-2026, invariante 75): el trigger rechaza ligar un omitido
+      // (carrera con la pre-validación TS) ⇒ 409, jamás el 500 de un código
+      // desconocido.
       case 'CARGO_EXCEDIDO':
       case 'MOVIMIENTO_YA_LIGADO':
       case 'REVERSO_INVALIDO':
       case 'LOTE_SOLO_API_NUEVO':
       case 'PARTES_INCOHERENTES':
       case 'CARGO_LIGADO':
+      case 'MOVIMIENTO_OMITIDO':
         return new ConflictException({
           message: mensajeErrorPartes(codigo, details),
           error: codigo,
@@ -10960,6 +12696,74 @@ export class ConciliacionService {
    * fuera el efectivo que SÍ cuadraba. Ligarlos exige `justificacion` en el
    * PATCH.
    */
+  /**
+   * Búsqueda de TEXTO de «Vincular gasto» ⇒ el `.or()` de PostgREST:
+   * proveedores que se llaman así (≤ 50 ids, consulta aparte) o
+   * nota / lugar / folio del ticket (`patronIlikeSeguro`). Otra búsqueda ⇒ null.
+   */
+  private async orTextoBusquedaGasto(
+    busqueda: BusquedaGasto,
+  ): Promise<string | null> {
+    if (busqueda.tipo !== 'texto') return null;
+    const patron = patronIlikeSeguro(busqueda.texto);
+    const { data: provs, error: provErr } = await this.supabase.service
+      .from('proveedor')
+      .select('id')
+      .ilike('nombre', `%${patron}%`)
+      .limit(50);
+    if (provErr) throw new Error(provErr.message);
+    const provIds = ((provs ?? []) as Array<{ id: unknown }>)
+      .map((p) => p.id)
+      .filter((id): id is string => typeof id === 'string');
+    return [
+      `notas.ilike.*${patron}*`,
+      `lugar.ilike.*${patron}*`,
+      `folio_ticket.ilike.*${patron}*`,
+      ...(provIds.length > 0 ? [`proveedor_id.in.(${provIds.join(',')})`] : []),
+    ].join(',');
+  }
+
+  /**
+   * UNIVERSO de «Vincular gasto» (lector ÚNICO: un cargo y varios cargos):
+   * sin conciliar, medio bancario (o, con `conNoBancarios`, todo menos
+   * BODEGA — `medio_pago` es NOT NULL: el `neq` no pierde nulos), en la
+   * moneda dada y la ventana, con el rango de monto y el texto de la
+   * búsqueda; tope `CANDIDATOS_GASTO_TOPE`. Un error se LANZA.
+   */
+  private async leerUniversoGastos(opts: {
+    cols: string;
+    moneda: string;
+    conNoBancarios: boolean;
+    ventana: { desde: string; hasta: string };
+    montos: RangoMontoGasto | null;
+    orTexto: string | null;
+  }): Promise<Array<Record<string, unknown>>> {
+    let qb = this.supabase.service
+      .from('gasto')
+      .select(opts.cols)
+      .eq('conciliado', false);
+    qb = opts.conNoBancarios
+      ? qb.neq('medio_pago', MEDIO_BODEGA)
+      : qb.in('medio_pago', MEDIOS_BANCARIOS);
+    qb = qb
+      .eq('moneda', opts.moneda)
+      .gte('fecha_gasto', opts.ventana.desde)
+      .lte('fecha_gasto', opts.ventana.hasta);
+    if (opts.montos) {
+      qb = qb.gte('monto', opts.montos.min);
+      qb = opts.montos.maxExclusivo
+        ? qb.lt('monto', opts.montos.max)
+        : qb.lte('monto', opts.montos.max);
+    }
+    if (opts.orTexto) qb = qb.or(opts.orTexto);
+    const { data, error } = await qb
+      .order('fecha_gasto', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(CANDIDATOS_GASTO_TOPE);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as unknown as Array<Record<string, unknown>>;
+  }
+
   async gastosCandidatosDeMovimiento(
     movId: string,
     query: Partial<
@@ -11000,30 +12804,10 @@ export class ConciliacionService {
     const busqueda = interpretarBusquedaGasto(query.q);
 
     // Texto: proveedores que se llaman así (≤ 50), en una consulta aparte.
-    let orTexto: string | null = null;
-    if (busqueda.tipo === 'texto') {
-      const patron = patronIlikeSeguro(busqueda.texto);
-      const { data: provs, error: provErr } = await this.supabase.service
-        .from('proveedor')
-        .select('id')
-        .ilike('nombre', `%${patron}%`)
-        .limit(50);
-      if (provErr) throw new Error(provErr.message);
-      const provIds = ((provs ?? []) as Array<{ id: unknown }>)
-        .map((p) => p.id)
-        .filter((id): id is string => typeof id === 'string');
-      orTexto = [
-        `notas.ilike.*${patron}*`,
-        `lugar.ilike.*${patron}*`,
-        `folio_ticket.ilike.*${patron}*`,
-        ...(provIds.length > 0
-          ? [`proveedor_id.in.(${provIds.join(',')})`]
-          : []),
-      ].join(',');
-    }
+    const orTexto = await this.orTextoBusquedaGasto(busqueda);
 
     const colsRicas = await this.gastoRicoCols();
-    type RangoMonto = { min: number; max: number; maxExclusivo: boolean };
+    type RangoMonto = RangoMontoGasto;
     const rangoBusqueda: RangoMonto | null =
       busqueda.tipo === 'monto'
         ? {
@@ -11032,38 +12816,21 @@ export class ConciliacionService {
             maxExclusivo: busqueda.maxExclusivo,
           }
         : null;
-    const leer = async (
+    // Lector COMPARTIDO con «Vincular a un gasto» de varios cargos
+    // (14-oct-2026): la MISMA consulta de siempre, extraída sin cambios.
+    const leer = (
       monedaQ: string,
       conNoBancarios: boolean,
       montos: RangoMonto | null,
-    ) => {
-      let qb = this.supabase.service
-        .from('gasto')
-        .select(colsRicas)
-        .eq('conciliado', false);
-      // Universo por medio: bancarios (siempre) o, con la bandera, todo
-      // menos BODEGA (`medio_pago` es NOT NULL: el `neq` no pierde nulos).
-      qb = conNoBancarios
-        ? qb.neq('medio_pago', MEDIO_BODEGA)
-        : qb.in('medio_pago', MEDIOS_BANCARIOS);
-      qb = qb
-        .eq('moneda', monedaQ)
-        .gte('fecha_gasto', ventana.desde)
-        .lte('fecha_gasto', ventana.hasta);
-      if (montos) {
-        qb = qb.gte('monto', montos.min);
-        qb = montos.maxExclusivo
-          ? qb.lt('monto', montos.max)
-          : qb.lte('monto', montos.max);
-      }
-      if (orTexto) qb = qb.or(orTexto);
-      const { data, error } = await qb
-        .order('fecha_gasto', { ascending: false })
-        .order('id', { ascending: true })
-        .limit(CANDIDATOS_GASTO_TOPE);
-      if (error) throw new Error(error.message);
-      return (data ?? []) as unknown as Array<Record<string, unknown>>;
-    };
+    ) =>
+      this.leerUniversoGastos({
+        cols: colsRicas,
+        moneda: monedaQ,
+        conNoBancarios,
+        ventana,
+        montos,
+        orTexto,
+      });
 
     const propios = await leer(moneda, incluirNoBancarios, rangoBusqueda);
     // CRUCE USD (0.0.75, invariante 70): en una cuenta en PESOS los gastos
@@ -11547,13 +13314,22 @@ export class ConciliacionService {
               ? 'INGRESO'
               : null;
     if (liga) {
+      // OMITIDO (0.0.77, invariante 75): el rechazo de siempre, con el
+      // motivo de la omisión cuando la clasificación es la canónica.
+      const omitido =
+        liga === 'CLASIFICACION' &&
+        typeof mov.clasificacion_id === 'string' &&
+        mov.clasificacion_id === (await this.idClasificacionOmitido());
       throw new ConflictException({
-        message:
-          liga === 'INGRESO'
+        message: omitido
+          ? mensajeMovimientoOmitido(
+              leerOmision(typeof mov.notas === 'string' ? mov.notas : null),
+            )
+          : liga === 'INGRESO'
             ? 'Este abono ya está conciliado con otro ingreso: desvincúlalo antes de ligar este.'
             : 'Ese movimiento ya está conciliado con otra cosa: desvincúlalo antes.',
         error: 'MOVIMIENTO_YA_LIGADO',
-        details: { liga },
+        details: omitido ? { liga, omitido: true } : { liga },
       });
     }
     const { data: ingRaw, error: ingErr } = await sb

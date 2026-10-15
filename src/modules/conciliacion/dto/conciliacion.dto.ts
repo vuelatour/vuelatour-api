@@ -6,6 +6,16 @@ import {
   JUSTIFICACION_MIN,
 } from '../../../common/vinculo-no-bancario.util';
 import {
+  MOTIVO_OMISION_MAX,
+  MOTIVO_OMISION_MIN,
+  OMITIR_MAX,
+} from '../omision.util';
+import {
+  CARGOS_A_GASTO_MAX,
+  CARGOS_A_GASTO_MIN,
+  MENSAJE_LOTE_CARGOS_INVALIDO,
+} from '../cargos-a-gasto.util';
+import {
   ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
@@ -223,6 +233,21 @@ export class ListConciliacionQuery {
   @ToBooleanQuery()
   @IsBoolean()
   conciliado?: boolean;
+
+  /**
+   * OMITIDOS (14-oct-2026, API 0.0.77, invariante 75): la pestaña
+   * «Omitidos». true ⇒ solo los movimientos con la clasificación canónica
+   * «Omitido de la conciliación» (el filtro va en el API, no sobre la lista
+   * recortada del panel).
+   */
+  @ApiPropertyOptional({
+    description:
+      'true/1 ⇒ solo los movimientos omitidos de la conciliación (pestaña «Omitidos»). Sin ningún omitido todavía ⇒ lista vacía; si no se puede leer la clasificación canónica ⇒ 503 OMITIDOS_NO_DISPONIBLE.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  solo_omitidos?: boolean;
 
   // ADITIVOS (24-sep-2026, conciliación de ingresos): tipo y ventana.
   @ApiPropertyOptional({ enum: TipoMovimientoBancario })
@@ -569,6 +594,23 @@ export class ClasificarMovimientoDto {
   @IsString()
   @MaxLength(500)
   notas?: string;
+
+  /**
+   * ENDURECIDO (14-oct-2026, API 0.0.77, invariante 75): la clasificación
+   * que el panel VIO al abrir el diálogo (`null` = estaba pendiente). Si la
+   * vigente es otra (alguien lo vinculó, lo clasificó o lo omitió) ⇒ 409
+   * `MOVIMIENTO_CAMBIO` sin escribir. Ausente = la conducta de siempre (un
+   * panel previo no la manda). El servicio decide por VALOR (`!==
+   * undefined`): con target ES2022 la instancia define la llave siempre.
+   */
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'La clasificación que el panel vio (null = pendiente). Si cambió mientras tanto ⇒ 409 MOVIMIENTO_CAMBIO.',
+  })
+  @IsOptional()
+  @IsUUID()
+  esperado_clasificacion_id?: string | null;
 }
 
 /**
@@ -800,4 +842,132 @@ export class AutoReversosDto {
   @IsOptional()
   @Matches(RE_DIA_CONCILIACION, { message: 'hasta debe ser YYYY-MM-DD' })
   hasta?: string;
+}
+
+// =====================================================================
+// OMITIR LA CONCILIACIÓN y VARIOS CARGOS → UN GASTO (14-oct-2026, API
+// 0.0.77, invariantes 75 y 76). Textos de error de lista en es-MX.
+// =====================================================================
+
+/** Texto recortado; vacío o solo espacios ⇒ `''` (lo rechaza `MinLength`). */
+const recortarTexto = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim() : value;
+
+/** Lista de movimientos a omitir / revisar / restaurar (1..200, sin repetir). */
+class ListaMovimientosOmisionDto {
+  @ApiProperty({
+    type: [String],
+    description: `Movimientos (1..${OMITIR_MAX}, uuid, sin repetir).`,
+  })
+  @IsArray({ message: 'Elige al menos un movimiento.' })
+  @ArrayMinSize(1, { message: 'Elige al menos un movimiento.' })
+  @ArrayMaxSize(OMITIR_MAX, {
+    message: `Se trabajan hasta ${OMITIR_MAX} movimientos por vez: divide la selección.`,
+  })
+  @ArrayUnique({ message: 'Hay movimientos repetidos en la selección.' })
+  @IsUUID(undefined, {
+    each: true,
+    message:
+      'Algún movimiento de la selección no es válido: recarga la página.',
+  })
+  movimiento_ids!: string[];
+}
+
+/** `POST /v1/conciliacion/movimientos/omitir/revisar` (solo lectura). */
+export class RevisarOmisionDto extends ListaMovimientosOmisionDto {}
+
+/** `POST /v1/conciliacion/movimientos/quitar-omision`. */
+export class QuitarOmisionDto extends ListaMovimientosOmisionDto {}
+
+/** `POST /v1/conciliacion/movimientos/omitir`. */
+export class OmitirMovimientosDto extends ListaMovimientosOmisionDto {
+  @ApiProperty({
+    minLength: MOTIVO_OMISION_MIN,
+    maxLength: MOTIVO_OMISION_MAX,
+    example: 'Comisión o IVA del banco',
+    description: `Por qué no se concilian (${MOTIVO_OMISION_MIN}–${MOTIVO_OMISION_MAX} caracteres, recortado). Va firmado en la primera línea de las notas de cada movimiento.`,
+  })
+  @Transform(recortarTexto)
+  @IsString({ message: 'Escribe el motivo de la omisión.' })
+  @MinLength(MOTIVO_OMISION_MIN, {
+    message: `El motivo debe tener al menos ${MOTIVO_OMISION_MIN} caracteres.`,
+  })
+  @MaxLength(MOTIVO_OMISION_MAX, {
+    message: `El motivo admite hasta ${MOTIVO_OMISION_MAX} caracteres.`,
+  })
+  motivo!: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Movimientos con aviso («podría conciliarse de verdad») que la oficina confirma omitir. Deben estar en `movimiento_ids` (si no, 400 ACEPTAR_RIESGO_INVALIDO).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(OMITIR_MAX)
+  @ArrayUnique({
+    message: 'Hay movimientos repetidos en los avisos confirmados.',
+  })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Algún movimiento confirmado no es válido: recarga la página.',
+  })
+  aceptar_riesgo_ids?: string[];
+}
+
+/** Lista de cargos para un gasto (2..50, sin repetir). */
+class ListaCargosGastoDto {
+  @ApiProperty({
+    type: [String],
+    description: `Cargos del banco (${CARGOS_A_GASTO_MIN}..${CARGOS_A_GASTO_MAX}, uuid, sin repetir).`,
+  })
+  @IsArray({ message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayMinSize(CARGOS_A_GASTO_MIN, { message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayMaxSize(CARGOS_A_GASTO_MAX, { message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayUnique({ message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Algún cargo de la selección no es válido: recarga la página.',
+  })
+  movimiento_ids!: string[];
+}
+
+/** `POST /v1/conciliacion/gastos/:id/cargos`. */
+export class LigarCargosAGastoDto extends ListaCargosGastoDto {}
+
+/** `POST /v1/conciliacion/cargos/gastos-candidatos` (solo lectura). */
+export class CargosGastosCandidatosDto extends ListaCargosGastoDto {
+  @ApiPropertyOptional({
+    maxLength: 80,
+    description:
+      'Número = monto del gasto (entero [q, q+1); con decimales ±0.01); texto = proveedor, nota, lugar o folio.',
+  })
+  @IsOptional()
+  @Transform(recortarOpcional)
+  @IsString()
+  @MaxLength(80)
+  q?: string;
+
+  @ApiPropertyOptional({
+    default: 30,
+    description:
+      'Ventana ±días alrededor de las fechas de los cargos (1..180).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  dias?: number;
+
+  @ApiPropertyOptional({
+    default: 100,
+    description: 'Máximo de candidatos en la respuesta (1..300).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(300)
+  limite?: number;
 }

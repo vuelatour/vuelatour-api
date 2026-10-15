@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   Optional,
@@ -54,6 +56,17 @@ import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
+import type { LigaCargosAGasto } from '../conciliacion/conciliacion.service';
+import { errorCargosAGastoNoDisponible } from '../../common/omision-cargos-disponible.util';
+import {
+  conPrefijoNoSeRegistro,
+  MENSAJE_CLIENT_REQUEST_ID_EN_USO,
+  MENSAJE_CLIENT_REQUEST_ID_REQUERIDO,
+  MENSAJE_CONCILIAR_SOLO_AL_CREAR,
+  MENSAJE_GASTO_NO_REGISTRADO,
+  MENSAJE_GASTO_SIN_VINCULAR,
+  MENSAJE_INVENTARIO_NO_DESDE_CARGOS,
+} from '../conciliacion/cargos-a-gasto.util';
 // Refacción a Inventario/Tienda desde el alta (12-oct-2026, invariante 57):
 // compra → recibir → precio → salida. Opcionales: sin los módulos (specs) el
 // alta normal no se entera.
@@ -1588,6 +1601,14 @@ export class ExpensesService {
     rol?: Rol,
     opts?: { notificar?: boolean },
   ) {
+    // VARIOS CARGOS → UN GASTO, «Créalo por la suma» (14-oct-2026, API
+    // 0.0.77, invariante 76): con la llave, el alta y la liga con los cargos
+    // van JUNTAS (o no queda nada). `null` = ausente.
+    const cargosIds = dto.conciliar_con_movimientos;
+    delete dto.conciliar_con_movimientos;
+    if (cargosIds != null) {
+      return this.crearConCargos(dto, cargosIds, userId, rol);
+    }
     const inv = dto.inventario;
     if (!inv) return this.crearGasto(dto, userId, rol, opts);
     delete dto.inventario;
@@ -1835,6 +1856,29 @@ export class ExpensesService {
     // notificar:false = flujos en lote (carga masiva de combustibles): una
     // carga de 50 filas no debe disparar 50 push a admin.
     opts?: { notificar?: boolean },
+  ) {
+    const r = await this.crearGastoInterno(dto, userId, rol, opts ?? {});
+    for (const despues of r.despues) despues();
+    return r.data;
+  }
+
+  /**
+   * El alta de un gasto (14-oct-2026: cuerpo de `crearGasto`, SIN cambio de
+   * conducta). Devuelve la fila insertada y, en `despues`, lo que el alta
+   * hace DESPUÉS del insert en su orden de siempre —aviso de matrícula,
+   * aviso de combustible corregido, lectura IA offline, auto-cruce con el
+   * banco y aviso «gasto_registrado»— SIN ejecutarlo: `crearGasto` lo corre
+   * de inmediato (idéntico a antes) y el alta por la suma
+   * (`crearConCargos`, invariante 76) SOLO si la liga con los cargos salió
+   * bien. `autoCruce: false` lo quita de la lista (la liga la decide la
+   * persona). `replay` = el 23505 de la llave devolvió el gasto YA creado
+   * (sin `despues`, como siempre).
+   */
+  private async crearGastoInterno(
+    dto: CreateGastoDto,
+    userId: string,
+    rol: Rol | undefined,
+    opts: { notificar?: boolean; autoCruce?: boolean },
   ) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
@@ -2379,7 +2423,11 @@ export class ExpensesService {
             this.logger.log(
               `Gasto idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el gasto existente ${existente.id as string} (sin duplicar).`,
             );
-            return existente;
+            return {
+              data: existente,
+              despues: [] as Array<() => void>,
+              replay: true,
+            };
           }
         }
         throw new ConflictException(
@@ -2389,6 +2437,9 @@ export class ExpensesService {
       throw new Error(error.message);
     }
 
+    // Lo que el alta hace DESPUÉS del insert, en su orden de siempre (ver
+    // `crearGastoInterno`): se ARMA aquí y lo corre quien llama.
+    const despues: Array<() => void> = [];
     // Aviso inmediato a oficina del cruce de matrícula (no solo en notas):
     // mismo canal que las discrepancias del enriquecimiento IA.
     if (discrepanciaMatricula && data && opts?.notificar !== false) {
@@ -2399,8 +2450,10 @@ export class ExpensesService {
         data: { gasto_id: data.id as string },
         link: '/admin/expenses',
       };
-      void this.notifications.notifyRole(Rol.ADMIN, avisoMat);
-      void this.notifications.notifyRole(Rol.ANALISTA, avisoMat);
+      despues.push(() => {
+        void this.notifications.notifyRole(Rol.ADMIN, avisoMat);
+        void this.notifications.notifyRole(Rol.ANALISTA, avisoMat);
+      });
     }
     // Mismo canal para el combustible corregido al del avión (invariante 43):
     // texto propio de `avisoCombustibleCorregido`.
@@ -2424,50 +2477,226 @@ export class ExpensesService {
       };
       // Sin el actor (como «gasto_registrado»): la oficina que captura en el
       // panel ya vio el aviso ámbar y la respuesta; no se avisa a sí misma.
-      void this.notifications.notifyRole(Rol.ADMIN, avisoComb, userId);
-      void this.notifications.notifyRole(Rol.ANALISTA, avisoComb, userId);
+      despues.push(() => {
+        void this.notifications.notifyRole(Rol.ADMIN, avisoComb, userId);
+        void this.notifications.notifyRole(Rol.ANALISTA, avisoComb, userId);
+      });
     }
 
     // Captura OFFLINE con foto: el piloto no tuvo IA en campo — el servidor
     // lee el comprobante ahora y completa lo que falte (como el tacómetro:
     // la operación no se detiene y el dato llega completo igual).
     if (dto.leer_con_ia === true && dto.foto_url) {
-      void this.enriquecerGastoConIA(
-        (data as { id: string }).id,
-        dto.foto_url,
-        userId,
-      ).catch((err) =>
-        this.logger.warn(
-          `Enriquecimiento IA del gasto falló: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      const fotoUrl = dto.foto_url;
+      despues.push(() => {
+        void this.enriquecerGastoConIA(
+          (data as { id: string }).id,
+          fotoUrl,
+          userId,
+        ).catch((err) =>
+          this.logger.warn(
+            `Enriquecimiento IA del gasto falló: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      });
     }
 
     // AUTO-CRUCE con el banco (15-sep-2026): si el estado de cuenta ya se
-    // importó, este gasto se concilia solo en cuanto se captura.
-    this.cruzarConBancoBestEffort(data, userId);
+    // importó, este gasto se concilia solo en cuanto se captura. El alta por
+    // la suma (invariante 76) lo apaga: la liga la eligió la persona.
+    if (opts?.autoCruce !== false) {
+      despues.push(() => this.cruzarConBancoBestEffort(data, userId));
+    }
 
     // Aviso a admin: el piloto subió un gasto desde campo.
     if (opts?.notificar !== false) {
-      void this.notifications.notifyRole(
-        Rol.ADMIN,
-        {
-          tipo: 'gasto_registrado',
-          titulo: 'Gasto registrado',
-          cuerpo: `${etiquetaCategoriaGasto(dto.categoria)} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
-          data: {
-            gasto_id: (data as { id: string }).id,
-            vuelo_id: dto.vuelo_id ?? null,
-          },
-          link: dto.vuelo_id
-            ? `/admin/flights/${dto.vuelo_id}`
-            : '/admin/expenses',
+      const avisoAlta = {
+        tipo: 'gasto_registrado',
+        titulo: 'Gasto registrado',
+        cuerpo: `${etiquetaCategoriaGasto(dto.categoria)} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
+        data: {
+          gasto_id: (data as { id: string }).id,
+          vuelo_id: dto.vuelo_id ?? null,
         },
-        userId,
-      );
+        link: dto.vuelo_id
+          ? `/admin/flights/${dto.vuelo_id}`
+          : '/admin/expenses',
+      };
+      despues.push(() => {
+        void this.notifications.notifyRole(Rol.ADMIN, avisoAlta, userId);
+      });
     }
 
-    return data!;
+    return { data: data!, despues, replay: false };
+  }
+
+  // =====================================================================
+  // VARIOS CARGOS → UN GASTO, «Créalo por la suma» (14-oct-2026, API 0.0.77,
+  // invariante 76): `POST /v1/expenses` con `conciliar_con_movimientos`.
+  // =====================================================================
+
+  /**
+   * El gasto nace y queda ligado a sus 2..50 cargos en la MISMA petición, o
+   * no queda nada:
+   *  (1) refacción a Inventario/Tienda ⇒ 400 INVENTARIO_NO_DESDE_CARGOS;
+   *  (2) sin `client_request_id` ⇒ 400 CLIENT_REQUEST_ID_REQUERIDO;
+   *  (3) sin la migración 20261014000002 (o sin el módulo) ⇒ 503 sin crear;
+   *  (4) REPLAY por la llave: mismos monto/moneda/medio ⇒ la RPC
+   *      (idempotente) y `idempotente: true`; otros datos ⇒ 409
+   *      CLIENT_REQUEST_ID_EN_USO;
+   *  (5) prevalidación PURA de los cargos ⇒ 4xx «No se registró el gasto:
+   *      …» SIN crear;
+   *  (6) alta SIN auto-cruce y con lo de después DIFERIDO;
+   *  (7) la RPC atómica; bien ⇒ avisos y relectura;
+   *  (8) mal ⇒ se RETIRA el gasto (`remove`) y se relanza el error con el
+   *      prefijo y `details.compensado: true`;
+   *  (9) si el retiro también falla ⇒ 500 GASTO_SIN_VINCULAR {gasto_id}.
+   */
+  private async crearConCargos(
+    dto: CreateGastoDto,
+    idsRaw: string[],
+    userId: string,
+    rol?: Rol,
+  ) {
+    if (dto.inventario != null) {
+      throw new BadRequestException({
+        message: MENSAJE_INVENTARIO_NO_DESDE_CARGOS,
+        error: 'INVENTARIO_NO_DESDE_CARGOS',
+      });
+    }
+    const llave = dto.client_request_id;
+    if (!llave) {
+      throw new BadRequestException({
+        message: MENSAJE_CLIENT_REQUEST_ID_REQUERIDO,
+        error: 'CLIENT_REQUEST_ID_REQUERIDO',
+      });
+    }
+    const conciliacion = this.conciliacion;
+    if (!conciliacion || !(await conciliacion.cargosAGastoDisponible())) {
+      throw errorCargosAGastoNoDisponible();
+    }
+    const ids = [...new Set(idsRaw.map((x) => String(x).trim().toLowerCase()))];
+    // (4) REPLAY: la llave ya creó un gasto (respuesta perdida, doble clic,
+    // o «vuelve a pulsar Guardar» tras un GASTO_SIN_VINCULAR).
+    const previo = await this.gastoPorLlave(llave);
+    if (previo) return this.replayAltaConCargos(previo, dto, ids, userId);
+    // (5) Prevalidación SIN crear (la RPC lo vuelve a validar todo).
+    await conciliacion.prevalidarCargosParaGastoNuevo(ids, {
+      moneda: String(dto.moneda ?? ''),
+      monto: Number(dto.monto),
+      medio_pago: String(dto.medio_pago ?? ''),
+      fecha_gasto: dto.fecha_gasto ?? null,
+    });
+    // (6) Alta sin auto-cruce; avisos, lectura IA y demás DIFERIDOS.
+    const creado = await this.crearGastoInterno(dto, userId, rol, {
+      autoCruce: false,
+    });
+    const gasto = creado.data as Record<string, unknown>;
+    // Carrera de la llave (23505): otro intento ya lo había creado.
+    if (creado.replay) {
+      return this.replayAltaConCargos(gasto, dto, ids, userId);
+    }
+    const gastoId = String(gasto.id);
+    // (7) La liga atómica.
+    let liga: LigaCargosAGasto;
+    try {
+      liga = await conciliacion.ligarCargosAGasto(gastoId, ids, userId, {
+        accion: 'crear',
+      });
+    } catch (err) {
+      // (8) Compensación: el gasto se retira (jamás un gasto a medias).
+      try {
+        await this.remove(gastoId, userId, rol);
+      } catch (errRetiro) {
+        this.logger.error(
+          `Alta por la suma: la liga del gasto ${gastoId} con ${ids.length} cargo(s) falló (${err instanceof Error ? err.message : String(err)}) y su retiro TAMBIÉN (${errRetiro instanceof Error ? errRetiro.message : String(errRetiro)}): queda registrado sin vincular.`,
+        );
+        throw new InternalServerErrorException({
+          message: MENSAJE_GASTO_SIN_VINCULAR,
+          error: 'GASTO_SIN_VINCULAR',
+          details: { gasto_id: gastoId },
+        });
+      }
+      this.logger.warn(
+        `Alta por la suma: la liga del gasto ${gastoId} con ${ids.length} cargo(s) falló (${err instanceof Error ? err.message : String(err)}); el gasto se retiró.`,
+      );
+      throw errorAltaConCargosCompensada(err);
+    }
+    for (const f of creado.despues) f();
+    const fresco = (await this.releerGasto(gastoId)) ?? gasto;
+    this.logger.log(
+      `Alta por la suma: gasto ${gastoId} creado y vinculado a ${ids.length} cargo(s) (usuario ${userId}); cubierto=${liga.gasto_estado.cubierto}`,
+    );
+    return {
+      ...fresco,
+      conciliacion: {
+        movimiento_ids: ids,
+        idempotente: liga.idempotente,
+        partes: liga.partes,
+        gasto_estado: liga.gasto_estado,
+      },
+    };
+  }
+
+  /** El gasto que ya creó esta llave de captura (o null). Un error se LANZA. */
+  private async gastoPorLlave(
+    llave: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(await this.cols())
+      .eq('client_request_id', llave)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ?? null;
+  }
+
+  /**
+   * REPLAY del alta por la suma: la llave ya creó un gasto. Con los MISMOS
+   * monto, moneda y medio se reintenta la liga (la RPC es idempotente: lo
+   * ya ligado no se repite) y la respuesta dice `idempotente: true`; con
+   * otros datos ⇒ 409 CLIENT_REQUEST_ID_EN_USO. Si la RPC falla aquí NO se
+   * retira nada (el gasto es de un intento anterior): el error sale con
+   * `details.gasto_id`.
+   */
+  private async replayAltaConCargos(
+    previo: Record<string, unknown>,
+    dto: CreateGastoDto,
+    ids: string[],
+    userId: string,
+  ) {
+    const gastoId = String(previo.id);
+    const texto = (v: unknown) => (typeof v === 'string' ? v : '');
+    const mismo =
+      Math.abs(Number(previo.monto) - Number(dto.monto)) < 0.005 &&
+      texto(previo.moneda) === texto(dto.moneda) &&
+      texto(previo.medio_pago) === texto(dto.medio_pago);
+    if (!mismo) {
+      throw new ConflictException({
+        message: MENSAJE_CLIENT_REQUEST_ID_EN_USO,
+        error: 'CLIENT_REQUEST_ID_EN_USO',
+        details: { gasto_id: gastoId },
+      });
+    }
+    let liga: LigaCargosAGasto;
+    try {
+      liga = await this.conciliacion!.ligarCargosAGasto(gastoId, ids, userId);
+    } catch (err) {
+      throw errorConGastoId(err, gastoId);
+    }
+    const fresco = (await this.releerGasto(gastoId)) ?? previo;
+    this.logger.log(
+      `Alta por la suma (replay de la llave): gasto ${gastoId} con ${ids.length} cargo(s) (usuario ${userId}); cubierto=${liga.gasto_estado.cubierto}`,
+    );
+    return {
+      ...fresco,
+      conciliacion: {
+        movimiento_ids: ids,
+        idempotente: true,
+        partes: liga.partes,
+        gasto_estado: liga.gasto_estado,
+      },
+    };
   }
 
   /**
@@ -3479,6 +3708,17 @@ export class ExpensesService {
       throw new BadRequestException({
         message: MENSAJE_SOLO_AL_CREAR,
         error: CODIGO_INVENTARIO.SOLO_AL_CREAR,
+      });
+    }
+    // Los cargos del banco se vinculan AL CREAR (invariante 76): un PATCH que
+    // traiga la llave (PartialType la hereda) rebota antes de tocar nada.
+    if (
+      (dto as { conciliar_con_movimientos?: unknown })
+        .conciliar_con_movimientos !== undefined
+    ) {
+      throw new BadRequestException({
+        message: MENSAJE_CONCILIAR_SOLO_AL_CREAR,
+        error: 'CONCILIAR_SOLO_AL_CREAR',
       });
     }
     // Control de versión (10-sep-2026, B1): `if_updated_at` NO es columna;
@@ -4758,4 +4998,69 @@ export class ExpensesService {
     );
     return { procesados: gastoIds.length, exitos, errores };
   }
+}
+
+/**
+ * Alta por la suma (invariante 76): el error de la liga, ya con el gasto
+ * RETIRADO, con «No se registró el gasto: » y `details.compensado: true`. Un
+ * error que no es HTTP (la base no respondió como se esperaba) sale como 500
+ * GASTO_NO_REGISTRADO con el detalle técnico (el gasto ya se retiró).
+ */
+function errorAltaConCargosCompensada(err: unknown): HttpException {
+  if (err instanceof HttpException) {
+    const cuerpo = cuerpoDeHttpException(err);
+    return new HttpException(
+      {
+        ...cuerpo.resto,
+        message: conPrefijoNoSeRegistro(cuerpo.message),
+        details: { ...cuerpo.details, compensado: true },
+      },
+      err.getStatus(),
+    );
+  }
+  return new InternalServerErrorException({
+    message: MENSAJE_GASTO_NO_REGISTRADO,
+    error: 'GASTO_NO_REGISTRADO',
+    details: {
+      compensado: true,
+      tecnico: err instanceof Error ? err.message : String(err),
+    },
+  });
+}
+
+/** Replay del alta por la suma: el error de la liga con `details.gasto_id`. */
+function errorConGastoId(err: unknown, gastoId: string): unknown {
+  if (!(err instanceof HttpException)) return err;
+  const cuerpo = cuerpoDeHttpException(err);
+  return new HttpException(
+    {
+      ...cuerpo.resto,
+      message: cuerpo.message,
+      details: { ...cuerpo.details, gasto_id: gastoId },
+    },
+    err.getStatus(),
+  );
+}
+
+/** `{message, details, resto}` del cuerpo de una HttpException. */
+function cuerpoDeHttpException(err: HttpException): {
+  message: string;
+  details: Record<string, unknown>;
+  resto: Record<string, unknown>;
+} {
+  const r = err.getResponse();
+  const obj: Record<string, unknown> =
+    r && typeof r === 'object'
+      ? { ...(r as Record<string, unknown>) }
+      : { message: String(r) };
+  const message = typeof obj.message === 'string' ? obj.message : err.message;
+  const details =
+    obj.details &&
+    typeof obj.details === 'object' &&
+    !Array.isArray(obj.details)
+      ? { ...(obj.details as Record<string, unknown>) }
+      : {};
+  delete obj.message;
+  delete obj.details;
+  return { message, details, resto: obj };
 }

@@ -12,6 +12,7 @@
  */
 import type { MovimientoLiga } from '../../common/cobro-conciliado.util';
 import { toleranciaLote } from './conciliacion-parcial.util';
+import { mensajeMovimientoOmitido } from './omision.util';
 
 /** Tope de cobros por abono (el mismo de la RPC y del DTO). */
 export const LOTE_COBROS_MAX = 50;
@@ -32,6 +33,10 @@ export const CODIGOS_ERROR_COBROS = [
   'LOTE_SOLO_API_NUEVO',
   'ABONO_LIGADO',
   'COBROS_INCOHERENTES',
+  // 14-oct-2026 (invariante 75): ligar un abono OMITIDO de la conciliación
+  // (trigger `trg_mov_bancario_omitido_sin_ligas`, por el UPDATE de
+  // sincronía de la puente o el `cobro_id` directo).
+  'MOVIMIENTO_OMITIDO',
 ] as const;
 export type CodigoErrorCobros = (typeof CODIGOS_ERROR_COBROS)[number];
 
@@ -348,6 +353,8 @@ export function mensajeErrorCobros(
       return 'El abono quedó con sus cobros a medias: recarga la página y vuelve a intentarlo; si sigue igual, avisa a soporte.';
     case 'LOTE_INVALIDO':
       return textoBd || 'La lista de cobros no es válida.';
+    case 'MOVIMIENTO_OMITIDO':
+      return mensajeMovimientoOmitido(null);
   }
 }
 

@@ -45,6 +45,10 @@ function fakeSupabase(db: Tablas, fallos: Record<string, unknown> = {}) {
         if (op === 'insert') {
           const creados = aInsertar.map((r) => ({
             id: `${tabla}-${++seq}`,
+            // DEFAULT de la BD (`movimiento_bancario.conciliado` NOT NULL
+            // default false): el CAS de «clasificar» (14-oct-2026,
+            // invariante 75) lo lee como la BD.
+            ...(tabla === 'movimiento_bancario' ? { conciliado: false } : {}),
             ...r,
           }));
           db[tabla] = [...(db[tabla] ?? []), ...creados];

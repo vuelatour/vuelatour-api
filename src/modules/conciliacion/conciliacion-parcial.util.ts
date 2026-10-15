@@ -32,6 +32,8 @@
  * tres gastos aporta $2,801.40 a cada uno.
  */
 
+import { mensajeMovimientoOmitido } from './omision.util';
+
 /**
  * Centavos de holgura entre la suma de los cargos y el monto del gasto, en
  * la MONEDA DEL GASTO. Cubre la diferencia por redondeo/propina del banco:
@@ -578,7 +580,8 @@ export function mensajeErrorPartes(
     | 'REVERSO_INVALIDO'
     | 'LOTE_SOLO_API_NUEVO'
     | 'PARTES_INCOHERENTES'
-    | 'CARGO_LIGADO',
+    | 'CARGO_LIGADO'
+    | 'MOVIMIENTO_OMITIDO',
   details?: Record<string, unknown> | null,
 ): string {
   const num = (k: string): number | null => {
@@ -616,6 +619,10 @@ export function mensajeErrorPartes(
         'vuelve a intentarlo en unos minutos desde Conciliación (recarga la página).'
       );
     }
+    // OMITIR LA CONCILIACIÓN (14-oct-2026, invariante 75): el trigger
+    // `trg_mov_bancario_omitido_sin_ligas` rechaza ligar un omitido.
+    case 'MOVIMIENTO_OMITIDO':
+      return mensajeMovimientoOmitido(null);
     case 'PARTES_INCOHERENTES':
     case 'CARGO_LIGADO':
     default:
@@ -670,6 +677,8 @@ export const CODIGOS_ERROR_PARTES = [
   'LOTE_INVALIDO',
   'PARTES_INCOHERENTES',
   'CARGO_LIGADO',
+  // 14-oct-2026 (invariante 75): ligar un movimiento OMITIDO.
+  'MOVIMIENTO_OMITIDO',
 ] as const;
 export type CodigoErrorPartes = (typeof CODIGOS_ERROR_PARTES)[number];
 

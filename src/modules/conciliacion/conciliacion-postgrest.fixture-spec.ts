@@ -17,7 +17,9 @@
  * - un registro de CADA operación (tabla, tipo, filtros, cuerpo) y de las
  *   subidas a Storage, para afirmar «no escribe nada».
  * Las RPC de la puente cargo ↔ gastos se emulan con
- * `conciliacion-partes.fixture-spec`.
+ * `conciliacion-partes.fixture-spec`; otras (omitir / varios cargos → un
+ * gasto, 14-oct-2026) se enchufan con `opts.rpc`
+ * (`omision-cargos.fixture-spec`).
  */
 import type { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -35,7 +37,7 @@ export interface ErrorFake {
 
 export interface OperacionFake {
   tabla: string;
-  op: 'select' | 'insert' | 'update' | 'upsert';
+  op: 'select' | 'insert' | 'update' | 'upsert' | 'delete';
   sel: string;
   cuerpo?: Row | Row[];
   filtros: Array<[string, string, unknown]>;
@@ -53,6 +55,15 @@ export interface OpcionesFake {
   antes?: (op: OperacionFake, db: Tablas) => ErrorFake | void;
   /** Filas por respuesta (max-rows de PostgREST). */
   maxRows?: number;
+  /**
+   * RPC adicionales: si devuelve algo, esa es la respuesta; `null` ⇒ las de
+   * la puente (`rpcPartes`).
+   */
+  rpc?: (
+    nombre: string,
+    args: Row,
+    db: Tablas,
+  ) => { data: unknown; error: unknown } | null;
 }
 
 const num = (v: unknown) => Number(v);
@@ -134,6 +145,13 @@ function embeber(db: Tablas, sel: string, r: Row): Row {
       (c) => c.id === r.cuenta_bancaria_id,
     );
   }
+  if (sel.includes('clasificacion:conciliacion_clasificacion')) {
+    const c = unico(
+      db.conciliacion_clasificacion,
+      (x) => x.id === r.clasificacion_id,
+    );
+    out.clasificacion = c ? { nombre: c.nombre ?? null } : null;
+  }
   if (sel.includes('proveedor:proveedor')) {
     out.proveedor = unico(db.proveedor, (p) => p.id === r.proveedor_id);
   }
@@ -170,6 +188,7 @@ function embeber(db: Tablas, sel: string, r: Row): Row {
 
 export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
   const log: OperacionFake[] = [];
+  const rpcs: Array<{ nombre: string; args: Row }> = [];
   const storage: Array<{ bucket: string; path: string }> = [];
   const maxRows = opts.maxRows ?? 1000;
   let seq = 0;
@@ -248,6 +267,15 @@ export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
           };
         }
         const filas = (db[tabla] ?? []).filter((r) => preds.every((f) => f(r)));
+        if (op.op === 'delete') {
+          db[tabla] = (db[tabla] ?? []).filter((r) => !filas.includes(r));
+          const copia = filas.map((r) => ({ ...r }));
+          return {
+            data: devolverFilas ? (uno ? (copia[0] ?? null) : copia) : null,
+            error: null,
+            count: copia.length,
+          };
+        }
         if (op.op === 'update') {
           for (const r of filas) Object.assign(r, op.cuerpo);
           const copia = filas.map((r) => ({ ...r }));
@@ -306,6 +334,10 @@ export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
           op.cuerpo = p;
           return api;
         },
+        delete() {
+          op.op = 'delete';
+          return api;
+        },
         eq: (col: string, val: unknown) =>
           filtro('eq', col, val, (r) => r[col] === val),
         neq: (col: string, val: unknown) =>
@@ -362,8 +394,12 @@ export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
       };
       return api;
     },
-    rpc: (nombre: string, args: Row) =>
-      Promise.resolve(rpcPartes(db, nombre, args)),
+    rpc: (nombre: string, args: Row) => {
+      rpcs.push({ nombre, args });
+      return Promise.resolve(
+        opts.rpc?.(nombre, args, db) ?? rpcPartes(db, nombre, args),
+      );
+    },
     storage: {
       from(bucket: string) {
         return {
@@ -383,6 +419,7 @@ export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
   return {
     supabase: { service } as unknown as SupabaseService,
     log,
+    rpcs,
     storage,
   };
 }

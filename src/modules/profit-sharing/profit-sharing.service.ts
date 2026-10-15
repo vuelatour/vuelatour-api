@@ -152,6 +152,10 @@ import { facturasDeVuelos } from '../flights/factura-cliente-etiquetas';
 import { itemPrecierreLigasUsdTc } from './ligas-usd-tc-precierre.util';
 import type { ResultadoLigasUsdTc } from '../conciliacion/ligas-usd-tc.util';
 import {
+  textoOmitidosPreCierre,
+  type OmitidosPeriodo,
+} from '../conciliacion/omision.util';
+import {
   CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
   DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
   DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA_FALLIDA,
@@ -3167,6 +3171,10 @@ export class ProfitSharingService {
     // promesa ARRANCA aquí (en paralelo con cobros sin banco) y se espera al
     // armar los items: no suma latencia. Nunca lanza (null = sin verificar).
     const ligasUsdTcPromesa = this.ligasUsdTcPrecierre(q.desde, q.hasta);
+    // MOVIMIENTOS OMITIDOS DE LA CONCILIACIÓN (14-oct-2026, invariante 75):
+    // renglón INFORMATIVO; arranca en paralelo y nunca lanza (null = no se
+    // pudo leer ⇒ lectura_fallida).
+    const omitidosPromesa = this.omitidosPrecierre(q.desde, q.hasta);
     let cobrosSinBanco: Awaited<
       ReturnType<ConciliacionService['cobrosSinBanco']>
     > | null = null;
@@ -3573,6 +3581,10 @@ export class ProfitSharingService {
         count: movs.length,
         monto: round2(movs.reduce((acc, m) => acc + Number(m.monto), 0)),
       },
+      // OMITIDOS (14-oct-2026, invariante 75): INFORMATIVO, fuera de
+      // `bloqueantes`. Los omitidos ya no cuentan en «sin conciliar»: aquí
+      // se ve cuántos se marcaron «no se concilia» con su motivo.
+      renglonOmitidosPreCierre(await omitidosPromesa),
     ];
 
     // Lo único que BLOQUEA números: vuelos sin completar, tacos amarillos,
@@ -3609,6 +3621,28 @@ export class ProfitSharingService {
    * (`ligasUsdTcFueraDeLugar`). Un stub viejo sin el método, un null o una
    * excepción ⇒ null (el renglón sale «sin verificar»); nunca lanza.
    */
+  /**
+   * Pre-cierre · MOVIMIENTOS OMITIDOS (14-oct-2026, invariante 75): lo lee
+   * `ConciliacionService.omitidosDelPeriodo` (nunca lanza). Sin el método
+   * (stub de un spec) o con error ⇒ null ⇒ `lectura_fallida`.
+   */
+  private async omitidosPrecierre(
+    desde: string,
+    hasta: string,
+  ): Promise<OmitidosPeriodo | null> {
+    const conciliacion = this
+      .conciliacion as Partial<ConciliacionService> | null;
+    if (typeof conciliacion?.omitidosDelPeriodo !== 'function') return null;
+    try {
+      return await conciliacion.omitidosDelPeriodo(desde, hasta);
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: omitidos de la conciliación no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
   private async ligasUsdTcPrecierre(
     desde: string,
     hasta: string,
@@ -4291,4 +4325,30 @@ function cobrosNecesitanTc(cobros: CobroRow[], tcVuelo: unknown): boolean {
     (c) =>
       c.moneda === 'MXN' && pos(c.tc_usd_mxn) == null && Number(c.monto) > 0,
   );
+}
+
+/**
+ * Renglón INFORMATIVO `movimientos_omitidos` del pre-cierre (invariante 75):
+ * NO bloquea (no está en `bloqueantes`). null ⇒ count 0 + `lectura_fallida`.
+ */
+function renglonOmitidosPreCierre(r: OmitidosPeriodo | null): {
+  clave: string;
+  titulo: string;
+  detalle: string;
+  count: number;
+  monto_mxn: number;
+  monto_usd: number;
+  informativo: true;
+  lectura_fallida?: true;
+} {
+  return {
+    clave: 'movimientos_omitidos',
+    titulo: 'Movimientos del banco omitidos de la conciliación',
+    detalle: textoOmitidosPreCierre(r),
+    count: r?.count ?? 0,
+    monto_mxn: r?.monto_mxn ?? 0,
+    monto_usd: r?.monto_usd ?? 0,
+    informativo: true,
+    ...(r ? {} : { lectura_fallida: true as const }),
+  };
 }

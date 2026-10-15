@@ -3,8 +3,14 @@ import { Transform, Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import { descripcionCategoriasGasto } from '../../../common/categoria-gasto.util';
 import {
+  CARGOS_A_GASTO_MAX,
+  CARGOS_A_GASTO_MIN,
+  MENSAJE_LOTE_CARGOS_INVALIDO,
+} from '../../conciliacion/cargos-a-gasto.util';
+import {
   ArrayMaxSize,
   ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -488,6 +494,27 @@ export class CreateGastoDto {
   @IsOptional()
   @IsUUID()
   client_request_id?: string;
+
+  /**
+   * VARIOS CARGOS → UN GASTO, «Créalo por la suma» (14-oct-2026, API 0.0.77,
+   * invariante 76): el gasto nace YA vinculado a estos cargos del banco (2..50)
+   * o no se registra. Solo ADMIN y FACTURACION (403 a los demás); exige
+   * `client_request_id`; solo al CREAR (un PATCH con la llave ⇒ 400).
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    description: `Cargos del banco (${CARGOS_A_GASTO_MIN}..${CARGOS_A_GASTO_MAX}, uuid, sin repetir) que paga este gasto: el alta los vincula en la MISMA petición (todo o nada, sin auto-cruce). Exige client_request_id. Solo ADMIN/FACTURACION y solo al crear.`,
+  })
+  @IsOptional()
+  @IsArray({ message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayMinSize(CARGOS_A_GASTO_MIN, { message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayMaxSize(CARGOS_A_GASTO_MAX, { message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @ArrayUnique({ message: MENSAJE_LOTE_CARGOS_INVALIDO })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Algún cargo de la selección no es válido: recarga la página.',
+  })
+  conciliar_con_movimientos?: string[];
 
   @ApiPropertyOptional({
     description:

@@ -47,6 +47,7 @@ import {
   puedeVerDetalleBanco,
   ROLES_CONCILIACION,
 } from '../conciliacion/roles-conciliacion';
+import { MENSAJE_CONCILIAR_SOLO_ADMIN_FACTURACION } from '../conciliacion/cargos-a-gasto.util';
 
 @ApiTags('Expenses')
 @ApiBearerAuth()
@@ -172,6 +173,17 @@ export class ExpensesController {
       // OFICINA — se ignora, jamás un 400 por un campo que la app no ve.
       delete dto.tua_incluida;
       this.assertFotoPropia(dto.foto_url, c.authId);
+    }
+    // VARIOS CARGOS → UN GASTO (14-oct-2026, invariante 76): vincular con el
+    // banco es de quien concilia (ADMIN, FACTURACION), antes del servicio.
+    if (
+      dto.conciliar_con_movimientos !== undefined &&
+      !ROLES_CONCILIACION.includes(c.rol)
+    ) {
+      throw new ForbiddenException({
+        message: MENSAJE_CONCILIAR_SOLO_ADMIN_FACTURACION,
+        error: 'CONCILIAR_SOLO_ADMIN_FACTURACION',
+      });
     }
     return this.expenses.create(dto, c.userId, c.rol);
   }

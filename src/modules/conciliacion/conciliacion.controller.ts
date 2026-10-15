@@ -23,6 +23,7 @@ import {
   AutoMatchDto,
   AutoReversosDto,
   CandidatosCobroQuery,
+  CargosGastosCandidatosDto,
   ClasificarMovimientoDto,
   CobrosSinBancoQuery,
   ConciliacionParseDto,
@@ -30,13 +31,17 @@ import {
   EmparejarReversoDto,
   GastosCandidatosQuery,
   ImportarMovimientosDto,
+  LigarCargosAGastoDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
   LinkMovimientoIngresoDto,
   ListConciliacionQuery,
   loteInvalido,
+  OmitirMovimientosDto,
   PaywiseAuditoriaQuery,
+  QuitarOmisionDto,
   ReporteConciliacionQuery,
+  RevisarOmisionDto,
   SugerirAbonosDto,
   SugerirLoteDto,
 } from './dto/conciliacion.dto';
@@ -288,7 +293,62 @@ export class ConciliacionController {
       dto.clasificacion_id ?? null,
       dto.notas,
       c.userId,
+      // ENDURECIDO (14-oct-2026, invariante 75): lo que el panel VIO
+      // (`undefined` = un panel previo que no lo manda: conducta de siempre).
+      { esperado: dto.esperado_clasificacion_id, usuarioNombre: c.nombre },
     );
+  }
+
+  // ---- OMITIR LA CONCILIACIÓN (14-oct-2026, API 0.0.77, invariante 75) ----
+  // Rutas LITERALES bajo `movimientos/`: van ANTES de `movimientos/:id` y
+  // sus sub-rutas (convención). Roles de la CLASE (ROLES_CONCILIACION).
+
+  @Post('movimientos/omitir/revisar')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Revisa una selección antes de omitirla (SOLO LECTURA; funciona aun sin la migración 20261014000002): estado de cada movimiento (PENDIENTE o por qué no lo está) y, de los pendientes, si podría conciliarse de verdad (gasto o cobro que cuadra, traspaso, devolución o «sin verificar»).',
+  })
+  revisarOmision(@Body() dto: RevisarOmisionDto) {
+    return this.conciliacion.revisarOmision(dto.movimiento_ids);
+  }
+
+  @Post('movimientos/omitir')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Omite de la conciliación de 1 a 200 movimientos PENDIENTES con un motivo firmado (todo o nada): quedan conciliados con la clasificación «Omitido de la conciliación» y la línea del motivo al inicio de sus notas. Los que tienen aviso se confirman en `aceptar_riesgo_ids`. Se deshace con quitar-omision.',
+  })
+  omitirMovimientos(
+    @Body() dto: OmitirMovimientosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.omitirMovimientos(dto, c.userId, c.nombre);
+  }
+
+  @Post('movimientos/quitar-omision')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Deshace la omisión de 1 a 200 movimientos (todo o nada): vuelven a Pendiente y su nota pierde SOLO la línea de la omisión.',
+  })
+  quitarOmision(
+    @Body() dto: QuitarOmisionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.quitarOmision(dto.movimiento_ids, c.userId);
+  }
+
+  // ---- VARIOS CARGOS → UN GASTO (14-oct-2026, API 0.0.77, invariante 76) ----
+
+  @Post('cargos/gastos-candidatos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Gastos que podrían pagarse con la SUMA de 2 a 50 cargos pendientes de la misma moneda (SOLO LECTURA): bancarios sin conciliar en la ventana de las fechas de los cargos, ordenados por si la suma los cubre (CUBRE, PARCIAL, EXCEDE). La suma la calcula el API.',
+  })
+  gastosCandidatosDeCargos(@Body() dto: CargosGastosCandidatosDto) {
+    return this.conciliacion.gastosCandidatosDeCargos(dto);
   }
 
   @Get('estados-cuenta')
@@ -316,6 +376,26 @@ export class ConciliacionController {
   })
   conciliacionDeGasto(@Param('id', ParseUUIDPipe) id: string) {
     return this.conciliacion.conciliacionDeGasto(id);
+  }
+
+  // VARIOS CARGOS → UN GASTO (14-oct-2026, API 0.0.77, invariante 76): otro
+  // MÉTODO que `GET gastos/:id` (no chocan). Todo o nada, por la RPC.
+  @Post('gastos/:id/cargos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Vincula de 2 a 50 cargos pendientes a UN gasto bancario (todo o nada, por la RPC de la migración 20261014000002): la suma no puede pasar del gasto + $1.00; reenviar los mismos cargos es idempotente. `gasto.conciliado` lo recalcula la BD.',
+  })
+  ligarCargosAGasto(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LigarCargosAGastoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.ligarCargosAGasto(
+      id,
+      dto.movimiento_ids,
+      c.userId,
+    );
   }
 
   @Get('movimientos')
