@@ -183,6 +183,22 @@ export function netoSistema(cobro: CobroPaywise): number {
   return r2(num(cobro.monto) - comision);
 }
 
+/**
+ * La comisión REAL que el cruce escribe en el cobro de vuelo antes de ligar
+ * (0.0.78, invariante 77 D6: un cobro de la pasarela se concilia con UN
+ * abono = su neto ± $1.00): la del archivo (`comision_paywise`); sin ella y
+ * por criterio BRUTO (el abono es el bruto del cobro: la pasarela no
+ * retuvo lo provisionado; así vienen los abonos Paywise de prod, sin bruto
+ * ni comisión) = r2(bruto del cobro − abono), un centavo de ruido ⇒ 0. null
+ * = no hay nada que escribir (NETO exacto, YA_CONCILIADO o REFERENCIA).
+ */
+export function comisionRealDeCruce(cruce: CrucePaywise): number | null {
+  if (cruce.comision_paywise != null) return cruce.comision_paywise;
+  if (cruce.criterio !== 'BRUTO') return null;
+  const x = r2(num(cruce.cobro.monto) - num(cruce.movimiento.monto));
+  return Math.abs(x) <= 0.01 ? 0 : x;
+}
+
 /** Comisión según el archivo (directa o por diferencia bruto − neto). */
 export function comisionPaywise(mov: MovimientoPaywise): number | null {
   const directa = mov.comision_monto;

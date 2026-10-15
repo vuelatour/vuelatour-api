@@ -471,7 +471,7 @@ export class ConciliacionController {
   @Patch('movimientos/:id/cobro')
   @ApiOperation({
     summary:
-      'Vincula o desvincula un ABONO con un cobro de vuelo (cobro_id) O con el SOBRE de un grupo (cobro_grupo_id), excluyentes; ambos null = desvincular (también un lote). Una parte de sobre responde 409 COBRO_DE_GRUPO. 1 ABONO ↔ N COBROS (12-oct-2026, 0.0.71): `cobro_ids` (1..50) = los cobros de vuelo que paga este abono; con 2+ todos en la moneda de la cuenta y Σ netos = abono ± tolerancia (1 ¢ por cobro, 0.02–1.00). Respuesta ADITIVA: cobros_n y cobros_estado[{cobro_id, monto_parte, vuelo_id, folio, cliente, monto, neto}]. 409: ABONO_NO_CUADRA {monto_abono, suma_cobros, diferencia, tolerancia, cobros[]}, LOTE_MONEDA_DISTINTA, COBRO_YA_CONCILIADO, COBRO_DE_GRUPO, COBRO_DE_ANTICIPO, COBRO_INVALIDO, MOVIMIENTO_YA_LIGADO, MOVIMIENTO_CON_LOTE (cobro_id suelto sobre un lote), REVERSO_INVALIDO; 400 LOTE_INVALIDO, SOLO_ABONOS; 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración.',
+      'Vincula o desvincula un ABONO con un cobro de vuelo (cobro_id) O con el SOBRE de un grupo (cobro_grupo_id), excluyentes; ambos null = desvincular (también un lote). Una parte de sobre responde 409 COBRO_DE_GRUPO. 1 ABONO ↔ N COBROS (12-oct-2026, 0.0.71): `cobro_ids` (1..50) = los cobros de vuelo que paga este abono; con 2+ todos en la moneda de la cuenta y Σ de lo que le FALTA a cada uno (0.0.78) = abono ± tolerancia (1 ¢ por cobro, 0.02–1.00). UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): un abono MENOR que lo que le falta al cobro lo deja PARCIAL (sin bandera); `corregir_comision: true` (UN cobro de vuelo sin abonos) escribe antes la comisión real (monto − depósito). Respuesta ADITIVA (con la puente, SIEMPRE): la fila releída + cobros_n y cobros_estado[{cobro_id, monto_parte, vuelo_id, folio, cliente, monto, neto, cobro_estado, cobro_neto, cobro_monto_vinculado, cobro_faltante, cobro_abonos_n}]; al desvincular cobros_liberados[{cobro_id, folio, estado, faltante, abonos_n}]; con la corrección comision_corregida {cobro_id, antes, despues}. 409: ABONO_EXCEDE_COBRO {…, excedente, un_solo, sugeridos[≤ 3]}, COMISION_NO_CUADRA {…, comision_real, comision_real_pct, por, corregible}, COBRO_MONEDA_DISTINTA {motivo TC_FUERA_DE_BANDA | TC_LEJOS, tc_implicito, tc_referencia, desvio_pct}, COBRO_YA_CONCILIADO {motivo CUBIERTO | UN_SOLO_ABONO, por}, SOBRE_NO_CUADRA {monto_abono, neto_sobre, diferencia}, ABONO_NO_CUADRA {monto_abono, suma_cobros, diferencia, tolerancia, cobros[]}, LOTE_MONEDA_DISTINTA, COBRO_DE_GRUPO, COBRO_DE_ANTICIPO, COBRO_INVALIDO, MOVIMIENTO_YA_LIGADO, MOVIMIENTO_CON_LOTE (cobro_id suelto sobre un lote), MOVIMIENTO_OMITIDO, REVERSO_INVALIDO; 400 LOTE_INVALIDO, SOLO_ABONOS, CORREGIR_COMISION_NO_APLICA {motivo VARIOS_COBROS | SOBRE | CON_ABONOS | DEPOSITO_MAYOR | SIN_COBRO | MONEDA_DISTINTA | DEPOSITO_INVALIDO}; 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración de 0.0.71, CONCILIACION_COBROS_PARCIALES_NO_DISPONIBLE (el 2.º abono de un cobro parcial sin 20261014000003) y CUENTA_SIN_MONEDA.',
   })
   linkCobro(
     @Param('id', ParseUUIDPipe) id: string,
@@ -484,6 +484,8 @@ export class ConciliacionController {
         cobro_id: dto.cobro_id ?? null,
         cobro_grupo_id: dto.cobro_grupo_id ?? null,
         ...(Array.isArray(dto.cobro_ids) ? { cobro_ids: dto.cobro_ids } : {}),
+        // 0.0.78 (invariante 77): solo viaja cuando es true.
+        ...(dto.corregir_comision === true ? { corregir_comision: true } : {}),
       },
       c.userId,
     );
@@ -552,7 +554,7 @@ export class ConciliacionController {
   @Get('movimientos/:id/candidatos-cobro')
   @ApiOperation({
     summary:
-      'Candidatos para conciliar un ABONO a mano: cobros de vuelo (COBRO_VUELO) y sobres de grupo (SOBRE_GRUPO) de la moneda de la cuenta, métodos bancarios, sin conciliar con otro movimiento, ordenados por cercanía del NETO al monto. Las partes de un sobre nunca se ofrecen.',
+      'Candidatos para conciliar un ABONO a mano: cobros de vuelo (COBRO_VUELO) y sobres de grupo (SOBRE_GRUPO) de la moneda de la cuenta, métodos bancarios, sin conciliar con otro movimiento, ordenados por cercanía del NETO al monto. Las partes de un sobre nunca se ofrecen. UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): con la migración 20261014000003 un cobro PARCIAL sigue siendo candidato (parcial, monto_vinculado, faltante, abonos_n, abonos[] y dif_monto contra lo que le falta; un abono de la PASARELA no recibe parciales); cada candidato trae al_vincular (cobro: {estado CONCILIADO | PARCIAL | EXCEDE | COMISION_NO_CUADRA | YA_CUBIERTO | UN_SOLO_ABONO | MONEDA_DISTINTA, faltante_antes, faltante_despues, sobrante, comision_real, tc_implicito, tc_referencia, desvio_pct, motivo, un_solo, sugeridos[≤ 3] en EXCEDE}; sobre: {estado CONCILIADO | SOBRE_NO_CUADRA, diferencia}); un sugerido que no entró en los 60 va al final. movimiento + cobros_parciales, tipo_cuenta y corregir_comision (capacidades).',
   })
   candidatosCobro(
     @Param('id', ParseUUIDPipe) id: string,

@@ -11,11 +11,23 @@
  * nada cuando se puede responder antes, y la traducción de sus códigos.
  */
 import {
+  alVincularAbono,
+  coberturaCobro,
+  cubreCobro,
+  EPSILON_COBRO_BANCO,
+  faltanteFueraDe,
   netoDeCobro,
+  ordenarPartesPorAntiguedad,
+  TC_COBRO_MAX,
+  TC_COBRO_MIN,
   TOLERANCIA_COBRO_BANCO,
+  type AlVincular,
+  type CobroParaCobertura,
+  type ParteCobroBanco,
 } from '../../common/cobro-banco.util';
 import type { MovimientoLiga } from '../../common/cobro-conciliado.util';
 import { etiquetaMetodoCobro } from '../../common/metodo-cobro.util';
+import { normalizarTc } from '../../common/tc.util';
 import { fechaCortaEs, toleranciaLote } from './conciliacion-parcial.util';
 import { mensajeMovimientoOmitido } from './omision.util';
 
@@ -81,41 +93,82 @@ export interface CobroParaLote {
   folio?: number | null;
   cobro_grupo_id?: unknown;
   ingreso_anticipo_id?: unknown;
+  /**
+   * ADITIVOS (0.0.78, invariante 77): el T.C. del cobro y el del vuelo (la
+   * referencia del ±2 % de un abono en OTRA moneda) y las partes de los
+   * OTROS abonos del cobro (SIN las de este abono; ausente = sin otras).
+   */
+  tc_usd_mxn?: number | string | null;
+  tc_vuelo?: number | string | null;
+  otras?: ReadonlyArray<ParteCobroBanco>;
 }
+
+/** Códigos con los que `puedeLigarCobros` rechaza (los de la BD, mismo `details`). */
+export type CodigoRechazoLoteCobros = Extract<
+  CodigoErrorCobros,
+  | 'LOTE_INVALIDO'
+  | 'COBRO_INVALIDO'
+  | 'COBRO_DE_GRUPO'
+  | 'COBRO_DE_ANTICIPO'
+  | 'LOTE_MONEDA_DISTINTA'
+  | 'ABONO_NO_CUADRA'
+  | 'ABONO_EXCEDE_COBRO'
+  | 'COMISION_NO_CUADRA'
+  | 'COBRO_MONEDA_DISTINTA'
+  | 'COBRO_YA_CONCILIADO'
+>;
 
 export type VeredictoLoteCobros =
   | {
       ok: true;
-      /** Partes que escribiría la RPC (en el orden pedido). */
-      partes: Array<{ cobro_id: string; monto_parte: number }>;
+      /**
+       * Partes que escribiría la RPC (en el orden pedido) y lo que le
+       * faltaba a cada cobro FUERA de este abono (invariante 77).
+       */
+      partes: Array<{
+        cobro_id: string;
+        monto_parte: number;
+        faltante: number;
+      }>;
+      /** Σ de lo que les faltaba a los cobros (sin otros abonos = Σ netos). */
       suma: number;
       diferencia: number;
       tolerancia: number;
+      /** Solo con UN cobro: el veredicto del espejo del trigger A (PARCIAL o CONCILIADO). */
+      al_vincular?: AlVincular;
     }
   | {
       ok: false;
-      codigo: Extract<
-        CodigoErrorCobros,
-        | 'LOTE_INVALIDO'
-        | 'COBRO_INVALIDO'
-        | 'COBRO_DE_GRUPO'
-        | 'COBRO_DE_ANTICIPO'
-        | 'LOTE_MONEDA_DISTINTA'
-        | 'ABONO_NO_CUADRA'
-      >;
+      codigo: CodigoRechazoLoteCobros;
       mensaje: string;
       details: Record<string, unknown>;
     };
 
 /**
- * ESPEJO de la RPC G: con UN cobro, parte = |abono| y sin cuadre (regla de
- * siempre); con N ≥ 2, todos en la moneda de la cuenta, parte = NETO y
- * |Σ − |abono|| ≤ tolerancia_lote(N). Devuelve el primer rechazo, con el
- * MISMO código y `details` que lanzaría la BD.
+ * ESPEJO de la RPC G + el trigger A (20261014000003, invariante 77), con el
+ * MISMO código y `details` que lanzaría la BD (el primer rechazo):
+ * - cada cobro: reembolso (COBRO_INVALIDO), parte de sobre (COBRO_DE_GRUPO),
+ *   de anticipo (COBRO_DE_ANTICIPO) y, en un lote, otra moneda
+ *   (LOTE_MONEDA_DISTINTA);
+ * - UN cobro ⇒ `alVincularAbono` (parte = |abono|): de más
+ *   (ABONO_EXCEDE_COBRO), comisión o pasarela que no cuadra con el neto
+ *   (COMISION_NO_CUADRA), otra moneda fuera de la banda 15–25 o a más de
+ *   `toleranciaTcPct` del T.C. del cobro/vuelo (COBRO_MONEDA_DISTINTA), ya
+ *   cubierto o «de un solo abono» con otro (COBRO_YA_CONCILIADO
+ *   CUBIERTO | UN_SOLO_ABONO); un abono MENOR deja el cobro PARCIAL (ok);
+ * - N ≥ 2 (lote) ⇒ cubierto o «de un solo abono» con otros ⇒
+ *   COBRO_YA_CONCILIADO; parte = lo que le FALTA a cada cobro fuera de este
+ *   abono y |Σ − |abono|| ≤ tolerancia_lote(N) (ABONO_NO_CUADRA con
+ *   `cobros[i]` {neto, suma_otras, abonos_otros, faltante, parte}).
+ * `toleranciaTcPct` ausente ⇒ solo la banda (como la BD).
  */
 export function puedeLigarCobros(input: {
   montoAbono: number | string;
   monedaCuenta: string | null;
+  /** Tipo de la cuenta del abono (BANCO | PASARELA): la pasarela concilia UN abono = neto. */
+  tipoCuenta?: string | null;
+  /** ±% del T.C. de referencia para un abono en otra moneda (`TOLERANCIA_TC_OFICIAL_PCT`). */
+  toleranciaTcPct?: number | null;
   cobros: ReadonlyArray<CobroParaLote>;
 }): VeredictoLoteCobros {
   const monto = r2(Math.abs(Number(input.montoAbono) || 0));
@@ -134,8 +187,7 @@ export function puedeLigarCobros(input: {
   }
   const folioDe = (c: CobroParaLote) =>
     c.folio == null ? '?' : String(c.folio);
-  let suma = 0;
-  const partes: Array<{ cobro_id: string; monto_parte: number }> = [];
+  // (1) Candados de cada cobro (los de G, en el orden pedido).
   for (const c of cobros) {
     const m = Number(c.monto) || 0;
     if (m <= 0) {
@@ -188,13 +240,52 @@ export function puedeLigarCobros(input: {
         },
       };
     }
-    const neto = netoDeCobro(c.monto, c.comision_banco_monto);
-    suma = r2(suma + neto);
-    partes.push({ cobro_id: c.id, monto_parte: n === 1 ? monto : neto });
   }
-  const tolerancia = n >= 2 ? toleranciaLote(n) : 0;
+  const pasarela = input.tipoCuenta === 'PASARELA';
+  if (n === 1) {
+    return veredictoUnCobro(cobros[0], {
+      monto,
+      monedaCuenta: input.monedaCuenta,
+      pasarela,
+      toleranciaTcPct: input.toleranciaTcPct ?? Number.POSITIVE_INFINITY,
+    });
+  }
+  // (2) LOTE: cada cobro entra por lo que le FALTA fuera de este abono.
+  let suma = 0;
+  const partes: Array<{
+    cobro_id: string;
+    monto_parte: number;
+    faltante: number;
+  }> = [];
+  const detalle: Array<Record<string, unknown>> = [];
+  for (const c of cobros) {
+    const otras = c.otras ?? [];
+    const cob = coberturaCobro(c, otras);
+    if (otras.length > 0) {
+      const rechazo = rechazoPorOtrosAbonos(c, otras, {
+        cruzada: input.monedaCuenta != null && c.moneda !== input.monedaCuenta,
+        pasarela,
+      });
+      if (rechazo) return rechazo;
+    }
+    const faltante =
+      otras.length === 0 ? cob.neto : Math.max(r2(cob.neto - cob.suma), 0);
+    suma = r2(suma + faltante);
+    partes.push({ cobro_id: c.id, monto_parte: faltante, faltante });
+    detalle.push({
+      id: c.id,
+      folio: c.folio ?? null,
+      monto: r2(Number(c.monto) || 0),
+      neto: cob.neto,
+      suma_otras: cob.suma,
+      abonos_otros: otras.length,
+      faltante,
+      parte: faltante,
+    });
+  }
+  const tolerancia = toleranciaLote(n);
   const diferencia = r2(monto - suma);
-  if (n >= 2 && Math.abs(diferencia) > tolerancia + 0.000001) {
+  if (Math.abs(diferencia) > tolerancia + EPSILON_COBRO_BANCO) {
     return {
       ok: false,
       codigo: 'ABONO_NO_CUADRA',
@@ -205,6 +296,7 @@ export function puedeLigarCobros(input: {
         diferencia,
         tolerancia,
         moneda: input.monedaCuenta,
+        porFaltante: detalle.some((d) => Number(d.abonos_otros) > 0),
       }),
       details: {
         monto_abono: monto,
@@ -212,16 +304,386 @@ export function puedeLigarCobros(input: {
         diferencia,
         tolerancia,
         moneda: input.monedaCuenta,
-        cobros: cobros.map((c) => ({
-          id: c.id,
-          folio: c.folio ?? null,
-          monto: r2(Number(c.monto) || 0),
-          neto: netoDeCobro(c.monto, c.comision_banco_monto),
-        })),
+        cobros: detalle,
       },
     };
   }
   return { ok: true, partes, suma, diferencia, tolerancia };
+}
+
+/**
+ * `details` del COBRO_YA_CONCILIADO de la BD (A y G: neto, suma_ligada,
+ * abonos_otros, movimiento_ids por antigüedad y `movimiento_id` = el más
+ * antiguo, compatible) + `moneda` y `abonos_detalle` para el texto.
+ */
+function detallesOtrosAbonos(
+  c: CobroParaLote,
+  otras: ReadonlyArray<ParteCobroBanco>,
+): Record<string, unknown> {
+  const cob = coberturaCobro(c, otras);
+  const movs = cob.movimiento_ids;
+  return {
+    cobro_id: c.id,
+    folio: c.folio ?? null,
+    neto: cob.neto,
+    suma_ligada: cob.suma,
+    abonos_otros: otras.length,
+    movimiento_ids: movs,
+    movimiento_id: movs[0] ?? null,
+    moneda: c.moneda,
+    abonos_detalle: abonosCortos(otras),
+  };
+}
+
+/** Partes de otros abonos en corto (fecha y monto) para el texto del 409. */
+function abonosCortos(
+  partes: ReadonlyArray<ParteCobroBanco>,
+): Array<{ movimiento_id: string; fecha: string | null; monto_parte: number }> {
+  return ordenarPartesPorAntiguedad(partes).map((p) => ({
+    movimiento_id: p.movimiento_id,
+    fecha: p.fecha,
+    monto_parte: p.monto_parte,
+  }));
+}
+
+/**
+ * COBRO_YA_CONCILIADO por los OTROS abonos del cobro (el bloque «con
+ * otras» de A y G): cubierto o con uno en otra moneda ⇒ CUBIERTO; «de un
+ * solo abono» (comisión, abono de pasarela o en otra moneda, otro abono de
+ * la pasarela) ⇒ UN_SOLO_ABONO con `por`. null = puede recibir este abono.
+ * `details` = el de la BD + `moneda` y `abonos_detalle` (fechas y montos,
+ * para el texto; la BD solo manda ids).
+ */
+function rechazoPorOtrosAbonos(
+  c: CobroParaLote,
+  otras: ReadonlyArray<ParteCobroBanco>,
+  abono: { cruzada: boolean; pasarela: boolean },
+): Extract<VeredictoLoteCobros, { ok: false }> | null {
+  const cob = coberturaCobro(c, otras);
+  const comun = detallesOtrosAbonos(c, otras);
+  if (cob.cruzado || cubreCobro(cob.neto, otras.length, false, cob.suma)) {
+    const details = { ...comun, motivo: 'CUBIERTO' };
+    return {
+      ok: false,
+      codigo: 'COBRO_YA_CONCILIADO',
+      mensaje: mensajeErrorCobros('COBRO_YA_CONCILIADO', details, ''),
+      details,
+    };
+  }
+  const comision = (Number(c.comision_banco_monto) || 0) > 0;
+  if (comision || abono.pasarela || abono.cruzada || cob.pasarela) {
+    const por = abono.cruzada
+      ? 'MONEDA_DISTINTA'
+      : abono.pasarela || cob.pasarela
+        ? 'PASARELA'
+        : 'COMISION';
+    const details = { ...comun, motivo: 'UN_SOLO_ABONO', por };
+    return {
+      ok: false,
+      codigo: 'COBRO_YA_CONCILIADO',
+      mensaje: mensajeErrorCobros('COBRO_YA_CONCILIADO', details, ''),
+      details,
+    };
+  }
+  return null;
+}
+
+/**
+ * UN cobro: el espejo del trigger A (`alVincularAbono`) traducido a los
+ * códigos y `details` de la BD. PARCIAL o CONCILIADO ⇒ ok con parte =
+ * |abono| (el panel confirma el parcial; la BD no exige bandera, D3).
+ */
+function veredictoUnCobro(
+  c: CobroParaLote,
+  abono: {
+    monto: number;
+    monedaCuenta: string | null;
+    pasarela: boolean;
+    toleranciaTcPct: number;
+  },
+): VeredictoLoteCobros {
+  const otras = c.otras ?? [];
+  const al = alVincularAbono({
+    cobro: c,
+    tcVuelo: normalizarTc(c.tc_vuelo ?? null),
+    otras,
+    abono: {
+      monto: abono.monto,
+      moneda_cuenta: abono.monedaCuenta,
+      pasarela: abono.pasarela,
+    },
+    toleranciaTcPct: abono.toleranciaTcPct,
+  });
+  const cob = coberturaCobro(c, otras);
+  const montoCobro = r2(Number(c.monto) || 0);
+  const folio = c.folio ?? null;
+  const rechazo = (
+    codigo: CodigoRechazoLoteCobros,
+    details: Record<string, unknown>,
+  ): VeredictoLoteCobros => ({
+    ok: false,
+    codigo,
+    mensaje: mensajeErrorCobros(codigo, details, ''),
+    details,
+  });
+  switch (al.estado) {
+    case 'YA_CUBIERTO':
+      return rechazo('COBRO_YA_CONCILIADO', {
+        ...detallesOtrosAbonos(c, otras),
+        motivo: 'CUBIERTO',
+      });
+    case 'UN_SOLO_ABONO':
+      return rechazo('COBRO_YA_CONCILIADO', {
+        ...detallesOtrosAbonos(c, otras),
+        motivo: 'UN_SOLO_ABONO',
+        por: al.motivo,
+      });
+    case 'MONEDA_DISTINTA':
+      return rechazo('COBRO_MONEDA_DISTINTA', {
+        cobro_id: c.id,
+        folio,
+        motivo: al.motivo,
+        moneda_cobro: c.moneda,
+        moneda_cuenta: abono.monedaCuenta,
+        neto: cob.neto,
+        parte: abono.monto,
+        tc_implicito: al.tc_implicito,
+        tc_referencia: al.tc_referencia,
+        desvio_pct: al.desvio_pct,
+        tc_min: TC_COBRO_MIN,
+        tc_max: TC_COBRO_MAX,
+        tc_referencia_origen:
+          al.tc_referencia == null
+            ? null
+            : normalizarTc(c.tc_usd_mxn ?? null) != null
+              ? 'COBRO'
+              : 'VUELO',
+      });
+    case 'EXCEDE':
+      return rechazo('ABONO_EXCEDE_COBRO', {
+        cobro_id: c.id,
+        folio,
+        moneda: c.moneda,
+        monto_cobro: montoCobro,
+        neto: cob.neto,
+        suma_otras: cob.suma,
+        abonos_otros: otras.length,
+        parte: abono.monto,
+        faltante: al.faltante_antes,
+        excedente: al.sobrante,
+        un_solo: al.un_solo,
+      });
+    case 'COMISION_NO_CUADRA': {
+      const comisionReal = al.comision_real ?? 0;
+      const corregir = comisionRealParaCorregir(montoCobro, abono.monto);
+      return rechazo('COMISION_NO_CUADRA', {
+        cobro_id: c.id,
+        folio,
+        moneda: c.moneda,
+        monto_cobro: montoCobro,
+        comision_capturada: r2(
+          (Number(c.comision_banco_monto) || 0) > 0
+            ? Number(c.comision_banco_monto)
+            : 0,
+        ),
+        neto: cob.neto,
+        parte: abono.monto,
+        comision_real: comisionReal,
+        comision_real_pct:
+          montoCobro > 0 ? r2((comisionReal / montoCobro) * 100) : null,
+        por: al.motivo,
+        corregible: otras.length === 0 && corregir.valida,
+      });
+    }
+    case 'PARCIAL':
+    case 'CONCILIADO':
+      break;
+  }
+  return {
+    ok: true,
+    partes: [
+      {
+        cobro_id: c.id,
+        monto_parte: abono.monto,
+        faltante: al.faltante_antes,
+      },
+    ],
+    suma: al.faltante_antes,
+    diferencia: r2(abono.monto - al.faltante_antes),
+    tolerancia: 0,
+    al_vincular: al,
+  };
+}
+
+/** Por qué no aplica «Corregir la comisión y vincular» (400 CORREGIR_COMISION_NO_APLICA). */
+export type MotivoCorregirComisionNoAplica =
+  | 'VARIOS_COBROS'
+  | 'SOBRE'
+  | 'CON_ABONOS'
+  | 'DEPOSITO_MAYOR'
+  | 'SIN_COBRO'
+  | 'MONEDA_DISTINTA'
+  | 'DEPOSITO_INVALIDO';
+
+/**
+ * La comisión REAL que «Corregir la comisión y vincular» escribiría:
+ * r2(monto − |abono|), un centavo de ruido ⇒ 0. Vale si 0 ≤ comisión <
+ * monto; un depósito MAYOR que el cobro ⇒ DEPOSITO_MAYOR (eso es un abono
+ * de más, no una comisión); un depósito en 0 ⇒ DEPOSITO_INVALIDO.
+ */
+export function comisionRealParaCorregir(
+  montoCobro: number | string,
+  montoAbono: number | string,
+): {
+  valida: boolean;
+  comision: number;
+  motivo: MotivoCorregirComisionNoAplica | null;
+} {
+  const monto = r2(Number(montoCobro) || 0);
+  let x = r2(monto - r2(Math.abs(Number(montoAbono) || 0)));
+  if (Math.abs(x) <= 0.01) x = 0;
+  if (x < 0) return { valida: false, comision: x, motivo: 'DEPOSITO_MAYOR' };
+  if (!(x < monto)) {
+    return { valida: false, comision: x, motivo: 'DEPOSITO_INVALIDO' };
+  }
+  return { valida: true, comision: x, motivo: null };
+}
+
+/** Texto es-MX del 400 CORREGIR_COMISION_NO_APLICA. */
+export function mensajeCorregirComisionNoAplica(
+  motivo: MotivoCorregirComisionNoAplica,
+): string {
+  const base =
+    'La comisión solo se corrige al vincular UN cobro de vuelo que todavía no tiene abonos, cuando el depósito es menor o igual que el cobro.';
+  if (motivo === 'MONEDA_DISTINTA') {
+    return `${base} El depósito está en otra moneda que el cobro: corrige el cobro en el vuelo.`;
+  }
+  return base;
+}
+
+/** Un cobro sugerido para completar un abono que EXCEDE a su cobro (D4). */
+export interface SugeridoCobro {
+  cobro_id: string;
+  vuelo_id: string | null;
+  folio: number | null;
+  cliente: string | null;
+  fecha_cobro: string | null;
+  monto: number;
+  moneda: string | null;
+  /** Lo que le falta FUERA de este abono (sin abonos = su neto). */
+  faltante: number;
+}
+
+/** Tope de sugeridos por 409 / candidato (D4). */
+export const SUGERIDOS_MAX = 3;
+/** ±centavos con los que un faltante «es» el excedente (D4). */
+export const TOLERANCIA_SUGERIDO = 0.02;
+
+/**
+ * Sugeridos de un ABONO_EXCEDE_COBRO (D4): del universo de «Vincular» (los
+ * cobros SIN cubrir de la cuenta, en su moneda, ±60 días: quien llama ya
+ * quitó los ocupados), los que les FALTA ≈ el excedente (±0.02), por
+ * cercanía de su fecha a la del abono (y fecha, id), sin `excluir`; ≤ 3.
+ */
+export function sugeridosParaExcedente(
+  universo: ReadonlyArray<SugeridoCobro>,
+  excedente: number,
+  fechaAbono: string | null,
+  excluir: Iterable<string> = [],
+): SugeridoCobro[] {
+  const exc = r2(Number(excedente) || 0);
+  if (!(exc > 0)) return [];
+  const fuera = new Set(excluir);
+  const ref = fechaAbono
+    ? Date.parse(`${fechaAbono.slice(0, 10)}T00:00:00Z`)
+    : NaN;
+  const dist = (s: SugeridoCobro): number => {
+    const t = s.fecha_cobro ? Date.parse(s.fecha_cobro) : NaN;
+    return Number.isFinite(t) && Number.isFinite(ref)
+      ? Math.abs(t - ref)
+      : Number.POSITIVE_INFINITY;
+  };
+  const vistos = new Set<string>();
+  return universo
+    .filter((s) => {
+      if (fuera.has(s.cobro_id) || vistos.has(s.cobro_id)) return false;
+      const f = r2(Number(s.faltante) || 0);
+      if (!(f > 0)) return false;
+      if (Math.abs(f - exc) > TOLERANCIA_SUGERIDO + EPSILON_COBRO_BANCO) {
+        return false;
+      }
+      vistos.add(s.cobro_id);
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        dist(a) - dist(b) ||
+        String(a.fecha_cobro ?? '').localeCompare(
+          String(b.fecha_cobro ?? ''),
+        ) ||
+        a.cobro_id.localeCompare(b.cobro_id),
+    )
+    .slice(0, SUGERIDOS_MAX);
+}
+
+/**
+ * ¿El cobro está OCUPADO para ESTE abono (no es candidato ni sugerido)? Sin
+ * la sonda de 20261014000003: con cualquier liga de OTRO abono (como el
+ * 0.0.77). Con ella: cubierto por los otros abonos o con uno en otra moneda;
+ * para un abono de la PASARELA, con cualquier otro abono (la pasarela no
+ * recibe parciales: un cobro de la pasarela es «de un solo abono»).
+ */
+export function cobroOcupadoParaAbono(
+  c: CobroParaCobertura,
+  partes: ReadonlyArray<ParteCobroBanco>,
+  movimientoId: string,
+  opts: { conParciales: boolean; pasarela: boolean },
+): boolean {
+  const f = faltanteFueraDe(c, partes, movimientoId);
+  if (f.n_otras === 0) return false;
+  if (!opts.conParciales) return true;
+  return f.cubierto_por_otras || f.cruzado_otras || opts.pasarela;
+}
+
+/** Lo que el API decide al vincular un abono con un SOBRE de grupo (D8). */
+export interface AlVincularSobre {
+  estado: 'CONCILIADO' | 'SOBRE_NO_CUADRA';
+  /** |abono| − neto del sobre (> 0: sobra; < 0: falta). */
+  diferencia: number;
+  neto: number;
+}
+
+/**
+ * Regla NUEVA del sobre (D8, solo en el API: el neto del sobre vive en
+ * `cobro_grupo`): abono de una cuenta BANCO en la moneda del sobre ⇒
+ * |abono| = neto del sobre (`netoDeCobro`) ± $1.00, o SOBRE_NO_CUADRA. Una
+ * cuenta PASARELA, otra moneda o la cuenta sin leer ⇒ como hoy (CONCILIADO).
+ */
+export function alVincularSobre(i: {
+  montoAbono: number | string;
+  monedaCuenta: string | null;
+  tipoCuenta: string | null;
+  sobre: { monto?: unknown; moneda?: unknown; comision_banco_monto?: unknown };
+}): AlVincularSobre {
+  const neto = netoDeCobro(
+    i.sobre.monto as number | string | null | undefined,
+    i.sobre.comision_banco_monto as number | string | null | undefined,
+  );
+  const abono = r2(Math.abs(Number(i.montoAbono) || 0));
+  const diferencia = r2(abono - neto);
+  const aplica =
+    i.tipoCuenta !== 'PASARELA' &&
+    i.monedaCuenta != null &&
+    i.monedaCuenta === i.sobre.moneda;
+  return {
+    estado:
+      aplica &&
+      Math.abs(diferencia) > TOLERANCIA_COBRO_BANCO + EPSILON_COBRO_BANCO
+        ? 'SOBRE_NO_CUADRA'
+        : 'CONCILIADO',
+    diferencia,
+    neto,
+  };
 }
 
 function dinero(n: number, moneda?: string | null): string {
@@ -240,7 +702,22 @@ export function mensajeAbonoNoCuadra(d: {
   diferencia: number;
   tolerancia: number;
   moneda?: string | null;
+  /**
+   * Algún cobro del lote ya tenía abonos (invariante 77): cada uno entra por
+   * lo que le FALTA y el texto lo dice; sin eso, el texto de siempre.
+   */
+  porFaltante?: boolean;
 }): string {
+  if (d.porFaltante === true) {
+    const sobran = d.diferencia > 0;
+    return (
+      `A los ${d.n} cobros les faltan ${dinero(d.suma, d.moneda)} (lo que le falta a cada uno) ` +
+      `y el abono es de ${dinero(d.monto_abono, d.moneda)}: ${sobran ? 'sobran' : 'faltan'} ` +
+      `${dinero(Math.abs(d.diferencia), d.moneda)} (se admite hasta ` +
+      `${dinero(d.tolerancia)} de diferencia por redondeos). ` +
+      'Revisa qué cobros paga este abono o corrige el monto o la comisión de alguno.'
+    );
+  }
   const faltan = d.diferencia > 0;
   return (
     `Los ${d.n} cobros suman ${dinero(d.suma, d.moneda)} y el abono es de ` +
@@ -408,23 +885,45 @@ export function mensajeComisionNoCuadra(d: {
   neto?: number | null;
   parte?: number | null;
   comision_real?: number | null;
+  /**
+   * `false` (0.0.78): «Corregir la comisión y vincular» no aplica (el cobro
+   * ya tiene abonos o el depósito rebasa el cobro) y el texto no la ofrece.
+   * Ausente = como siempre.
+   */
+  corregible?: boolean | null;
 }): string {
   const folio = textoDe(d.folio);
   const m = d.moneda ?? null;
   if (d.neto == null || d.parte == null || d.comision_real == null) {
     return `El depósito no cuadra con lo que espera el cobro del vuelo #${folio} después de la comisión: corrige la comisión del cobro antes de vincular.`;
   }
+  const capturadaTxt =
+    (d.comision_capturada ?? 0) > 0
+      ? ` después de la comisión registrada (${dinero(d.comision_capturada ?? 0)})`
+      : '';
+  if (d.monto_cobro != null && d.parte > d.monto_cobro + 0.01) {
+    // El banco depositó MÁS que el cobro (hasta $1.00): no hay comisión que
+    // corregir hacia arriba; la registrada sobra.
+    return (
+      `El cobro del vuelo #${folio} (${dinero(d.monto_cobro, m)}) espera un depósito de ` +
+      `${dinero(d.neto, m)}${capturadaTxt} y el banco depositó ${dinero(d.parte, m)}, más que el cobro: ` +
+      'revisa la comisión registrada (el cliente pudo pagarla aparte) y corrígela en el vuelo antes de vincular.'
+    );
+  }
+  if (d.corregible === false) {
+    return (
+      `El cobro del vuelo #${folio}${d.monto_cobro != null ? ` (${dinero(d.monto_cobro, m)})` : ''} espera un depósito de ` +
+      `${dinero(d.neto, m)}${capturadaTxt} y el banco depositó ${dinero(d.parte, m)}: ` +
+      `la comisión real fue ${dinero(d.comision_real, m)}. Corrige la comisión del cobro en el vuelo antes de vincular.`
+    );
+  }
   const pct =
     d.monto_cobro != null && d.monto_cobro > 0
       ? ` (${((d.comision_real / d.monto_cobro) * 100).toFixed(2)} %)`
       : '';
-  const capturada =
-    (d.comision_capturada ?? 0) > 0
-      ? ` después de la comisión registrada (${dinero(d.comision_capturada ?? 0)})`
-      : '';
   return (
     `El cobro del vuelo #${folio}${d.monto_cobro != null ? ` (${dinero(d.monto_cobro, m)})` : ''} espera un depósito de ` +
-    `${dinero(d.neto, m)}${capturada} y el banco depositó ${dinero(d.parte, m)}: ` +
+    `${dinero(d.neto, m)}${capturadaTxt} y el banco depositó ${dinero(d.parte, m)}: ` +
     `la comisión real fue ${dinero(d.comision_real, m)}${pct}. Corrige la comisión del cobro o usa ` +
     `«Corregir la comisión a ${dinero(d.comision_real)} y vincular».`
   );
@@ -531,12 +1030,78 @@ export function mensajeCobroMonedaDistinta(d: {
 }
 
 /**
- * 409 COBRO_CONCILIADO (trigger E, invariante 77): el dinero de un cobro con
- * abonos ligados no cambia. La BD solo lo lanza en una carrera (el API
- * decide antes con su candado y su propio texto).
+ * 409 COBRO_CONCILIADO (invariante 77): el dinero de un cobro con abonos
+ * ligados no cambia. Sin datos ⇒ el texto de la carrera con el trigger E de
+ * la BD; con los datos del candado del API (`flights.updateCobro` /
+ * `deleteCobro`):
+ * - vía SOBRE ⇒ «Desvincula el sobre primero» (el de siempre);
+ * - PARCIAL ⇒ «conciliado PARCIAL con el banco ($1,700.00 MXN de $3,400.00
+ *   MXN, abono del 15 sep)…»;
+ * - 2+ abonos ⇒ «conciliado con 2 abonos del banco (15 sep · $1,700.00 y
+ *   15 sep · $1,700.00)…»;
+ * - 1 abono ⇒ el de siempre.
  */
-export function mensajeCobroConciliado(): string {
-  return 'El cobro tiene abonos del banco vinculados: su monto, moneda, comisión, sobre o anticipo no cambian mientras esté conciliado; desvincúlalo en Conciliación primero.';
+export function mensajeCobroConciliado(d?: {
+  via?: 'DIRECTO' | 'SOBRE' | null;
+  parcial?: boolean | null;
+  abonos?: ReadonlyArray<{ fecha?: unknown; monto_parte?: unknown }>;
+  monto_vinculado?: number | null;
+  neto?: number | null;
+  moneda?: string | null;
+}): string {
+  if (!d) {
+    return 'El cobro tiene abonos del banco vinculados: su monto, moneda, comisión, sobre o anticipo no cambian mientras esté conciliado; desvincúlalo en Conciliación primero.';
+  }
+  if (d.via === 'SOBRE') {
+    return 'Este cobro es parte de un sobre de grupo conciliado con un movimiento bancario. Desvincula el sobre primero en Conciliación.';
+  }
+  const abonos = d.abonos ?? [];
+  const n = abonos.length;
+  const m = d.moneda ?? null;
+  if (d.parcial === true && d.monto_vinculado != null && d.neto != null) {
+    const fechas = abonos.map((a) => fechaCortaEs(textoONull(a.fecha)) ?? '?');
+    const cuales =
+      n <= 1
+        ? `abono del ${fechas[0] ?? '?'}`
+        : `abonos del ${fechas.slice(0, -1).join(', ')} y ${fechas[fechas.length - 1]}`;
+    return (
+      `Este cobro está conciliado PARCIAL con el banco (${dinero(d.monto_vinculado, m)} de ${dinero(d.neto, m)}, ${cuales}). ` +
+      'Para cambiar su monto, moneda, tipo de cambio o comisión, o para eliminarlo, primero desvincula ' +
+      `${n <= 1 ? 'ese abono' : 'esos abonos'} en Conciliación.`
+    );
+  }
+  if (n >= 2) {
+    return (
+      `Este cobro está conciliado con ${n} abonos del banco (${listaAbonos(abonos)}). ` +
+      'Para cambiar su dinero o eliminarlo, primero desvincula esos abonos en Conciliación.'
+    );
+  }
+  return 'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.';
+}
+
+/**
+ * 409 SOBRE_NO_CUADRA (D8, solo API): el abono de una cuenta de banco no es
+ * el neto del sobre del grupo (± $1.00).
+ */
+export function mensajeSobreNoCuadra(d: {
+  grupo_folio?: unknown;
+  monto_abono: number;
+  neto_sobre: number;
+  /** |abono| − neto del sobre. */
+  diferencia: number;
+  moneda?: string | null;
+  /** El sobre trae comisión bancaria capturada. */
+  con_comision?: boolean | null;
+}): string {
+  const m = d.moneda ?? null;
+  const g = `G-${textoDe(d.grupo_folio)}`;
+  const faltan = d.diferencia < 0;
+  return (
+    `El abono (${dinero(d.monto_abono, m)}) no cuadra con el sobre del grupo ${g} ` +
+    `(${dinero(d.neto_sobre, m)}${d.con_comision === true ? ' después de la comisión' : ''}): ` +
+    `${faltan ? 'faltan' : 'sobran'} ${dinero(Math.abs(d.diferencia), m)}. ` +
+    'Revisa que sea el depósito del grupo o corrige el sobre antes de vincular.'
+  );
 }
 
 /** Texto es-MX (sin uuid crudos) de cada código de la BD. */
@@ -556,6 +1121,16 @@ export function mensajeErrorCobros(
       const dif = num(details, 'diferencia');
       const tol = num(details, 'tolerancia');
       if (suma != null && monto != null && dif != null && tol != null) {
+        // 0.0.78 (invariante 77): algún cobro ya tenía abonos ⇒ cada uno
+        // entró por lo que le FALTA y el texto lo dice.
+        const porFaltante =
+          Array.isArray(details?.cobros) &&
+          details.cobros.some(
+            (c: unknown) =>
+              !!c &&
+              typeof c === 'object' &&
+              Number((c as { abonos_otros?: unknown }).abonos_otros) > 0,
+          );
         return mensajeAbonoNoCuadra({
           n: n || 2,
           suma,
@@ -563,6 +1138,7 @@ export function mensajeErrorCobros(
           diferencia: dif,
           tolerancia: tol,
           moneda: typeof details?.moneda === 'string' ? details.moneda : null,
+          porFaltante,
         });
       }
       return 'Los cobros elegidos no suman lo que depositó el banco: revisa qué cobros paga este abono.';
@@ -644,6 +1220,8 @@ export function mensajeErrorCobros(
         neto: num(details, 'neto'),
         parte: num(details, 'parte'),
         comision_real: num(details, 'comision_real'),
+        corregible:
+          typeof details?.corregible === 'boolean' ? details.corregible : null,
       });
     case 'COBRO_MONEDA_DISTINTA':
       return mensajeCobroMonedaDistinta({

@@ -144,6 +144,11 @@ import {
   partesDeLigas,
 } from '../conciliacion/ligas-cobro.lector';
 import {
+  leerErrorCobros,
+  mensajeCobroConciliado,
+} from '../conciliacion/cobros-lote.util';
+import {
+  cambiaDineroDelCobro,
   coberturaCobro,
   cobroCubiertoEnBanco,
   estadoBancoCobro,
@@ -462,6 +467,16 @@ export interface CobroConSobre extends CobroLike {
   sobrante?: number | null;
   abonos_banco?: AbonoBancoDeCobro[];
 }
+
+/**
+ * Lo que el candado de conciliación de un cobro lee: su liga (id y sobre) y
+ * su dinero (monto, moneda, comisión) para decir si está PARCIAL.
+ */
+type CobroConDineroConciliable = CobroConciliable & {
+  monto?: unknown;
+  moneda?: unknown;
+  comision_banco_monto?: unknown;
+};
 
 /** Un abono del banco ligado DIRECTO a un cobro (invariante 77). */
 export interface AbonoBancoDeCobro {
@@ -12624,8 +12639,24 @@ export class FlightsService {
    * sobreestimaría en silencio.
    */
   private async assertCobroSinConciliar(
-    cobro: CobroConciliable,
+    cobro: CobroConDineroConciliable,
   ): Promise<void> {
+    const conflicto = await this.conflictoCobroConciliado(cobro);
+    if (conflicto) throw conflicto;
+  }
+
+  /**
+   * El 409 `COBRO_CONCILIADO` del candado (UN COBRO, VARIOS ABONOS: 0.0.78,
+   * invariante 77, trigger E en la BD) o null si el cobro no tiene liga. El
+   * criterio es el de siempre —liga directa (uno o VARIOS abonos, también un
+   * PARCIAL) o la de su sobre— y ahora el 409 es ESTRUCTURADO: `details`
+   * {cobro_id, estado, movimientos_ligados[{movimiento_id, fecha,
+   * monto_parte, cuenta}], parcial, faltante} con el texto de cada caso
+   * (`mensajeCobroConciliado`: parcial, 2+ abonos, 1 abono o sobre).
+   */
+  private async conflictoCobroConciliado(
+    cobro: CobroConDineroConciliable,
+  ): Promise<ConflictException | null> {
     // Fuente única cobro-conciliado.util: liga directa (`cobro_id`) o, si
     // el cobro es parte de un sobre de grupo, la liga del sobre
     // (`cobro_grupo_id`) — el banco enlaza al sobre, nunca a la parte.
@@ -12637,13 +12668,99 @@ export class FlightsService {
       sobreIds: sobreId ? [sobreId] : [],
     });
     const mov = movimientoDeCobro(cobro, data);
-    if (mov) {
-      throw new ConflictException(
-        sobreId && typeof mov.cobro_grupo_id === 'string'
-          ? 'Este cobro es parte de un sobre de grupo conciliado con un movimiento bancario. Desvincula el sobre primero en Conciliación.'
-          : 'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
+    if (!mov) return null;
+    if (sobreId && typeof mov.cobro_grupo_id === 'string') {
+      const liga = mov as typeof mov & {
+        fecha?: unknown;
+        monto?: unknown;
+        cuenta?: { alias?: unknown } | { alias?: unknown }[] | null;
+      };
+      const cuenta = Array.isArray(liga.cuenta) ? liga.cuenta[0] : liga.cuenta;
+      return new ConflictException({
+        message: mensajeCobroConciliado({ via: 'SOBRE' }),
+        error: 'COBRO_CONCILIADO',
+        details: {
+          cobro_id: cobro.id,
+          estado: 'CONCILIADO' as EstadoBancoCobro,
+          via: 'SOBRE',
+          movimientos_ligados: [
+            {
+              movimiento_id: String(mov.id),
+              fecha: typeof liga.fecha === 'string' ? liga.fecha : null,
+              monto_parte:
+                Math.round(Math.abs(Number(liga.monto) || 0) * 100) / 100,
+              cuenta: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
+            },
+          ],
+          parcial: false,
+          faltante: 0,
+        },
+      });
+    }
+    const partes = partesDeLigas(data).get(cobro.id) ?? [];
+    const cob = coberturaCobro(cobro, partes);
+    const estado = estadoBancoCobro({
+      monto: cobro.monto as number | string | null | undefined,
+      metodo: null,
+      via: 'DIRECTO',
+      cobertura: cob,
+    });
+    const parcial = estado === 'PARCIAL';
+    return new ConflictException({
+      message: mensajeCobroConciliado({
+        via: 'DIRECTO',
+        parcial,
+        abonos: partes,
+        monto_vinculado: cob.monto_vinculado,
+        neto: cob.neto,
+        moneda: typeof cobro.moneda === 'string' ? cobro.moneda : null,
+      }),
+      error: 'COBRO_CONCILIADO',
+      details: {
+        cobro_id: cobro.id,
+        estado,
+        movimientos_ligados: partes.map((p) => ({
+          movimiento_id: p.movimiento_id,
+          fecha: p.fecha,
+          monto_parte: p.monto_parte,
+          cuenta: p.cuenta_alias,
+        })),
+        parcial,
+        faltante: cob.faltante,
+      },
+    });
+  }
+
+  /**
+   * Carrera con una liga nueva entre el candado y la escritura: el trigger
+   * E (23514 COBRO_CONCILIADO, 20261014000003) o la FK RESTRICT de la
+   * puente (23503/23001 al borrar) ⇒ el MISMO 409 del candado (se relee la
+   * liga); si la relectura no la ve o falla, el 409 genérico con los
+   * `details` de la BD. Nunca 500.
+   */
+  private async conflictoCobroConciliadoTrasCarrera(
+    cobro: CobroConDineroConciliable,
+    error: {
+      code?: string | null;
+      message?: string | null;
+      hint?: string | null;
+      details?: string | null;
+    },
+  ): Promise<ConflictException> {
+    try {
+      const conflicto = await this.conflictoCobroConciliado(cobro);
+      if (conflicto) return conflicto;
+    } catch (err) {
+      this.logger.warn(
+        `Cobro ${cobro.id}: no se pudo releer su liga tras la carrera (${err instanceof Error ? err.message : String(err)}).`,
       );
     }
+    const deBd = leerErrorCobros(error);
+    return new ConflictException({
+      message: mensajeCobroConciliado(),
+      error: 'COBRO_CONCILIADO',
+      details: deBd.details ?? { cobro_id: cobro.id },
+    });
   }
 
   /** Corrige un cobro capturado mal (oficina) y recalcula la bandera cobrado. */
@@ -12660,7 +12777,7 @@ export class FlightsService {
     const conIngresos = await ingresosDisponibles(this.supabase.service);
     const colsExistente: string = conIngresos
       ? 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, comision_banco_monto, ingreso_anticipo_id, cuenta_destino, tc_usd_mxn'
-      : 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn';
+      : 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn, comision_banco_monto';
     const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select(colsExistente)
@@ -12717,9 +12834,42 @@ export class FlightsService {
       };
     }
 
-    // Editar el DINERO de un cobro conciliado rompería el cuadre con el banco
-    // (la conciliación cruza por monto/neto y moneda). Referencia, fecha o
-    // notas sí se pueden corregir sin desvincular.
+    // CANDADO DE CONCILIACIÓN (UN COBRO, VARIOS ABONOS: 0.0.78, invariante
+    // 77; en la BD, el trigger E): con abonos del banco (uno o varios,
+    // también un PARCIAL) o su sobre ligado, el DINERO no cambia — rompería
+    // el cuadre con el banco (la conciliación cruza por monto/neto y
+    // moneda). Se decide con el valor NUEVO contra el VIGENTE
+    // (`cambiaDineroDelCobro`, patrón `cambiaDineroDelGasto`: el panel manda
+    // el formulario completo) ⇒ 409 COBRO_CONCILIADO estructurado. Mismo
+    // dinero reenviado ⇒ se CONGELA (sin esto, `monto` presente recalcularía
+    // la comisión desde el % guardado con 4 decimales y movería un centavo
+    // contra el trigger E). Referencia, fecha, cuenta, método y notas siguen
+    // su curso. Un reembolso nunca está ligado (lo frena el 400 de abajo).
+    if (
+      Number(existing.monto) >= 0 &&
+      (dto.monto !== undefined ||
+        dto.moneda !== undefined ||
+        dto.tc_usd_mxn !== undefined ||
+        dto.comision_banco_pct !== undefined ||
+        dto.comision_banco_monto !== undefined)
+    ) {
+      const conciliable = { ...existing, id: cobroId };
+      if (cambiaDineroDelCobro(dto, existing)) {
+        await this.assertCobroSinConciliar(conciliable);
+      } else if (await this.conflictoCobroConciliado(conciliable)) {
+        dto = {
+          ...dto,
+          monto: undefined,
+          moneda: undefined,
+          tc_usd_mxn: undefined,
+          comision_banco_pct: undefined,
+          comision_banco_monto: undefined,
+        };
+      }
+    }
+    // `tocaDinero` (de siempre): el aviso de transición del 0.0.77 y el
+    // reembolso (después de congelar, el dinero reenviado sin cambio ya no
+    // cuenta).
     const tocaDinero =
       dto.monto !== undefined ||
       dto.moneda !== undefined ||
@@ -12733,12 +12883,6 @@ export class FlightsService {
       throw new BadRequestException(
         'Este movimiento es un reembolso: no se corrige su dinero — elimínalo y recaptúralo con el monto correcto.',
       );
-    }
-    if (tocaDinero) {
-      await this.assertCobroSinConciliar({
-        id: cobroId,
-        cobro_grupo_id: existing.cobro_grupo_id,
-      });
     }
 
     const patch: Record<string, unknown> = { updated_by: userId };
@@ -12796,7 +12940,20 @@ export class FlightsService {
       .eq('id', cobroId)
       .select(COBRO_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Carrera con una liga nueva (trigger E de 20261014000003): el MISMO
+      // 409 del candado, nunca 500.
+      if (
+        error.code === '23514' &&
+        leerErrorCobros(error).codigo === 'COBRO_CONCILIADO'
+      ) {
+        throw await this.conflictoCobroConciliadoTrasCarrera(
+          { ...existing, id: cobroId },
+          error,
+        );
+      }
+      throw new Error(error.message);
+    }
     // Best-effort: la corrección del cobro YA quedó escrita — nunca 5xx por
     // la bandera (se autocorrige en la siguiente escritura/revisión).
     try {
@@ -12865,8 +13022,8 @@ export class FlightsService {
     // transición de la solicitud automática.
     const conIngresos = await ingresosDisponibles(this.supabase.service);
     const colsExistente: string = conIngresos
-      ? 'id, vuelo_id, cobro_grupo_id, monto, moneda, ingreso_anticipo_id, metodo_cobro, cuenta_destino, tc_usd_mxn'
-      : 'id, vuelo_id, cobro_grupo_id, monto, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn';
+      ? 'id, vuelo_id, cobro_grupo_id, monto, moneda, ingreso_anticipo_id, metodo_cobro, cuenta_destino, tc_usd_mxn, comision_banco_monto'
+      : 'id, vuelo_id, cobro_grupo_id, monto, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn, comision_banco_monto';
     const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select(colsExistente)
@@ -12880,16 +13037,24 @@ export class FlightsService {
     // completo o re-parte) — 409 COBRO_DE_GRUPO.
     await this.assertNoEsParteDeSobre(existing);
     // Mismo candado que expenses.remove: borrar un cobro conciliado dejaría
-    // el movimiento bancario cuadrado contra nada.
-    await this.assertCobroSinConciliar({
-      id: cobroId,
-      cobro_grupo_id: existing.cobro_grupo_id,
-    });
+    // el movimiento bancario cuadrado contra nada (409 COBRO_CONCILIADO
+    // estructurado desde el 0.0.78, también con un abono PARCIAL).
+    await this.assertCobroSinConciliar({ ...existing, id: cobroId });
     const { error } = await this.supabase.service
       .from('cobro_vuelo')
       .delete()
       .eq('id', cobroId);
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Carrera: un abono se ligó entre el candado y el DELETE ⇒ la FK
+      // RESTRICT de la puente (23503/23001) ⇒ el MISMO 409, nunca 500.
+      if (error.code === '23503' || error.code === '23001') {
+        throw await this.conflictoCobroConciliadoTrasCarrera(
+          { ...existing, id: cobroId },
+          error,
+        );
+      }
+      throw new Error(error.message);
+    }
     // Best-effort: el cobro YA se borró — nunca 5xx por la bandera (se
     // autocorrige en la siguiente escritura/revisión).
     try {

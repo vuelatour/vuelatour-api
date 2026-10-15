@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -53,15 +54,24 @@ import {
   esCobrosLoteAusente,
 } from '../../common/cobros-lote-disponible.util';
 import {
+  alVincularSobre,
+  cobroOcupadoParaAbono,
+  comisionRealParaCorregir,
   diferenciaLoteCobros,
   etiquetaConciliadoCobroUnico,
   etiquetaConciliadoCobros,
   leerErrorCobros,
   LOTE_COBROS_MAX,
+  mensajeCorregirComisionNoAplica,
   mensajeErrorCobros,
+  mensajeSobreNoCuadra,
   netoDeCobro,
   puedeLigarCobros,
+  sugeridosParaExcedente,
   type CobroParaLote,
+  type MotivoCorregirComisionNoAplica,
+  type SugeridoCobro,
+  type VeredictoLoteCobros,
 } from './cobros-lote.util';
 import {
   leerLigasDeCobros,
@@ -71,13 +81,18 @@ import {
   type ParteCobroLeida,
 } from './ligas-cobro.lector';
 import {
+  alVincularAbono,
   coberturaCobro,
   estadoBancoCobro,
   faltanteFueraDe,
+  type AlVincular,
   type EstadoBancoCobro,
   type ParteCobroBanco,
 } from '../../common/cobro-banco.util';
-import { cobrosParcialesDisponibles } from '../../common/cobros-parciales-disponible.util';
+import {
+  cobrosParcialesDisponibles,
+  errorCobrosParcialesNoDisponibles,
+} from '../../common/cobros-parciales-disponible.util';
 import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
 import {
   conFolioComprobante,
@@ -135,6 +150,7 @@ import {
   type CandidatoAbonoCruce,
 } from './abono-cruce.util';
 import {
+  comisionRealDeCruce,
   cruzarPaywise,
   difDias,
   PAYWISE_VENTANA_DIAS,
@@ -238,6 +254,7 @@ import {
   textoReciprocoCruceUsd,
   textoSePuedeCruzarUsd,
   TOLERANCIA_CENTAVOS,
+  TOLERANCIA_TC_OFICIAL_PCT,
   TOPE_CRUCE_USD,
   ventanaDias,
   type CargoCompetidor,
@@ -494,6 +511,13 @@ export interface CandidatoCobroVuelo {
   faltante?: number;
   abonos_n?: number;
   abonos?: AbonoDeCobroCorto[];
+  /**
+   * ADITIVO (0.0.78, D18): qué pasaría al vincular ESTE abono a este cobro
+   * (`alVincularAbono`, el espejo del trigger A + el ±2 % del T.C.). Un
+   * EXCEDE trae `sugeridos[]` (≤ 3): cobros libres a los que les falta ≈ lo
+   * que sobra.
+   */
+  al_vincular?: AlVincular & { sugeridos?: SugeridoCobro[] };
 }
 
 /** Ficha corta de un cobro de vuelo (lotes y estado de la bandeja). */
@@ -524,6 +548,15 @@ export interface CandidatoSobreGrupo extends SobreConciliacion {
   dif_monto: number;
   /** ADITIVO (12-oct-2026, invariante 54): fecha del vuelo del grupo. */
   fecha_vuelo?: string | null;
+  /**
+   * ADITIVO (0.0.78, D8/D18): el abono de una cuenta de banco en la moneda
+   * del sobre debe ser su neto ± $1.00 (SOBRE_NO_CUADRA); `diferencia` =
+   * |abono| − neto.
+   */
+  al_vincular?: {
+    estado: 'CONCILIADO' | 'SOBRE_NO_CUADRA';
+    diferencia: number;
+  };
 }
 
 export type CandidatoCobro = CandidatoCobroVuelo | CandidatoSobreGrupo;
@@ -540,6 +573,12 @@ export interface LigaCobroInput {
    * es la liga de siempre.
    */
   cobro_ids?: string[] | null;
+  /**
+   * «Corregir la comisión y vincular» (0.0.78, D6): solo con UN cobro de
+   * vuelo sin abonos; antes de ligar escribe la comisión real (monto −
+   * depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica.
+   */
+  corregir_comision?: boolean;
 }
 
 /**
@@ -671,6 +710,162 @@ function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
 function r2(x: number): number {
   return Math.round(x * 100) / 100;
 }
+
+// =====================================================================
+// UN COBRO, VARIOS ABONOS — vincular (0.0.78, invariante 77)
+// =====================================================================
+
+/** La comisión que «Corregir la comisión y vincular» dejó en el cobro. */
+export interface ComisionCorregida {
+  cobro_id: string;
+  antes: number | null;
+  despues: number | null;
+}
+
+/** Un cobro que soltó el abono al desvincularlo, con su estado DESPUÉS (D22). */
+export interface CobroLiberado {
+  cobro_id: string;
+  folio: number | null;
+  estado: EstadoBancoCobro;
+  faltante: number;
+  abonos_n: number;
+}
+
+/** Lo que hace falta para leer el universo de los sugeridos de un 409. */
+interface ContextoSugeridos {
+  /** DATE del abono. */
+  fecha: string;
+  cuenta_bancaria_id: string;
+  /** Moneda y tipo de la cuenta ya leídos (ausentes ⇒ se leen). */
+  moneda?: string | null;
+  tipoCuenta?: string | null;
+  /** Cobros que no se sugieren (los que se intentaron ligar). */
+  excluir: ReadonlyArray<string>;
+}
+
+/** 400 CORREGIR_COMISION_NO_APLICA (D6) con su motivo. */
+function errorCorregirComisionNoAplica(
+  motivo: MotivoCorregirComisionNoAplica,
+): BadRequestException {
+  return new BadRequestException({
+    message: mensajeCorregirComisionNoAplica(motivo),
+    error: 'CORREGIR_COMISION_NO_APLICA',
+    details: { motivo },
+  });
+}
+
+/** 503 CUENTA_SIN_MONEDA: sin la moneda de la cuenta no se cruza de oídas. */
+function errorCuentaSinMonedaCobros(): ServiceUnavailableException {
+  return new ServiceUnavailableException({
+    message:
+      'No se pudo leer la moneda de la cuenta del abono: vuelve a intentarlo en unos segundos.',
+    error: 'CUENTA_SIN_MONEDA',
+  });
+}
+
+/**
+ * El error de una liga que falló DESPUÉS de corregir la comisión: la
+ * comisión QUEDA (es la verdad del banco) y el texto lo dice; `details`
+ * gana `comision_corregida`. Lo que no es un HttpException pasa igual.
+ */
+function conNotaComisionCorregida(err: unknown, c: ComisionCorregida): unknown {
+  if (!(err instanceof HttpException)) return err;
+  const r = err.getResponse();
+  const cuerpo: Record<string, unknown> =
+    typeof r === 'string' ? { message: r } : { ...r };
+  const dinero = (n: number | null) => (n == null ? '$0.00' : montoBonito(n));
+  const nota =
+    c.antes === c.despues
+      ? ''
+      : ` La comisión del cobro ya quedó corregida a ${dinero(c.despues)} (antes ${dinero(c.antes)}).`;
+  cuerpo.message = `${typeof cuerpo.message === 'string' ? cuerpo.message : err.message}${nota}`;
+  cuerpo.details = {
+    ...(cuerpo.details && typeof cuerpo.details === 'object'
+      ? cuerpo.details
+      : {}),
+    comision_corregida: c,
+  };
+  // La MISMA clase (ConflictException, ServiceUnavailableException…) y el
+  // MISMO status; si no se puede, un HttpException con ese status.
+  const status = err.getStatus();
+  const Clase = err.constructor as new (body: object) => HttpException;
+  if (err.constructor !== HttpException) {
+    try {
+      const nuevo = new Clase(cuerpo);
+      if (nuevo.getStatus() === status) return nuevo;
+    } catch {
+      // cae al genérico
+    }
+  }
+  return new HttpException(cuerpo, status);
+}
+
+/**
+ * Fila de `cobro_vuelo` (+ `vuelo` embebido con folio y T.C.) ⇒ lo que ve
+ * `puedeLigarCobros`, con las partes de los OTROS abonos.
+ */
+function cobroParaLoteDeFila(
+  c: Record<string, unknown>,
+  otras: ParteCobroBanco[],
+): CobroParaLote {
+  const vuelo = unwrapOne(
+    c.vuelo as
+      | { folio?: unknown; tc_usd_mxn?: unknown }
+      | { folio?: unknown; tc_usd_mxn?: unknown }[]
+      | null,
+  );
+  return {
+    id: String(c.id),
+    monto: Number(c.monto) || 0,
+    moneda: typeof c.moneda === 'string' ? c.moneda : null,
+    comision_banco_monto: (c.comision_banco_monto as number | null) ?? null,
+    folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+    cobro_grupo_id: c.cobro_grupo_id,
+    ingreso_anticipo_id: c.ingreso_anticipo_id,
+    tc_usd_mxn: (c.tc_usd_mxn as number | string | null) ?? null,
+    tc_vuelo: (vuelo?.tc_usd_mxn as number | string | null) ?? null,
+    otras,
+  };
+}
+
+/** Fila del universo de «Vincular» ⇒ sugerido (con lo que le FALTA). */
+function sugeridoDeFila(
+  c: Record<string, unknown>,
+  faltante: number,
+): SugeridoCobro {
+  const vuelo = unwrapOne(
+    c.vuelo as {
+      folio?: unknown;
+      cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+    } | null,
+  );
+  const cliente = unwrapOne(vuelo?.cliente);
+  return {
+    cobro_id: String(c.id),
+    vuelo_id: typeof c.vuelo_id === 'string' ? c.vuelo_id : null,
+    folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+    cliente: typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+    fecha_cobro: typeof c.fecha_cobro === 'string' ? c.fecha_cobro : null,
+    monto: r2(Number(c.monto) || 0),
+    moneda: typeof c.moneda === 'string' ? c.moneda : null,
+    faltante: r2(faltante),
+  };
+}
+
+/** Candidato de «Vincular» ⇒ sugerido (misma forma que `sugeridoDeFila`). */
+function sugeridoDeCandidato(c: CandidatoCobroVuelo): SugeridoCobro {
+  return {
+    cobro_id: c.cobro_id,
+    vuelo_id: c.vuelo_id ?? null,
+    folio: c.folio,
+    cliente: c.cliente,
+    fecha_cobro: c.fecha_cobro,
+    monto: c.monto,
+    moneda: c.moneda,
+    faltante: c.faltante ?? c.neto,
+  };
+}
+
 // Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. La banda
 // plausible del T.C. implícito (TC_IMPLICITO_MIN/MAX, 15–25) y la regla del
 // T.C. OFICIAL del día del cargo (invariante 70) viven en `auto-cruce.util`
@@ -3097,7 +3292,7 @@ export class ConciliacionService {
     userId: string,
   ): Promise<{ ok: boolean; rechazado: boolean; motivo: string | null }> {
     try {
-      await this.linkCobro(movId, liga, userId);
+      await this.linkCobro(movId, liga, userId, { respuesta: false });
       return { ok: true, rechazado: false, motivo: null };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -4207,10 +4402,39 @@ export class ConciliacionService {
    * movimiento_bancario_cobro_excluyente). Ambos null = desvincular (limpia
    * las dos ligas). Una PARTE de sobre jamás se enlaza: 409 COBRO_DE_GRUPO
    * («concilia contra el sobre del grupo G-n»).
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77):
+   * - un `cobro_id` suelto se PRE-VALIDA con el espejo TS del trigger A
+   *   (`prevalidarCobroUnico`: la cobertura de sus OTROS abonos +
+   *   `puedeLigarCobros` con UN cobro), con el MISMO código y `details` que
+   *   la BD: abono MENOR ⇒ el cobro queda PARCIAL (sin bandera, D3); de más
+   *   ⇒ 409 ABONO_EXCEDE_COBRO con `sugeridos[]`; comisión o pasarela que no
+   *   cuadra con el neto ⇒ 409 COMISION_NO_CUADRA; otra moneda fuera de la
+   *   banda o a más de ±2 % del T.C. del cobro/vuelo ⇒ 409
+   *   COBRO_MONEDA_DISTINTA; cubierto o «de un solo abono» con otro ⇒ 409
+   *   COBRO_YA_CONCILIADO. Sin la migración 20261014000003 el 2.º abono de
+   *   un cobro PARCIAL ⇒ 503 CONCILIACION_COBROS_PARCIALES_NO_DISPONIBLE;
+   * - un SOBRE en una cuenta de banco de su moneda ⇒ |abono| = neto del
+   *   sobre ± $1.00 o 409 SOBRE_NO_CUADRA (solo API, D8);
+   * - `corregir_comision` (UN cobro de vuelo sin abonos): escribe la
+   *   comisión REAL (monto − depósito) con `escribirComisionReal` y liga por
+   *   el camino normal; si la liga falla después, la comisión QUEDA (es la
+   *   verdad del banco) y el error lo dice (`details.comision_corregida`);
+   * - con la puente, la respuesta es SIEMPRE la de `respuestaCobros` (fila
+   *   releída + `cobros_estado[]`, también con un `cobro_id` suelto) y, al
+   *   desvincular, `cobros_liberados[]` con el estado de cada cobro DESPUÉS.
+   * `opts.respuesta: false` (INTERNO: auto-cruce y Paywise, que la tiran)
+   * devuelve la fila del UPDATE sin releer.
    */
-  async linkCobro(movId: string, liga: LigaCobroInput, userId: string) {
+  async linkCobro(
+    movId: string,
+    liga: LigaCobroInput,
+    userId: string,
+    opts: { respuesta?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
     let cobroId = liga.cobro_id ?? null;
     const sobreId = liga.cobro_grupo_id ?? null;
+    const corregir = liga.corregir_comision === true;
     if (cobroId && sobreId) {
       throw new BadRequestException(
         'Indica un cobro de vuelo O un sobre de grupo, no los dos.',
@@ -4243,11 +4467,21 @@ export class ConciliacionService {
           error: 'LOTE_INVALIDO',
         });
       }
+      // «Corregir la comisión y vincular» (invariante 77): solo con UN cobro.
+      if (corregir && ids.length !== 1) {
+        throw errorCorregirComisionNoAplica('VARIOS_COBROS');
+      }
       if (await this.cobrosLoteOn()) {
-        return this.ligarCobrosPorRpc(movId, ids, userId);
+        return this.ligarCobrosPorRpc(movId, ids, userId, {
+          corregirComision: corregir,
+          respuesta: opts.respuesta !== false,
+        });
       }
       if (ids.length >= 2) throw errorCobrosLoteNoDisponibles();
       cobroId = ids[0];
+    }
+    if (corregir && !cobroId) {
+      throw errorCorregirComisionNoAplica(sobreId ? 'SOBRE' : 'SIN_COBRO');
     }
     // Emparejado como devolución de un cargo (30-sep-2026): 409 antes de
     // tocar nada (el trigger también lo rechazaría, con peor mensaje).
@@ -4257,7 +4491,7 @@ export class ConciliacionService {
       this.partesOn(),
       this.cobrosLoteOn(),
     ]);
-    const colsMov = `id, gasto_id, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
+    const colsMov = `id, tipo, fecha, monto, cuenta_bancaria_id, gasto_id, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4267,6 +4501,10 @@ export class ConciliacionService {
     if (!movRaw) throw new NotFoundException(`Movimiento ${movId} not found`);
     const mov = movRaw as unknown as {
       id: string;
+      tipo: string;
+      fecha: string;
+      monto: number | string;
+      cuenta_bancaria_id: string;
       gasto_id: string | null;
       clasificacion_id?: string | null;
       clasificacion?: { nombre?: unknown } | { nombre?: unknown }[] | null;
@@ -4275,6 +4513,7 @@ export class ConciliacionService {
       ingreso_id?: string | null;
       cobros_n?: number | null;
     };
+    const ligar = cobroId !== null || sobreId !== null;
     // OMITIDO (14-oct-2026, invariante 75): ni se liga ni se «desliga» — el
     // UPDATE de abajo pone `clasificacion_id = null` y borraría la omisión
     // en silencio. 409 sin escribir (una clasificación NO canónica se sigue
@@ -4291,12 +4530,19 @@ export class ConciliacionService {
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
+    // DESVINCULAR (0.0.78, invariante 77): los cobros que suelta ESTE abono,
+    // leídos ANTES de soltar (`cobros_liberados` de la respuesta;
+    // best-effort: null = no se pudieron leer y la llave no viaja).
+    const liberados =
+      !ligar && conCobros && opts.respuesta !== false
+        ? await this.cobrosDelAbono(movId, Number(mov.cobros_n) || 0)
+        : null;
     // Un LOTE de cobros (2+, 12-oct-2026) solo se cambia con `cobro_ids`
     // (RPC): el espejo `cobro_id` ya es NULL y el trigger legado rechazaría
     // tocarlo. Desvincular (ambos null) sí: se sueltan las partes ANTES y
     // el camino de siempre termina de dejarlo pendiente.
     if (conCobros && Number(mov.cobros_n) >= 2) {
-      if (cobroId !== null || sobreId !== null) {
+      if (ligar) {
         throw new ConflictException({
           message: mensajeErrorCobros(
             'LOTE_SOLO_API_NUEVO',
@@ -4313,7 +4559,7 @@ export class ConciliacionService {
     // 2-oct-2026): su dinero se contaría dos veces. El trigger A custodia el
     // sentido contrario (partes en un movimiento con cobro); este, el que
     // no tiene CHECK en la BD. Desvincular (ambos null) sí pasa.
-    if ((cobroId !== null || sobreId !== null) && ligadoAGasto(mov)) {
+    if (ligar && ligadoAGasto(mov)) {
       throw new ConflictException({
         message: mensajeMovimientoConGastos(
           Math.max(gastosLigadosN(mov), mov.gasto_id ? 1 : 0),
@@ -4327,11 +4573,21 @@ export class ConciliacionService {
         },
       });
     }
+    // Solo un ABONO (entrada de dinero) paga un cobro o un sobre (0.0.78: la
+    // regla del cobro se mide contra |abono|; el trigger A de la puente ya lo
+    // exigía al cobro con SOLO_ABONOS). Después de los 409 de siempre.
+    if (ligar && mov.tipo !== (TipoMovimientoBancario.ABONO as string)) {
+      throw new BadRequestException({
+        message: mensajeErrorCobros('SOLO_ABONOS', null, ''),
+        error: 'SOLO_ABONOS',
+      });
+    }
 
+    let corregida: ComisionCorregida | null = null;
     if (cobroId) {
       const colsCobro: string = conIngresos
-        ? 'id, cobro_grupo_id, ingreso_anticipo_id, sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio))'
-        : 'id, cobro_grupo_id, sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio))';
+        ? 'id, vuelo_id, monto, moneda, comision_banco_monto, tc_usd_mxn, cobro_grupo_id, ingreso_anticipo_id, sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio)), vuelo:vuelo!vuelo_id(folio, tc_usd_mxn)'
+        : 'id, vuelo_id, monto, moneda, comision_banco_monto, tc_usd_mxn, cobro_grupo_id, sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio)), vuelo:vuelo!vuelo_id(folio, tc_usd_mxn)';
       const { data: cobroRaw, error: cobroErr } = await this.supabase.service
         .from('cobro_vuelo')
         .select(colsCobro)
@@ -4371,45 +4627,27 @@ export class ConciliacionService {
           },
         });
       }
-      // Un cobro ya enlazado a OTRO movimiento no puede cuadrar una segunda
-      // línea del banco (el auto-match ya lo respeta; el manual también).
-      const { data: yaEnlazado, error: ocupadoErr } =
-        await this.supabase.service
-          .from('movimiento_bancario')
-          .select('id')
-          .eq('cobro_id', cobroId)
-          .neq('id', movId)
-          .limit(1)
-          .maybeSingle();
-      if (ocupadoErr) throw new Error(ocupadoErr.message);
-      if (yaEnlazado) {
-        throw new ConflictException(
-          'Ese cobro ya está conciliado con otro movimiento bancario.',
-        );
-      }
-      // En la PUENTE (12-oct-2026): un cobro dentro del lote de OTRO abono
-      // no tiene espejo `cobro_id` y la consulta de arriba no lo ve.
-      if (conCobros) {
-        const ligas = await leerLigasDeCobros(this.supabase.service, {
-          cobroIds: [cobroId],
-          conPuente: true,
-        });
-        if (ligas.some((l) => l.id !== movId)) {
-          throw new ConflictException(
-            'Ese cobro ya está conciliado con otro movimiento bancario.',
-          );
-        }
-      }
+      // UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): la pre-validación
+      // del trigger A (cobertura de sus OTROS abonos + `alVincularAbono`)
+      // reemplaza los dos chequeos de «ya enlazado a OTRO movimiento» del
+      // 0.0.77 (espejo y puente): un cobro PARCIAL sí admite este abono.
+      corregida = await this.prevalidarCobroUnico(movId, mov, cobro, {
+        conCobros,
+        corregir,
+        userId,
+      });
     }
 
     if (sobreId) {
-      const { data: sobre, error: sobreErr } = await this.supabase.service
+      const { data: sobreRaw, error: sobreErr } = await this.supabase.service
         .from('cobro_grupo')
-        .select('id')
+        .select(
+          'id, monto, moneda, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio)',
+        )
         .eq('id', sobreId)
         .maybeSingle();
       if (sobreErr) throw new Error(sobreErr.message);
-      if (!sobre) {
+      if (!sobreRaw) {
         throw new BadRequestException('Cobro de grupo (sobre) no encontrado.');
       }
       const { data: yaEnlazado, error: ocupadoErr } =
@@ -4426,6 +4664,8 @@ export class ConciliacionService {
           'Ese sobre de grupo ya está conciliado con otro movimiento bancario.',
         );
       }
+      // SOBRE_NO_CUADRA (0.0.78, D8): el abono de banco es el neto del sobre.
+      await this.prevalidarSobre(movId, mov, sobreRaw);
     }
 
     const { data, error } = await this.supabase.service
@@ -4433,11 +4673,7 @@ export class ConciliacionService {
       .update({
         cobro_id: cobroId,
         cobro_grupo_id: sobreId,
-        conciliado:
-          cobroId !== null ||
-          sobreId !== null ||
-          mov.gasto_id !== null ||
-          gastosLigadosN(mov) > 0,
+        conciliado: ligar || mov.gasto_id !== null || gastosLigadosN(mov) > 0,
         // Vincular un cobro real pisa la clasificación "sin vuelo".
         clasificacion_id: null,
         updated_by: userId,
@@ -4446,58 +4682,495 @@ export class ConciliacionService {
       .select(await this.movCols())
       .maybeSingle();
     if (error) {
-      // Índices únicos uq_mov_bancario_cobro / uq_mov_bancario_cobro_grupo:
-      // dos vínculos simultáneos al mismo cobro/sobre pasan el check previo
-      // (TOCTOU) pero solo uno gana en la BD.
-      if (error.code === '23505' || error.message?.includes('23505'))
-        throw new ConflictException(
-          sobreId
-            ? 'Ese sobre de grupo ya está vinculado a otro movimiento bancario.'
-            : 'Ese cobro ya está vinculado a otro movimiento bancario.',
-        );
-      if (error.code === '23503')
-        throw new BadRequestException(
-          sobreId ? 'Cobro de grupo no encontrado.' : 'Cobro no encontrado.',
-        );
-      if (error.code === '23514') {
-        // Por NOMBRE del constraint (24-sep-2026): antes cualquier 23514
-        // decía «cobro y sobre a la vez».
-        const msg = error.message ?? '';
-        if (msg.includes('movimiento_bancario_ingreso')) {
-          throw new ConflictException({
-            message:
-              'Ese movimiento ya está conciliado con un ingreso: desvincúlalo antes.',
-            error: 'MOVIMIENTO_YA_LIGADO',
-            details: { liga: 'INGRESO' },
-          });
-        }
-        // Puente de cobros (12-oct-2026): el trigger legado rechaza tocar
-        // un lote y la puente un cobro ya ocupado en otro abono — 409 con
-        // su código y texto en es-MX, nunca el 400 genérico.
-        const deCobros = leerErrorCobros(error);
-        if (deCobros.codigo && deCobros.codigo !== 'LOTE_INVALIDO') {
-          throw new ConflictException({
-            message: mensajeErrorCobros(
-              deCobros.codigo,
-              deCobros.details,
-              deCobros.texto,
-            ),
-            error: deCobros.codigo,
-            details: deCobros.details ?? undefined,
-          });
-        }
-        if (msg.includes('cobro_excluyente') || !msg) {
-          throw new BadRequestException(
-            'Un movimiento no puede ligar un cobro de vuelo y un sobre de grupo a la vez.',
-          );
-        }
-        throw new BadRequestException(
-          `El movimiento no admite esa liga (${msg.slice(0, 200)}).`,
-        );
+      let e = this.errorLigaDirectaCobro(error, sobreId);
+      if (cobroId) {
+        e = await this.conSugeridosSiExcede(e, movId, {
+          fecha: mov.fecha,
+          cuenta_bancaria_id: mov.cuenta_bancaria_id,
+          excluir: [cobroId],
+        });
+      }
+      throw corregida ? conNotaComisionCorregida(e, corregida) : e;
+    }
+    const extra: Record<string, unknown> = corregida
+      ? { comision_corregida: corregida }
+      : {};
+    const fila = data as unknown as Record<string, unknown>;
+    if (!conCobros || opts.respuesta === false) return { ...fila, ...extra };
+    // Con la puente: la fila RELEÍDA (los espejos `cobros_n`/`cobro_id` los
+    // recalcula la BD después del UPDATE) + `cobros_estado[]`. La liga YA
+    // quedó escrita: si la relectura falla, la fila del UPDATE (sin 5xx).
+    let resp: Record<string, unknown>;
+    try {
+      resp = await this.respuestaCobros(movId);
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación del abono ${movId}: la liga quedó escrita pero no se pudo releer (${err instanceof Error ? err.message : String(err)}).`,
+      );
+      resp = fila;
+    }
+    const cobrosLiberados = liberados
+      ? await this.cobrosLiberados(liberados)
+      : null;
+    return {
+      ...resp,
+      ...(cobrosLiberados ? { cobros_liberados: cobrosLiberados } : {}),
+      ...extra,
+    };
+  }
+
+  /**
+   * Pre-validación del camino DIRECTO (un `cobro_id` suelto; 0.0.78,
+   * invariante 77): el espejo TS del trigger A para UN cobro, con la
+   * cobertura de sus OTROS abonos (lector único) y la cuenta del abono, y el
+   * MISMO código y `details` que la BD (409 sin escribir). Sin la sonda de
+   * 20261014000003 un cobro con otros abonos no admite otro (la BD vieja lo
+   * rechaza por su índice único): si la regla nueva lo aceptaría ⇒ 503
+   * CONCILIACION_COBROS_PARCIALES_NO_DISPONIBLE (un cobro CUBIERTO ya salió
+   * con 409 COBRO_YA_CONCILIADO). Con `corregir`, valida y escribe la
+   * comisión real ANTES de la regla y la devuelve; un error posterior lleva
+   * la nota de la comisión corregida.
+   */
+  private async prevalidarCobroUnico(
+    movId: string,
+    mov: { fecha: string; monto: number | string; cuenta_bancaria_id: string },
+    cobro: Record<string, unknown> & { id: string },
+    opts: { conCobros: boolean; corregir: boolean; userId: string },
+  ): Promise<ComisionCorregida | null> {
+    const [ligas, cuenta] = await Promise.all([
+      leerLigasDeCobros(this.supabase.service, {
+        cobroIds: [cobro.id],
+        conPuente: opts.conCobros,
+      }),
+      this.infoCuenta(mov.cuenta_bancaria_id),
+    ]);
+    if (!cuenta.moneda) throw errorCuentaSinMonedaCobros();
+    const partes = partesDeLigas(ligas).get(cobro.id) ?? [];
+    const c = cobroParaLoteDeFila(
+      cobro,
+      partes.filter((p) => p.movimiento_id !== movId),
+    );
+    let corregida: ComisionCorregida | null = null;
+    if (opts.corregir) {
+      corregida = await this.corregirComisionAntesDeLigar(
+        c,
+        partes,
+        mov.monto,
+        cuenta.moneda,
+        opts.userId,
+      );
+      c.comision_banco_monto = corregida.despues;
+    }
+    try {
+      const veredicto = puedeLigarCobros({
+        montoAbono: mov.monto,
+        monedaCuenta: cuenta.moneda,
+        tipoCuenta: cuenta.tipo,
+        toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+        cobros: [c],
+      });
+      if (!veredicto.ok) {
+        throw await this.errorVeredictoCobros(veredicto, movId, {
+          fecha: mov.fecha,
+          cuenta_bancaria_id: mov.cuenta_bancaria_id,
+          moneda: cuenta.moneda,
+          tipoCuenta: cuenta.tipo,
+          excluir: [cobro.id],
+        });
+      }
+      if ((c.otras?.length ?? 0) > 0 && !(await this.cobrosParcialesOn())) {
+        throw errorCobrosParcialesNoDisponibles();
+      }
+    } catch (err) {
+      throw corregida ? conNotaComisionCorregida(err, corregida) : err;
+    }
+    return corregida;
+  }
+
+  /**
+   * SOBRE_NO_CUADRA (0.0.78, D8; solo en el API: el neto del sobre vive en
+   * `cobro_grupo` y el API es su único escritor): un abono de una cuenta de
+   * BANCO en la moneda del sobre debe ser su neto ± $1.00. Pasarela u otra
+   * moneda, como siempre.
+   */
+  private async prevalidarSobre(
+    movId: string,
+    mov: { monto: number | string; cuenta_bancaria_id: string },
+    sobre: Record<string, unknown>,
+  ): Promise<void> {
+    const cuenta = await this.infoCuenta(mov.cuenta_bancaria_id);
+    if (!cuenta.moneda) throw errorCuentaSinMonedaCobros();
+    const v = alVincularSobre({
+      montoAbono: mov.monto,
+      monedaCuenta: cuenta.moneda,
+      tipoCuenta: cuenta.tipo,
+      sobre,
+    });
+    if (v.estado !== 'SOBRE_NO_CUADRA') return;
+    const folioRaw = unwrapOne(
+      sobre.grupo as { folio?: unknown } | { folio?: unknown }[] | null,
+    )?.folio;
+    const grupoFolio = folioRaw == null ? null : Number(folioRaw);
+    const montoAbono = r2(Math.abs(Number(mov.monto) || 0));
+    throw new ConflictException({
+      message: mensajeSobreNoCuadra({
+        grupo_folio: grupoFolio,
+        monto_abono: montoAbono,
+        neto_sobre: v.neto,
+        diferencia: v.diferencia,
+        moneda: cuenta.moneda,
+        con_comision: v.neto < r2(Number(sobre.monto) || 0),
+      }),
+      error: 'SOBRE_NO_CUADRA',
+      details: {
+        movimiento_id: movId,
+        cobro_grupo_id: sobre.id,
+        grupo_folio: grupoFolio,
+        monto_abono: montoAbono,
+        neto_sobre: v.neto,
+        diferencia: v.diferencia,
+        moneda: cuenta.moneda,
+      },
+    });
+  }
+
+  /**
+   * «Corregir la comisión y vincular» (0.0.78, D6): solo un cobro de vuelo
+   * SIN abonos (ni este), en la moneda de la cuenta y con 0 ≤ monto −
+   * |depósito| < monto (400 CORREGIR_COMISION_NO_APLICA si no). Escribe la
+   * comisión real con `escribirComisionReal` (la misma escritura del cruce
+   * Paywise) y devuelve {cobro_id, antes, despues}; si ya era esa, no
+   * escribe.
+   */
+  private async corregirComisionAntesDeLigar(
+    c: CobroParaLote,
+    partes: ReadonlyArray<ParteCobroBanco>,
+    montoAbono: number | string,
+    monedaCuenta: string,
+    userId: string,
+  ): Promise<ComisionCorregida> {
+    if (partes.length > 0) throw errorCorregirComisionNoAplica('CON_ABONOS');
+    if (c.moneda !== monedaCuenta) {
+      throw errorCorregirComisionNoAplica('MONEDA_DISTINTA');
+    }
+    const monto = r2(Number(c.monto) || 0);
+    const real = comisionRealParaCorregir(monto, montoAbono);
+    if (!real.valida) {
+      throw errorCorregirComisionNoAplica(real.motivo ?? 'DEPOSITO_MAYOR');
+    }
+    const antes =
+      (Number(c.comision_banco_monto) || 0) > 0
+        ? r2(Number(c.comision_banco_monto))
+        : null;
+    const nueva = real.comision > 0.01 ? r2(real.comision) : null;
+    if ((antes ?? 0) === (nueva ?? 0)) {
+      return { cobro_id: c.id, antes, despues: antes };
+    }
+    const despues = await this.escribirComisionReal(
+      c.id,
+      monto,
+      real.comision,
+      userId,
+    );
+    this.logger.log(
+      `Comisión real ${despues ?? 0} escrita en el cobro ${c.id} (antes ${antes ?? 0}) al vincular («Corregir la comisión y vincular»).`,
+    );
+    return { cobro_id: c.id, antes, despues };
+  }
+
+  /**
+   * Escribe en el COBRO DE VUELO la comisión REAL del banco o de la pasarela
+   * (fuente única de esta escritura: el cruce Paywise y «Corregir la comisión
+   * y vincular», 0.0.78): `comision_banco_monto` = la comisión (null si ≤
+   * 0.01) y `comision_banco_pct` recalculado a 4 decimales. Un 23514
+   * COBRO_CONCILIADO del trigger E (el cobro ya tiene abonos) ⇒ 409 con su
+   * texto. Devuelve la comisión que quedó.
+   */
+  private async escribirComisionReal(
+    cobroId: string,
+    monto: number,
+    comision: number,
+    userId: string,
+  ): Promise<number | null> {
+    const cm = comision > 0.01 ? r2(comision) : null;
+    const { error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .update({
+        comision_banco_monto: cm,
+        comision_banco_pct:
+          cm != null && monto > 0
+            ? Math.round((cm / monto) * 100 * 10000) / 10000
+            : null,
+        updated_by: userId,
+      })
+      .eq('id', cobroId);
+    if (error) {
+      const e = error.code === '23514' ? leerErrorCobros(error) : null;
+      if (e?.codigo === 'COBRO_CONCILIADO') {
+        throw new ConflictException({
+          message: mensajeErrorCobros('COBRO_CONCILIADO', e.details, e.texto),
+          error: 'COBRO_CONCILIADO',
+          details: e.details ?? undefined,
+        });
       }
       throw new Error(error.message);
     }
-    return data as unknown as Record<string, unknown>;
+    return cm;
+  }
+
+  /**
+   * 400/409 de un veredicto de `puedeLigarCobros` (mismo código y `details`
+   * que la BD, + `movimiento_id`). ABONO_EXCEDE_COBRO lleva `sugeridos[]`
+   * (best-effort).
+   */
+  private async errorVeredictoCobros(
+    v: Extract<VeredictoLoteCobros, { ok: false }>,
+    movId: string,
+    ctx: ContextoSugeridos,
+  ): Promise<BadRequestException | ConflictException> {
+    const details: Record<string, unknown> = {
+      movimiento_id: movId,
+      ...v.details,
+    };
+    if (v.codigo === 'ABONO_EXCEDE_COBRO') {
+      details.sugeridos = await this.sugeridosDeExcedente(
+        movId,
+        ctx,
+        Number(v.details.excedente),
+      );
+    }
+    const cuerpo = { message: v.mensaje, error: v.codigo, details };
+    return v.codigo === 'LOTE_INVALIDO'
+      ? new BadRequestException(cuerpo)
+      : new ConflictException(cuerpo);
+  }
+
+  /**
+   * Un 409 ABONO_EXCEDE_COBRO que viene de la BD (carrera con otra liga)
+   * gana sus `sugeridos[]` (best-effort); cualquier otro error pasa igual.
+   */
+  private async conSugeridosSiExcede(
+    err: Error,
+    movId: string,
+    ctx: ContextoSugeridos,
+  ): Promise<Error> {
+    if (!(err instanceof ConflictException)) return err;
+    const r = err.getResponse() as Record<string, unknown> | string;
+    if (typeof r !== 'object' || r.error !== 'ABONO_EXCEDE_COBRO') return err;
+    const details =
+      r.details && typeof r.details === 'object'
+        ? (r.details as Record<string, unknown>)
+        : {};
+    if (Array.isArray(details.sugeridos)) return err;
+    const sugeridos = await this.sugeridosDeExcedente(
+      movId,
+      ctx,
+      Number(details.excedente),
+    );
+    return new ConflictException({ ...r, details: { ...details, sugeridos } });
+  }
+
+  /**
+   * Sugeridos de un ABONO_EXCEDE_COBRO (D4, best-effort ⇒ [] y warn si
+   * algo falla): del MISMO universo de «Vincular» (`consultaCobrosDeAbono`,
+   * ±60 días, la moneda de la cuenta; ocupados fuera con
+   * `cobroOcupadoParaAbono`), los cobros a los que les FALTA ≈ el excedente
+   * (±0.02), por cercanía de fecha; ≤ 3.
+   */
+  private async sugeridosDeExcedente(
+    movId: string,
+    ctx: ContextoSugeridos,
+    excedente: number,
+  ): Promise<SugeridoCobro[]> {
+    if (!(excedente > 0)) return [];
+    try {
+      const cuenta =
+        ctx.moneda !== undefined
+          ? { moneda: ctx.moneda, tipo: ctx.tipoCuenta ?? null }
+          : await this.infoCuenta(ctx.cuenta_bancaria_id);
+      if (!cuenta.moneda) return [];
+      const [conIngresos, conCobrosLote] = await Promise.all([
+        this.ingresosOn(),
+        this.cobrosLoteOn(),
+      ]);
+      const { lo, hi } = this.ventanaAbono(ctx.fecha, CANDIDATOS_DIAS_DEFAULT);
+      const res = await this.consultaCobrosDeAbono(
+        lo,
+        hi,
+        cuenta.moneda,
+        conIngresos,
+      );
+      if (res.error) throw new Error(res.error.message);
+      const cobros = (res.data ?? []) as unknown as Array<
+        Record<string, unknown>
+      >;
+      if (cobros.length === 0) return [];
+      const conParciales = conCobrosLote && (await this.cobrosParcialesOn());
+      const ligas = await leerLigasDeCobros(this.supabase.service, {
+        cobroIds: cobros.map((c) => c.id as string),
+        conPuente: conCobrosLote,
+      });
+      const partes = partesDeLigas(ligas);
+      const pasarela = cuenta.tipo === 'PASARELA';
+      const universo = cobros
+        .filter(
+          (c) =>
+            !cobroOcupadoParaAbono(c, partes.get(c.id as string) ?? [], movId, {
+              conParciales,
+              pasarela,
+            }),
+        )
+        .map((c) =>
+          sugeridoDeFila(
+            c,
+            faltanteFueraDe(c, partes.get(c.id as string) ?? [], movId)
+              .faltante,
+          ),
+        );
+      return sugeridosParaExcedente(
+        universo,
+        excedente,
+        ctx.fecha,
+        ctx.excluir,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `No se pudieron armar los cobros sugeridos del abono ${movId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Error del UPDATE del camino directo (`cobro_id` / `cobro_grupo_id`) ⇒
+   * 409/400 con su código y texto es-MX (nunca el 400 genérico ni un 500).
+   */
+  private errorLigaDirectaCobro(
+    error: {
+      code?: string | null;
+      message?: string | null;
+      hint?: string | null;
+      details?: string | null;
+    },
+    sobreId: string | null,
+  ): Error {
+    // Índices únicos uq_mov_bancario_cobro / uq_mov_bancario_cobro_grupo:
+    // dos vínculos simultáneos al mismo cobro/sobre pasan el check previo
+    // (TOCTOU) pero solo uno gana en la BD (desde 20261014000003 solo el del
+    // sobre; el de cobros lo custodia el trigger A con el cobro bloqueado).
+    if (error.code === '23505' || error.message?.includes('23505')) {
+      return new ConflictException(
+        sobreId
+          ? 'Ese sobre de grupo ya está vinculado a otro movimiento bancario.'
+          : 'Ese cobro ya está vinculado a otro movimiento bancario.',
+      );
+    }
+    if (error.code === '23503') {
+      return new BadRequestException(
+        sobreId ? 'Cobro de grupo no encontrado.' : 'Cobro no encontrado.',
+      );
+    }
+    if (error.code === '23514') {
+      // Por NOMBRE del constraint (24-sep-2026): antes cualquier 23514
+      // decía «cobro y sobre a la vez».
+      const msg = error.message ?? '';
+      if (msg.includes('movimiento_bancario_ingreso')) {
+        return new ConflictException({
+          message:
+            'Ese movimiento ya está conciliado con un ingreso: desvincúlalo antes.',
+          error: 'MOVIMIENTO_YA_LIGADO',
+          details: { liga: 'INGRESO' },
+        });
+      }
+      // Puente de cobros (12-oct-2026): el trigger legado rechaza tocar un
+      // lote y A un cobro que no admite este abono — 409 con su código y
+      // texto en es-MX (sin la marca « [ABONO_NO_CUADRA]»), nunca el 400
+      // genérico.
+      const deCobros = leerErrorCobros(error);
+      if (deCobros.codigo && deCobros.codigo !== 'LOTE_INVALIDO') {
+        return new ConflictException({
+          message: mensajeErrorCobros(
+            deCobros.codigo,
+            deCobros.details,
+            deCobros.texto,
+          ),
+          error: deCobros.codigo,
+          details: deCobros.details ?? undefined,
+        });
+      }
+      if (msg.includes('cobro_excluyente') || !msg) {
+        return new BadRequestException(
+          'Un movimiento no puede ligar un cobro de vuelo y un sobre de grupo a la vez.',
+        );
+      }
+      return new BadRequestException(
+        `El movimiento no admite esa liga (${msg.slice(0, 200)}).`,
+      );
+    }
+    return new Error(error.message ?? 'Error de la base de datos');
+  }
+
+  /**
+   * Los cobros que paga HOY este abono (antes de desvincularlo), para
+   * `cobros_liberados`. Best-effort: null si no se pudieron leer.
+   */
+  private async cobrosDelAbono(
+    movId: string,
+    cobrosN: number,
+  ): Promise<string[] | null> {
+    if (cobrosN <= 0) return [];
+    try {
+      const partes = await partesDeAbonos(this.supabase.service, [movId]);
+      return [...new Set(partes.map((p) => p.cobro_id))];
+    } catch (err) {
+      this.logger.warn(
+        `No se pudieron leer los cobros del abono ${movId} antes de desvincularlo: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * `cobros_liberados[]` de un desvincular (D22): cada cobro que soltó el
+   * abono con su estado DESPUÉS (con los OTROS abonos que le quedan:
+   * PARCIAL, o SIN_CONCILIAR si no le queda ninguno). Best-effort: null si
+   * no se pudo leer (la llave no viaja).
+   */
+  private async cobrosLiberados(
+    cobroIds: ReadonlyArray<string>,
+  ): Promise<CobroLiberado[] | null> {
+    if (cobroIds.length === 0) return [];
+    try {
+      const [fichas, partes] = await Promise.all([
+        this.fichasDeCobrosEnLote(cobroIds.map((id) => ({ cobro_id: id }))),
+        leerPartesDeCobros(this.supabase.service, cobroIds),
+      ]);
+      const out: CobroLiberado[] = [];
+      for (const id of cobroIds) {
+        const f = fichas.get(id);
+        if (!f) continue;
+        const ps = partes.get(id) ?? [];
+        const cob = coberturaCobro(f, ps);
+        out.push({
+          cobro_id: id,
+          folio: f.folio,
+          estado: estadoBancoCobro({
+            monto: f.monto,
+            metodo: f.metodo_cobro,
+            via: ps.length > 0 ? 'DIRECTO' : null,
+            cobertura: cob,
+          }),
+          faltante: cob.faltante,
+          abonos_n: cob.n_partes,
+        });
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer el estado de los cobros liberados: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   // =====================================================================
@@ -4508,22 +5181,29 @@ export class ConciliacionService {
    * Liga el abono con 1..N cobros por la RPC `conciliacion_ligar_abono_cobros`
    * (UNA transacción en BD: valida, escribe la puente como DIFF y recalcula
    * los espejos). Antes, en TS y con los MISMOS textos, se pre-valida para
-   * responder 409 claros sin tocar nada (`puedeLigarCobros`, ocupados por
-   * `leerLigasDeCobros`). La BD es el candado real (carreras): su error se
-   * traduce con `errorRpcCobros`.
+   * responder 409 claros sin tocar nada (`puedeLigarCobros` con la cobertura
+   * de los OTROS abonos de cada cobro —lector único—, la moneda y el TIPO de
+   * la cuenta y el ±2 % del T.C.; 0.0.78, invariante 77: con UN cobro el
+   * espejo del trigger A, en un lote cada cobro por lo que le FALTA). Sin la
+   * sonda de 20261014000003 un cobro con otros abonos no admite otro: 503
+   * si la regla nueva lo aceptaría (uno CUBIERTO ya salió con 409). La BD es
+   * el candado real (carreras): su error se traduce con `errorRpcCobros`.
+   * `corregirComision` (UN cobro, validado en `linkCobro`) escribe antes la
+   * comisión real.
    */
   private async ligarCobrosPorRpc(
     movId: string,
     ids: string[],
     userId: string,
-  ) {
+    opts: { corregirComision?: boolean; respuesta?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
     const sb = this.supabase.service;
     await this.bloquearSiEnReverso(movId);
     const [conIngresos, conPartes] = await Promise.all([
       this.ingresosOn(),
       this.partesOn(),
     ]);
-    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
+    const colsMov = `id, tipo, fecha, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
     const { data: movRaw, error: movErr } = await sb
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4534,6 +5214,7 @@ export class ConciliacionService {
     const mov = movRaw as unknown as {
       id: string;
       tipo: string;
+      fecha: string;
       monto: number | string;
       cuenta_bancaria_id: string;
       gasto_id: string | null;
@@ -4587,17 +5268,13 @@ export class ConciliacionService {
         },
       });
     }
-    const monedaCuenta = await this.monedaCuenta(mov.cuenta_bancaria_id);
-    if (ids.length >= 2 && !monedaCuenta) {
-      throw new ServiceUnavailableException({
-        message:
-          'No se pudo leer la moneda de la cuenta del abono: vuelve a intentarlo en unos segundos.',
-        error: 'CUENTA_SIN_MONEDA',
-      });
-    }
+    // Moneda y TIPO de la cuenta (0.0.78: también con UN cobro — la regla del
+    // trigger A depende de los dos; sin moneda no se cruza de oídas).
+    const cuenta = await this.infoCuenta(mov.cuenta_bancaria_id);
+    if (!cuenta.moneda) throw errorCuentaSinMonedaCobros();
     const colsCobro = conIngresos
-      ? 'id, vuelo_id, monto, moneda, comision_banco_monto, cobro_grupo_id, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio)'
-      : 'id, vuelo_id, monto, moneda, comision_banco_monto, cobro_grupo_id, vuelo:vuelo!vuelo_id(folio)';
+      ? 'id, vuelo_id, monto, moneda, comision_banco_monto, tc_usd_mxn, cobro_grupo_id, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio, tc_usd_mxn)'
+      : 'id, vuelo_id, monto, moneda, comision_banco_monto, tc_usd_mxn, cobro_grupo_id, vuelo:vuelo!vuelo_id(folio, tc_usd_mxn)';
     const filas = await this.leerPorLotes(ids, (lote) =>
       sb.from('cobro_vuelo').select(colsCobro).in('id', lote),
     );
@@ -4610,71 +5287,89 @@ export class ConciliacionService {
         details: { cobro_ids: faltan },
       });
     }
-    const cobros: CobroParaLote[] = ids.map((id) => {
-      const c = porId.get(id)!;
-      return {
-        id,
-        monto: Number(c.monto) || 0,
-        moneda: typeof c.moneda === 'string' ? c.moneda : null,
-        comision_banco_monto: (c.comision_banco_monto as number | null) ?? null,
-        folio: unwrapOne(c.vuelo as { folio?: unknown } | null)?.folio as
-          | number
-          | null
-          | undefined,
-        cobro_grupo_id: c.cobro_grupo_id,
-        ingreso_anticipo_id: c.ingreso_anticipo_id,
-      };
-    });
     // Un cobro de anticipo: 409 con el folio ING-n, como en la liga simple.
-    for (const c of cobros) {
-      if (typeof c.ingreso_anticipo_id === 'string' && c.ingreso_anticipo_id) {
-        throw await this.conflictoCobroDeAnticipo(c.ingreso_anticipo_id);
+    for (const id of ids) {
+      const anticipo = porId.get(id)!.ingreso_anticipo_id;
+      if (typeof anticipo === 'string' && anticipo) {
+        throw await this.conflictoCobroDeAnticipo(anticipo);
       }
     }
-    const veredicto = puedeLigarCobros({
-      montoAbono: mov.monto,
-      monedaCuenta,
-      cobros,
-    });
-    if (!veredicto.ok) {
-      const cuerpo = {
-        message: veredicto.mensaje,
-        error: veredicto.codigo,
-        details: { movimiento_id: movId, ...veredicto.details },
-      };
-      throw veredicto.codigo === 'LOTE_INVALIDO'
-        ? new BadRequestException(cuerpo)
-        : new ConflictException(cuerpo);
+    // Las partes de TODOS los abonos de cada cobro (lector único, paginado;
+    // esta ruta solo corre con la puente de 20261012000002). Las de ESTE
+    // abono no cuentan como «otras» (la G escribe como DIFF).
+    const partesPorCobro = await leerPartesDeCobros(sb, ids);
+    const cobros: CobroParaLote[] = ids.map((id) =>
+      cobroParaLoteDeFila(
+        porId.get(id)!,
+        (partesPorCobro.get(id) ?? []).filter((p) => p.movimiento_id !== movId),
+      ),
+    );
+    const ctx: ContextoSugeridos = {
+      fecha: mov.fecha,
+      cuenta_bancaria_id: mov.cuenta_bancaria_id,
+      moneda: cuenta.moneda,
+      tipoCuenta: cuenta.tipo,
+      excluir: ids,
+    };
+    let corregida: ComisionCorregida | null = null;
+    if (opts.corregirComision === true && cobros.length === 1) {
+      corregida = await this.corregirComisionAntesDeLigar(
+        cobros[0],
+        partesPorCobro.get(ids[0]) ?? [],
+        mov.monto,
+        cuenta.moneda,
+        userId,
+      );
+      cobros[0].comision_banco_monto = corregida.despues;
     }
-    // Ocupados por OTRO movimiento (espejo o puente).
-    const ligas = await leerLigasDeCobros(sb, {
-      cobroIds: ids,
-      conPuente: true,
-    });
-    const ocupado = ligas.find((l) => l.id !== movId);
-    if (ocupado) {
-      const c = cobros.find((x) => x.id === ocupado.cobro_id);
-      throw new ConflictException({
-        message: mensajeErrorCobros(
-          'COBRO_YA_CONCILIADO',
-          { folio: c?.folio ?? null, cobro_id: ocupado.cobro_id },
-          '',
-        ),
-        error: 'COBRO_YA_CONCILIADO',
-        details: {
-          cobro_id: ocupado.cobro_id,
-          folio: c?.folio ?? null,
-          movimiento_id: ocupado.id,
-        },
+    try {
+      const veredicto = puedeLigarCobros({
+        montoAbono: mov.monto,
+        monedaCuenta: cuenta.moneda,
+        tipoCuenta: cuenta.tipo,
+        toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+        cobros,
       });
+      if (!veredicto.ok) {
+        throw await this.errorVeredictoCobros(veredicto, movId, ctx);
+      }
+      // Sin 20261014000003 (índice único + la G de netos) un cobro con OTROS
+      // abonos no admite este: 503 claro (nada se escribe).
+      if (
+        cobros.some((c) => (c.otras?.length ?? 0) > 0) &&
+        !(await this.cobrosParcialesOn())
+      ) {
+        throw errorCobrosParcialesNoDisponibles();
+      }
+      const { error } = await sb.rpc('conciliacion_ligar_abono_cobros', {
+        p_movimiento_id: movId,
+        p_cobro_ids: ids,
+        p_actor: userId,
+      });
+      if (error) {
+        throw await this.conSugeridosSiExcede(
+          this.errorRpcCobros(error, movId),
+          movId,
+          ctx,
+        );
+      }
+    } catch (err) {
+      throw corregida ? conNotaComisionCorregida(err, corregida) : err;
     }
-    const { error } = await sb.rpc('conciliacion_ligar_abono_cobros', {
-      p_movimiento_id: movId,
-      p_cobro_ids: ids,
-      p_actor: userId,
-    });
-    if (error) throw this.errorRpcCobros(error, movId);
-    return this.respuestaCobros(movId);
+    const extra: Record<string, unknown> = corregida
+      ? { comision_corregida: corregida }
+      : {};
+    if (opts.respuesta === false) return { id: movId, ...extra };
+    // La liga YA quedó escrita: si la relectura falla, sin 5xx (el panel
+    // recarga la bandeja; un 500 aquí invitaría a reintentar algo hecho).
+    try {
+      return { ...(await this.respuestaCobros(movId)), ...extra };
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación del abono ${movId}: los cobros quedaron ligados pero no se pudo releer (${err instanceof Error ? err.message : String(err)}).`,
+      );
+      return { id: movId, ...extra };
+    }
   }
 
   /** Suelta TODAS las partes de cobros del abono (RPC H). */
@@ -4724,7 +5419,11 @@ export class ConciliacionService {
   /**
    * Respuesta tras ligar cobros: la fila RELEÍDA (`movCols` + `cobros_n`) +
    * `cobros_estado[]` (cada parte con su vuelo), ADITIVOS. Con UNA parte el
-   * espejo `cobro_id` viaja como siempre.
+   * espejo `cobro_id` viaja como siempre. Desde el 0.0.78 (invariante 77)
+   * cada `cobros_estado[i]` gana el estado del COBRO con TODOS sus abonos
+   * después de ligar (`cobro_estado`, `cobro_neto`, `cobro_monto_vinculado`,
+   * `cobro_faltante`, `cobro_abonos_n`; best-effort: si esa lectura falla,
+   * esas llaves no viajan).
    */
   private async respuestaCobros(movId: string) {
     const { data, error } = await this.supabase.service
@@ -4735,6 +5434,37 @@ export class ConciliacionService {
     if (error) throw new Error(error.message);
     const partes = await partesDeAbonos(this.supabase.service, [movId]);
     const fichas = await this.fichasDeCobrosEnLote(partes);
+    const estados = new Map<string, Record<string, unknown>>();
+    if (partes.length > 0) {
+      try {
+        const porCobro = await leerPartesDeCobros(
+          this.supabase.service,
+          partes.map((p) => p.cobro_id),
+        );
+        for (const p of partes) {
+          const f = fichas.get(p.cobro_id);
+          if (!f) continue;
+          const ps = porCobro.get(p.cobro_id) ?? [];
+          const cob = coberturaCobro(f, ps);
+          estados.set(p.cobro_id, {
+            cobro_estado: estadoBancoCobro({
+              monto: f.monto,
+              metodo: f.metodo_cobro,
+              via: ps.length > 0 ? 'DIRECTO' : null,
+              cobertura: cob,
+            }),
+            cobro_neto: cob.neto,
+            cobro_monto_vinculado: cob.monto_vinculado,
+            cobro_faltante: cob.faltante,
+            cobro_abonos_n: cob.n_partes,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `No se pudo leer el estado de los cobros del abono ${movId} tras ligarlo: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     return {
       ...((data as unknown as Record<string, unknown> | null) ?? {
         id: movId,
@@ -4743,6 +5473,7 @@ export class ConciliacionService {
         cobro_id: p.cobro_id,
         monto_parte: p.monto_parte,
         ...(fichas.get(p.cobro_id) ?? {}),
+        ...(estados.get(p.cobro_id) ?? {}),
       })),
     };
   }
@@ -5052,6 +5783,35 @@ export class ConciliacionService {
   }
 
   /**
+   * Cobros de vuelo candidatos de un ABONO: el UNIVERSO de «Vincular» (y de
+   * los sugeridos de un 409 ABONO_EXCEDE_COBRO, D4): positivos, sin sobre ni
+   * anticipo, métodos que llegan al banco, en ±días, en la moneda de la
+   * cuenta (si se conoce); tope 300 por fecha.
+   */
+  private consultaCobrosDeAbono(
+    lo: string,
+    hi: string,
+    moneda: string | null,
+    conIngresos: boolean,
+  ) {
+    let qc = this.supabase.service
+      .from('cobro_vuelo')
+      .select(
+        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, tc_usd_mxn, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, tc_usd_mxn, cliente:cliente_id(nombre))',
+      )
+      .gt('monto', 0)
+      .is('cobro_grupo_id', null)
+      .in('metodo_cobro', METODOS_ABONO_MANUAL)
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(300);
+    if (conIngresos) qc = qc.is('ingreso_anticipo_id', null);
+    if (moneda) qc = qc.eq('moneda', moneda);
+    return qc;
+  }
+
+  /**
    * Candidatos para conciliar un ABONO a mano: cobros de vuelo Y sobres de
    * grupo (misma moneda que la cuenta, métodos que llegan al banco, sin
    * conciliar con OTRO movimiento) en ±`dias`, ordenados por cercanía del
@@ -5082,10 +5842,13 @@ export class ConciliacionService {
       cobro_ids?: string[];
       /**
        * ADITIVOS (0.0.78, invariante 77): ¿un cobro ya acepta varios abonos
-       * (sonda de 20261014000003)? y el tipo de la cuenta del abono.
+       * (sonda de 20261014000003)?, el tipo de la cuenta del abono y la
+       * capacidad de «Corregir la comisión y vincular» (`corregir_comision`
+       * en el PATCH; un API previo no la tiene y respondería 400).
        */
       cobros_parciales?: boolean;
       tipo_cuenta?: string | null;
+      corregir_comision?: true;
     };
     candidatos: CandidatoCobro[];
     exactos: number;
@@ -5129,19 +5892,7 @@ export class ConciliacionService {
     // siempre.
     const conIngresos = await this.ingresosOn();
 
-    let qc = this.supabase.service
-      .from('cobro_vuelo')
-      .select(
-        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
-      )
-      .gt('monto', 0)
-      .is('cobro_grupo_id', null)
-      .in('metodo_cobro', METODOS_ABONO_MANUAL)
-      .gte('fecha_cobro', lo)
-      .lte('fecha_cobro', hi)
-      .order('fecha_cobro', { ascending: true })
-      .limit(300);
-    if (conIngresos) qc = qc.is('ingreso_anticipo_id', null);
+    const qc = this.consultaCobrosDeAbono(lo, hi, moneda, conIngresos);
     let qs = this.supabase.service
       .from('cobro_grupo')
       .select(
@@ -5153,10 +5904,7 @@ export class ConciliacionService {
       .lte('fecha_cobro', hi)
       .order('fecha_cobro', { ascending: true })
       .limit(100);
-    if (moneda) {
-      qc = qc.eq('moneda', moneda);
-      qs = qs.eq('moneda', moneda);
-    }
+    if (moneda) qs = qs.eq('moneda', moneda);
     const [cobrosRes, sobresRes] = await Promise.all([qc, qs]);
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (sobresRes.error) throw new Error(sobresRes.error.message);
@@ -5171,6 +5919,7 @@ export class ConciliacionService {
     // PARCIAL y entra por lo que le falta (salvo que este abono sea de la
     // PASARELA: un cobro de la pasarela es «de un solo abono»).
     const conParciales = conCobrosLote && (await this.cobrosParcialesOn());
+    const pasarela = cuentaAbono.tipo === 'PASARELA';
     const ocupadosCobro = new Set<string>();
     const ocupadosSobre = new Set<string>();
     let partesPorCobro = new Map<string, ParteCobroBanco[]>();
@@ -5183,23 +5932,19 @@ export class ConciliacionService {
       partesPorCobro = partesDeLigas(ligas);
       for (const m of ligas) {
         if (m.id === movId) continue;
-        if (typeof m.cobro_id === 'string' && !conParciales)
-          ocupadosCobro.add(m.cobro_id);
         if (typeof m.cobro_grupo_id === 'string')
           ocupadosSobre.add(m.cobro_grupo_id);
       }
-      if (conParciales) {
-        for (const c of cobros) {
-          const id = c.id as string;
-          const f = faltanteFueraDe(c, partesPorCobro.get(id) ?? [], movId);
-          if (f.n_otras === 0) continue;
-          if (
-            f.cubierto_por_otras ||
-            f.cruzado_otras ||
-            cuentaAbono.tipo === 'PASARELA'
-          ) {
-            ocupadosCobro.add(id);
-          }
+      // La MISMA regla que los sugeridos del 409 (`cobroOcupadoParaAbono`).
+      for (const c of cobros) {
+        const id = c.id as string;
+        if (
+          cobroOcupadoParaAbono(c, partesPorCobro.get(id) ?? [], movId, {
+            conParciales,
+            pasarela,
+          })
+        ) {
+          ocupadosCobro.add(id);
         }
       }
     }
@@ -5215,7 +5960,7 @@ export class ConciliacionService {
 
     const montoMov = Number(mov.monto) || 0;
     const refMs = Date.parse(`${mov.fecha}T00:00:00Z`);
-    const candidatos: CandidatoCobro[] = [
+    const todos: CandidatoCobro[] = [
       ...cobros
         .filter((c) => !ocupadosCobro.has(c.id as string))
         .map((c): CandidatoCobroVuelo => {
@@ -5223,6 +5968,7 @@ export class ConciliacionService {
             c.vuelo as {
               folio?: unknown;
               fecha_vuelo?: unknown;
+              tc_usd_mxn?: unknown;
               cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
             } | null,
           );
@@ -5264,6 +6010,16 @@ export class ConciliacionService {
               fecha: p.fecha,
               monto_parte: p.monto_parte,
             })),
+            // Qué pasaría al vincular ESTE abono a este cobro (el espejo del
+            // trigger A + el ±2 % del T.C.; D18). Los sugeridos de un EXCEDE
+            // se agregan abajo, con el universo completo.
+            al_vincular: alVincularAbono({
+              cobro: c,
+              tcVuelo: normalizarTc(vuelo?.tc_usd_mxn ?? null),
+              otras: f.otras,
+              abono: { monto: montoMov, moneda_cuenta: moneda, pasarela },
+              toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+            }),
           };
         }),
       ...sobres
@@ -5280,6 +6036,12 @@ export class ConciliacionService {
             } | null,
           );
           const cliente = unwrapOne(grupo?.cliente);
+          const regla = alVincularSobre({
+            montoAbono: montoMov,
+            monedaCuenta: moneda,
+            tipoCuenta: cuentaAbono.tipo,
+            sobre: s,
+          });
           return {
             ...norm,
             id: norm.cobro_grupo_id,
@@ -5287,16 +6049,46 @@ export class ConciliacionService {
               typeof cliente?.nombre === 'string' ? cliente.nombre : null,
             dif_monto: r2(Math.abs(norm.neto - montoMov)),
             fecha_vuelo: fechaVueloDe(grupo?.fecha_vuelo),
+            al_vincular: { estado: regla.estado, diferencia: regla.diferencia },
           };
         }),
-    ]
-      .sort(
-        (a, b) =>
-          a.dif_monto - b.dif_monto ||
-          Math.abs(Date.parse(a.fecha_cobro) - refMs) -
-            Math.abs(Date.parse(b.fecha_cobro) - refMs),
-      )
-      .slice(0, CANDIDATOS_MAX);
+    ].sort(
+      (a, b) =>
+        a.dif_monto - b.dif_monto ||
+        Math.abs(Date.parse(a.fecha_cobro) - refMs) -
+          Math.abs(Date.parse(b.fecha_cobro) - refMs),
+    );
+    // SUGERIDOS de un EXCEDE (D4): del universo completo (los cobros libres
+    // ANTES del tope), los que les falta ≈ lo que sobra; si alguno no entró
+    // en los primeros CANDIDATOS_MAX, va al final para que el panel lo marque.
+    const cobrosLibres = todos.filter(
+      (c): c is CandidatoCobroVuelo => c.tipo === 'COBRO_VUELO',
+    );
+    const universo = cobrosLibres.map(sugeridoDeCandidato);
+    for (const c of cobrosLibres) {
+      if (c.al_vincular?.estado !== 'EXCEDE') continue;
+      c.al_vincular.sugeridos = sugeridosParaExcedente(
+        universo,
+        c.al_vincular.sobrante,
+        mov.fecha,
+        [c.id],
+      );
+    }
+    const top = todos.slice(0, CANDIDATOS_MAX);
+    const enLista = new Set(top.map((c) => `${c.tipo}:${c.id}`));
+    const porId = new Map(cobrosLibres.map((c) => [c.id, c]));
+    const sugeridosFuera: CandidatoCobroVuelo[] = [];
+    for (const c of top) {
+      if (c.tipo !== 'COBRO_VUELO') continue;
+      for (const s of c.al_vincular?.sugeridos ?? []) {
+        const k = `COBRO_VUELO:${s.cobro_id}`;
+        const cand = porId.get(s.cobro_id);
+        if (enLista.has(k) || !cand) continue;
+        enLista.add(k);
+        sugeridosFuera.push(cand);
+      }
+    }
+    const candidatos: CandidatoCobro[] = [...top, ...sugeridosFuera];
     const salida = {
       movimiento: {
         id: mov.id,
@@ -5314,9 +6106,11 @@ export class ConciliacionService {
             }
           : {}),
         // ADITIVOS (0.0.78, invariante 77): capacidad de varios abonos por
-        // cobro y tipo de la cuenta (la pasarela no recibe parciales).
+        // cobro, tipo de la cuenta (la pasarela no recibe parciales) y
+        // «Corregir la comisión y vincular» (`corregir_comision` del PATCH).
         cobros_parciales: conParciales,
         tipo_cuenta: cuentaAbono.tipo,
+        corregir_comision: true as const,
       },
       candidatos,
       exactos: candidatos.filter((c) => c.dif_monto === 0).length,
@@ -5779,40 +6573,33 @@ export class ConciliacionService {
   }
 
   /**
-   * Aplica un cruce: escribe en el cobro de vuelo la comisión REAL del
-   * archivo (si difiere — mismo espíritu que `tc_gasto` al ligar gastos;
-   * ANTES de ligar, porque un cobro conciliado ya no se toca) y liga el
-   * movimiento (`linkCobro`, con sus candados). Un SOBRE no se reescribe
-   * (su comisión se parte entre los hijos): solo se liga y se reporta.
+   * Aplica un cruce: escribe en el cobro de vuelo la comisión REAL (si
+   * difiere — mismo espíritu que `tc_gasto` al ligar gastos; ANTES de ligar,
+   * porque un cobro conciliado ya no se toca) y liga el movimiento
+   * (`linkCobro`, con sus candados). Un SOBRE no se reescribe (su comisión se
+   * parte entre los hijos): solo se liga y se reporta. La comisión real es la
+   * del archivo o, por criterio BRUTO sin datos del archivo, la inferida =
+   * bruto del cobro − abono (`comisionRealDeCruce`; 0.0.78, D6: el cobro de
+   * la pasarela se concilia con UN abono = su neto ± $1.00 y sin la
+   * inferencia el auto-cruce rebotaría con COMISION_NO_CUADRA). La escribe
+   * `escribirComisionReal` (la misma de «Corregir la comisión y vincular»).
    */
   private async aplicarCrucePaywise(
     cruce: CrucePaywise,
     userId: string,
   ): Promise<void> {
     const { cobro, movimiento } = cruce;
+    const real = comisionRealDeCruce(cruce);
     if (
       cobro.tipo === 'COBRO_VUELO' &&
-      cruce.comision_paywise != null &&
-      cruce.dif_comision != null &&
-      Math.abs(cruce.dif_comision) > 0.01 &&
-      cruce.comision_paywise >= 0 &&
-      cruce.comision_paywise < cobro.monto
+      real != null &&
+      Math.abs(real - cruce.comision_sistema) > 0.01 &&
+      real >= 0 &&
+      real < cobro.monto
     ) {
-      const comision = cruce.comision_paywise;
-      const { error } = await this.supabase.service
-        .from('cobro_vuelo')
-        .update({
-          comision_banco_monto: comision > 0 ? r2(comision) : null,
-          comision_banco_pct:
-            comision > 0
-              ? Math.round((comision / cobro.monto) * 100 * 10000) / 10000
-              : null,
-          updated_by: userId,
-        })
-        .eq('id', cobro.id);
-      if (error) throw new Error(error.message);
+      await this.escribirComisionReal(cobro.id, cobro.monto, real, userId);
       this.logger.log(
-        `Paywise: comisión real ${comision} escrita en cobro ${cobro.id} (antes ${cruce.comision_sistema}).`,
+        `Paywise: comisión real ${real} escrita en cobro ${cobro.id} (antes ${cruce.comision_sistema}; ${cruce.comision_paywise != null ? 'del archivo' : 'inferida por BRUTO'}).`,
       );
     }
     await this.linkCobro(
@@ -5821,6 +6608,7 @@ export class ConciliacionService {
         ? { cobro_id: cobro.id }
         : { cobro_grupo_id: cobro.id },
       userId,
+      { respuesta: false },
     );
   }
 
@@ -5907,7 +6695,13 @@ export class ConciliacionService {
     const movimientosOmitidos = omitidoPw.fallo
       ? null
       : movsSinIngreso.length - movsRaw.length;
-    const movimientos: MovimientoPaywise[] = movsRaw.map((m) => ({
+    // UN COBRO, VARIOS ABONOS (0.0.78, D6): un abono que paga 2+ cobros
+    // (lote) NO es «libre» aunque su espejo `cobro_id` sea NULL: fuera del
+    // cruce, contado aparte (aditivo `movimientos_en_lote`). Sin la puente
+    // no hay lotes (`cobros_n` no viaja ⇒ 0).
+    const movsSinLote = movsRaw.filter((m) => !(Number(m.cobros_n) >= 2));
+    const movimientosEnLote = movsRaw.length - movsSinLote.length;
+    const movimientos: MovimientoPaywise[] = movsSinLote.map((m) => ({
       id: m.id as string,
       fecha: m.fecha as string,
       monto: r2(Number(m.monto) || 0),
@@ -5945,6 +6739,7 @@ export class ConciliacionService {
       cobrosConciliadosFuera,
       movimientosConIngreso: conIngresos ? movimientosConIngreso : null,
       movimientosOmitidos,
+      movimientosEnLote,
     };
   }
 
@@ -5960,6 +6755,7 @@ export class ConciliacionService {
       errores?: unknown[];
       movimientos_con_ingreso?: number | null;
       movimientos_omitidos?: number | null;
+      movimientos_en_lote?: number | null;
     } = {},
   ) {
     const ya = r.coinciden.filter((c) => c.criterio === 'YA_CONCILIADO');
@@ -6003,6 +6799,11 @@ export class ConciliacionService {
         ...('movimientos_omitidos' in extra
           ? { movimientos_omitidos: extra.movimientos_omitidos ?? null }
           : {}),
+        // ADITIVO (0.0.78, invariante 77): abonos de la pasarela que pagan
+        // 2+ cobros (lote), fuera del cruce.
+        ...('movimientos_en_lote' in extra
+          ? { movimientos_en_lote: extra.movimientos_en_lote ?? 0 }
+          : {}),
       },
       coinciden: r.coinciden,
       comision_distinta: r.comision_distinta,
@@ -6036,6 +6837,7 @@ export class ConciliacionService {
       {
         movimientos_con_ingreso: u.movimientosConIngreso,
         movimientos_omitidos: u.movimientosOmitidos,
+        movimientos_en_lote: u.movimientosEnLote,
       },
     );
   }
@@ -6087,6 +6889,7 @@ export class ConciliacionService {
         errores,
         movimientos_con_ingreso: u2.movimientosConIngreso,
         movimientos_omitidos: u2.movimientosOmitidos,
+        movimientos_en_lote: u2.movimientosEnLote,
       },
     );
   }

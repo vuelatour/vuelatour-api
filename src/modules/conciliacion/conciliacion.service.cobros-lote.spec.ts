@@ -457,11 +457,7 @@ const code = async (p: Promise<unknown>) => {
 describe('1 abono ↔ N cobros — linkCobro con cobro_ids (con la migración)', () => {
   it('dos cobros que cuadran: partes = neto, espejo NULL, cobros_n 2, conciliado; respuesta con cobros_estado', async () => {
     const { svc, db } = armar(mundo());
-    const r = (await svc.linkCobro(
-      'm1',
-      { cobro_ids: ['c379', 'c380'] },
-      USER,
-    )) as Record<string, unknown>;
+    const r = await svc.linkCobro('m1', { cobro_ids: ['c379', 'c380'] }, USER);
     const m = db.movimiento_bancario[0];
     expect(m.cobros_n).toBe(2);
     expect(m.cobro_id).toBeNull();
@@ -573,13 +569,18 @@ describe('1 abono ↔ N cobros — linkCobro con cobro_ids (con la migración)',
   });
 
   it('cobro_ids con UN cobro va por la RPC: parte = |abono| y espejo = el cobro', async () => {
-    const { svc, db } = armar(mundo());
+    // 0.0.78 (invariante 77): un abono MAYOR que su cobro ya no se liga
+    // (ABONO_EXCEDE_COBRO); uno MENOR deja el cobro parcial con parte =
+    // |abono| (no su neto).
+    const { svc, db } = armar(
+      mundo({ movimiento_bancario: [abono('m1', 900)] }),
+    );
     await svc.linkCobro('m1', { cobro_ids: ['c379'] }, USER);
     const m = db.movimiento_bancario[0];
     expect(m.cobros_n).toBe(1);
     expect(m.cobro_id).toBe('c379');
     expect(db.movimiento_bancario_cobro).toEqual([
-      expect.objectContaining({ cobro_id: 'c379', monto_parte: 3500 }),
+      expect.objectContaining({ cobro_id: 'c379', monto_parte: 900 }),
     ]);
   });
 
@@ -695,7 +696,12 @@ describe('1 abono ↔ N cobros — SIN la migración', () => {
   });
 
   it('UN cobro (cobro_ids o cobro_id) va por el camino directo de siempre', async () => {
-    const { svc, db, log } = armar(mundo(), { sinMigracion: true });
+    // 0.0.78: el abono no rebasa el cobro (la pre-validación del trigger A
+    // aplica igual sin la migración).
+    const { svc, db, log } = armar(
+      mundo({ movimiento_bancario: [abono('m1', 1000)] }),
+      { sinMigracion: true },
+    );
     await svc.linkCobro('m1', { cobro_ids: ['c379'] }, USER);
     expect(db.movimiento_bancario[0]).toMatchObject({
       cobro_id: 'c379',

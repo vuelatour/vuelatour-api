@@ -445,13 +445,15 @@ export class LinkMovimientoCobroDto {
    * de vuelo que paga este abono (1..50, sin repetir). Excluyente con
    * `cobro_id` / `cobro_grupo_id` (400 LOTE_INVALIDO). Con 2+, todos en la
    * moneda de la cuenta y la suma de sus NETOS debe cuadrar con el abono
-   * (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00).
+   * (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00). Desde
+   * el 0.0.78 (invariante 77) cada cobro entra por lo que le FALTA (neto −
+   * sus otros abonos).
    */
   @ApiPropertyOptional({
     type: [String],
     nullable: true,
     description:
-      'Cobros de vuelo que paga este abono (1..50, sin repetir). Excluyente con cobro_id / cobro_grupo_id. Con 2 o más, todos en la moneda de la cuenta y la suma de sus netos debe cuadrar con el abono (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00). 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración.',
+      'Cobros de vuelo que paga este abono (1..50, sin repetir). Excluyente con cobro_id / cobro_grupo_id. Con 2 o más, todos en la moneda de la cuenta y la suma de lo que le FALTA a cada uno (su neto menos sus otros abonos) debe cuadrar con el abono (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00). 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración.',
   })
   @IsOptional()
   @IsArray()
@@ -460,6 +462,32 @@ export class LinkMovimientoCobroDto {
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   cobro_ids?: string[] | null;
+
+  /**
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D6): «Corregir la
+   * comisión y vincular». Solo con UN cobro de vuelo (`cobro_id` o
+   * `cobro_ids` de 1) sin abonos: antes de ligar escribe la comisión real
+   * (monto − depósito). Un API previo responde 400 «property
+   * corregir_comision should not exist» (forbidNonWhitelisted): el panel
+   * solo lo manda con la capacidad `movimiento.corregir_comision`.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Solo con UN cobro de vuelo sin abonos: antes de ligar escribe la comisión real (monto − depósito). 400 CORREGIR_COMISION_NO_APLICA si no aplica.',
+  })
+  @IsOptional()
+  // El valor CRUDO del cuerpo (patrón de `solo_enriquecer`): con
+  // `enableImplicitConversion` (main.ts) un «"false"» llegaría convertido a
+  // `true` (Boolean('false')) y ESCRIBIRÍA la comisión; así solo pasan
+  // `true` y `false` de verdad.
+  @Transform(({ obj, key, value }): unknown => {
+    const fuente = obj as Record<string, unknown> | null | undefined;
+    return fuente && typeof fuente === 'object' && key in fuente
+      ? fuente[key]
+      : (value as unknown);
+  })
+  @IsBoolean()
+  corregir_comision?: boolean;
 }
 
 /** Candidatos (cobros de vuelo + sobres de grupo) para conciliar un ABONO a mano. */

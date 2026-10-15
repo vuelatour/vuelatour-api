@@ -416,9 +416,11 @@ describe('updateCobro — el dinero de un cobro de anticipo no se toca', () => {
     )!;
     // Sin `ingreso_anticipo_id`; desde el 0.0.77 (14-oct-2026) lee además
     // moneda, método, cuenta y T.C.: la fila de ANTES del aviso de
-    // transición de la solicitud automática de factura.
+    // transición de la solicitud automática de factura; desde el 0.0.78
+    // (invariante 77) también la comisión: el candado compara el dinero
+    // NUEVO contra el VIGENTE (`cambiaDineroDelCobro`) y dice si está PARCIAL.
     expect(sel(lectura.ops)).toBe(
-      'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn',
+      'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn, comision_banco_monto',
     );
   });
 });

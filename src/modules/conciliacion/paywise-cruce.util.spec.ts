@@ -1,4 +1,5 @@
 import {
+  comisionRealDeCruce,
   cruzarPaywise,
   difDias,
   normalizarReferencia,
@@ -230,5 +231,40 @@ describe('helpers', () => {
     expect(difDias('2026-09-03', '2026-09-04T03:00:00Z')).toBe(0);
     expect(difDias('2026-09-03', '2026-09-08T12:00:00Z')).toBe(5);
     expect(difDias('2026-09-03', 'no-fecha')).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('comisionRealDeCruce (0.0.78, invariante 77 D6: la comisión que se escribe ANTES de ligar)', () => {
+  it('la del archivo manda (directa o bruto − neto)', () => {
+    const r = cruzarPaywise(
+      [mov({ monto: 900, monto_bruto: 1000, comision_monto: null })],
+      [cobro({ comision_banco_monto: 100 })],
+    );
+    expect(r.coinciden[0].criterio).toBe('NETO');
+    expect(comisionRealDeCruce(r.coinciden[0])).toBe(100);
+  });
+
+  it('BRUTO sin bruto ni comisión en el archivo (así vienen los de prod) ⇒ bruto del cobro − abono; un centavo de ruido ⇒ 0', () => {
+    const r = cruzarPaywise(
+      [mov({ monto: 7000, monto_bruto: null, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    expect(r.coinciden[0].criterio).toBe('BRUTO');
+    expect(r.coinciden[0].comision_paywise).toBeNull();
+    expect(comisionRealDeCruce(r.coinciden[0])).toBe(0);
+    const casi = cruzarPaywise(
+      [mov({ monto: 6999.99, monto_bruto: null, comision_monto: null })],
+      [cobro({ monto: 7000, comision_banco_monto: 620 })],
+    );
+    expect(comisionRealDeCruce(casi.coinciden[0])).toBe(0);
+  });
+
+  it('NETO exacto sin datos del archivo ⇒ null (nada que escribir)', () => {
+    const r = cruzarPaywise(
+      [mov({ monto: 911.43, monto_bruto: null, comision_monto: null })],
+      [cobro()],
+    );
+    expect(r.coinciden[0].criterio).toBe('NETO');
+    expect(comisionRealDeCruce(r.coinciden[0])).toBeNull();
   });
 });

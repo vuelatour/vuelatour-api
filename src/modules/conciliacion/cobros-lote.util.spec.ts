@@ -1,4 +1,7 @@
 import {
+  alVincularSobre,
+  cobroOcupadoParaAbono,
+  comisionRealParaCorregir,
   CODIGOS_ERROR_COBROS,
   diferenciaLoteCobros,
   etiquetaConciliadoCobroUnico,
@@ -7,17 +10,27 @@ import {
   ligasDesdePartes,
   LOTE_COBROS_MAX,
   mensajeAbonoExcedeCobro,
+  mensajeAbonoNoCuadra,
+  mensajeCobroConciliado,
   mensajeCobroMonedaDistinta,
   mensajeCobroYaCubierto,
   mensajeComisionNoCuadra,
+  mensajeCorregirComisionNoAplica,
   mensajeErrorCobros,
+  mensajeSobreNoCuadra,
   netoDeCobro,
   puedeLigarCobros,
+  sugeridosParaExcedente,
+  type CobroParaLote,
+  type SugeridoCobro,
   TOKEN_ABONO_NO_CUADRA,
   unirLigas,
   type CodigoErrorCobros,
 } from './cobros-lote.util';
-import { netoDeCobro as netoDeCobroComun } from '../../common/cobro-banco.util';
+import {
+  netoDeCobro as netoDeCobroComun,
+  type ParteCobroBanco,
+} from '../../common/cobro-banco.util';
 import {
   cobroEstaConciliado,
   movimientoDeCobro,
@@ -56,8 +69,8 @@ describe('cobros-lote.util — 1 abono ↔ N cobros (caso #379 + #380)', () => {
     expect(v).toEqual({
       ok: true,
       partes: [
-        { cobro_id: A, monto_parte: 1000 },
-        { cobro_id: B, monto_parte: 2500 },
+        { cobro_id: A, monto_parte: 1000, faltante: 1000 },
+        { cobro_id: B, monto_parte: 2500, faltante: 2500 },
       ],
       suma: 3500,
       diferencia: 0,
@@ -65,16 +78,34 @@ describe('cobros-lote.util — 1 abono ↔ N cobros (caso #379 + #380)', () => {
     });
   });
 
-  it('UN cobro: parte = |abono| y sin cuadre (regla de siempre)', () => {
+  it('UN cobro: parte = |abono| (0.0.78: con la regla del trigger A, ya no «sin cuadre»)', () => {
     const v = puedeLigarCobros({
+      montoAbono: '-3500',
+      monedaCuenta: 'MXN',
+      cobros: [{ id: A, monto: 3500, moneda: 'MXN', folio: 379 }],
+    });
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.partes).toEqual([
+        { cobro_id: A, monto_parte: 3500, faltante: 3500 },
+      ]);
+      expect(v.tolerancia).toBe(0);
+      expect(v.al_vincular?.estado).toBe('CONCILIADO');
+    }
+    // Lo de antes («otra moneda sola, pasa») hoy es COBRO_MONEDA_DISTINTA:
+    // $3,500 MXN contra un cobro de 1,000 USD da un T.C. de 3.5.
+    const cruzado = puedeLigarCobros({
       montoAbono: '-3500',
       monedaCuenta: 'MXN',
       cobros: [{ id: A, monto: 1000, moneda: 'USD', folio: 379 }],
     });
-    expect(v.ok).toBe(true);
-    if (v.ok) {
-      expect(v.partes).toEqual([{ cobro_id: A, monto_parte: 3500 }]);
-      expect(v.tolerancia).toBe(0);
+    expect(cruzado.ok).toBe(false);
+    if (!cruzado.ok) {
+      expect(cruzado.codigo).toBe('COBRO_MONEDA_DISTINTA');
+      expect(cruzado.details).toMatchObject({
+        motivo: 'TC_FUERA_DE_BANDA',
+        tc_implicito: 3.5,
+      });
     }
   });
 
@@ -125,7 +156,7 @@ describe('cobros-lote.util — 1 abono ↔ N cobros (caso #379 + #380)', () => {
     expect(fuera.ok).toBe(false);
   });
 
-  it('otra moneda dentro de un lote ⇒ LOTE_MONEDA_DISTINTA; sola, pasa', () => {
+  it('otra moneda dentro de un lote ⇒ LOTE_MONEDA_DISTINTA (sola, la decide el T.C.)', () => {
     const lote = puedeLigarCobros({
       montoAbono: 3500,
       monedaCuenta: 'MXN',
@@ -724,5 +755,628 @@ describe('cobros-lote.util — un cobro, varios abonos (0.0.78, invariante 77)',
         posicion: 1,
       }),
     ).toBe('Cobro · vuelo #315 · Transferencia');
+  });
+});
+
+/** Una parte de OTRO abono (cuenta MXN de banco salvo que se diga). */
+const parteDe = (
+  movimientoId: string,
+  monto: number,
+  extra: Partial<ParteCobroBanco> = {},
+): ParteCobroBanco => ({
+  movimiento_id: movimientoId,
+  cobro_id: A,
+  monto_parte: monto,
+  moneda_cuenta: 'MXN',
+  pasarela: false,
+  fecha: '2026-09-15',
+  created_at: '2026-09-15T12:00:00Z',
+  monto_abono: monto,
+  cobros_n: 1,
+  cuenta_bancaria_id: 'cta',
+  cuenta_alias: 'EJE SCOTIA',
+  ...extra,
+});
+
+const unCobro = (
+  montoAbono: number,
+  c: Partial<CobroParaLote>,
+  cuenta: { moneda?: string | null; tipo?: string | null } = {},
+) =>
+  puedeLigarCobros({
+    montoAbono,
+    monedaCuenta: cuenta.moneda === undefined ? 'MXN' : cuenta.moneda,
+    tipoCuenta: cuenta.tipo ?? 'BANCO',
+    toleranciaTcPct: 2,
+    cobros: [{ id: A, monto: 0, moneda: 'MXN', folio: 315, ...c }],
+  });
+
+describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78, invariante 77)', () => {
+  it('camionetas (UN cobro): 1,700 de 3,400 ⇒ ok PARCIAL (parte = |abono|); 2.º 1,700 ⇒ ok CONCILIADO; 3.º 100 ⇒ COBRO_YA_CONCILIADO CUBIERTO con los details de la BD', () => {
+    const p1 = unCobro(1700, { monto: 3400 });
+    expect(p1).toMatchObject({
+      ok: true,
+      partes: [{ cobro_id: A, monto_parte: 1700, faltante: 3400 }],
+      tolerancia: 0,
+      al_vincular: { estado: 'PARCIAL', faltante_despues: 1700 },
+    });
+    const p2 = unCobro(1700, { monto: 3400, otras: [parteDe('m1', 1700)] });
+    expect(p2).toMatchObject({
+      ok: true,
+      partes: [{ cobro_id: A, monto_parte: 1700, faltante: 1700 }],
+      al_vincular: { estado: 'CONCILIADO', faltante_despues: 0 },
+    });
+    const p3 = unCobro(100, {
+      monto: 3400,
+      otras: [
+        parteDe('m2', 1700, { fecha: '2026-09-16' }),
+        parteDe('m1', 1700),
+      ],
+    });
+    expect(p3.ok).toBe(false);
+    if (!p3.ok) {
+      expect(p3.codigo).toBe('COBRO_YA_CONCILIADO');
+      expect(p3.details).toMatchObject({
+        cobro_id: A,
+        folio: 315,
+        motivo: 'CUBIERTO',
+        neto: 3400,
+        suma_ligada: 3400,
+        abonos_otros: 2,
+        movimiento_ids: ['m1', 'm2'],
+        movimiento_id: 'm1',
+      });
+      expect(p3.details).not.toHaveProperty('por');
+      expect(p3.mensaje).toBe(
+        'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15 sep · $1,700.00 y 16 sep · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
+      );
+    }
+  });
+
+  it('abono de MÁS: 69,183 contra #315 (68,205.55) ⇒ ABONO_EXCEDE_COBRO (también el primero); con abonos previos, el texto «ya le vincularon»', () => {
+    const v = unCobro(69183, { monto: 68205.55 });
+    expect(v.ok).toBe(false);
+    if (!v.ok) {
+      expect(v.codigo).toBe('ABONO_EXCEDE_COBRO');
+      expect(v.details).toEqual({
+        cobro_id: A,
+        folio: 315,
+        moneda: 'MXN',
+        monto_cobro: 68205.55,
+        neto: 68205.55,
+        suma_otras: 0,
+        abonos_otros: 0,
+        parte: 69183,
+        faltante: 68205.55,
+        excedente: 977.45,
+        un_solo: false,
+      });
+    }
+    const otra = unCobro(2000, { monto: 3400, otras: [parteDe('m1', 1700)] });
+    expect(otra.ok).toBe(false);
+    if (!otra.ok) {
+      expect(otra.details).toMatchObject({
+        suma_otras: 1700,
+        abonos_otros: 1,
+        faltante: 1700,
+        excedente: 300,
+      });
+      expect(otra.mensaje).toBe(
+        'Al cobro del vuelo #315 ($3,400.00 MXN) ya le vincularon $1,700.00 MXN y le faltan $1,700.00 MXN; este abono es de $2,000.00 MXN: sobran $300.00 MXN. Si el depósito también pagó otro vuelo, márcalo junto con este para que la suma cuadre con el abono; si el cobro está mal capturado, corrígelo antes de vincular.',
+      );
+    }
+    // Dentro de la tolerancia de $1.00 sí liga.
+    expect(unCobro(3401, { monto: 3400 }).ok).toBe(true);
+    expect(unCobro(3401.01, { monto: 3400 }).ok).toBe(false);
+  });
+
+  it('comisión (HSBC) y pasarela (Paywise): UN abono = neto ± 1.00; COMISION_NO_CUADRA con comisión real, % y corregible; un 2.º abono ⇒ UN_SOLO_ABONO', () => {
+    const hsbc = { monto: 5000, comision_banco_monto: 250 };
+    expect(unCobro(4750, hsbc).ok).toBe(true);
+    const no = unCobro(4000, hsbc);
+    expect(no.ok).toBe(false);
+    if (!no.ok) {
+      expect(no.codigo).toBe('COMISION_NO_CUADRA');
+      expect(no.details).toEqual({
+        cobro_id: A,
+        folio: 315,
+        moneda: 'MXN',
+        monto_cobro: 5000,
+        comision_capturada: 250,
+        neto: 4750,
+        parte: 4000,
+        comision_real: 1000,
+        comision_real_pct: 20,
+        por: 'COMISION',
+        corregible: true,
+      });
+    }
+    const excede = unCobro(5500, hsbc);
+    expect(!excede.ok && excede.details).toMatchObject({
+      un_solo: true,
+      excedente: 750,
+      faltante: 4750,
+    });
+    const segundo = unCobro(100, { ...hsbc, otras: [parteDe('m1', 4000)] });
+    expect(!segundo.ok && segundo.details).toMatchObject({
+      motivo: 'UN_SOLO_ABONO',
+      por: 'COMISION',
+    });
+    const pw = { monto: 13000, comision_banco_monto: 1129.76, folio: 293 };
+    expect(unCobro(11870.24, pw, { tipo: 'PASARELA' }).ok).toBe(true);
+    const pwNo = unCobro(11800, pw, { tipo: 'PASARELA' });
+    expect(!pwNo.ok && pwNo.details).toMatchObject({
+      por: 'PASARELA',
+      comision_real: 1200,
+      comision_real_pct: 9.23,
+      corregible: true,
+    });
+    expect(
+      !pwNo.ok &&
+        pwNo.mensaje.endsWith(
+          'Corrige la comisión del cobro o usa «Corregir la comisión a $1,200.00 y vincular».',
+        ),
+    ).toBe(true);
+    // Sin comisión capturada pero abono de la PASARELA: también «de un solo abono».
+    const sinCom = unCobro(6305, { monto: 7000 }, { tipo: 'PASARELA' });
+    expect(!sinCom.ok && sinCom.codigo).toBe('COMISION_NO_CUADRA');
+    expect(!sinCom.ok && sinCom.details).toMatchObject({
+      comision_real: 695,
+      por: 'PASARELA',
+    });
+    // Un parcial de banco no admite un abono de la pasarela.
+    const mixto = unCobro(
+      1700,
+      { monto: 3400, otras: [parteDe('m1', 1700)] },
+      { tipo: 'PASARELA' },
+    );
+    expect(!mixto.ok && mixto.details).toMatchObject({
+      motivo: 'UN_SOLO_ABONO',
+      por: 'PASARELA',
+    });
+  });
+
+  it('otra moneda (1↔1): banda 15–25 y ±2 % del T.C. del cobro (o del vuelo); sin tolerancia, solo la banda', () => {
+    const usd = { monto: 1000, moneda: 'USD', tc_usd_mxn: 17 };
+    expect(unCobro(17000, usd).ok).toBe(true);
+    expect(unCobro(17340, usd).ok).toBe(true); // +2.0 % es CERCA
+    const lejos = unCobro(17360, usd);
+    expect(!lejos.ok && lejos.details).toMatchObject({
+      motivo: 'TC_LEJOS',
+      tc_implicito: 17.36,
+      tc_referencia: 17,
+      desvio_pct: 2.1,
+      tc_referencia_origen: 'COBRO',
+    });
+    const delVuelo = unCobro(20400, {
+      monto: 1000,
+      moneda: 'USD',
+      tc_vuelo: 17,
+    });
+    expect(!delVuelo.ok && delVuelo.details).toMatchObject({
+      motivo: 'TC_LEJOS',
+      tc_referencia_origen: 'VUELO',
+      desvio_pct: 20,
+    });
+    const banda = unCobro(500, usd);
+    expect(!banda.ok && banda.details).toMatchObject({
+      motivo: 'TC_FUERA_DE_BANDA',
+      tc_implicito: 0.5,
+      tc_min: 15,
+      tc_max: 25,
+    });
+    // Sin referencia: solo la banda.
+    expect(unCobro(20400, { monto: 1000, moneda: 'USD' }).ok).toBe(true);
+    // Sin `toleranciaTcPct` (como la BD): solo la banda aunque haya T.C.
+    expect(
+      puedeLigarCobros({
+        montoAbono: 20400,
+        monedaCuenta: 'MXN',
+        cobros: [{ id: A, monto: 1000, moneda: 'USD', tc_usd_mxn: 17 }],
+      }).ok,
+    ).toBe(true);
+    // Un abono en otra moneda a un cobro con otro abono ⇒ UN_SOLO_ABONO.
+    const segundo = unCobro(17000, {
+      ...usd,
+      otras: [parteDe('m1', 100, { moneda_cuenta: 'USD' })],
+    });
+    expect(!segundo.ok && segundo.details).toMatchObject({
+      motivo: 'UN_SOLO_ABONO',
+      por: 'MONEDA_DISTINTA',
+    });
+  });
+
+  it('LOTE por FALTANTE: #315 + #332; Villanueva; un cobro con abono previo entra por lo que le falta y el texto lo dice', () => {
+    const lote = puedeLigarCobros({
+      montoAbono: 69183,
+      monedaCuenta: 'MXN',
+      cobros: [
+        { id: A, monto: 68205.55, moneda: 'MXN', folio: 315 },
+        { id: B, monto: 977.45, moneda: 'MXN', folio: 332 },
+      ],
+    });
+    expect(lote).toMatchObject({
+      ok: true,
+      suma: 69183,
+      diferencia: 0,
+      partes: [
+        { cobro_id: A, monto_parte: 68205.55, faltante: 68205.55 },
+        { cobro_id: B, monto_parte: 977.45, faltante: 977.45 },
+      ],
+    });
+    const d5 = puedeLigarCobros({
+      montoAbono: 69000,
+      monedaCuenta: 'MXN',
+      cobros: [
+        { id: A, monto: 50999, moneda: 'MXN', folio: 277 },
+        {
+          id: B,
+          monto: 30000,
+          moneda: 'MXN',
+          folio: 278,
+          otras: [parteDe('mP', 11999, { cobro_id: B })],
+        },
+      ],
+    });
+    expect(d5).toMatchObject({
+      ok: true,
+      partes: [
+        { cobro_id: A, monto_parte: 50999 },
+        { cobro_id: B, monto_parte: 18001, faltante: 18001 },
+      ],
+    });
+    const noCuadra = puedeLigarCobros({
+      montoAbono: 69000,
+      monedaCuenta: 'MXN',
+      cobros: [
+        { id: A, monto: 40999, moneda: 'MXN', folio: 277 },
+        {
+          id: B,
+          monto: 28001,
+          moneda: 'MXN',
+          folio: 278,
+          otras: [parteDe('mP', 10000, { cobro_id: B })],
+        },
+      ],
+    });
+    expect(noCuadra.ok).toBe(false);
+    if (!noCuadra.ok) {
+      expect(noCuadra.codigo).toBe('ABONO_NO_CUADRA');
+      expect(noCuadra.details).toMatchObject({
+        monto_abono: 69000,
+        suma_cobros: 59000,
+        diferencia: 10000,
+      });
+      expect((noCuadra.details.cobros as unknown[])[1]).toEqual({
+        id: B,
+        folio: 278,
+        monto: 28001,
+        neto: 28001,
+        suma_otras: 10000,
+        abonos_otros: 1,
+        faltante: 18001,
+        parte: 18001,
+      });
+      expect(noCuadra.mensaje).toContain(
+        'A los 2 cobros les faltan $59,000.00 MXN (lo que le falta a cada uno)',
+      );
+    }
+    const cubierto = puedeLigarCobros({
+      montoAbono: 69000,
+      monedaCuenta: 'MXN',
+      cobros: [
+        { id: A, monto: 40999, moneda: 'MXN' },
+        {
+          id: B,
+          monto: 28001,
+          moneda: 'MXN',
+          otras: [parteDe('mP', 28001, { cobro_id: B })],
+        },
+      ],
+    });
+    expect(!cubierto.ok && cubierto.details).toMatchObject({
+      cobro_id: B,
+      motivo: 'CUBIERTO',
+      movimiento_id: 'mP',
+    });
+    const unSolo = puedeLigarCobros({
+      montoAbono: 69000,
+      monedaCuenta: 'MXN',
+      tipoCuenta: 'PASARELA',
+      cobros: [
+        { id: A, monto: 40999, moneda: 'MXN' },
+        {
+          id: B,
+          monto: 38001,
+          moneda: 'MXN',
+          otras: [parteDe('mP', 10000, { cobro_id: B })],
+        },
+      ],
+    });
+    expect(!unSolo.ok && unSolo.details).toMatchObject({
+      motivo: 'UN_SOLO_ABONO',
+      por: 'PASARELA',
+    });
+  });
+
+  it('mensajeAbonoNoCuadra: con un cobro que ya tenía abonos, el texto por faltante (spec); sin eso, el de siempre byte a byte; leído de la BD igual', () => {
+    expect(
+      mensajeAbonoNoCuadra({
+        n: 2,
+        suma: 2677.45,
+        monto_abono: 2700,
+        diferencia: 22.55,
+        tolerancia: 0.02,
+        moneda: 'MXN',
+        porFaltante: true,
+      }),
+    ).toBe(
+      'A los 2 cobros les faltan $2,677.45 MXN (lo que le falta a cada uno) y el abono es de $2,700.00 MXN: sobran $22.55 MXN (se admite hasta $0.02 de diferencia por redondeos). Revisa qué cobros paga este abono o corrige el monto o la comisión de alguno.',
+    );
+    const hoy = mensajeAbonoNoCuadra({
+      n: 2,
+      suma: 1500,
+      monto_abono: 3500,
+      diferencia: 2000,
+      tolerancia: 0.02,
+      moneda: 'MXN',
+    });
+    expect(hoy).toBe(
+      'Los 2 cobros suman $1,500.00 MXN y el abono es de $3,500.00 MXN: faltan $2,000.00 MXN (se admite hasta $0.02 MXN de diferencia por redondeos). Revisa qué cobros paga este abono o corrige el monto o la comisión de alguno.',
+    );
+    const deBd = {
+      monto_abono: 2700,
+      suma_cobros: 2677.45,
+      diferencia: 22.55,
+      tolerancia: 0.02,
+      moneda: 'MXN',
+      cobros: [{ abonos_otros: 0 }, { abonos_otros: 1 }],
+    };
+    expect(mensajeErrorCobros('ABONO_NO_CUADRA', deBd, '')).toContain(
+      '(lo que le falta a cada uno)',
+    );
+    expect(
+      mensajeErrorCobros(
+        'ABONO_NO_CUADRA',
+        { ...deBd, cobros: [{ abonos_otros: 0 }, { abonos_otros: 0 }] },
+        '',
+      ),
+    ).toContain('Los 2 cobros suman $2,677.45 MXN');
+  });
+
+  it('comisionRealParaCorregir: monto − depósito (un centavo de ruido ⇒ 0); depósito mayor ⇒ DEPOSITO_MAYOR; sin depósito ⇒ DEPOSITO_INVALIDO', () => {
+    expect(comisionRealParaCorregir(13000, 11800)).toEqual({
+      valida: true,
+      comision: 1200,
+      motivo: null,
+    });
+    expect(comisionRealParaCorregir(5000, 5000.01)).toEqual({
+      valida: true,
+      comision: 0,
+      motivo: null,
+    });
+    expect(comisionRealParaCorregir(5000, 5000.5)).toMatchObject({
+      valida: false,
+      motivo: 'DEPOSITO_MAYOR',
+    });
+    expect(comisionRealParaCorregir(100, 0)).toMatchObject({
+      valida: false,
+      motivo: 'DEPOSITO_INVALIDO',
+    });
+    expect(mensajeCorregirComisionNoAplica('CON_ABONOS')).toBe(
+      'La comisión solo se corrige al vincular UN cobro de vuelo que todavía no tiene abonos, cuando el depósito es menor o igual que el cobro.',
+    );
+    expect(mensajeCorregirComisionNoAplica('MONEDA_DISTINTA')).toContain(
+      'otra moneda',
+    );
+  });
+
+  it('sugeridosParaExcedente: faltante ≈ excedente (±0.02), por cercanía de fecha, sin excluidos ni repetidos, ≤ 3', () => {
+    const s = (id: string, faltante: number, fecha: string): SugeridoCobro => ({
+      cobro_id: id,
+      vuelo_id: `v-${id}`,
+      folio: null,
+      cliente: null,
+      fecha_cobro: fecha,
+      monto: faltante,
+      moneda: 'MXN',
+      faltante,
+    });
+    const universo = [
+      s('lejos', 977.45, '2026-08-01T17:00:00Z'),
+      s('c332', 977.45, '2026-09-14T17:00:00Z'),
+      s('casi', 977.47, '2026-09-20T17:00:00Z'),
+      s('fuera', 977.48, '2026-09-15T17:00:00Z'),
+      s('c315', 977.45, '2026-09-15T17:00:00Z'),
+      s('otro', 977.44, '2026-09-10T17:00:00Z'),
+      s('c332', 977.45, '2026-09-14T17:00:00Z'),
+    ];
+    expect(
+      sugeridosParaExcedente(universo, 977.45, '2026-09-15', ['c315']).map(
+        (x) => x.cobro_id,
+      ),
+    ).toEqual(['c332', 'otro', 'casi']);
+    expect(sugeridosParaExcedente(universo, 0, '2026-09-15')).toEqual([]);
+  });
+
+  it('cobroOcupadoParaAbono: sin la sonda, cualquier otra liga ocupa; con ella, solo cubierto, cruzado o un abono de la pasarela', () => {
+    const c = { monto: 3400, moneda: 'MXN' };
+    const sin = { conParciales: false, pasarela: false };
+    const con = { conParciales: true, pasarela: false };
+    expect(cobroOcupadoParaAbono(c, [], 'm2', sin)).toBe(false);
+    expect(cobroOcupadoParaAbono(c, [parteDe('m2', 1700)], 'm2', sin)).toBe(
+      false,
+    );
+    expect(cobroOcupadoParaAbono(c, [parteDe('m1', 1700)], 'm2', sin)).toBe(
+      true,
+    );
+    expect(cobroOcupadoParaAbono(c, [parteDe('m1', 1700)], 'm2', con)).toBe(
+      false,
+    );
+    expect(cobroOcupadoParaAbono(c, [parteDe('m1', 3400)], 'm2', con)).toBe(
+      true,
+    );
+    expect(
+      cobroOcupadoParaAbono(
+        c,
+        [parteDe('m1', 100, { moneda_cuenta: 'USD' })],
+        'm2',
+        con,
+      ),
+    ).toBe(true);
+    expect(
+      cobroOcupadoParaAbono(c, [parteDe('m1', 1700)], 'm2', {
+        conParciales: true,
+        pasarela: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('alVincularSobre + mensajeSobreNoCuadra: banco en la moneda del sobre ⇒ neto ± 1.00; pasarela u otra moneda, como hoy', () => {
+    const sobre = { monto: 11500, moneda: 'MXN', comision_banco_monto: 699.24 };
+    expect(
+      alVincularSobre({
+        montoAbono: 10000,
+        monedaCuenta: 'MXN',
+        tipoCuenta: 'BANCO',
+        sobre,
+      }),
+    ).toEqual({
+      estado: 'SOBRE_NO_CUADRA',
+      diferencia: -800.76,
+      neto: 10800.76,
+    });
+    expect(
+      alVincularSobre({
+        montoAbono: 10801.76,
+        monedaCuenta: 'MXN',
+        tipoCuenta: 'BANCO',
+        sobre,
+      }).estado,
+    ).toBe('CONCILIADO');
+    expect(
+      alVincularSobre({
+        montoAbono: 10801.77,
+        monedaCuenta: 'MXN',
+        tipoCuenta: 'BANCO',
+        sobre,
+      }).estado,
+    ).toBe('SOBRE_NO_CUADRA');
+    expect(
+      alVincularSobre({
+        montoAbono: 10000,
+        monedaCuenta: 'MXN',
+        tipoCuenta: 'PASARELA',
+        sobre,
+      }).estado,
+    ).toBe('CONCILIADO');
+    expect(
+      alVincularSobre({
+        montoAbono: 600,
+        monedaCuenta: 'USD',
+        tipoCuenta: 'BANCO',
+        sobre,
+      }).estado,
+    ).toBe('CONCILIADO');
+    expect(
+      mensajeSobreNoCuadra({
+        grupo_folio: 12,
+        monto_abono: 10000,
+        neto_sobre: 10800.76,
+        diferencia: -800.76,
+        moneda: 'MXN',
+        con_comision: true,
+      }),
+    ).toBe(
+      'El abono ($10,000.00 MXN) no cuadra con el sobre del grupo G-12 ($10,800.76 MXN después de la comisión): faltan $800.76 MXN. Revisa que sea el depósito del grupo o corrige el sobre antes de vincular.',
+    );
+    expect(
+      mensajeSobreNoCuadra({
+        grupo_folio: 12,
+        monto_abono: 11000,
+        neto_sobre: 10800.76,
+        diferencia: 199.24,
+        moneda: 'MXN',
+      }),
+    ).toContain('($10,800.76 MXN): sobran $199.24 MXN.');
+  });
+
+  it('mensajeCobroConciliado (candado del API): parcial, 2 abonos, 1 abono, sobre; sin datos = el de la carrera con el trigger E', () => {
+    expect(
+      mensajeCobroConciliado({
+        via: 'DIRECTO',
+        parcial: true,
+        abonos: [{ fecha: '2026-09-15', monto_parte: 1700 }],
+        monto_vinculado: 1700,
+        neto: 3400,
+        moneda: 'MXN',
+      }),
+    ).toBe(
+      'Este cobro está conciliado PARCIAL con el banco ($1,700.00 MXN de $3,400.00 MXN, abono del 15 sep). Para cambiar su monto, moneda, tipo de cambio o comisión, o para eliminarlo, primero desvincula ese abono en Conciliación.',
+    );
+    expect(
+      mensajeCobroConciliado({
+        via: 'DIRECTO',
+        parcial: false,
+        abonos: [
+          { fecha: '2026-09-15', monto_parte: 1700 },
+          { fecha: '2026-09-15', monto_parte: 1700 },
+        ],
+        monto_vinculado: 3400,
+        neto: 3400,
+        moneda: 'MXN',
+      }),
+    ).toBe(
+      'Este cobro está conciliado con 2 abonos del banco (15 sep · $1,700.00 y 15 sep · $1,700.00). Para cambiar su dinero o eliminarlo, primero desvincula esos abonos en Conciliación.',
+    );
+    expect(
+      mensajeCobroConciliado({
+        via: 'DIRECTO',
+        abonos: [{ fecha: '2026-09-15', monto_parte: 3400 }],
+      }),
+    ).toBe(
+      'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
+    );
+    expect(mensajeCobroConciliado({ via: 'SOBRE' })).toBe(
+      'Este cobro es parte de un sobre de grupo conciliado con un movimiento bancario. Desvincula el sobre primero en Conciliación.',
+    );
+    expect(mensajeCobroConciliado()).toBe(
+      mensajeErrorCobros('COBRO_CONCILIADO', null, ''),
+    );
+  });
+
+  it('mensajeComisionNoCuadra: no corregible ⇒ no ofrece el botón; depósito mayor que el cobro ⇒ revisar la comisión', () => {
+    const base = {
+      folio: 293,
+      moneda: 'MXN',
+      monto_cobro: 13000,
+      comision_capturada: 1129.76,
+      neto: 11870.24,
+      parte: 11800,
+      comision_real: 1200,
+    };
+    expect(
+      mensajeComisionNoCuadra({ ...base, corregible: false }),
+    ).not.toContain('Corregir la comisión a');
+    expect(mensajeComisionNoCuadra({ ...base, corregible: true })).toContain(
+      '«Corregir la comisión a $1,200.00 y vincular»',
+    );
+    expect(
+      mensajeComisionNoCuadra({ ...base, parte: 13000.5, comision_real: 0 }),
+    ).toContain('más que el cobro');
+  });
+
+  it('ningún texto nuevo lleva uuid ni la marca « [ABONO_NO_CUADRA]»', () => {
+    const textos = [
+      unCobro(69183, { monto: 68205.55 }),
+      unCobro(4000, { monto: 5000, comision_banco_monto: 250 }),
+      unCobro(100, { monto: 3400, otras: [parteDe('m1', 3400)] }),
+      unCobro(500, { monto: 1000, moneda: 'USD' }),
+    ].map((v) => (v.ok ? '' : v.mensaje));
+    for (const t of textos) {
+      expect(t.length).toBeGreaterThan(0);
+      expect(t).not.toContain(A);
+      expect(t).not.toContain('[ABONO_NO_CUADRA]');
+    }
   });
 });
