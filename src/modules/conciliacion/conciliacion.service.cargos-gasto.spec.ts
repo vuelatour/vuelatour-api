@@ -280,6 +280,36 @@ describe('POST cargos/gastos-candidatos — la SUMA la calcula el API', () => {
     expect(r.candidatos[0].id).toBe('g-suma');
   });
 
+  it('CON candidatos también dice los excluidos de la suma (revisión del 14-oct-2026): el efectivo y el ya conciliado del mismo monto que «Créalo por la suma» duplicaría', async () => {
+    const w = armar(
+      tresCargos([
+        // Otro gasto bancario del MISMO monto llena la lista…
+        gasto('g-taxi', 9700, '2026-11-15', { categoria: 'TAXI' }),
+        // …y antes escondía estos dos.
+        gasto('g-efectivo', 9700, '2026-09-23', {
+          medio_pago: 'EFECTIVO',
+          categoria: 'COMIDA',
+        }),
+        gasto('g-conciliado', 9700, '2026-09-20', { conciliado: true }),
+      ]),
+    );
+    for (const q of [undefined, '9700.00']) {
+      const r = await w.svc.gastosCandidatosDeCargos({
+        movimiento_ids: TRES,
+        q,
+        dias: 120,
+      });
+      expect(r.candidatos.map((c) => c.id)).toEqual(['g-taxi']);
+      expect(r.excluidos?.map((g) => [g.motivo, g.n])).toEqual([
+        ['EFECTIVO_U_OTRO_MEDIO', 1],
+        ['YA_CONCILIADO', 1],
+      ]);
+      expect(r.excluidos?.[0].gastos[0].id).toBe('g-efectivo');
+      expect(r.excluidos_monto).toBe(9700);
+    }
+    expect(escrituras(w.log)).toHaveLength(0);
+  });
+
   it('sin candidatos: dice POR QUÉ (los excluidos por la suma)', async () => {
     const w = armar(
       tresCargos([

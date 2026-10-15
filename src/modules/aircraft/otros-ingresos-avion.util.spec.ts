@@ -174,15 +174,18 @@ describe('filaHojaOtrosIngresos', () => {
 
 describe('notaTcUsdIngreso', () => {
   it('OFICIAL_DEL_DIA, GASTO_LIGADO (hojas o fila de vuelo) LITERALES; PROPIO / USD ⇒ null', () => {
-    expect(notaTcUsdIngreso(convDe(ING4))).toBe(NOTA_OFICIAL_0904);
+    expect(notaTcUsdIngreso(convDe(ING4), 46550.8)).toBe(NOTA_OFICIAL_0904);
     const reembolso = { ...ING4, monto: 45483.6, gasto_id: '70e8c3a4-1111' };
     const hojas: TcGastoLigado = {
       gasto_id: '70e8c3a4-1111',
       tc: 17.237699,
       fecha: '2026-09-15',
       lugar: 'T.C. promedio de las hojas',
+      cargado_mxn: 45483.6,
     };
-    expect(notaTcUsdIngreso(convDe(reembolso, OFICIAL_0904, hojas))).toBe(
+    expect(
+      notaTcUsdIngreso(convDe(reembolso, OFICIAL_0904, hojas), 45483.6),
+    ).toBe(
       'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
     );
     expect(
@@ -191,13 +194,43 @@ describe('notaTcUsdIngreso', () => {
           ...hojas,
           lugar: 'T.C. de costos del vuelo #430',
         }),
+        45483.6,
       ),
     ).toBe(
       'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15-sep-2026, T.C. de costos del vuelo #430): reembolso y gasto se anulan en este libro.',
     );
-    expect(notaTcUsdIngreso(convDe({ ...ING4, tc_usd_mxn: 17.5 }))).toBeNull();
-    expect(notaTcUsdIngreso(convDe(USD))).toBeNull();
-    expect(notaTcUsdIngreso(convDe(ING4, null))).toBeNull();
+    expect(
+      notaTcUsdIngreso(convDe({ ...ING4, tc_usd_mxn: 17.5 }), 46550.8),
+    ).toBeNull();
+    expect(notaTcUsdIngreso(convDe(USD), 95)).toBeNull();
+    expect(notaTcUsdIngreso(convDe(ING4, null), 46550.8)).toBeNull();
+  });
+
+  it('GASTO_LIGADO según lo que el libro le CARGA al avión (revisión del 14-oct-2026): parcial ⇒ «anula $X de los $Y»; de más ⇒ «solo le carga $Y … no se anulan con nada»', () => {
+    // #383: el libro carga 1,365.64 (la operación) de una factura de 1,925.27.
+    const op: TcGastoLigado = {
+      gasto_id: '8c60e428-2222',
+      tc: 17.6,
+      fecha: '2026-09-25',
+      lugar: 'T.C. de costos del vuelo #383',
+      cargado_mxn: 1365.64,
+    };
+    const de = (monto: number) => ({
+      ...ING4,
+      monto,
+      gasto_id: '8c60e428-2222',
+    });
+    expect(
+      notaTcUsdIngreso(convDe(de(1925.27), OFICIAL_0904, op), 1925.27),
+    ).toBe(
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25-sep-2026, T.C. de costos del vuelo #383): este libro solo le carga $1,365.64 MXN de ese gasto al avión; los $559.63 MXN restantes del reembolso no se anulan con nada.',
+    );
+    expect(notaTcUsdIngreso(convDe(de(1000), OFICIAL_0904, op), 1000)).toBe(
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25-sep-2026, T.C. de costos del vuelo #383): el reembolso anula $1,000 MXN de los $1,365.64 MXN que este libro le carga al avión de ese gasto.',
+    );
+    expect(
+      notaTcUsdIngreso(convDe(de(1365.645), OFICIAL_0904, op), 1365.645),
+    ).toContain('reembolso y gasto se anulan en este libro.');
   });
 });
 
@@ -271,48 +304,63 @@ describe('hojaOtrosIngresosAvion', () => {
     ]);
   });
 
-  it('reembolso cuyo gasto NO cuenta en este libro ⇒ pendiente LITERAL (oficial del día o T.C. propio); ligado o gasto del libro ⇒ ninguno', () => {
+  it('reembolso cuyo gasto este libro NO le carga al avión ⇒ pendiente LITERAL (oficial del día o T.C. propio); ligado por lo cargado ⇒ ninguno', () => {
     const reembolso = { ...ING4, gasto_id: 'g-otro-mes' };
     const p1: string[] = [];
     hojaOtrosIngresosAvion([reembolso], conversionesDe([reembolso]), p1);
     expect(p1).toEqual([
-      'Hoja "Otros ingresos" (2026-09-04): ING-4 reembolsa un gasto que este libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con el T.C. oficial de su día y no se anula exacto con su gasto',
+      'Hoja "Otros ingresos" (2026-09-04): ING-4 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto',
     ]);
     const propio = { ...reembolso, tc_usd_mxn: 17.5 };
     const p2: string[] = [];
     hojaOtrosIngresosAvion([propio], conversionesDe([propio]), p2);
     expect(p2).toEqual([
-      'Hoja "Otros ingresos" (2026-09-04): ING-4 reembolsa un gasto que este libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con su T.C. propio y no se anula exacto con su gasto',
+      'Hoja "Otros ingresos" (2026-09-04): ING-4 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con su T.C. propio y no se anula con su gasto',
     ]);
-    // El gasto SÍ está en el libro (T.C. propio capturado: manda) ⇒ nada.
-    const p3: string[] = [];
-    hojaOtrosIngresosAvion(
-      [propio],
-      conversionesDe([propio]),
-      p3,
-      new Set(['g-otro-mes']),
-    );
-    expect(p3).toEqual([]);
-    // Ligado ⇒ nada (se anula con su gasto).
     const ligado: TcGastoLigado = {
       gasto_id: 'g-otro-mes',
       tc: 17.237699,
       fecha: '2026-09-15',
       lugar: 'T.C. promedio de las hojas',
+      cargado_mxn: 46550.8,
     };
+    const delLibro = new Map([['g-otro-mes', ligado]]);
+    // El gasto SÍ lo carga el libro pero el T.C. propio (manda) es otro
+    // (revisión del 14-oct-2026): no se anulan al centavo ⇒ lo dice.
+    const p3: string[] = [];
+    hojaOtrosIngresosAvion([propio], conversionesDe([propio]), p3, delLibro);
+    expect(p3).toEqual([
+      'Hoja "Otros ingresos" (2026-09-04): ING-4 trae T.C. propio (17.5000) y este libro convierte el gasto que reembolsa con 17.2377 (T.C. promedio de las hojas): reembolso y gasto no se anulan exactos',
+    ]);
+    // Ligado y por lo cargado ⇒ nada (se anula con su gasto).
     const p4: string[] = [];
     const h = hojaOtrosIngresosAvion(
       [reembolso],
       new Map([[reembolso.id, convDe(reembolso, OFICIAL_0904, ligado)]]),
       p4,
-      new Set(['g-otro-mes']),
+      delLibro,
     );
     expect(p4).toEqual([]);
     expect(h.filas[0]).toMatchObject({
       tc_usd: 17.237699,
       neto_usd: 2700.52,
       tc_usd_origen: 'GASTO_LIGADO',
+      tc_usd_nota:
+        'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-otro-m del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
     });
+    // Ligado pero el libro solo carga una PARTE (TUA o extensión
+    // trasladadas, parcial de un reparto) ⇒ pendiente del exceso.
+    const parte = { ...ligado, cargado_mxn: 40000 };
+    const p5: string[] = [];
+    hojaOtrosIngresosAvion(
+      [reembolso],
+      new Map([[reembolso.id, convDe(reembolso, OFICIAL_0904, parte)]]),
+      p5,
+      new Map([['g-otro-mes', parte]]),
+    );
+    expect(p5).toEqual([
+      'Hoja "Otros ingresos" (2026-09-04): ING-4 reembolsa $46,550.80 MXN de un gasto del que este libro solo le carga $40,000 MXN al avión: $6,550.80 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso',
+    ]);
   });
 
   it('un anticipo forzado no entra a la hoja', () => {

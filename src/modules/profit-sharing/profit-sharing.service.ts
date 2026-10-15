@@ -59,14 +59,16 @@ import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
 // Desde el 0.0.77 (decisión del cliente del 14-oct-2026) su USD sale de la
 // fuente única `usdDeIngresoAvion`: la MISMA conversión del balance.
 import {
+  avisosReembolsoGasto,
   diaTcOficialIngreso,
+  gastosLigadosDelLibro,
   ingresoEsDelAvion,
   leerIngresosDeResultado,
   partirIngresosPorAvion,
   usdDeIngresoAvion,
   type IngresoParaLibro,
   type OrigenTcIngreso,
-  type TcGastoLigado,
+  type ParteGastoCargada,
 } from '../../common/ingreso-resultado.util';
 import {
   etiquetaCategoriaIngreso,
@@ -1615,13 +1617,16 @@ export class ProfitSharingService {
     // de avión). Los agregados directos/indirectos/permisos/sin_tc se derivan
     // de ESTE acumulador, así el desglose cuadra con ellos por construcción.
     const porCategoria = new Map<string, GastoCategoriaAcc>();
-    // REEMBOLSO LIGADO (14-oct-2026, API 0.0.77, revisión F3): divisor con
-    // que ESTE avión convierte cada gasto en pesos que RESTA (el de `toUsd`:
-    // `tc_gasto` ?? oficial del día del gasto), para que un
-    // REEMBOLSO_DEVOLUCION ligado a ese gasto se anule EXACTO con él (abajo,
-    // en los otros ingresos). El bucle de gastos corre antes que el de
-    // ingresos; un parcial del reparto comparte el id del padre.
-    const tcGastoReparto = new Map<string, TcGastoLigado>();
+    // REEMBOLSO LIGADO (14-oct-2026, API 0.0.77, revisión F3): las partes de
+    // cada gasto en pesos que ESTE avión RESTA, con el divisor de `toUsd`
+    // (`tc_gasto` ?? oficial del día del gasto) y el MONTO que resta (monto −
+    // TUA/extensión trasladadas: revisión del 14-oct-2026), para que un
+    // REEMBOLSO_DEVOLUCION ligado a ese gasto se anule EXACTO con lo que el
+    // avión cargó (abajo, en los otros ingresos; fuente única
+    // `gastosLigadosDelLibro`, la misma del balance). El bucle de gastos
+    // corre antes que el de ingresos; un parcial del reparto comparte el id
+    // del padre (sus partes se suman).
+    const partesGastoCargadas: ParteGastoCargada[] = [];
     // TUA EMBEBIDO en facturas de aeródromo (regla 7): se descuenta del costo
     // del avión ANTES de convertir y se acumula para una fila informativa
     // del detalle (transparencia: el total de la categoría ya no es la suma
@@ -1753,10 +1758,11 @@ export class ProfitSharingService {
       if (grupo !== 'EXCLUIDO' && g.moneda === 'MXN' && g.id) {
         const propioGasto = pos(g.tc_gasto);
         const divisor = propioGasto ?? ctx.tcOficialGasto.get(g.id)?.tc ?? null;
-        if (divisor != null && divisor > 0 && !tcGastoReparto.has(g.id)) {
-          tcGastoReparto.set(g.id, {
+        if (divisor != null && divisor > 0) {
+          partesGastoCargadas.push({
             gasto_id: g.id,
             tc: divisor,
+            mxn: round2(Number(g.monto) - descontado),
             fecha: diaDeFecha(g.fecha_gasto ?? null),
             lugar:
               propioGasto != null
@@ -1798,6 +1804,7 @@ export class ProfitSharingService {
       }
       porCategoria.set(clave, acc);
     }
+    const tcGastoReparto = gastosLigadosDelLibro(partesGastoCargadas);
     if (tuaEmbebidoCount > 0) {
       // Fila informativa (grupo EXCLUIDO: no suma a ningún agregado): cuánto
       // TUA embebido se le quitó al costo del avión en este periodo.
@@ -1895,7 +1902,10 @@ export class ProfitSharingService {
     // del tablero: decisión del cliente del 14-oct-2026, fuente única
     // `usdDeIngresoAvion` (ING-4 = 2,746.70 en los dos libros); un reembolso
     // ligado a un gasto que este avión resta usa el T.C. de ese gasto para
-    // anularse con él.
+    // anularse con él. `tc_aviso` (revisión del 14-oct-2026, AL FINAL de la
+    // línea): los MISMOS avisos de la hoja del balance
+    // (`avisosReembolsoGasto`: su gasto no lo carga este avión, trae T.C.
+    // propio distinto o excede lo cargado), unidos con « · »; null sin aviso.
     let otrosIngresosAvion = 0;
     let otrosIngresosSinTcMxn = 0;
     let otrosIngresosTcOficialCount = 0;
@@ -1915,18 +1925,27 @@ export class ProfitSharingService {
       tc_oficial: boolean;
       /** ADITIVO al final (14-oct-2026, API 0.0.77): de dónde salió el T.C. */
       tc_origen: OrigenTcIngreso | null;
+      /** ADITIVO al final (revisión del 14-oct-2026): por qué no se anula con su gasto. */
+      tc_aviso: string | null;
     }> = [];
     for (const i of ctx.ingresosAvion ?? []) {
       if (!ingresoEsDelAvion(i)) continue;
       const monto = Number(i.monto) || 0;
       const com = Number(i.comision_monto) > 0 ? Number(i.comision_monto) : 0;
       const neto = round2(monto - com);
+      const gastoLigado = i.gasto_id
+        ? (tcGastoReparto.get(i.gasto_id) ?? null)
+        : null;
       const conv = usdDeIngresoAvion(i, {
         oficialDelDia: ctx.tcOficialIngreso?.get(i.id) ?? null,
-        gastoLigado: i.gasto_id
-          ? (tcGastoReparto.get(i.gasto_id) ?? null)
-          : null,
+        gastoLigado,
       });
+      const avisos = avisosReembolsoGasto(
+        i,
+        etiquetaIngreso(i.folio),
+        conv,
+        gastoLigado,
+      );
       const usd = conv.usd;
       const tcOficialUsado = conv.origen === 'OFICIAL_DEL_DIA';
       if (usd == null) {
@@ -1955,6 +1974,7 @@ export class ProfitSharingService {
         tc: conv.tc,
         tc_oficial: tcOficialUsado,
         tc_origen: conv.origen,
+        tc_aviso: avisos.length > 0 ? avisos.join(' · ') : null,
       });
     }
 

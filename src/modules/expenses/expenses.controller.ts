@@ -176,8 +176,11 @@ export class ExpensesController {
     }
     // VARIOS CARGOS → UN GASTO (14-oct-2026, invariante 76): vincular con el
     // banco es de quien concilia (ADMIN, FACTURACION), antes del servicio.
+    // `null` = ausente, el MISMO criterio de `create()` (revisión del
+    // 14-oct-2026): un formulario que manda la llave en null en un alta
+    // normal no le da 403 a quien no concilia.
     if (
-      dto.conciliar_con_movimientos !== undefined &&
+      dto.conciliar_con_movimientos != null &&
       !ROLES_CONCILIACION.includes(c.rol)
     ) {
       throw new ForbiddenException({

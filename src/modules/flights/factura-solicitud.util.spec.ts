@@ -637,7 +637,7 @@ describe('solicitud AUTOMÁTICA que ya no aplica (14-oct-2026, API 0.0.77)', () 
       60,
     );
     expect(linkAvisoCambioSolicitud('v-341', 'YA_NO_APLICA')).toBe(
-      '/admin/facturas-emitidas?resaltar=v-341#ya-no-aplican',
+      '/admin/flights/v-341#cobros',
     );
     expect(linkAvisoCambioSolicitud('v-341', 'VUELVE_A_APLICAR')).toBe(
       '/admin/facturas-emitidas?resaltar=v-341#por-facturar',
@@ -665,13 +665,13 @@ describe('solicitud AUTOMÁTICA que ya no aplica (14-oct-2026, API 0.0.77)', () 
     expect(t('YA_NO_APLICA', 'REEMBOLSO')).toEqual({
       titulo: 'Ya no aplica: factura del vuelo #341',
       cuerpo:
-        'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+        'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
     });
     expect(t('YA_NO_APLICA', 'COBRO_CORREGIDO').cuerpo).toBe(
-      'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+      'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
     );
     expect(t('YA_NO_APLICA', 'COBRO_ELIMINADO').cuerpo).toBe(
-      'Se eliminó un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+      'Se eliminó un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
     );
     expect(
       t('VUELVE_A_APLICAR', 'COBRO_NUEVO', { origen: 'en HSBC Pesos' }),

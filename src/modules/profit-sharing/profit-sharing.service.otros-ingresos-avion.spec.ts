@@ -201,11 +201,14 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
         tc_oficial: true,
         // ADITIVO al final (0.0.77): de dónde salió el T.C.
         tc_origen: 'OFICIAL_DEL_DIA',
+        // ADITIVO al final (revisión del 14-oct-2026): sin gasto ligado, sin aviso.
+        tc_aviso: null,
       },
     ]);
-    expect(Object.keys(a.detalle.otros_ingresos_avion[0]).at(-1)).toBe(
+    expect(Object.keys(a.detalle.otros_ingresos_avion[0]).slice(-2)).toEqual([
       'tc_origen',
-    );
+      'tc_aviso',
+    ]);
     expect(a.ingresos.otros_ingresos_avion_tc_oficial_count).toBe(1);
     expect(a.ingresos.otros_ingresos_avion_sin_tc_mxn).toBe(0);
     expect(r.tc_oficial.ingresos).toEqual({ count: 1, monto_mxn: 46550.8 });
@@ -480,6 +483,23 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
       });
       expect(a.ingresos.otros_ingresos_avion_usd).toBe(175.22);
       expect(a.ingresos.otros_ingresos_avion_usd).not.toBe(r2(3000 / 16.9479));
+      // Reembolsa EXACTO lo que el avión cargó: sin aviso.
+      expect(a.detalle.otros_ingresos_avion[0].tc_aviso).toBeNull();
+    });
+
+    it('revisión del 14-oct-2026: un reembolso MAYOR que lo que el avión cargó del gasto se convierte con el divisor del gasto y lo AVISA en `tc_aviso`', async () => {
+      const { svc } = armar(
+        mundoReparto([reembolso({ monto: 3500 })]),
+        POR_DIA,
+      );
+      const a = avionDe(await svc.compute({ desde: DESDE, hasta: HASTA }));
+      expect(a.detalle.otros_ingresos_avion[0]).toMatchObject({
+        usd: r2(3500 / 17.1211),
+        tc: 17.1211,
+        tc_origen: 'GASTO_LIGADO',
+        tc_aviso:
+          'ING-40 reembolsa $3,500 MXN de un gasto del que este libro solo le carga $3,000 MXN al avión: $500 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso',
+      });
     });
 
     it('ligado a un gasto que este avión NO resta (otro id, o una categoría que no es REEMBOLSO_DEVOLUCION): la regla por ingreso (oficial de SU día)', async () => {

@@ -426,16 +426,19 @@ export function transicionSolicitudAutomatica(
 }
 
 /**
- * Link del aviso de transición: la tarjeta «ya no aplican» de la bandeja
- * (ancla `ya-no-aplican`) o la de «Por facturar» (`por-facturar`).
+ * Link del aviso de transición. YA_NO_APLICA ⇒ el DETALLE DEL VUELO en su
+ * tarjeta de cobros (`/admin/flights/<id>#cobros`), donde CUALQUIER panel
+ * ofrece «Retirar» (revisión del 14-oct-2026: la tarjeta «ya no aplican» de
+ * la bandeja solo existe en el panel nuevo, y con el API 0.0.77 y el panel
+ * de antes el enlace aterrizaba en una bandeja sin el vuelo);
+ * VUELVE_A_APLICAR ⇒ la tarjeta «Por facturar» (`por-facturar`).
  */
 export function linkAvisoCambioSolicitud(
   vueloId: string,
   transicion: TransicionSolicitudAutomatica,
 ): string {
-  const ancla =
-    transicion === 'YA_NO_APLICA' ? 'ya-no-aplican' : 'por-facturar';
-  return `/admin/facturas-emitidas?resaltar=${vueloId}#${ancla}`;
+  if (transicion === 'YA_NO_APLICA') return `/admin/flights/${vueloId}#cobros`;
+  return `/admin/facturas-emitidas?resaltar=${vueloId}#por-facturar`;
 }
 
 /**
@@ -466,7 +469,7 @@ export function textoAvisoCambioSolicitud(p: {
   const fila = p.eraReembolso === true ? 'un reembolso' : 'un cobro';
   if (p.transicion === 'YA_NO_APLICA') {
     const cola =
-      ' Su solicitud automática salió de «Por facturar»; retírala desde ahí.';
+      ' Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).';
     const sinDinero =
       'ya no quedó dinero en una cuenta que exija factura.' + cola;
     let cuerpo: string;

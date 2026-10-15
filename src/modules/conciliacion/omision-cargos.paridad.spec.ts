@@ -12,6 +12,7 @@ import {
 } from './cargos-a-gasto.util';
 import { TOLERANCIA_CONCILIACION } from './conciliacion-parcial.util';
 import { MEDIOS_BANCARIOS } from './gastos-candidatos.util';
+import { motivoTriggerReverso } from './reverso-cruce.util';
 import {
   CLASIFICACION_OMITIDO,
   CODIGOS_ERROR_OMISION,
@@ -73,7 +74,11 @@ describe('migración 20261014000002 — forma del archivo', () => {
       ),
     ];
     expect(funciones.map((m) => m[1]).sort()).toEqual(
-      [...RPCS_OMISION_CARGOS, 'tg_mov_bancario_omitido_sin_ligas'].sort(),
+      [
+        ...RPCS_OMISION_CARGOS,
+        'tg_mov_bancario_omitido_sin_ligas',
+        'tg_mov_bancario_reverso_omitido',
+      ].sort(),
     );
     for (const f of funciones) {
       expect(f[2]).toMatch(/security invoker/);
@@ -85,6 +90,9 @@ describe('migración 20261014000002 — forma del archivo', () => {
   it('todo con «create or replace» (idempotente sin quitar nada) y recarga el esquema', () => {
     expect(CODIGO).toContain(
       'create or replace trigger trg_mov_bancario_omitido_sin_ligas',
+    );
+    expect(CODIGO).toContain(
+      'create or replace trigger trg_mov_bancario_reverso_omitido',
     );
     expect(CODIGO).not.toMatch(/create (function|trigger)/);
     expect(SQL).toMatch(/pg_notify\('pgrst', 'reload schema'\)/);
@@ -130,13 +138,42 @@ describe('migración 20261014000002 — espejos del API', () => {
     expect(cuerpoDe('fn_cargos')).toContain("'tolerancia', 1.00");
   });
 
-  it('las 7 columnas del trigger = COLUMNAS_TRIGGER_OMITIDO', () => {
+  it('las 9 columnas del trigger = COLUMNAS_TRIGGER_OMITIDO', () => {
     const m = /before update of ([a-z_, ]+)\n/.exec(CODIGO);
     expect(m).not.toBeNull();
     expect(m![1].split(',').map((c) => c.trim())).toEqual([
       ...COLUMNAS_TRIGGER_OMITIDO,
     ]);
     expect(CODIGO).toContain('when (old.clasificacion_id is not null)');
+  });
+
+  it('revisión del 14-oct-2026: quitar la omisión SOLO por la RPC (paso local cerrado al terminar) y el par con un CARGO omitido se frena', () => {
+    const quitar = cuerpoDe('fn_quitar');
+    expect(quitar).toContain("set_config('vt.quitar_omision', '1', true)");
+    expect(quitar).toContain("set_config('vt.quitar_omision', '', true)");
+    expect(quitar.indexOf("'vt.quitar_omision', '1'")).toBeLessThan(
+      quitar.indexOf('update public.movimiento_bancario m'),
+    );
+    expect(quitar.indexOf("'vt.quitar_omision', ''")).toBeGreaterThan(
+      quitar.indexOf('update public.movimiento_bancario m'),
+    );
+    expect(cuerpoDe('fn_omitido_ligas')).toContain(
+      "current_setting('vt.quitar_omision', true) is distinct from '1'",
+    );
+    // El estado REVERSO del deshacer va PRIMERO en su CASE.
+    expect([...quitar.matchAll(/then '([A-Z_]+)'/g)].map((x) => x[1])).toEqual([
+      'REVERSO',
+      'PENDIENTE',
+      'CLASIFICADO',
+    ]);
+    expect(CODIGO).toMatch(
+      /create or replace trigger trg_mov_bancario_reverso_omitido\s+before insert or update of reverso_de_id\s+on public\.movimiento_bancario\s+for each row\s+when \(new\.reverso_de_id is not null\)/,
+    );
+    expect(cuerpoDe('fn_reverso_omitido')).toContain('for share');
+    // Corre DESPUÉS del trigger del par (Postgres los ordena por nombre).
+    expect(
+      'trg_mov_bancario_reverso' < 'trg_mov_bancario_reverso_omitido',
+    ).toBe(true);
   });
 
   it('la sonda llama la RPC con los nombres de parámetros de la BD', () => {
@@ -168,6 +205,18 @@ describe('migración 20261014000002 — espejos del API', () => {
       expect(CODIGOS_ERROR_CARGOS_GASTO as readonly string[]).toContain(c);
     }
     expect(hints(cuerpoDe('fn_omitido_ligas'))).toEqual(['MOVIMIENTO_OMITIDO']);
+    // El trigger del CARGO omitido (5b) rechaza el UPDATE del par: el
+    // emparejado lo traduce a 409 REVERSO_INVALIDO legible (jamás 500).
+    expect(hints(cuerpoDe('fn_reverso_omitido'))).toEqual([
+      'MOVIMIENTO_OMITIDO',
+    ]);
+    const msg = /message = '(MOVIMIENTO_OMITIDO: [^']+)'/.exec(
+      cuerpoDe('fn_reverso_omitido'),
+    );
+    expect(msg).not.toBeNull();
+    expect(motivoTriggerReverso({ code: '23514', message: msg![1] })).toBe(
+      'Uno de los dos movimientos se omitió de la conciliación: deshaz la omisión antes de emparejarlos.',
+    );
   });
 
   it('el CASE del estado tiene el MISMO orden que estadoMovimientoParaOmitir', () => {

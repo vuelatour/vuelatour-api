@@ -1162,6 +1162,65 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
     ).toBe(true);
   });
 
+  // Revisión del 14-oct-2026 (lote B, invariante 75).
+  it('el abono apunta al cargo pero el cargo YA NO es su devolución (omitido o clasificado con otra cosa) ⇒ 409, jamás «idempotente»', async () => {
+    const { svc, db, log } = armar(mundo());
+    Object.assign(fila(db, ABONO_1), {
+      reverso_de_id: CARGO_1,
+      clasificacion_id: CL_REVERSO,
+      conciliado: true,
+    });
+    Object.assign(fila(db, CARGO_1), {
+      conciliado: true,
+      clasificacion_id: 'cl-traspaso',
+    });
+    const antes = log.filter((q) => q.op === 'update').length;
+    const r = await error(svc.emparejarReverso(ABONO_1, CARGO_1, USER));
+    expect(r.code).toBe('REVERSO_INVALIDO');
+    expect(r.message).toBe(
+      'El abono ya apunta a este cargo, pero el cargo ya no está como su devolución (se omitió, se clasificó o se ligó a otra cosa): quita el emparejamiento del abono y vuelve a emparejarlos.',
+    );
+    expect(log.filter((q) => q.op === 'update').length).toBe(antes);
+  });
+
+  it('interbloqueo (40P01) al escribir el abono ⇒ 409 CONFLICTO_CONCURRENTE con texto es-MX, nada escrito', async () => {
+    const { svc, db } = armar(mundo(), {
+      alActualizar: (tabla, _f, patch) =>
+        tabla === 'movimiento_bancario' && patch.reverso_de_id
+          ? { code: '40P01', message: 'deadlock detected' }
+          : null,
+    });
+    const r = await error(svc.emparejarReverso(ABONO_1, CARGO_1, USER));
+    expect(r.e).toBeInstanceOf(ConflictException);
+    expect(r.code).toBe('CONFLICTO_CONCURRENTE');
+    expect(r.message).toBe(
+      'Otra operación tocó estos movimientos al mismo tiempo: vuelve a intentarlo.',
+    );
+    expect(fila(db, ABONO_1)).toMatchObject({
+      reverso_de_id: null,
+      conciliado: false,
+    });
+  });
+
+  it('el trigger rechaza el par porque el CARGO se omitió en la carrera (23514 MOVIMIENTO_OMITIDO) ⇒ 409 REVERSO_INVALIDO legible, no 500', async () => {
+    const { svc, db } = armar(mundo(), {
+      alActualizar: (tabla, _f, patch) =>
+        tabla === 'movimiento_bancario' && patch.reverso_de_id
+          ? {
+              code: '23514',
+              message:
+                'MOVIMIENTO_OMITIDO: el cargo se omitió de la conciliación; deshaz la omisión antes de emparejarlo con su devolución',
+            }
+          : null,
+    });
+    const r = await error(svc.emparejarReverso(ABONO_1, CARGO_1, USER));
+    expect(r.code).toBe('REVERSO_INVALIDO');
+    expect(r.message).toBe(
+      'Uno de los dos movimientos se omitió de la conciliación: deshaz la omisión antes de emparejarlos.',
+    );
+    expect(fila(db, ABONO_1).conciliado).toBe(false);
+  });
+
   const cobroCliente = (): Row => ({
     id: 'cobro-cliente',
     vuelo_id: 'v-1',

@@ -24,12 +24,16 @@
  * promedio (dos T.C. por diseño, como el Excel del cliente).
  */
 import {
+  avisosReembolsoGasto,
+  excedenteSobreCargado,
   filaLibroDeIngreso,
   usdDeIngresoAvion,
   type ConversionIngreso,
   type IngresoParaLibro,
+  type TcGastoLigado,
 } from '../../common/ingreso-resultado.util';
 import { etiquetaCategoriaIngreso } from '../../common/categoria-ingreso.util';
+import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { fuenteTcLegible } from '../../common/fuente-tc-oficial.util';
 import type {
   BalanceAvionHojaOtrosIngresosPayload,
@@ -77,10 +81,18 @@ function diaCorto(dia: string): string {
  * oficial de referencia del día del ingreso (open.er-api, dato del
  * 2026-09-04): el ingreso en pesos no traía tipo de cambio.»; GASTO_LIGADO ⇒
  * «T.C. con el que este libro convierte el gasto que reembolsa (gasto
- * 70e8c3a4 del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se
- * anulan en este libro.»; PROPIO o USD ⇒ null. Pura.
+ * 70e8c3a4 del 15-sep-2026, T.C. promedio de las hojas): …» y, según el
+ * NETO del reembolso (`netoMxn`) contra lo que el libro le CARGA al avión
+ * de ese gasto (revisión del 14-oct-2026): igual (±0.005) ⇒ «reembolso y
+ * gasto se anulan en este libro.»; menos ⇒ «el reembolso anula $X de los $Y
+ * que este libro le carga al avión de ese gasto.»; más ⇒ «este libro solo
+ * le carga $Y de ese gasto al avión; los $Z restantes del reembolso no se
+ * anulan con nada.»; PROPIO o USD ⇒ null. Pura.
  */
-export function notaTcUsdIngreso(conv: ConversionIngreso): string | null {
+export function notaTcUsdIngreso(
+  conv: ConversionIngreso,
+  netoMxn: number | null,
+): string | null {
   if (conv.origen === 'OFICIAL_DEL_DIA' && conv.oficial) {
     return `T.C. oficial de referencia del día del ingreso (${fuenteTcLegible(conv.oficial.fuente)}, dato del ${conv.oficial.fecha_dato}): el ingreso en pesos no traía tipo de cambio.`;
   }
@@ -92,7 +104,16 @@ export function notaTcUsdIngreso(conv: ConversionIngreso): string | null {
     ]
       .filter(Boolean)
       .join(' ');
-    return `T.C. con el que este libro convierte el gasto que reembolsa (${cual}, ${g.lugar}): reembolso y gasto se anulan en este libro.`;
+    const base = `T.C. con el que este libro convierte el gasto que reembolsa (${cual}, ${g.lugar})`;
+    const neto = netoMxn ?? g.cargado_mxn;
+    const exceso = excedenteSobreCargado(neto, g);
+    if (exceso > 0) {
+      return `${base}: este libro solo le carga ${fmtDineroTexto(g.cargado_mxn, 'MXN')} de ese gasto al avión; los ${fmtDineroTexto(exceso, 'MXN')} restantes del reembolso no se anulan con nada.`;
+    }
+    if (neto < g.cargado_mxn - 0.005) {
+      return `${base}: el reembolso anula ${fmtDineroTexto(neto, 'MXN')} de los ${fmtDineroTexto(g.cargado_mxn, 'MXN')} que este libro le carga al avión de ese gasto.`;
+    }
+    return `${base}: reembolso y gasto se anulan en este libro.`;
   }
   return null;
 }
@@ -141,7 +162,7 @@ export function filaHojaOtrosIngresos(
     tc_usd: i.moneda === 'USD' ? null : conv.tc,
     neto_usd: conv.usd,
     tc_usd_origen: conv.origen,
-    tc_usd_nota: notaTcUsdIngreso(conv),
+    tc_usd_nota: notaTcUsdIngreso(conv, f.remanente_mxn),
   };
 }
 
@@ -155,15 +176,17 @@ export function filaHojaOtrosIngresos(
  * suma). ÚLTIMA llave `usd_por_ingreso: true` SIEMPRE (pyservices pinta
  * T.C. A USD / NETO USD y C5 = ROUND(SUM(K),2) con ella). Pendientes: MXN
  * sin T.C. propio ni oficial de su día (la utilidad queda vacía), USD sin
- * T.C. (el CHECK `ingreso_tc_resultado_chk` lo impide) y un reembolso en
- * pesos cuyo gasto NO cuenta en este libro (`gastosDelLibro` = ids de los
- * gastos en pesos que este libro convierte): no se anula exacto con él.
+ * T.C. (el CHECK `ingreso_tc_resultado_chk` lo impide) y los AVISOS de un
+ * reembolso en pesos con gasto (`avisosReembolsoGasto`, revisión del
+ * 14-oct-2026: su gasto no lo carga este libro, trae T.C. propio distinto o
+ * excede lo cargado). `gastosDelLibro` = lo que este libro le CARGA al avión
+ * de cada gasto en pesos (`gastosLigadosDelLibro`).
  */
 export function hojaOtrosIngresosAvion(
   ingresos: readonly IngresoParaLibro[],
   conversiones: ReadonlyMap<string, ConversionIngreso>,
   pendientes: string[],
-  gastosDelLibro: ReadonlySet<string> = new Set(),
+  gastosDelLibro: ReadonlyMap<string, TcGastoLigado> = new Map(),
 ): BalanceAvionHojaOtrosIngresosPayload {
   const filas: BalanceAvionOtroIngresoFilaPayload[] = [];
   for (const i of ingresos) {
@@ -183,17 +206,13 @@ export function hojaOtrosIngresosAvion(
         `${donde}: ingreso ${fila.clave} en pesos sin T.C. propio ni T.C. oficial de su día — fila sin USD; la utilidad después de gastos queda vacía`,
       );
     }
-    if (
-      i.categoria === 'REEMBOLSO_DEVOLUCION' &&
-      i.moneda === 'MXN' &&
-      i.gasto_id &&
-      conv.usd != null &&
-      conv.origen !== 'GASTO_LIGADO' &&
-      !gastosDelLibro.has(i.gasto_id)
-    ) {
-      pendientes.push(
-        `${donde}: ${fila.clave} reembolsa un gasto que este libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con ${conv.origen === 'PROPIO' ? 'su T.C. propio' : 'el T.C. oficial de su día'} y no se anula exacto con su gasto`,
-      );
+    for (const aviso of avisosReembolsoGasto(
+      i,
+      fila.clave,
+      conv,
+      i.gasto_id ? (gastosDelLibro.get(i.gasto_id) ?? null) : null,
+    )) {
+      pendientes.push(`${donde}: ${aviso}`);
     }
     filas.push(fila);
   }

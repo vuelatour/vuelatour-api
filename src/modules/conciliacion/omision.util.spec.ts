@@ -51,7 +51,11 @@ describe('omision.util — clasificación canónica', () => {
 
   it('el prefijo de la línea es el nombre + «: »', () => {
     expect(PREFIJO_LINEA_OMISION).toBe(`${CLASIFICACION_OMITIDO}: `);
-    expect(COLUMNAS_TRIGGER_OMITIDO).toHaveLength(7);
+    expect(COLUMNAS_TRIGGER_OMITIDO).toHaveLength(9);
+    expect(COLUMNAS_TRIGGER_OMITIDO.slice(-2)).toEqual([
+      'clasificacion_id',
+      'conciliado',
+    ]);
   });
 });
 
@@ -470,6 +474,27 @@ describe('omision.util — mensajes de los 409 (textos exactos del contrato)', (
   it('MOVIMIENTO_NO_OMITIDO, MOVIMIENTO_NO_EXISTE y MOVIMIENTO_OMITIDO', () => {
     expect(mensajeNoOmitidos([iva], 3)).toBe(
       'No se restauró ninguno: 1 de los 3 ya no está omitido (24 sep · IVA - COMISIONES $1.12). Recarga la lista.',
+    );
+    // Revisión del 14-oct-2026: un omitido con una devolución emparejada
+    // (estado REVERSO de la RPC) dice qué hacer primero.
+    expect(mensajeNoOmitidos([{ ...iva, estado: 'REVERSO' }], 1)).toBe(
+      'No se restauró: hay una devolución emparejada con este movimiento (24 sep · IVA - COMISIONES $1.12). Quita primero ese emparejamiento y vuelve a intentarlo.',
+    );
+    expect(
+      mensajeNoOmitidos([{ ...iva, estado: 'REVERSO' }, { ...iva }], 3),
+    ).toBe(
+      'No se restauró ninguno: 1 de los 3 tiene una devolución emparejada (24 sep · IVA - COMISIONES $1.12). Quita primero ese emparejamiento y vuelve a intentarlo.',
+    );
+    expect(
+      mensajeNoOmitidos(
+        [
+          { ...iva, estado: 'REVERSO' },
+          { ...iva, descripcion: 'ASA', estado: 'REVERSO' },
+        ],
+        3,
+      ),
+    ).toBe(
+      'No se restauró ninguno: 2 de los 3 tienen una devolución emparejada (24 sep · IVA - COMISIONES $1.12 · 24 sep · ASA $1.12). Quita primero esos emparejamientos y vuelve a intentarlo.',
     );
     expect(mensajeMovimientosNoExisten(2)).toBe(
       '2 de los movimientos ya no existen: recarga la página.',

@@ -383,8 +383,9 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         ),
       ).toBeLessThanOrEqual(0.01);
       expect(bAmbos.pendientes.join('\n')).not.toContain(
-        'reembolsa un gasto que este libro no cuenta',
+        'reembolsa un gasto que este libro no le carga',
       );
+      expect(bAmbos.pendientes.join('\n')).not.toContain('ING-7');
       // Reparto (y su tablero).
       const rNada = await reparto(sinNada);
       const rAmbos = await reparto(conAmbos);
@@ -448,8 +449,184 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         'OFICIAL_DEL_DIA',
       );
       expect(x.libro.pendientes).toContain(
-        'Hoja "Otros ingresos" (2026-09-04): ING-7 reembolsa un gasto que este libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con el T.C. oficial de su día y no se anula exacto con su gasto',
+        'Hoja "Otros ingresos" (2026-09-04): ING-7 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto',
       );
+      expect(x.repartoAvion.detalle.otros_ingresos_avion[0].tc_aviso).toBe(
+        'ING-7 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto',
+      );
+    });
+
+    // Revisión del 14-oct-2026 (hallazgo del reembolso ligado): lo que el
+    // libro le CARGA al avión del gasto, no solo su T.C.
+    it('(8) EXTENSIÓN DE HORARIO completa en la fila del #501 (caso #192: el avión no la carga): ni el balance ni el reparto la ligan — el oficial de SU día en los TRES, pendiente y `tc_aviso`', async () => {
+      const EXT: Fila = {
+        ...gastoBase,
+        id: 'g-extension-501',
+        vuelo_id: V1,
+        vuelo: { folio: 501, aeronave_id: AV },
+        categoria: 'OPERACIONES',
+        monto: 4549.06,
+        notas: 'extensión de servicio inspector Baraona',
+      };
+      const x = await tres(
+        mundo([reembolsoDe(EXT.id as string, 4549.06)], [EXT]),
+      );
+      const v501 = x.libro.vuelos.find((v) => v.vuelo_id === V1)!;
+      expect(v501.op_vinculos).toContainEqual({
+        id: 'g-extension-501',
+        rol: 'nota',
+        monto_mxn: null,
+        gasto_mxn: 4549.06,
+      });
+      const usd = r2(4549.06 / 16.9479);
+      expect([x.balanceHoja, x.reparto, x.tablero]).toEqual([usd, usd, usd]);
+      expect(x.libro.otros_ingresos_avion!.filas[0].tc_usd_origen).toBe(
+        'OFICIAL_DEL_DIA',
+      );
+      expect(x.repartoAvion.detalle.otros_ingresos_avion[0].tc_origen).toBe(
+        'OFICIAL_DEL_DIA',
+      );
+      const aviso =
+        'ING-7 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto';
+      expect(x.libro.pendientes).toContain(
+        `Hoja "Otros ingresos" (2026-09-04): ${aviso}`,
+      );
+      expect(x.repartoAvion.detalle.otros_ingresos_avion[0].tc_aviso).toBe(
+        aviso,
+      );
+    });
+
+    it('(9) TUA de la oficina en la factura del #501 (2,000 = operación 1,500 + TUA 500): los dos libros ligan por lo CARGADO (1,500); un reembolso de 2,000 se avisa en los dos y deja +500 ÷ su T.C.', async () => {
+      const OPS: Fila = {
+        ...gastoBase,
+        id: 'g-op-tua-501',
+        vuelo_id: V1,
+        vuelo: { folio: 501, aeronave_id: AV },
+        categoria: 'OPERACIONES',
+        monto: 2000,
+        tua_incluida: 500,
+        notas: 'Aterrizaje y TUA',
+      };
+      const bNada = await libro(mundo());
+      const x = await tres(mundo([reembolsoDe(OPS.id as string, 2000)], [OPS]));
+      const v501 = x.libro.vuelos.find((v) => v.vuelo_id === V1)!;
+      expect(v501.op_vinculos).toContainEqual({
+        id: 'g-op-tua-501',
+        rol: 'suma',
+        monto_mxn: 1500,
+        gasto_mxn: 2000,
+      });
+      expect(x.libro.otros_ingresos_avion!.filas[0]).toMatchObject({
+        tc_usd: 20,
+        neto_usd: 100,
+        tc_usd_origen: 'GASTO_LIGADO',
+        tc_usd_nota:
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-op-tua del 10-sep-2026, T.C. de costos del vuelo #501): este libro solo le carga $1,500 MXN de ese gasto al avión; los $500 MXN restantes del reembolso no se anulan con nada.',
+      });
+      const aviso =
+        'ING-7 reembolsa $2,000 MXN de un gasto del que este libro solo le carga $1,500 MXN al avión: $500 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso';
+      expect(x.libro.pendientes).toContain(
+        `Hoja "Otros ingresos" (2026-09-04): ${aviso}`,
+      );
+      // Balance: el gasto restó 1,500 ÷ 20 = 75 y el reembolso suma 100.
+      expect(
+        r2(
+          x.libro.balance.utilidad_despues_usd! -
+            bNada.balance.utilidad_despues_usd!,
+        ),
+      ).toBe(25);
+      // Reparto: el divisor del gasto (oficial del 10-sep, 17.2) y el MISMO aviso.
+      expect(x.repartoAvion.detalle.otros_ingresos_avion[0]).toMatchObject({
+        usd: r2(2000 / 17.2),
+        tc: 17.2,
+        tc_origen: 'GASTO_LIGADO',
+        tc_aviso: aviso,
+      });
+    });
+
+    it('(10) gasto del TRAMO CANCELADO que voló otro avión (fila «solo gastos» del XB-DOS, sin parte en la venta): el balance NO lo resta ni lo liga (oficial de su día + pendiente); el reparto sí lo resta y lo liga (diferencia de diseño entre libros, invariante 67)', async () => {
+      const V7 = 'v-7';
+      const DIA7 = '2026-09-26T15:00:00+00:00';
+      const GASTO: Fila = {
+        ...gastoBase,
+        id: 'g-tramo-cancelado',
+        vuelo_id: V7,
+        escala_id: 'e-7b',
+        aeronave_id: AV2,
+        categoria: 'OPERACIONES',
+        monto: 500,
+        tc_gasto: 17.5,
+        fecha_gasto: '2026-09-27',
+        notas: 'Aterrizaje del tramo cancelado',
+        vuelo: { folio: 507, aeronave_id: AV },
+      };
+      const m = mundo(
+        [
+          {
+            ...reembolsoDe(GASTO.id as string, 500),
+            aeronave_id: AV2,
+            aeronave: { matricula: 'XB-DOS', color_calendario: '#10B981' },
+          },
+        ],
+        [GASTO],
+      );
+      const e1 = m.escala[0];
+      m.vuelo = [
+        ...m.vuelo,
+        { ...m.vuelo[0], id: V7, folio: 507, fecha_vuelo: DIA7 },
+      ];
+      m.escala = [
+        ...m.escala,
+        {
+          ...e1,
+          id: 'e-7a',
+          vuelo_id: V7,
+          orden: 1,
+          taco_salida: 102,
+          taco_llegada: 104,
+          fecha_salida_plan: DIA7,
+          vuelo: { fecha_vuelo: DIA7, aeronave_id: AV },
+        },
+        {
+          ...e1,
+          id: 'e-7b',
+          vuelo_id: V7,
+          orden: 2,
+          aeronave_id: AV2,
+          cancelada_at: '2026-09-26T12:00:00+00:00',
+          taco_salida: null,
+          taco_llegada: null,
+          origen_iata: 'MID',
+          destino_iata: 'CUN',
+          fecha_salida_plan: '2026-09-27T18:00:00+00:00',
+          vuelo: { fecha_vuelo: DIA7, aeronave_id: AV },
+        },
+      ];
+      const x = await tres(m, AV2);
+      const fila = x.libro.vuelos.find((v) => v.vuelo_id === V7)!;
+      expect(fila.solo_gastos_tramo_cancelado).toBe(true);
+      expect(fila.ganancia_usd).toBeNull();
+      // La fila SÍ tiene T.C. de costos (el del gasto) y su vínculo 'suma':
+      // antes de la revisión el balance lo ligaba aunque ese costo no restara.
+      expect(fila.tc_costos).toBe(17.5);
+      expect(fila.op_vinculos).toContainEqual({
+        id: 'g-tramo-cancelado',
+        rol: 'suma',
+        monto_mxn: 500,
+      });
+      expect(x.libro.otros_ingresos_avion!.filas[0]).toMatchObject({
+        neto_usd: r2(500 / 16.9479),
+        tc_usd_origen: 'OFICIAL_DEL_DIA',
+      });
+      expect(x.libro.pendientes).toContain(
+        'Hoja "Otros ingresos" (2026-09-04): ING-7 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto',
+      );
+      expect(x.repartoAvion.detalle.otros_ingresos_avion[0]).toMatchObject({
+        usd: r2(500 / 17.5),
+        tc: 17.5,
+        tc_origen: 'GASTO_LIGADO',
+        tc_aviso: null,
+      });
     });
   });
 });

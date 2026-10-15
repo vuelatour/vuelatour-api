@@ -1,8 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   COLS_INGRESO_LIBRO,
+  LUGAR_TC_PONDERADO,
+  avisosReembolsoGasto,
   diaTcOficialIngreso,
+  excedenteSobreCargado,
   filaLibroDeIngreso,
+  gastosLigadosDelLibro,
   ingresoEsDelAvion,
   ingresoParaLibroDeFila,
   leerIngresosDeResultado,
@@ -473,6 +477,7 @@ describe('conversión única del ingreso de un avión (14-oct-2026, API 0.0.77)'
       tc: 17.237699,
       fecha: '2026-09-15',
       lugar: 'T.C. promedio de las hojas',
+      cargado_mxn: 45483.6,
     };
     const reembolso = {
       ...ING4,
@@ -517,5 +522,221 @@ describe('conversión única del ingreso de un avión (14-oct-2026, API 0.0.77)'
       usdDeIngresoAvion(reembolso, { gastoLigado: { ...ligado, tc: 0 } })
         .origen,
     ).toBeNull();
+    // Un gasto que el libro NO le carga al avión (revisión del 14-oct-2026)
+    // jamás es «ligado»: el oficial de su día.
+    expect(
+      usdDeIngresoAvion(reembolso, {
+        oficialDelDia: OFICIAL_0904,
+        gastoLigado: { ...ligado, cargado_mxn: 0 },
+      }).origen,
+    ).toBe('OFICIAL_DEL_DIA');
+  });
+});
+
+/**
+ * REEMBOLSO LIGADO: lo que el libro le CARGA al avión del gasto (revisión
+ * del 14-oct-2026, invariante 67). Casos reales de prod: 8ab208c4 (#192,
+ * N4142R, OPERACIONES $4,549.06 del 06-sep, extensión de horario COMPLETA:
+ * el avión no carga nada) y 8c60e428 (#383, N990GG, $1,925.27 = Operaciones
+ * 1,365.64 + Tarifa TUA 559.63: el avión carga solo la operación).
+ */
+describe('gastos ligables de un libro y avisos del reembolso (revisión 14-oct-2026)', () => {
+  const parte = (
+    gasto_id: string,
+    tc: number,
+    mxn: number,
+    lugar = 'T.C. promedio de las hojas',
+  ) => ({ gasto_id, tc, mxn, fecha: '2026-09-06', lugar });
+
+  it('gastosLigadosDelLibro: Σ de las partes que RESTAN por gasto; sin cargo (Σ ≤ 0) no entra; un divisor ⇒ ese; varios ⇒ el ponderado', () => {
+    const m = gastosLigadosDelLibro([
+      // #383: el vínculo 'suma' de la operación (la TUA es solo nota).
+      parte('8c60e428', 17.6, 1365.64, 'T.C. de costos del vuelo #383'),
+      // #192: extensión completa ⇒ el libro no lo carga (0, se ignora).
+      parte('8ab208c4', 16.8925, 0),
+      // Un reparto manual con dos partes al MISMO avión.
+      parte('g-rep', 20, 100),
+      parte('g-rep', 20, 50.01),
+      // Mezcla imposible por construcción (fila + hoja con otro T.C.).
+      parte('g-mix', 20, 1000),
+      parte('g-mix', 10, 1000),
+      // Negativo que deja la Σ en 0 ⇒ fuera; divisor inválido ⇒ fuera.
+      parte('g-cero', 20, 100),
+      parte('g-cero', 20, -100),
+      parte('g-sin-tc', 0, 100),
+      parte('', 20, 100),
+    ]);
+    expect([...m.keys()]).toEqual(['8c60e428', 'g-rep', 'g-mix']);
+    expect(m.get('8c60e428')).toEqual({
+      gasto_id: '8c60e428',
+      tc: 17.6,
+      fecha: '2026-09-06',
+      lugar: 'T.C. de costos del vuelo #383',
+      cargado_mxn: 1365.64,
+    });
+    expect(m.get('g-rep')).toMatchObject({ tc: 20, cargado_mxn: 150.01 });
+    // 2,000 ÷ (1,000/20 + 1,000/10) = 13.3333…: 2,000 pesos ⇒ 150 USD, lo
+    // mismo que las dos partes.
+    const mix = m.get('g-mix')!;
+    expect(mix.lugar).toBe(LUGAR_TC_PONDERADO);
+    expect(mix.cargado_mxn).toBe(2000);
+    expect(Math.round((2000 / mix.tc) * 100) / 100).toBe(150);
+  });
+
+  it('excedenteSobreCargado: ≥ 0 a centavos; medio centavo no cuenta', () => {
+    expect(excedenteSobreCargado(1925.27, { cargado_mxn: 1365.64 })).toBe(
+      559.63,
+    );
+    expect(excedenteSobreCargado(1365.645, { cargado_mxn: 1365.64 })).toBe(0);
+    expect(excedenteSobreCargado(1000, { cargado_mxn: 1365.64 })).toBe(0);
+  });
+
+  const REEMBOLSO: IngresoParaLibro = {
+    ...base,
+    id: 'i-99',
+    folio: 99,
+    categoria: 'REEMBOLSO_DEVOLUCION',
+    fecha: '2026-09-20',
+    monto: 4549.06,
+    aeronave_id: 'av-n4142r',
+    gasto_id: '8ab208c4',
+  };
+  const OFICIAL_0920: TcOficialDia = {
+    tc: 17.2123,
+    fecha_dato: '2026-09-20',
+    fuente: 'OPEN_ER_API',
+  };
+
+  it('#192 (extensión completa: el libro NO le carga el gasto) ⇒ el oficial de su día en los dos libros y el aviso LITERAL', () => {
+    const conv = usdDeIngresoAvion(REEMBOLSO, {
+      oficialDelDia: OFICIAL_0920,
+      gastoLigado: null,
+    });
+    expect(conv).toMatchObject({ usd: 264.29, origen: 'OFICIAL_DEL_DIA' });
+    expect(avisosReembolsoGasto(REEMBOLSO, 'ING-99', conv, null)).toEqual([
+      'ING-99 reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con el T.C. oficial de su día y no se anula con su gasto',
+    ]);
+    // Con T.C. propio, lo dice.
+    const propio = { ...REEMBOLSO, tc_usd_mxn: 17.5 };
+    expect(
+      avisosReembolsoGasto(
+        propio,
+        'ING-99',
+        usdDeIngresoAvion(propio, {}),
+        undefined,
+      )[0],
+    ).toContain('se convirtió con su T.C. propio y no se anula con su gasto');
+  });
+
+  it('#383 (el libro carga 1,365.64 de 1,925.27): GASTO_LIGADO y aviso del EXCESO de 559.63; igual o menor ⇒ sin aviso', () => {
+    const ligado: TcGastoLigado = {
+      gasto_id: '8c60e428',
+      tc: 17.6,
+      fecha: '2026-09-25',
+      lugar: 'T.C. de costos del vuelo #383',
+      cargado_mxn: 1365.64,
+    };
+    const completo = { ...REEMBOLSO, monto: 1925.27, gasto_id: '8c60e428' };
+    const conv = usdDeIngresoAvion(completo, { gastoLigado: ligado });
+    expect(conv).toMatchObject({ usd: 109.39, origen: 'GASTO_LIGADO' });
+    expect(avisosReembolsoGasto(completo, 'ING-99', conv, ligado)).toEqual([
+      'ING-99 reembolsa $1,925.27 MXN de un gasto del que este libro solo le carga $1,365.64 MXN al avión: $559.63 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso',
+    ]);
+    for (const monto of [1365.64, 1000]) {
+      const r = { ...completo, monto };
+      expect(
+        avisosReembolsoGasto(
+          r,
+          'ING-99',
+          usdDeIngresoAvion(r, { gastoLigado: ligado }),
+          ligado,
+        ),
+      ).toEqual([]);
+    }
+    // La comisión bancaria se descuenta: 1,925.27 − 559.63 ⇒ sin exceso.
+    const neto = { ...completo, comision_monto: 559.63 };
+    expect(
+      avisosReembolsoGasto(
+        neto,
+        'ING-99',
+        usdDeIngresoAvion(neto, { gastoLigado: ligado }),
+        ligado,
+      ),
+    ).toEqual([]);
+  });
+
+  it('T.C. PROPIO con el gasto en el libro: no se anula al centavo ⇒ aviso LITERAL (y el del exceso si aplica); el MISMO T.C. ⇒ nada', () => {
+    const ligado: TcGastoLigado = {
+      gasto_id: '70e8c3a4',
+      tc: 17.237699,
+      fecha: '2026-09-15',
+      lugar: 'T.C. promedio de las hojas',
+      cargado_mxn: 45483.6,
+    };
+    const propio = {
+      ...REEMBOLSO,
+      monto: 45483.6,
+      gasto_id: '70e8c3a4',
+      tc_usd_mxn: 17.5,
+    };
+    const conv = usdDeIngresoAvion(propio, { gastoLigado: ligado });
+    expect(conv.origen).toBe('PROPIO');
+    expect(avisosReembolsoGasto(propio, 'ING-99', conv, ligado)).toEqual([
+      'ING-99 trae T.C. propio (17.5000) y este libro convierte el gasto que reembolsa con 17.2377 (T.C. promedio de las hojas): reembolso y gasto no se anulan exactos',
+    ]);
+    const exceso = { ...propio, monto: 46000 };
+    expect(
+      avisosReembolsoGasto(
+        exceso,
+        'ING-99',
+        usdDeIngresoAvion(exceso, { gastoLigado: ligado }),
+        ligado,
+      ),
+    ).toHaveLength(2);
+    const igual = { ...propio, tc_usd_mxn: 17.237699 };
+    expect(
+      avisosReembolsoGasto(
+        igual,
+        'ING-99',
+        usdDeIngresoAvion(igual, { gastoLigado: ligado }),
+        ligado,
+      ),
+    ).toEqual([]);
+  });
+
+  it('otra categoría, USD, sin gasto_id o sin USD ⇒ sin avisos', () => {
+    const conv = usdDeIngresoAvion(REEMBOLSO, { oficialDelDia: OFICIAL_0920 });
+    expect(
+      avisosReembolsoGasto(
+        { ...REEMBOLSO, categoria: 'OTRO_INGRESO' },
+        'ING-99',
+        conv,
+        null,
+      ),
+    ).toEqual([]);
+    expect(
+      avisosReembolsoGasto(
+        { ...REEMBOLSO, gasto_id: null },
+        'ING-99',
+        conv,
+        null,
+      ),
+    ).toEqual([]);
+    expect(
+      avisosReembolsoGasto(
+        { ...REEMBOLSO, moneda: 'USD' },
+        'ING-99',
+        conv,
+        null,
+      ),
+    ).toEqual([]);
+    expect(
+      avisosReembolsoGasto(
+        REEMBOLSO,
+        'ING-99',
+        usdDeIngresoAvion(REEMBOLSO, {}),
+        null,
+      ),
+    ).toEqual([]);
   });
 });

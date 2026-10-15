@@ -46,7 +46,11 @@ export const FIRMANTE_MAX = 80;
 /** Tope de la línea completa (espejo del CHECK de la RPC). */
 export const LINEA_OMISION_MAX = 500;
 
-/** Columnas del trigger `trg_mov_bancario_omitido_sin_ligas` (espejo). */
+/**
+ * Columnas del trigger `trg_mov_bancario_omitido_sin_ligas` (espejo). Las 7
+ * ligas y —revisión del 14-oct-2026— `clasificacion_id` y `conciliado`: un
+ * omitido no pierde la omisión fuera de `conciliacion_quitar_omision`.
+ */
 export const COLUMNAS_TRIGGER_OMITIDO = [
   'gasto_id',
   'gastos_n',
@@ -55,6 +59,8 @@ export const COLUMNAS_TRIGGER_OMITIDO = [
   'cobro_grupo_id',
   'ingreso_id',
   'reverso_de_id',
+  'clasificacion_id',
+  'conciliado',
 ] as const;
 
 /** Estatus de la fila omitida en el Excel de conciliación. */
@@ -462,11 +468,26 @@ export function mensajeOmitirConRiesgo(
     : `${n} de los ${total} movimientos podrían conciliarse de verdad: ${lista}. Quítalos de la selección o confirma que también se omiten.`;
 }
 
-/** 409 MOVIMIENTO_NO_OMITIDO (deshacer): cuáles ya no están omitidos. */
+/**
+ * 409 MOVIMIENTO_NO_OMITIDO (deshacer): cuáles ya no están omitidos. Con
+ * estado REVERSO (revisión del 14-oct-2026: un omitido al que apunta una
+ * devolución; la RPC no lo restaura para no dejar un par a medias) el texto
+ * dice qué hacer primero.
+ */
 export function mensajeNoOmitidos(
   filas: readonly FilaMensajeOmision[],
   total: number,
 ): string {
+  const enPar = filas.filter((f) => f.estado === 'REVERSO');
+  if (enPar.length > 0) {
+    const listaPar = listaNombrada(enPar, (f) => lineaMovimientoMensaje(f));
+    if (total <= 1) {
+      return `No se restauró: hay una devolución emparejada con este movimiento (${listaPar}). Quita primero ese emparejamiento y vuelve a intentarlo.`;
+    }
+    return enPar.length === 1
+      ? `No se restauró ninguno: 1 de los ${total} tiene una devolución emparejada (${listaPar}). Quita primero ese emparejamiento y vuelve a intentarlo.`
+      : `No se restauró ninguno: ${enPar.length} de los ${total} tienen una devolución emparejada (${listaPar}). Quita primero esos emparejamientos y vuelve a intentarlo.`;
+  }
   const n = filas.length;
   const lista = listaNombrada(filas, (f) => lineaMovimientoMensaje(f));
   if (total <= 1) {

@@ -7,9 +7,10 @@
 --   conciliaciones pendientes para todo eso ponerlas a un solo gasto, si no
 --   existe el gasto que permita crearlo por la cantidad de la suma».
 --
--- QUÉ CREA (SOLO funciones nuevas + UN trigger nuevo; ninguna tabla, columna,
--- CHECK, índice, vista ni función existente cambia, y NO siembra datos: la
--- clasificación canónica la crea la función 1 en la PRIMERA omisión):
+-- QUÉ CREA (SOLO funciones nuevas + DOS triggers nuevos; ninguna tabla,
+-- columna, CHECK, índice, vista ni función existente cambia, y NO siembra
+-- datos: la clasificación canónica la crea la función 1 en la PRIMERA
+-- omisión):
 --   1) conciliacion_clasificacion_omitido(actor) → uuid: busca «Omitido de la
 --      conciliación» sin distinguir mayúsculas, la crea si falta y la
 --      REACTIVA si está de baja.
@@ -19,7 +20,10 @@
 --      NADA: uno que ya no está pendiente aborta el lote entero.
 --   3) conciliacion_quitar_omision(ids[], actor): 1..200 OMITIDOS ⇒
 --      pendientes otra vez; quita SOLO la primera línea canónica (el resto de
---      las notas queda byte a byte). TODO O NADA.
+--      las notas queda byte a byte). TODO O NADA. Es el ÚNICO camino que le
+--      quita la omisión a un movimiento (abre el paso del trigger 5 con
+--      `vt.quitar_omision` local a su transacción) y no restaura un cargo al
+--      que apunta una devolución (estado REVERSO).
 --   4) conciliacion_ligar_cargos_a_gasto(gasto, ids[], actor): 2..50 CARGOS
 --      pendientes y libres, de cuentas en la MONEDA del gasto, con un gasto
 --      BANCARIO ⇒ UNA parte por cargo (|monto|) en la puente, en UNA
@@ -28,14 +32,24 @@
 --      gasto.conciliado). Re-envío idéntico = no-op (idempotente).
 --   5) tg_mov_bancario_omitido_sin_ligas() + trg_mov_bancario_omitido_sin_ligas
 --      (BEFORE UPDATE OF gasto_id, gastos_n, cobro_id, cobros_n,
---      cobro_grupo_id, ingreso_id, reverso_de_id WHEN old.clasificacion_id is
---      not null): un movimiento con la clasificación canónica NO recibe
---      ninguna liga por ningún camino (RPC G de gastos, RPC de cobros —por su
---      UPDATE de sincronía—, cobro_id directo, sobre, ingreso, gasto_id
---      legado, reverso) ⇒ 23514 MOVIMIENTO_OMITIDO. Una clasificación que NO
---      es la canónica se sigue pisando al ligar, como siempre. No modifica NEW.
+--      cobro_grupo_id, ingreso_id, reverso_de_id, clasificacion_id,
+--      conciliado WHEN old.clasificacion_id is not null): un movimiento con la
+--      clasificación canónica NO recibe ninguna liga por ningún camino (RPC G
+--      de gastos, RPC de cobros —por su UPDATE de sincronía—, cobro_id
+--      directo, sobre, ingreso, gasto_id legado, reverso) y —revisión del
+--      14-oct-2026— tampoco PIERDE la omisión por fuera de la función 3
+--      (el «desvincular» de linkCobro, una reclasificación o conciliado =
+--      false) ⇒ 23514 MOVIMIENTO_OMITIDO. Una clasificación que NO es la
+--      canónica se sigue pisando al ligar, como siempre. No modifica NEW.
+--   5b) tg_mov_bancario_reverso_omitido() + trg_mov_bancario_reverso_omitido
+--      (BEFORE INSERT OR UPDATE OF reverso_de_id WHEN new.reverso_de_id is
+--      not null; revisión del 14-oct-2026): una devolución NO se empareja con
+--      un CARGO omitido (el trigger 5 solo mira la fila que se actualiza, el
+--      abono) ⇒ 23514 MOVIMIENTO_OMITIDO. Lee el cargo FOR SHARE y, por su
+--      nombre, corre DESPUÉS de trg_mov_bancario_reverso (que ya lo bloqueó
+--      FOR UPDATE).
 --
--- SEGURIDAD (ajuste del 14-oct-2026): las 5 funciones son SECURITY INVOKER
+-- SEGURIDAD (ajuste del 14-oct-2026): las 6 funciones son SECURITY INVOKER
 -- con search_path vacío y este archivo NO toca permisos (ni quita ni otorga
 -- EXECUTE), por eso se aplica completo por el MCP (`apply_migration`), sin
 -- paso manual en el SQL Editor:
@@ -50,10 +64,10 @@
 --     sus funciones auxiliares. El dry-run lo prueba con `set local role`
 --     authenticated y anon (T28) y la sección 7 aborta si esa premisa no se
 --     cumple al aplicar;
---   - la función del trigger lee conciliacion_clasificacion con los
---     privilegios de quien actualiza movimiento_bancario: service_role (API)
---     o el dueño de los triggers/RPC SECURITY DEFINER de siempre (postgres):
---     los dos saltan RLS;
+--   - las funciones de los triggers leen conciliacion_clasificacion (y la 5b
+--     el cargo) con los privilegios de quien actualiza movimiento_bancario:
+--     service_role (API) o el dueño de los triggers/RPC SECURITY DEFINER de
+--     siempre (postgres): los dos saltan RLS;
 --   - el advisor 0028/0029 solo marca SECURITY DEFINER: no hay WARN nuevos.
 --
 -- CONVENCIONES (las de 20261002000002): errores 23514 con message «CODIGO: …»,
@@ -71,7 +85,7 @@
 --   array['TARJETA_CORP','TRANSFERENCIA',…] = MEDIOS_BANCARIOS (gastos-candidatos.util.ts), MISMO orden
 --   200 / 2..50                             = OMITIR_MAX / CARGOS_A_GASTO_MIN..MAX
 --   1.00                                    = TOLERANCIA_CONCILIACION (por gasto)
---   las 7 columnas del trigger              = COLUMNAS_TRIGGER_OMITIDO
+--   las 9 columnas del trigger 5            = COLUMNAS_TRIGGER_OMITIDO
 --
 -- LO QUE NO CAMBIA: los triggers A/B/K de la puente, las RPC G y H, el
 -- trigger del par (reverso), los de cobros, `recalcular_gasto_conciliado`, la
@@ -91,10 +105,11 @@
 -- partir de las secciones 1–5 de ESTE archivo, entre las marcas «>>> CUERPO»
 -- y «<<< CUERPO»). Orden (CLAUDE.md del workspace): A0 contexto → CUERPO →
 -- verificación → FILAS DE PRUEBA (después del DDL: lección 55006 del
--- 12-oct-2026) → pruebas T1–T28 con escrituras REALES → T29 `set constraints
--- all immediate` → raise exception 'DRYRUN_OK 20261014000002 …'. Esperado:
--- ERROR «DRYRUN_OK …» (ese error ES el éxito: nada persiste). Cualquier otro
--- ⇒ NO aplicar. Después, por SELECT: las 5 funciones y el trigger NO existen,
+-- 12-oct-2026) → pruebas T1–T28 y T30–T31 con escrituras REALES → T29 `set
+-- constraints all immediate` → raise exception 'DRYRUN_OK 20261014000002 …'.
+-- Esperado: ERROR «DRYRUN_OK …» (ese error ES el éxito: nada persiste).
+-- Cualquier otro ⇒ NO aplicar. Después, por SELECT: las 6 funciones y los 2
+-- triggers NO existen,
 -- 0 clasificaciones «Omitido de la conciliación» / «DRYRUN-20261014000002 …»,
 -- 0 movimientos con referencia 'DRYRUN' y 0 gastos con notas 'DRYRUN%'.
 --
@@ -106,11 +121,12 @@
 --
 -- REVERSA (SOLO por el SQL Editor y con confirmación del usuario): 1) deshacer
 -- TODAS las omisiones (pestaña «Omitidos» o `conciliacion_quitar_omision` por
--- lotes de 200); 2) quitar el trigger y las 5 funciones con el texto de
+-- lotes de 200); 2) quitar los 2 triggers y las 6 funciones con el texto de
 -- `docs/sql-20261014000002/03-reversa-20261014000002.sql` (vive fuera de este
 -- archivo para que el MCP lo acepte entero); 3) quitar el renglón del
--- historial; 4) REINICIAR el API (la sonda memoriza el «sí»). La fila
--- canónica se deja inactiva (`activo = false`).
+-- historial —aplicada por el MCP, su `version` es la marca de tiempo del
+-- momento de aplicar: se busca por `name`—; 4) REINICIAR el API (la sonda
+-- memoriza el «sí»). La fila canónica se deja inactiva (`activo = false`).
 
 -- >>> CUERPO
 
@@ -349,6 +365,9 @@ begin
    where lower(c.nombre) = lower('Omitido de la conciliación')
    limit 1;
 
+  -- Un omitido al que APUNTA una devolución (revisión del 14-oct-2026: el
+  -- trigger 5b lo impide; esto cuida lo que llegara por otra vía) no se
+  -- restaura: quedaría un par a medias. Sale con estado REVERSO.
   select coalesce(jsonb_agg(jsonb_build_object(
            'id', m.id,
            'fecha', m.fecha,
@@ -356,6 +375,9 @@ begin
            'monto', m.monto,
            'descripcion', left(coalesce(m.descripcion, ''), 80),
            'estado', case
+             when m.clasificacion_id = v_clasif
+                  and exists (select 1 from public.movimiento_bancario r
+                               where r.reverso_de_id = m.id) then 'REVERSO'
              when not m.conciliado then 'PENDIENTE'
              when m.clasificacion_id is not null then 'CLASIFICADO'
              else 'CONCILIADO'
@@ -363,7 +385,10 @@ begin
     into v_otros
     from public.movimiento_bancario m
    where m.id = any(p_movimiento_ids)
-     and (v_clasif is null or m.clasificacion_id is distinct from v_clasif);
+     and (v_clasif is null
+          or m.clasificacion_id is distinct from v_clasif
+          or exists (select 1 from public.movimiento_bancario r
+                      where r.reverso_de_id = m.id));
   if jsonb_array_length(v_otros) > 0 then
     raise exception using
       errcode = '23514',
@@ -377,6 +402,9 @@ begin
   -- si alguna apareciera, conciliado = false con partes revienta al commit
   -- (PARTES_INCOHERENTES / COBROS_INCOHERENTES) y no se escribe nada.
   -- Notas: espejo EXACTO de `quitarLineaOmision` (omision.util.ts).
+  -- El trigger 5 SOLO deja quitar la omisión con este paso, local a la
+  -- transacción y cerrado en cuanto termina el UPDATE.
+  perform set_config('vt.quitar_omision', '1', true);
   update public.movimiento_bancario m
      set clasificacion_id = null,
          conciliado = false,
@@ -388,6 +416,7 @@ begin
          end,
          updated_by = coalesce(p_actor, m.updated_by)
    where m.id = any(p_movimiento_ids);
+  perform set_config('vt.quitar_omision', '', true);
 
   return jsonb_build_object(
     'restaurados', v_n,
@@ -396,7 +425,7 @@ begin
 end $fn_quitar$;
 
 comment on function public.conciliacion_quitar_omision(uuid[], uuid) is
-  'RPC (API 0.0.77, 20261014000002, SECURITY INVOKER): deshace la omisión de 1..200 movimientos en UNA transacción (todo o nada): sin clasificación, conciliado = false y sin la PRIMERA línea canónica de sus notas (el resto queda byte a byte). 23514 LOTE_INVALIDO | MOVIMIENTO_NO_EXISTE {ids} | MOVIMIENTO_NO_OMITIDO {movimientos[]}.';
+  'RPC (API 0.0.77, 20261014000002, SECURITY INVOKER): deshace la omisión de 1..200 movimientos en UNA transacción (todo o nada): sin clasificación, conciliado = false y sin la PRIMERA línea canónica de sus notas (el resto queda byte a byte). ÚNICO camino que le quita la omisión a un movimiento (paso `vt.quitar_omision` del trigger trg_mov_bancario_omitido_sin_ligas). 23514 LOTE_INVALIDO | MOVIMIENTO_NO_EXISTE {ids} | MOVIMIENTO_NO_OMITIDO {movimientos[] con estado PENDIENTE | CLASIFICADO | CONCILIADO | REVERSO}.';
 
 -- ===========================================================================
 -- 4) 2..50 CARGOS → UN GASTO (todo o nada)
@@ -690,7 +719,8 @@ comment on function public.conciliacion_ligar_cargos_a_gasto(uuid, uuid[], uuid)
 -- 5) CANDADO EN BD: un movimiento OMITIDO no recibe ninguna liga
 --    (cubre la RPC G y la de cobros —por su UPDATE de sincronía—, el
 --    cobro_id directo de linkCobro, el sobre, el ingreso, el gasto_id
---    legado y el reverso)
+--    legado y el reverso) ni pierde la omisión fuera de la función 3
+--    (revisión del 14-oct-2026: el «desvincular» de linkCobro pasaba)
 -- ===========================================================================
 create or replace function public.tg_mov_bancario_omitido_sin_ligas()
 returns trigger
@@ -718,26 +748,94 @@ begin
       message = 'MOVIMIENTO_OMITIDO: el movimiento se omitió de la conciliación; deshaz la omisión antes de vincularlo',
       detail = jsonb_build_object('movimiento_id', old.id)::text;
   end if;
+  -- Quitarle la clasificación canónica o regresarlo a pendiente SOLO por
+  -- conciliacion_quitar_omision (su paso local `vt.quitar_omision`): el
+  -- UPDATE de «desvincular» de linkCobro (cobro_id null, conciliado false,
+  -- clasificacion_id null) borraba la omisión firmada en silencio y dejaba
+  -- su línea en las notas.
+  if (new.clasificacion_id is distinct from old.clasificacion_id
+      or new.conciliado is distinct from old.conciliado)
+     and current_setting('vt.quitar_omision', true) is distinct from '1' then
+    raise exception using
+      errcode = '23514',
+      hint = 'MOVIMIENTO_OMITIDO',
+      message = 'MOVIMIENTO_OMITIDO: el movimiento se omitió de la conciliación; solo «Deshacer la omisión» lo regresa a pendiente o le quita la clasificación',
+      detail = jsonb_build_object('movimiento_id', old.id)::text;
+  end if;
   return new;
 end $fn_omitido_ligas$;
 
 comment on function public.tg_mov_bancario_omitido_sin_ligas() is
-  'Trigger (20261014000002, invariante 75, SECURITY INVOKER): rechaza con 23514 MOVIMIENTO_OMITIDO cualquier liga (gasto, lote, cobro, lote de cobros, sobre, ingreso, reverso) sobre un movimiento con la clasificación canónica «Omitido de la conciliación». Una clasificación que NO es la canónica se sigue pisando como siempre.';
+  'Trigger (20261014000002, invariante 75, SECURITY INVOKER): sobre un movimiento con la clasificación canónica «Omitido de la conciliación» rechaza con 23514 MOVIMIENTO_OMITIDO cualquier liga (gasto, lote, cobro, lote de cobros, sobre, ingreso, reverso) y que pierda la omisión (otra clasificación, sin clasificación o conciliado = false) fuera de conciliacion_quitar_omision. Una clasificación que NO es la canónica se sigue pisando como siempre.';
 
 -- Por orden alfabético corre después de trg_mov_bancario_cobros_candados y
 -- trg_mov_bancario_gasto_suma y antes de trg_mov_bancario_reverso y
 -- trg_movimiento_bancario_set_updated_at; no modifica NEW.
 create or replace trigger trg_mov_bancario_omitido_sin_ligas
-  before update of gasto_id, gastos_n, cobro_id, cobros_n, cobro_grupo_id, ingreso_id, reverso_de_id
+  before update of gasto_id, gastos_n, cobro_id, cobros_n, cobro_grupo_id, ingreso_id, reverso_de_id, clasificacion_id, conciliado
   on public.movimiento_bancario
   for each row
   when (old.clasificacion_id is not null)
   execute function public.tg_mov_bancario_omitido_sin_ligas();
 
+-- ===========================================================================
+-- 5b) CANDADO EN BD: una devolución NO se empareja con un CARGO omitido
+--     (revisión del 14-oct-2026: el trigger 5 mira la fila que se actualiza
+--     —el abono—; este mira el cargo al que apunta `reverso_de_id`)
+-- ===========================================================================
+create or replace function public.tg_mov_bancario_reverso_omitido()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $fn_reverso_omitido$
+declare
+  v_clasif uuid;
+begin
+  -- El WHEN del trigger ya exigió new.reverso_de_id no nulo. Un UPDATE que
+  -- repite el MISMO cargo no empareja nada nuevo (como tg_mov_bancario_reverso).
+  if tg_op = 'UPDATE' and new.reverso_de_id is not distinct from old.reverso_de_id then
+    return new;
+  end if;
+  -- El cargo bajo candado: una omisión que ya lo tomó FOR UPDATE se espera y
+  -- se ve confirmada. (trg_mov_bancario_reverso, que corre antes por su
+  -- nombre, ya lo bloqueó FOR UPDATE en esta misma transacción.)
+  select m.clasificacion_id
+    into v_clasif
+    from public.movimiento_bancario m
+   where m.id = new.reverso_de_id
+     for share;
+  if v_clasif is not null and exists (
+    select 1
+      from public.conciliacion_clasificacion c
+     where c.id = v_clasif
+       and lower(c.nombre) = lower('Omitido de la conciliación')
+  ) then
+    raise exception using
+      errcode = '23514',
+      hint = 'MOVIMIENTO_OMITIDO',
+      message = 'MOVIMIENTO_OMITIDO: el cargo se omitió de la conciliación; deshaz la omisión antes de emparejarlo con su devolución',
+      detail = jsonb_build_object('movimiento_id', new.reverso_de_id, 'abono_id', new.id)::text;
+  end if;
+  return new;
+end $fn_reverso_omitido$;
+
+comment on function public.tg_mov_bancario_reverso_omitido() is
+  'Trigger (20261014000002, invariante 75, SECURITY INVOKER): rechaza con 23514 MOVIMIENTO_OMITIDO emparejar una devolución (reverso_de_id) con un CARGO que tiene la clasificación canónica «Omitido de la conciliación». Lee el cargo FOR SHARE; corre después de trg_mov_bancario_reverso.';
+
+-- «trg_mov_bancario_reverso_omitido» ordena DESPUÉS de «trg_mov_bancario_reverso»
+-- (mismo momento y evento: Postgres los dispara por nombre); no modifica NEW.
+create or replace trigger trg_mov_bancario_reverso_omitido
+  before insert or update of reverso_de_id
+  on public.movimiento_bancario
+  for each row
+  when (new.reverso_de_id is not null)
+  execute function public.tg_mov_bancario_reverso_omitido();
+
 -- <<< CUERPO
 
 -- ===========================================================================
--- 6) PERMISOS: ninguno a propósito (ver «SEGURIDAD» en la cabecera). Las 5
+-- 6) PERMISOS: ninguno a propósito (ver «SEGURIDAD» en la cabecera). Las 6
 --    funciones son SECURITY INVOKER: quien no salta RLS no ve ni escribe nada.
 -- ===========================================================================
 
@@ -745,7 +843,7 @@ select pg_notify('pgrst', 'reload schema');
 
 -- ===========================================================================
 -- 7) VERIFICACIÓN: aborta (y con ella toda la migración) si falta una
---    función o el trigger, si alguna quedó SECURITY DEFINER o sin search_path
+--    función o un trigger, si alguna quedó SECURITY DEFINER o sin search_path
 --    vacío, o si la premisa de la seguridad (RLS habilitado SIN políticas en
 --    las tablas que tocan) no se cumple.
 -- ===========================================================================
@@ -758,16 +856,22 @@ begin
   if to_regprocedure('public.conciliacion_quitar_omision(uuid[],uuid)') is null then v_falta := v_falta || 'conciliacion_quitar_omision'::text; end if;
   if to_regprocedure('public.conciliacion_ligar_cargos_a_gasto(uuid,uuid[],uuid)') is null then v_falta := v_falta || 'conciliacion_ligar_cargos_a_gasto'::text; end if;
   if to_regprocedure('public.tg_mov_bancario_omitido_sin_ligas()') is null then v_falta := v_falta || 'tg_mov_bancario_omitido_sin_ligas'::text; end if;
+  if to_regprocedure('public.tg_mov_bancario_reverso_omitido()') is null then v_falta := v_falta || 'tg_mov_bancario_reverso_omitido'::text; end if;
   if not exists (select 1 from pg_trigger
                   where tgname = 'trg_mov_bancario_omitido_sin_ligas'
                     and tgrelid = 'public.movimiento_bancario'::regclass) then
     v_falta := v_falta || 'trg_mov_bancario_omitido_sin_ligas'::text;
   end if;
+  if not exists (select 1 from pg_trigger
+                  where tgname = 'trg_mov_bancario_reverso_omitido'
+                    and tgrelid = 'public.movimiento_bancario'::regclass) then
+    v_falta := v_falta || 'trg_mov_bancario_reverso_omitido'::text;
+  end if;
   if exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
               where n.nspname = 'public'
                 and p.proname in ('conciliacion_clasificacion_omitido', 'conciliacion_omitir_movimientos',
                                   'conciliacion_quitar_omision', 'conciliacion_ligar_cargos_a_gasto',
-                                  'tg_mov_bancario_omitido_sin_ligas')
+                                  'tg_mov_bancario_omitido_sin_ligas', 'tg_mov_bancario_reverso_omitido')
                 and (p.prosecdef or p.proconfig is null
                      or not ('search_path=""' = any (p.proconfig)))) then
     v_falta := v_falta || 'security invoker / search_path'::text;

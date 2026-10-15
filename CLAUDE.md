@@ -5690,8 +5690,18 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (EXIGE); ENTRE monedas la moneda identifica el dinero (pesos devueltos
       completos y dólares retenidos en un método que no exige ⇒ NO exige:
       excepción consciente, pregunta abierta al cliente). Sin `cobrado` solo
-      aplica la (1). `dineroDevueltoCompleto` es la definición ÚNICA de «se
-      devolvió completo» (la usa el pre-cierre `cobros_en_cancelados` para
+      aplica la (1). **Límite conocido (revisión del 14-oct-2026, sin
+      corregir en el 0.0.77)**: la (2) confía en el T.C. TECLEADO del
+      reembolso (`createReembolso` solo exige reembolso ≤ cobrado neto +
+      0.01 y el diálogo no lo prellena): una devolución PARCIAL en otra
+      moneda tecleada a un T.C. bajo (16,000 MXN a 16.00 de un cobro de
+      1,000 USD con el oficial en 17.50) pasa por completa y deja $1,500 MXN
+      retenidos sin CFDI. Un 400 duro contra el oficial bloquearía
+      devoluciones legítimas al T.C. del banco y calcular la (2) con el
+      oficial sería un cálculo paralelo a `cobrosEnUsd`: la salida es un 409
+      con «aceptar el T.C.» que pide el panel nuevo (sale con él). Prod al
+      14-oct-2026: 0 devoluciones cruzadas. `dineroDevueltoCompleto` es la
+      definición ÚNICA de «se devolvió completo» (la usa el pre-cierre `cobros_en_cancelados` para
       su marca `diferencia_cambiaria`; `retieneCobros` sigue siendo la
       medida en USD del REPARTO y cuenta la diferencia cambiaria: decisión
       de dinero aparte). El lector suma `moneda` y `tc_usd_mxn` al select de
@@ -5810,8 +5820,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       escribir—; compuerta de UNA consulta a `vuelo`, 42703 ⇒ `NO_DISPONIBLE`;
       jamás lanza ni revierte dinero) a `destinatariosFacturacion(actor)`:
       tipo `factura_solicitud_ya_no_aplica` (EXIGE ⇒ no exige; título «Ya no
-      aplica: factura del vuelo #341», link
-      `/admin/facturas-emitidas?resaltar=<vuelo>#ya-no-aplican`) y
+      aplica: factura del vuelo #341», link `/admin/flights/<vuelo>#cobros`
+      —el DETALLE del vuelo, donde cualquier panel ofrece «Retirar»;
+      revisión del 14-oct-2026: el ancla `#ya-no-aplican` de la bandeja solo
+      existe en el panel nuevo y, con el API 0.0.77 y el panel de antes, el
+      aviso aterrizaba en una bandeja sin el vuelo—) y
       `factura_solicitud_vuelve_a_aplicar` (no exige ⇒ EXIGE con la
       automática todavía viva; «Vuelve a aplicar: factura del vuelo #341»,
       `#por-facturar`); `data` = `{vuelo_id, folio, origen: 'YA_NO_APLICA' |
@@ -5819,7 +5832,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       COBRO_ELIMINADO, cobro_id}`; cuerpos en `textoAvisoCambioSolicitud`
       (p. ej. «Se registró la devolución del dinero del vuelo #341 · Maqar ·
       27 sep: un anticipo devuelto no lleva factura. Su solicitud automática
-      salió de «Por facturar»; retírala desde ahí.»). Desde `createCobro`
+      salió de «Por facturar»; retírala desde el detalle del vuelo (botón
+      «Retirar»).»). Desde `createCobro`
       (sin sobre, cualquier método), «Es el pago de un vuelo»,
       `createReembolso` (sin sobre), `deleteCobro` y `updateCobro` (dinero,
       cuenta o método); sin transición no avisa (nunca repite). La
@@ -7028,7 +7042,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (LA partición: su avión XOR VuelaTour, orden del lector, lo que no es
       resultado en ningún lado), `ingresoEsDelAvion`, `netoIngresoUsd` y
       —0.0.77— `diaTcOficialIngreso` y `usdDeIngresoAvion` (la conversión
-      ÚNICA, abajo); `aircraft/otros-ingresos-avion.util` —
+      ÚNICA, abajo) y —revisión del 14-oct-2026— `gastosLigadosDelLibro`,
+      `excedenteSobreCargado` y `avisosReembolsoGasto` (el reembolso ligado,
+      abajo); `aircraft/otros-ingresos-avion.util` —
       `filaHojaOtrosIngresos`, `notaTcUsdIngreso`, `hojaOtrosIngresosAvion`,
       `fusionarOtrosIngresosFlota`. Los pesos
       salen SIEMPRE de `filaLibroDeIngreso` (sin cambio): MXN directo, USD ×
@@ -7054,7 +7070,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ingreso en pesos no traía tipo de cambio.»; GASTO_LIGADO ⇒ «T.C. con el
       que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del
       15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan
-      en este libro.»; PROPIO o USD ⇒ null)—);
+      en este libro.» si el NETO del reembolso es lo que el libro le carga
+      al avión de ese gasto (±0.005); menos ⇒ «…: el reembolso anula $1,000
+      MXN de los $1,365.64 MXN que este libro le carga al avión de ese
+      gasto.»; más ⇒ «…: este libro solo le carga $1,365.64 MXN de ese gasto
+      al avión; los $559.63 MXN restantes del reembolso no se anulan con
+      nada.» —revisión del 14-oct-2026, `notaTcUsdIngreso(conv, netoMxn)`—;
+      PROPIO o USD ⇒ null)—);
       (2) la línea «(+) OTROS INGRESOS USD» que SUMA en la cascada
       (`balance.otros_ingresos_avion_usd` = hoja.usd; `utilidad_despues_usd`
       = round2(antes − combustible − indirectos − refacciones − otros −
@@ -7087,21 +7109,50 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       su memo por día, compartido por todo el general —un día, una
       consulta—; reparto: `resolverTcOficial`, mismo lote de vuelos y
       gastos). **Reembolso LIGADO** (REEMBOLSO_DEVOLUCION en pesos con
-      `gasto_id` de un gasto en pesos que ESE libro cuenta): se convierte con
-      el T.C. con el que ESE libro convierte su gasto —balance: el T.C. de
-      costos de la fila de su vuelo (`tc_costos ?? tcPromedio`, el divisor
-      de `ganancia_usd`; los vínculos 'suma' de la fila) o `tcHojas` si vive
-      en una hoja; reparto: `tc_gasto ?? oficial del día del gasto` (el
-      divisor de `toUsd`, solo gastos que restan: grupo ≠ EXCLUIDO)— para
-      que reembolso y gasto se anulen EXACTOS en cada libro (revisión del
-      14-oct-2026: con la regla por ingreso un reembolso exacto del gasto
-      70e8c3a4 dejaba +45.12 USD en el balance y +27.15 en el reparto que no
-      existen en pesos); su USD puede diferir entre libros igual que el de
-      su gasto; si el gasto no está en ese libro (otro mes, otro avión u
-      otra moneda) ⇒ la regla por ingreso y, en el balance, el pendiente
-      «Hoja "Otros ingresos" (fecha): ING-n reembolsa un gasto que este
-      libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con
-      el T.C. oficial de su día y no se anula exacto con su gasto». El
+      `gasto_id` de un gasto en pesos que ESE libro le CARGA al avión): se
+      convierte con el T.C. con el que ESE libro convierte su gasto —balance:
+      el T.C. de costos de la fila de su vuelo (`tc_costos ?? tcPromedio`,
+      el divisor de `ganancia_usd`; los vínculos 'suma' de la fila) o
+      `tcHojas` si vive en una hoja; reparto: `tc_gasto ?? oficial del día
+      del gasto` (el divisor de `toUsd`, solo gastos que restan: grupo ≠
+      EXCLUIDO)— para que reembolso y gasto se anulen EXACTOS en cada libro
+      (revisión del 14-oct-2026: con la regla por ingreso un reembolso exacto
+      del gasto 70e8c3a4 dejaba +45.12 USD en el balance y +27.15 en el
+      reparto que no existen en pesos); su USD puede diferir entre libros
+      igual que el de su gasto. **Lo CARGADO, no solo el T.C. (segunda
+      revisión del 14-oct-2026)**: la fuente única `gastosLigadosDelLibro`
+      (PURA, la usan los DOS libros) arma por gasto el divisor Y
+      `cargado_mxn` = Σ de las partes que RESTAN en la utilidad del avión
+      —balance: los vínculos 'suma' (su `monto_mxn`: la parte op/FBO, no la
+      TUA ni la extensión) SOLO de filas con `ganancia_usd` (una fila sin
+      parte en la venta, factor 0, no resta sus gastos) + las filas de sus
+      hojas (un parcial del reparto, su parte); reparto: `monto − TUA −
+      extensión` de cada parte que resta—; Σ ≤ 0 ⇒ el gasto NO entra (el
+      avión no lo carga) y `usdDeIngresoAvion` exige `cargado_mxn > 0` (un
+      `divisor` distinto entre partes, imposible por construcción, se pondera
+      para que lo cargado se anule igual). Caso #192 (8ab208c4, extensión
+      completa): ya no se «liga» en el reparto (antes ÷ 16.8925 = +269.29 USD
+      a los socios) y los DOS libros usan el oficial del día del reembolso.
+      `avisosReembolsoGasto` (textos ÚNICOS: balance = un pendiente con el
+      prefijo de la hoja; reparto = `tc_aviso` de la línea, unidos con « · »)
+      dice cuándo NO se anula: el libro no le carga el gasto ⇒ «ING-7
+      reembolsa un gasto que este libro no le carga al avión (otro mes, otro
+      avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo
+      sin venta): se convirtió con el T.C. oficial de su día y no se anula
+      con su gasto» (o «con su T.C. propio»); T.C. PROPIO (manda, captura
+      explícita) que no da el mismo centavo que el divisor del libro ⇒ «ING-7
+      trae T.C. propio (17.5000) y este libro convierte el gasto que
+      reembolsa con 17.2377 (T.C. promedio de las hojas): reembolso y gasto
+      no se anulan exactos»; el reembolso EXCEDE lo cargado (> 0.005; caso
+      #383, 8c60e428: 1,925.27 = operación 1,365.64 + TUA 559.63) ⇒ «ING-7
+      reembolsa $1,925.27 MXN de un gasto del que este libro solo le carga
+      $1,365.64 MXN al avión: $559.63 MXN no se anulan con nada y suman al
+      avión — si esa parte no es suya, corrige el monto o el avión del
+      ingreso» (el reembolso entero sigue contando para el avión: lo decide
+      el `aeronave_id` de la oficina; un reembolso MENOR que lo cargado es
+      legítimo y no avisa). NO se bloquea en Ingresos un reembolso de un
+      gasto que el avión no carga: decidirlo exigiría repetir la regla de
+      cada libro en la escritura (cálculo paralelo). El
       balance YA NO divide la hoja entre `tcHojas` y los ingresos YA NO
       cuentan para el respaldo «avión sin vuelos» (con gastos E ingresos el
       pendiente dice «sus hojas de gastos se convirtieron a USD con el T.C.
@@ -7140,8 +7191,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       SIEMPRE, tras `comision_vendedor_solo_gasto_real` y antes de
       `afac_en_filas`; Libro Dinero solo con dato; reparto SIEMPRE (0 / [] en
       `ingresos` y `detalle.otros_ingresos_avion`, cuya línea gana
-      `tc_origen` AL FINAL desde el 0.0.77 —el PDF/XLSX del reparto no la
-      lleva—), `tc_oficial.ingresos`
+      `tc_origen` y —revisión del 14-oct-2026— `tc_aviso` (string | null) AL
+      FINAL desde el 0.0.77 —el PDF/XLSX del reparto no los lleva—),
+      `tc_oficial.ingresos`
       `{count, monto_mxn}` y el payload del PDF/XLSX por avión con
       `otros_ingresos_avion_usd`, `otros_ingresos_avion_sin_tc_mxn` y
       `otros_ingresos_avion` (`saldo_usd` YA lo incluye). El general LEE
@@ -7207,11 +7259,16 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (mapeo de los campos nuevos —`gasto_id` desde el 0.0.77—, fila
       byte-idéntica, partición, neto USD, `diaTcOficialIngreso` y
       `usdDeIngresoAvion` con las cifras reales: 2,746.70 / 2,660.05 /
-      2,638.61), `otros-ingresos-avion.util.spec` (fila ING-4 literal con las
-      cuatro llaves del 0.0.77 —16.9479 ⇒ 2,746.70—, `notaTcUsdIngreso`, USD
-      con comisión, sin T.C., ligado y no ligado con sus pendientes
-      literales, vacía con la bandera, fusión con orden estable y null que se
-      propaga), `aircraft-balance.service.otros-ingresos-avion.spec`
+      2,638.61; `cargado_mxn` 0 ⇒ jamás ligado; `gastosLigadosDelLibro`,
+      `excedenteSobreCargado` y `avisosReembolsoGasto` con #192 y #383
+      reales, T.C. propio y los textos LITERALES),
+      `otros-ingresos-avion.util.spec` (fila ING-4 literal con las cuatro
+      llaves del 0.0.77 —16.9479 ⇒ 2,746.70—, `notaTcUsdIngreso` igual /
+      parcial / de más, USD con comisión, sin T.C., ligado y no ligado con
+      sus pendientes literales —T.C. propio con el gasto en el libro y
+      exceso de lo cargado—, vacía con la bandera, fusión con orden estable
+      y null que se propaga),
+      `aircraft-balance.service.otros-ingresos-avion.spec`
       (individual 2,586.16 con el oficial 18 del día del ingreso —el libro
       promedia 20—, cascada y socios, `diferencias` acotadas, ajenos y
       anticipo forzado fuera, EXTERNOS sin leer `ingreso`, avión sin vuelos:
@@ -7227,12 +7284,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (oficial 18 ⇒ 2,586.16, T.C. propio, USD neto, sin T.C., ajenos,
       `q.aeronave_id`, sin ingresos/sin migración idénticos, un día = una
       consulta, payload del PDF y utilidades por mes; `tc_origen` y el
-      reembolso LIGADO con `tc_gasto` y con el oficial del día del gasto),
+      reembolso LIGADO con `tc_gasto` y con el oficial del día del gasto;
+      `tc_aviso` null por lo cargado y el aviso del exceso),
       `aircraft-balance.service.ingreso-conversion-unica.spec` (0.0.77,
       CRUCE: ING-4 = 2,746.70 en balance, reparto y tablero con un libro que
       promedia 20; USD 970 en los tres; avión sin vuelos; una consulta del
       oficial por día en el general; reembolso ligado a un gasto de hoja, de
-      la fila de un vuelo y de otro mes),
+      la fila de un vuelo y de otro mes; revisión del 14-oct-2026: extensión
+      completa del #501 ⇒ oficial en los TRES con pendiente y `tc_aviso`,
+      TUA de oficina ⇒ ligado por lo CARGADO con el aviso del exceso en los
+      dos libros y +25 USD exactos en el balance, gasto de un tramo cancelado
+      de otro avión ⇒ el balance no lo liga y el reparto sí),
       `dashboards.service.overview-otros-ingresos.spec` (identidad al
       centavo), `ingresos.service.spec` / `ingresos.util.spec` /
       `ingresos-xlsx.spec` (201 con aviso, 400 en alta y PATCH, conciliado
@@ -8242,19 +8304,41 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       MOVIMIENTO_NO_PENDIENTE {movimientos[{id, fecha, tipo, monto,
       descripcion, estado}]}, UN UPDATE —; `conciliacion_quitar_omision(ids,
       actor)` — mismas listas; todos deben tener la canónica
-      (MOVIMIENTO_NO_OMITIDO); vuelven a Pendientes sin la primera línea
-      canónica (vacío ⇒ null). Interbloqueo (40P01) ⇒ 409
-      CONFLICTO_CONCURRENTE.
+      (MOVIMIENTO_NO_OMITIDO; un omitido al que APUNTA una devolución sale
+      con estado REVERSO y no se restaura —quedaría un par a medias—:
+      `mensajeNoOmitidos` pide quitar primero el emparejamiento); vuelven a
+      Pendientes sin la primera línea canónica (vacío ⇒ null); es el ÚNICO
+      camino que le quita la omisión a un movimiento: abre el paso del
+      trigger con `set_config('vt.quitar_omision', '1', true)` justo antes
+      de su UPDATE y lo cierra ('') justo después. Interbloqueo (40P01) ⇒
+      409 CONFLICTO_CONCURRENTE.
     - **Candado en BD** `trg_mov_bancario_omitido_sin_ligas` (BEFORE UPDATE
       OF gasto_id, gastos_n, cobro_id, cobros_n, cobro_grupo_id, ingreso_id,
-      reverso_de_id WHEN old.clasificacion_id is not null; no modifica NEW):
+      reverso_de_id, clasificacion_id, conciliado WHEN old.clasificacion_id
+      is not null; no modifica NEW; las 9 columnas = `COLUMNAS_TRIGGER_OMITIDO`):
       un omitido NO recibe ninguna liga por ningún camino (RPC G, RPC de
       cobros por su UPDATE de sincronía, `cobro_id` directo, sobre,
-      ingreso, `gasto_id` legado, reverso) ⇒ 23514 MOVIMIENTO_OMITIDO. Una
+      ingreso, `gasto_id` legado, reverso) y —revisión del 14-oct-2026— NO
+      PIERDE la omisión por fuera de `conciliacion_quitar_omision` (otra
+      clasificación, sin clasificación o `conciliado = false` sin su paso
+      `vt.quitar_omision`: el «desvincular» de `linkCobro` —cobro_id null,
+      conciliado false, clasificacion_id null— la borraba en silencio y
+      dejaba su línea en las notas) ⇒ 23514 MOVIMIENTO_OMITIDO. Un SEGUNDO
+      trigger, `trg_mov_bancario_reverso_omitido` (BEFORE INSERT OR UPDATE
+      OF reverso_de_id WHEN new.reverso_de_id is not null; corre DESPUÉS de
+      `trg_mov_bancario_reverso` por su nombre y lee el cargo FOR SHARE),
+      frena emparejar una devolución con un CARGO omitido (el primero solo
+      mira la fila que se actualiza, el abono) con el mismo código. Una
       clasificación que NO es la canónica se sigue pisando al ligar, como
       siempre. El API lo traduce a 409 en `errorRpcPartes`,
-      `errorRpcCobros` y la rama 23514 de `linkCobro` (`mensajeErrorPartes`
-      / `mensajeErrorCobros`), nunca 500.
+      `errorRpcCobros`, la rama 23514 de `linkCobro` (`mensajeErrorPartes`
+      / `mensajeErrorCobros`), el UPDATE de «Clasificar» (409
+      MOVIMIENTO_OMITIDO con el motivo) y el emparejado de reverso
+      (`motivoTriggerReverso` ⇒ 409 REVERSO_INVALIDO «Uno de los dos
+      movimientos se omitió de la conciliación: deshaz la omisión antes de
+      emparejarlos.»), nunca 500. Borrar la fila canónica (ON DELETE SET
+      NULL) no pasa por estos candados: nadie la borra (la reversa la deja
+      inactiva).
     - **Rutas** (literales bajo `movimientos/`, ANTES de `movimientos/:id`;
       roles de la CLASE = `ROLES_CONCILIACION`; 200):
       `POST movimientos/omitir/revisar {movimiento_ids}` (SOLO LECTURA;
@@ -8280,7 +8364,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       auto-cruce y del badge): SE_PUEDE_CRUZAR ⇒ GASTO_QUE_CUADRA, AMBIGUO
       ⇒ GASTOS_AMBIGUOS, sin anotar (lectura caída o truncada, cuenta sin
       moneda) ⇒ SIN_VERIFICAR; ABONO ⇒ `cobrosExactosLibresDeAbono` (≤ 5 en
-      paralelo) > 0 ⇒ COBRO_QUE_CUADRA, null o error ⇒ SIN_VERIFICAR, y
+      paralelo; PAGINADA por la PK con tope `TOPE_UNIVERSO` desde la revisión
+      del 14-oct-2026 —con `.limit(1000)` un cobro exacto después de la fila
+      1000 daba 0: omitir o ligar al ingreso sin aviso— y pasado el tope ⇒
+      null) > 0 ⇒ COBRO_QUE_CUADRA, null o error ⇒ SIN_VERIFICAR, y
       `esDevolucionDeCargo` ⇒ DEVOLUCION; los dos ⇒ `patronTraspaso` ⇒
       TRASPASO. Prioridad GASTO_QUE_CUADRA > GASTOS_AMBIGUOS >
       COBRO_QUE_CUADRA > TRASPASO > DEVOLUCION > SIN_VERIFICAR. Cada
@@ -8293,21 +8380,37 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `esperado` distinto de lo vigente (o null y ya conciliado) ⇒ 409
       MOVIMIENTO_CAMBIO `{actual {conciliado, clasificacion_id,
       clasificacion}}`, ANTES de la rama del reverso; (3) reverso como
-      siempre; (4) omitido + null ⇒ deshacer por la RPC; omitido + otra ⇒
-      409 MOVIMIENTO_OMITIDO con su motivo; (5) un lote de cobros
-      (`cobros_n > 0`) no se clasifica; (6) UPDATE con CAS sobre lo leído
-      (`conciliado` + `clasificacion_id`): 0 filas ⇒ 409 MOVIMIENTO_CAMBIO.
+      siempre; (4) omitido (por el id de la canónica O por el NOMBRE
+      embebido en la misma lectura: revisión del 14-oct-2026, sin depender
+      del memo) + null ⇒ deshacer por la RPC; omitido + otra ⇒ 409
+      MOVIMIENTO_OMITIDO con su motivo; (5) un lote de cobros (`cobros_n >
+      0`) no se clasifica; la clasificación destino se lee con su `nombre`
+      y la canónica por nombre ⇒ 400 USA_OMITIR (si la lectura del id cayó
+      en (0)); (6) UPDATE con CAS sobre lo leído (`conciliado` +
+      `clasificacion_id`): 0 filas ⇒ 409 MOVIMIENTO_CAMBIO; el 23514
+      MOVIMIENTO_OMITIDO del trigger ⇒ 409 MOVIMIENTO_OMITIDO.
       La respuesta suma `omision: null`. El catálogo (`GET clasificaciones`)
       NO ofrece la canónica y `POST clasificaciones` con su nombre ⇒ 400
       USA_OMITIR sin insertar.
     - **Candados TS** (antes del trigger, con mejor texto; sin escribir):
       `ligarPartes` (al ligar; `leerMovimientoPartes` suma
-      `clasificacion_id, notas`), `linkCobro` (ligar Y «desvincular»: su
-      UPDATE pone `clasificacion_id = null` y borraría la omisión) y
-      `ligarCobrosPorRpc` ⇒ 409 MOVIMIENTO_OMITIDO (`bloquearSiOmitido`);
-      `linkIngreso` ⇒ el 409 MOVIMIENTO_YA_LIGADO de siempre con el motivo
-      y `details.omitido: true`. Reversos, auto-cruce e Ingresos ya no
-      tocan un movimiento clasificado/conciliado.
+      `clasificacion_id, notas` y el nombre embebido), `linkCobro` (ligar Y
+      «desvincular»: su UPDATE pone `clasificacion_id = null` y borraría la
+      omisión) y `ligarCobrosPorRpc` ⇒ 409 MOVIMIENTO_OMITIDO
+      (`bloquearSiOmitido`, que desde la revisión del 14-oct-2026 decide
+      PRIMERO por el NOMBRE de la clasificación embebido en la MISMA lectura
+      —`clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`—
+      y solo sin él por el id memorizado; una carrera o una lectura caída
+      las frena el trigger); `linkIngreso` ⇒ el 409 MOVIMIENTO_YA_LIGADO de
+      siempre con el motivo y `details.omitido: true`. Reversos, auto-cruce
+      e Ingresos ya no tocan un movimiento clasificado/conciliado; el
+      reintento «idempotente» del emparejado de reverso exige que el cargo
+      siga como SU devolución (conciliado con «Reverso de un cargo» y sin
+      otra liga; si no ⇒ 409 REVERSO_INVALIDO «El abono ya apunta a este
+      cargo, pero el cargo ya no está como su devolución…») y un 40P01 al
+      escribir el par (interbloqueo con «Omitir» de un lote) ⇒ 409
+      CONFLICTO_CONCURRENTE (`conflictoConcurrenteReverso`), también en el
+      emparejado automático (su `motivo`).
     - **Lectores (ADITIVOS)**: `GET movimientos` ⇒ cada fila con `omision:
       {motivo, por, fecha} | null` SIEMPRE (del embed de la clasificación y
       las notas: cero consultas; el panel detecta el API nuevo por la
@@ -8352,15 +8455,22 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       1000 sin avisar y anotaba con una foto recortada.
     - Specs: `omision.util.spec`, `omision-cargos-disponible.util.spec`,
       `omision-cargos.paridad.spec` (lee el ARCHIVO SQL: nombre canónico,
-      prefijo, topes, las 7 columnas del trigger, el orden del CASE, los
-      códigos que el API traduce, todo SECURITY INVOKER con `search_path
-      ''` y ni una palabra que el MCP decline),
+      prefijo, topes, las 9 columnas del trigger, el orden del CASE, los
+      códigos que el API traduce —también el del trigger del cargo omitido
+      por `motivoTriggerReverso`—, el paso `vt.quitar_omision` abierto y
+      cerrado alrededor del UPDATE del deshacer, el estado REVERSO primero
+      en su CASE, todo SECURITY INVOKER con `search_path ''` y ni una
+      palabra que el MCP decline),
       `conciliacion.service.omitir.spec` (PostgREST falso con CAS y embeds
       + las RPC emuladas en `omision-cargos.fixture-spec.ts`: la línea
       exacta y las notas de vuelta byte a byte, 404/409/400/503 sin
-      escribir, riesgos y su confirmación, carreras de la RPC, revisar,
-      deshacer, lista/resumen/Excel/Paywise, clasificar con `esperado` y
-      CAS, candados de gasto/cobro/ingreso y el trigger, pre-cierre),
+      escribir, riesgos y su confirmación —el cobro exacto después de la
+      fila 1,000 y más de 3,000 candidatos ⇒ SIN_VERIFICAR—, carreras de la
+      RPC, revisar, deshacer, lista/resumen/Excel/Paywise, clasificar con
+      `esperado` y CAS, candados de gasto/cobro/ingreso y el trigger,
+      pre-cierre), `conciliacion.service.reverso.spec` (el reintento sobre
+      un cargo que ya no es la devolución ⇒ 409; 40P01 ⇒ 409
+      CONFLICTO_CONCURRENTE; el trigger del cargo omitido ⇒ 409 legible),
       `conciliacion.controller.omitir.spec` (HTTP real: rutas, roles, DTO,
       `esperado`, `?solo_omitidos`) y
       `profit-sharing.service.pre-cierre-omitidos.spec`.
@@ -8402,8 +8512,16 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ⇒ `truncado`) en `[fecha_min − dias, fecha_max + dias]`; los cruzados
       (USD contra cuenta MXN) NO entran. `cargos_con_candidato_propio` =
       `anotarMotivoPendiente` sobre COPIAS (null si alguno no se pudo
-      anotar: jamás un «ninguno» falso). Sin candidatos ⇒
-      `excluidosDeCandidatos` con el monto = Σ.
+      anotar: jamás un «ninguno» falso). `excluidos` + `excluidos_monto`
+      SIEMPRE (`excluidosDeCandidatos` con el monto = Σ o el de `q`;
+      revisión del 14-oct-2026: antes solo con la lista vacía, y un gasto
+      bancario cualquiera del mismo monto escondía el COMIDA de $400 en
+      EFECTIVO o el gasto ya conciliado contra otro cargo que «Créalo por la
+      suma» duplicaría; en prod 123 de 282 gastos no bancarios y 97 de 537
+      conciliados tienen un bancario sin conciliar del mismo monto a ±120
+      días). UNA consulta acotada por monto y fechas; si falla, sin la
+      llave (warn). `crearConCargos` NO revisa duplicados: el panel hace el
+      paso de duplicados (`q` = la suma, `dias` 120) y enseña `excluidos`.
     - **`POST gastos/:id/cargos {movimiento_ids 2..50}`** (otro MÉTODO que
       `GET gastos/:id`; `:id` con ParseUUIDPipe) ⇒ `{gasto_id,
       idempotente, nuevos, partes[{movimiento_id, monto_parte, moneda}],
@@ -8430,8 +8548,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       invariante 75) en «no» ⇒ el mismo 503 sin llamar la RPC.
     - **«Créalo por la suma»**: `POST /v1/expenses` con
       `CreateGastoDto.conciliar_con_movimientos?: uuid[]` (2..50 sin
-      repetir; ADITIVO). Controller: el campo presente (`!== undefined`) y
-      el rol fuera de `ROLES_CONCILIACION` ⇒ 403
+      repetir; ADITIVO). Controller: el campo con valor (`!= null`: `null`
+      = ausente, el MISMO criterio de `create()`; revisión del 14-oct-2026,
+      antes `!== undefined` daba 403 a un alta normal con la llave en null)
+      y el rol fuera de `ROLES_CONCILIACION` ⇒ 403
       CONCILIAR_SOLO_ADMIN_FACTURACION antes del servicio. Servicio
       (`create` ⇒ `crearConCargos`; `null` = ausente): (1) refacción a
       Inventario ⇒ 400 INVENTARIO_NO_DESDE_CARGOS; (2) sin
@@ -8466,17 +8586,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (topes 2..50, tolerancia 1.00, MEDIOS en el mismo orden, códigos),
       `conciliacion.service.cargos-gasto.spec` (suma y orden, ventana,
       pagos previos, búsqueda, terminación común, cargos con su propio
-      gasto, excluidos, rechazos en el orden de la RPC, la liga con UNA
-      llamada y sin la G, idempotente, parciales, cada código con su texto,
-      omitido, interbloqueo, un 42883 que NO es «migración ausente», sin la
-      migración, `accion: 'crear'`, prevalidación),
+      gasto, excluidos —también CON candidatos: el efectivo y el ya
+      conciliado del mismo monto—, rechazos en el orden de la RPC, la liga
+      con UNA llamada y sin la G, idempotente, parciales, cada código con su
+      texto, omitido, interbloqueo, un 42883 que NO es «migración ausente»,
+      sin la migración, `accion: 'crear'`, prevalidación),
       `conciliacion.controller.cargos-gasto.spec` (HTTP real),
       `expenses.service.crear-con-cargos.spec` (PostgREST falso: alta de
       siempre con auto-cruce y aviso; alta por la suma sin auto-cruce y con
       el aviso DESPUÉS de la liga; rechazos sin crear; compensación,
       GASTO_NO_REGISTRADO y GASTO_SIN_VINCULAR; replay, llave en uso,
       carrera 23505; PATCH) y `expenses.controller.crear-con-cargos.spec`
-      (403 a quien no concilia, DTO).
+      (403 a quien no concilia, la llave en `null` = ausente para cualquier
+      rol, DTO).
 
 ## Convenciones NestJS
 
@@ -9406,45 +9528,57 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 - **PENDIENTE (14-oct-2026, lote B del 0.0.77) —
   `20261014000002_conciliacion_omitir_y_cargos_a_gasto.sql`** (invariantes
   75 y 76; NO aplicada: la aplica el orquestador). SOLO funciones nuevas +
-  UN trigger nuevo: `conciliacion_clasificacion_omitido`,
+  DOS triggers nuevos: `conciliacion_clasificacion_omitido`,
   `conciliacion_omitir_movimientos`, `conciliacion_quitar_omision`,
-  `conciliacion_ligar_cargos_a_gasto` y `tg_mov_bancario_omitido_sin_ligas`
-  + `trg_mov_bancario_omitido_sin_ligas`; ninguna tabla, columna, CHECK,
-  índice, vista ni función existente cambia y NO siembra datos. Las 5
-  funciones son SECURITY INVOKER con `search_path ''` y el archivo NO toca
+  `conciliacion_ligar_cargos_a_gasto`, `tg_mov_bancario_omitido_sin_ligas`
+  + `trg_mov_bancario_omitido_sin_ligas` y —revisión del 14-oct-2026—
+  `tg_mov_bancario_reverso_omitido` + `trg_mov_bancario_reverso_omitido`
+  (el trigger de la omisión vigila además `clasificacion_id` y
+  `conciliado`); ninguna tabla, columna, CHECK, índice, vista ni función
+  existente cambia y NO siembra datos. Las 6 funciones son SECURITY INVOKER
+  con `search_path ''` y el archivo NO toca
   permisos ni lleva drop/delete/revoke/grant (ni en comentarios): se aplica
   ENTERO por `apply_migration`. anon/authenticated conservan el EXECUTE por
   default pero, con RLS sin políticas (invariante 51), no ven ninguna fila
   ni pueden insertar (lo prueba el dry-run, T28). Paquete en
   `docs/sql-20261014000002/` (README con el orden): `01-dryrun…sql` (legible)
   y `01-dryrun….transporte.sql` (lo que se manda por `execute_sql`),
-  `02b-postcheck-lecturas…sql`, `02-postcheck…sql` (T1–T29 ya aplicada, termina
+  `02b-postcheck-lecturas…sql`, `02-postcheck…sql` (T1–T31 ya aplicada, termina
   en `POSTCHECK_OK`) y `03-reversa…sql` (SOLO SQL Editor, con confirmación).
-  **Dry-run corrido en prod el 14-oct-2026** (bloque autoabortado con
-  escrituras REALES; filas de prueba DESPUÉS del DDL; `set constraints all
-  immediate` en T29):
-  `ERROR: P0001: DRYRUN_OK 20261014000002 · T1–T29 · canónica
-  0ec662fc-f07c-42f3-80d2-c729492d6c4c · authenticated:MOVIMIENTO_NO_EXISTE
+  **Dry-run corrido en prod el 14-oct-2026, con la revisión** (bloque
+  autoabortado con escrituras REALES; filas de prueba DESPUÉS del DDL; T30 =
+  el «desvincular» de `linkCobro` y cualquier UPDATE que le quite la omisión
+  a un omitido ⇒ MOVIMIENTO_OMITIDO, el deshacer por la RPC sí pasa y cierra
+  su paso; T31 = la devolución contra un CARGO omitido ⇒
+  MOVIMIENTO_OMITIDO, con el cargo pendiente sí, y el deshacer de un omitido
+  con devolución ⇒ MOVIMIENTO_NO_OMITIDO estado REVERSO; `set constraints
+  all immediate` en T29):
+  `ERROR: P0001: DRYRUN_OK 20261014000002 · T1–T31 · canónica
+  f0530ebf-e6d2-4d38-8a16-ad2e4d00eae9 · authenticated:MOVIMIENTO_NO_EXISTE
   authenticated:MOVIMIENTO_NO_EXISTE authenticated:MOVIMIENTO_NO_EXISTE
   authenticated:42501 anon:MOVIMIENTO_NO_EXISTE anon:MOVIMIENTO_NO_EXISTE
   anon:MOVIMIENTO_NO_EXISTE anon:42501 · md5 del bloque
-  278693a0f4bf976c161bf72ecf2fcc9b · todo se revierte`; después, por
-  SELECT: las 5 funciones y el trigger no existen, 0 clasificaciones
-  canónicas/DRYRUN, 0 movimientos `DRYRUN`, 0 gastos `DRYRUN%`, 0 partes.
+  7ff0af6591515e360bc1e10fa89efe69 · todo se revierte`; después, por
+  SELECT: las 6 funciones y los 2 triggers no existen, 0 clasificaciones
+  canónicas/DRYRUN, 0 movimientos `DRYRUN`, 0 gastos `DRYRUN%`; 999
+  movimientos y 7 pares de reverso, como antes.
   Procedimiento (proyecto `bjesduasnzbzywofukbf`; hay DOS: confirmar con un
   SELECT): `02b` (todo vacío) ⇒ dry-run (si pasó tiempo) ⇒ `apply_migration`
-  (name `20261014000002_conciliacion_omitir_y_cargos_a_gasto`) ⇒ `02b` (5
-  funciones `prosecdef = false` y `search_path=""`, trigger, RLS sin
-  políticas, 0 canónicas) ⇒ `02-postcheck` ⇒ `POSTCHECK_OK` ⇒
+  (name `20261014000002_conciliacion_omitir_y_cargos_a_gasto`; el MCP guarda
+  como `version` la marca de tiempo del MOMENTO de aplicar, no
+  `20261014000002`: el historial se busca por `name` —`02b` paso 6 y la
+  reversa ya lo hacen—) ⇒ `02b` (6 funciones `prosecdef = false` y
+  `search_path=""`, 2 triggers, RLS sin políticas, 0 canónicas) ⇒
+  `02-postcheck` ⇒ `POSTCHECK_OK` ⇒
   `get_advisors` (sin 0028/0029: nada es SECURITY DEFINER). **Sin dependencia
   dura** con el API: el 0.0.77 la sondea (sin ella, lo nuevo responde 503 y
   lo demás como el 0.0.76; se enciende sola ≤ 10 min después de aplicarla) y
   con un API ≤ 0.0.76 nadie llama las RPC y, sin omitidos, el trigger nunca
   actúa. **REVERSA** (SOLO SQL Editor, con confirmación): deshacer antes
   TODAS las omisiones (pestaña «Omitidos» o `conciliacion_quitar_omision` en
-  lotes de 200), luego `03-reversa…sql` (trigger, 5 funciones, renglón del
-  historial; la canónica queda inactiva) y REINICIAR el API (la sonda
-  memoriza el «sí»).
+  lotes de 200), luego `03-reversa…sql` (2 triggers, 6 funciones, renglón
+  del historial POR `name`; la canónica queda inactiva) y REINICIAR el API
+  (la sonda memoriza el «sí»).
 - **ORDEN DE DESPLIEGUE 0.0.77 (lote A + lote B, 14-oct-2026).** El lote A
   no trae migración y exige pyservices ANTES del API (su compuerta, bullet
   anterior); el lote B trae `20261014000002` y ningún cambio de pyservices
@@ -9463,9 +9597,13 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   pre-cierre de septiembre con `movimientos_omitidos` count 0 y `listo` como
   antes. **ROLLBACK del API a 0.0.76 con omitidos en la BD**: posible, pero
   el 0.0.76 ofrece la canónica como una clasificación más y un intento de
-  ligar un omitido lo rechaza el trigger con un código que ese API no
-  conoce (500 en la liga de gastos, 400 genérico en la de cobros): deshacer
-  antes las omisiones o avanzar.
+  ligar un omitido —o de desvincularlo o reclasificarlo, desde la
+  revisión— lo rechaza el trigger con un código que ese API no conoce (500
+  en la liga de gastos y en «Clasificar», 400 genérico en la de cobros):
+  deshacer antes las omisiones o avanzar. **Con el panel de ANTES y el API
+  0.0.77** (el panel de estos lotes sale después): el aviso «Ya no aplica»
+  lleva al detalle del vuelo (`#cobros`, donde ese panel ofrece «Retirar»),
+  no a la tarjeta «ya no aplican» que aún no existe.
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del

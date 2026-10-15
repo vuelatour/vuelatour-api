@@ -898,6 +898,19 @@ const DETALLE_MAX = 300;
 /** Tope de movimientos por corrida del re-cruce (evita respuestas eternas). */
 const RECRUCE_MAX = 2000;
 
+/**
+ * 409 CONFLICTO_CONCURRENTE del emparejado de reverso (revisión del
+ * 14-oct-2026): Postgres resolvió un interbloqueo (40P01) abortando ESTA
+ * operación —p. ej. contra «Omitir» de un lote con el abono y el cargo—.
+ * Mismo código y texto que `errorRpcOmision` / `errorRpcCargosGasto`.
+ */
+function conflictoConcurrenteReverso(): ConflictException {
+  return new ConflictException({
+    message: MENSAJE_CONFLICTO_CONCURRENTE,
+    error: 'CONFLICTO_CONCURRENTE',
+  });
+}
+
 /** Banda de tolerancia de monto (±5%) para juntar gastos candidatos. */
 const MATCH_MONTO_PCT = 0.05;
 
@@ -4032,7 +4045,10 @@ export class ConciliacionService {
    * cobros PAYWISE, así que un «otro ingreso» de 19,380 tecleado a mano se
    * habría llevado el abono de Cristy y el cobro #235 (TRANSFERENCIA 20,400 −
    * 1,020) se quedaba para siempre en «cobros sin banco». Devuelve cuántos
-   * hay; null si no se pudo leer (el llamador NO liga).
+   * hay; null si no se pudo leer (el llamador NO liga). PAGINADO por la PK
+   * (revisión del 14-oct-2026): con `.limit(1000)` un cobro exacto después
+   * de la fila 1000 daba 0 en vez de null —omitir o ligar al ingreso sin
+   * aviso—; hoy, más de `TOPE_UNIVERSO` candidatos ⇒ null (falla CERRADO).
    */
   private async cobrosExactosLibresDeAbono(
     abono: AbonoCruce,
@@ -4042,29 +4058,52 @@ export class ConciliacionService {
   ): Promise<number | null> {
     const sb = this.supabase.service;
     const { lo, hi } = this.ventanaAbono(fecha, VENTANA_MANUAL_DIAS);
-    const [cobrosRes, sobresRes] = await Promise.all([
-      sb
-        .from('cobro_vuelo')
-        .select('id, monto, comision_banco_monto')
-        .gt('monto', 0)
-        .is('cobro_grupo_id', null)
-        .is('ingreso_anticipo_id', null)
-        .in('metodo_cobro', METODOS_ABONO_MANUAL)
-        .eq('moneda', moneda)
-        .gte('fecha_cobro', lo)
-        .lte('fecha_cobro', hi)
-        .limit(1000),
-      sb
-        .from('cobro_grupo')
-        .select('id, monto, comision_banco_monto')
-        .gt('monto', 0)
-        .in('metodo_cobro', METODOS_ABONO_MANUAL)
-        .eq('moneda', moneda)
-        .gte('fecha_cobro', lo)
-        .lte('fecha_cobro', hi)
-        .limit(1000),
-    ]);
-    if (cobrosRes.error || sobresRes.error) return null;
+    let cobros: Array<Record<string, unknown>>;
+    let sobres: Array<Record<string, unknown>>;
+    try {
+      const [cobrosRes, sobresRes] = await Promise.all([
+        this.leerPaginado(
+          (a, b) =>
+            sb
+              .from('cobro_vuelo')
+              .select('id, monto, comision_banco_monto')
+              .gt('monto', 0)
+              .is('cobro_grupo_id', null)
+              .is('ingreso_anticipo_id', null)
+              .in('metodo_cobro', METODOS_ABONO_MANUAL)
+              .eq('moneda', moneda)
+              .gte('fecha_cobro', lo)
+              .lte('fecha_cobro', hi)
+              .order('id', { ascending: true })
+              .range(a, b),
+          TOPE_UNIVERSO,
+        ),
+        this.leerPaginado(
+          (a, b) =>
+            sb
+              .from('cobro_grupo')
+              .select('id, monto, comision_banco_monto')
+              .gt('monto', 0)
+              .in('metodo_cobro', METODOS_ABONO_MANUAL)
+              .eq('moneda', moneda)
+              .gte('fecha_cobro', lo)
+              .lte('fecha_cobro', hi)
+              .order('id', { ascending: true })
+              .range(a, b),
+          TOPE_UNIVERSO,
+        ),
+      ]);
+      if (cobrosRes.truncado || sobresRes.truncado) {
+        this.logger.warn(
+          `Cobros exactos del abono: más de ${TOPE_UNIVERSO} candidatos en ±${VENTANA_MANUAL_DIAS} días (${moneda}); no se pudo verificar.`,
+        );
+        return null;
+      }
+      cobros = cobrosRes.filas;
+      sobres = sobresRes.filas;
+    } catch {
+      return null;
+    }
     const exacto = (
       tipo: 'COBRO_VUELO' | 'SOBRE_GRUPO',
       c: Record<string, unknown>,
@@ -4082,10 +4121,10 @@ export class ConciliacionService {
         },
         pasarela,
       );
-    const cobroIds = ((cobrosRes.data ?? []) as Array<Record<string, unknown>>)
+    const cobroIds = cobros
       .filter((c) => exacto('COBRO_VUELO', c))
       .map((c) => c.id as string);
-    const sobreIds = ((sobresRes.data ?? []) as Array<Record<string, unknown>>)
+    const sobreIds = sobres
       .filter((s) => exacto('SOBRE_GRUPO', s))
       .map((s) => s.id as string);
     if (cobroIds.length === 0 && sobreIds.length === 0) return 0;
@@ -4163,7 +4202,7 @@ export class ConciliacionService {
       this.partesOn(),
       this.cobrosLoteOn(),
     ]);
-    const colsMov = `id, gasto_id, clasificacion_id, notas${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
+    const colsMov = `id, gasto_id, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4175,6 +4214,7 @@ export class ConciliacionService {
       id: string;
       gasto_id: string | null;
       clasificacion_id?: string | null;
+      clasificacion?: { nombre?: unknown } | { nombre?: unknown }[] | null;
       notas?: string | null;
       gastos_n?: number | null;
       ingreso_id?: string | null;
@@ -4183,8 +4223,14 @@ export class ConciliacionService {
     // OMITIDO (14-oct-2026, invariante 75): ni se liga ni se «desliga» — el
     // UPDATE de abajo pone `clasificacion_id = null` y borraría la omisión
     // en silencio. 409 sin escribir (una clasificación NO canónica se sigue
-    // pisando al ligar un cobro, como siempre).
-    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
+    // pisando al ligar un cobro, como siempre). Por el NOMBRE embebido; en
+    // una carrera, el trigger de la BD (23514 ⇒ 409 por `leerErrorCobros`).
+    await this.bloquearSiOmitido(
+      movId,
+      mov.clasificacion_id,
+      mov.notas,
+      unwrapOne(mov.clasificacion ?? null)?.nombre,
+    );
     // Un abono conciliado con un INGRESO no se liga ni se desvincula por
     // aquí (su camino es PATCH movimientos/:id/ingreso).
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
@@ -4422,7 +4468,7 @@ export class ConciliacionService {
       this.ingresosOn(),
       this.partesOn(),
     ]);
-    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n, clasificacion_id, notas${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
+    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
     const { data: movRaw, error: movErr } = await sb
       .from('movimiento_bancario')
       .select(colsMov)
@@ -4440,6 +4486,7 @@ export class ConciliacionService {
       cobro_grupo_id: string | null;
       cobros_n: number | null;
       clasificacion_id?: string | null;
+      clasificacion?: { nombre?: unknown } | { nombre?: unknown }[] | null;
       notas?: string | null;
       ingreso_id?: string | null;
     };
@@ -4450,7 +4497,12 @@ export class ConciliacionService {
       });
     }
     // OMITIDO (invariante 75): 409 sin llamar la RPC.
-    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
+    await this.bloquearSiOmitido(
+      movId,
+      mov.clasificacion_id,
+      mov.notas,
+      unwrapOne(mov.clasificacion ?? null)?.nombre,
+    );
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
@@ -6286,8 +6338,23 @@ export class ConciliacionService {
     }
     // (4) OMITIDO (invariante 75): «Quitar clasificación» = deshacer la
     // omisión por la RPC (quita su línea de las notas); cualquier otra
-    // clasificación ⇒ 409 MOVIMIENTO_OMITIDO.
-    if (clasifActual && idOmitido && clasifActual === idOmitido) {
+    // clasificación ⇒ 409 MOVIMIENTO_OMITIDO. Por el id de la canónica O por
+    // el NOMBRE embebido en la misma lectura (revisión del 14-oct-2026: sin
+    // depender del memo ni de otra consulta que pueda fallar).
+    const nombreActual = unwrapOne(
+      (mov.clasificacion as
+        | { nombre?: unknown }
+        | { nombre?: unknown }[]
+        | null
+        | undefined) ?? null,
+    )?.nombre;
+    if (
+      clasifActual &&
+      ((idOmitido && clasifActual === idOmitido) ||
+        esClasificacionOmitida(
+          typeof nombreActual === 'string' ? nombreActual : null,
+        ))
+    ) {
       if (clasificacionId === null) {
         const r = await this.quitarOmision([movId], userId);
         return r.movimientos[0] ?? { id: movId, omision: null };
@@ -6317,12 +6384,26 @@ export class ConciliacionService {
     if (clasificacionId) {
       const { data: clasif, error: clErr } = await this.supabase.service
         .from('conciliacion_clasificacion')
-        .select('id')
+        .select('id, nombre')
         .eq('id', clasificacionId)
         .maybeSingle();
       if (clErr) throw new Error(clErr.message);
       if (!clasif)
         throw new BadRequestException('Clasificación no encontrada.');
+      // La canónica por NOMBRE (revisión del 14-oct-2026): si la lectura del
+      // id de la canónica falló en (0), aquí no se cuela una omisión sin
+      // motivo firmado.
+      const nombreDestino = (clasif as { nombre?: unknown }).nombre;
+      if (
+        esClasificacionOmitida(
+          typeof nombreDestino === 'string' ? nombreDestino : null,
+        )
+      ) {
+        throw new BadRequestException({
+          message: MENSAJE_USA_OMITIR,
+          error: 'USA_OMITIR',
+        });
+      }
     }
     const patch: Record<string, unknown> = {
       clasificacion_id: clasificacionId,
@@ -6348,7 +6429,19 @@ export class ConciliacionService {
     const { data, error } = await upd
       .select(await this.movCols())
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // El trigger de la omisión (invariante 75, revisión del 14-oct-2026):
+      // un omitido no se reclasifica ni se regresa a pendiente por aquí
+      // (solo `conciliacion_quitar_omision`) ⇒ 409, jamás un 500.
+      if (
+        `${error.message ?? ''} ${(error as { hint?: string | null }).hint ?? ''}`.includes(
+          'MOVIMIENTO_OMITIDO',
+        )
+      ) {
+        throw this.conflictoMovimientoOmitido(movId, mov.notas);
+      }
+      throw new Error(error.message);
+    }
     if (!data) {
       let actual: Record<string, unknown> | null = null;
       try {
@@ -6456,15 +6549,28 @@ export class ConciliacionService {
   /**
    * CANDADO TS (invariante 75): un movimiento OMITIDO no se liga ni se
    * desliga por los caminos viejos (gasto, cobro, sobre): 409 sin tocar
-   * nada. Sin la canónica (o con su lectura caída) no aplica — el trigger
-   * de la BD sigue siendo el candado real.
+   * nada. Decide primero por el NOMBRE de su clasificación leído en la MISMA
+   * consulta (`nombreClasificacion`, revisión del 14-oct-2026: sin otra
+   * lectura que pueda fallar) y si no viene, por el id de la canónica
+   * (memo). Si nada de eso se pudo saber, el trigger de la BD es el candado
+   * real: rechaza ligar un omitido Y quitarle la omisión por fuera de
+   * `conciliacion_quitar_omision` (desvincular, reclasificar o dejarlo
+   * pendiente) con 23514 MOVIMIENTO_OMITIDO, que cada camino traduce a 409.
    */
   private async bloquearSiOmitido(
     movId: string,
     clasificacionId: unknown,
     notas: unknown,
+    nombreClasificacion?: unknown,
   ): Promise<void> {
     if (typeof clasificacionId !== 'string' || !clasificacionId) return;
+    if (
+      esClasificacionOmitida(
+        typeof nombreClasificacion === 'string' ? nombreClasificacion : null,
+      )
+    ) {
+      throw this.conflictoMovimientoOmitido(movId, notas);
+    }
     const idOmitido = await this.idClasificacionOmitido();
     if (!idOmitido || idOmitido !== clasificacionId) return;
     throw this.conflictoMovimientoOmitido(movId, notas);
@@ -7465,7 +7571,13 @@ export class ConciliacionService {
    * (bancarios, sin conciliar, moneda de las cuentas; nunca cruzados) en
    * [fecha_min − dias, fecha_max + dias], con la MISMA búsqueda. Cada
    * candidato con `resultado` (CUBRE/PARCIAL/EXCEDE), `faltante_tras` y
-   * `excedente` (lo calcula el API; el panel solo pinta).
+   * `excedente` (lo calcula el API; el panel solo pinta). `excluidos` +
+   * `excluidos_monto` viajan SIEMPRE (revisión del 14-oct-2026; con
+   * candidatos también): los gastos del monto de la suma (o del de `q`) que
+   * NO son del universo —en efectivo u otro medio, ya conciliados con otro
+   * cargo, en otra moneda o fuera de la ventana— son justo los que «Créalo
+   * por la suma» duplicaría; con la lista llena (otro gasto bancario del
+   * mismo monto) no se veían.
    */
   async gastosCandidatosDeCargos(dto: {
     movimiento_ids: string[];
@@ -7654,7 +7766,11 @@ export class ConciliacionService {
         ordenados.length > limite || filas.length >= CANDIDATOS_GASTO_TOPE,
       cargos_con_candidato_propio: cargosConPropio,
     };
-    if (ordenados.length > 0) return respuesta;
+    // SIEMPRE (revisión del 14-oct-2026), no solo con la lista vacía: el
+    // paso de duplicados antes de «Créalo por la suma» (`q` = la suma) debe
+    // ver el gasto en EFECTIVO o ya conciliado del mismo monto aunque otro
+    // gasto bancario de ese monto llene la lista. UNA consulta acotada por
+    // monto y fechas; si falla, la respuesta sale sin la llave (warn).
     const excluidos = await this.excluidosDeCandidatos({
       movId: ids[0],
       q: dto.q,
@@ -8018,6 +8134,12 @@ export class ConciliacionService {
       .select(cols)
       .maybeSingle();
     if (abErr) {
+      // INTERBLOQUEO (revisión del 14-oct-2026): «Omitir» bloquea su lote
+      // por id y este UPDATE bloquea el abono y luego (su trigger) el cargo;
+      // si Postgres aborta ESTA operación, 409 con código estable y texto
+      // es-MX (como `errorRpcOmision`), jamás el 500 de «deadlock detected».
+      // Nada quedó escrito: la sentencia se revierte entera.
+      if (abErr.code === '40P01') throw conflictoConcurrenteReverso();
       const motivo = motivoTriggerReverso(abErr);
       if (motivo) throw this.reversoInvalido(motivo, detalles);
       throw new Error(abErr.message);
@@ -8069,6 +8191,7 @@ export class ConciliacionService {
         });
       }
       if (cgErr) {
+        if (cgErr.code === '40P01') throw conflictoConcurrenteReverso();
         const motivo = motivoTriggerReverso(cgErr);
         if (motivo) throw this.reversoInvalido(motivo, detalles);
         throw new Error(cgErr.message);
@@ -8113,6 +8236,7 @@ export class ConciliacionService {
       .maybeSingle();
     const detalles = { abono_id: abono.id, cargo_id: cargo.id };
     if (error) {
+      if (error.code === '40P01') throw conflictoConcurrenteReverso();
       const motivo = motivoTriggerReverso(error);
       if (motivo) throw this.reversoInvalido(motivo, detalles);
       throw new Error(error.message);
@@ -8330,7 +8454,25 @@ export class ConciliacionService {
           idempotente: false,
         };
       }
-      return { ...this.respuestaPar(abono, cargo), idempotente: true };
+      // «Idempotente» SOLO si el cargo quedó como SU devolución (revisión
+      // del 14-oct-2026): conciliado con «Reverso de un cargo» y sin otra
+      // liga. Un cargo que se omitió, se clasificó con otra cosa o se ligó
+      // con el abono apuntándole es un par ROTO: 409, jamás «ya estaba».
+      const idReverso = await this.asegurarClasificacionReverso(userId);
+      if (
+        cargo.conciliado &&
+        cargo.clasificacion_id === idReverso &&
+        !ligadoAGasto(cargo) &&
+        !cargo.cobro_id &&
+        !cargo.cobro_grupo_id &&
+        !cargo.ingreso_id
+      ) {
+        return { ...this.respuestaPar(abono, cargo), idempotente: true };
+      }
+      throw this.reversoInvalido(
+        'El abono ya apunta a este cargo, pero el cargo ya no está como su devolución (se omitió, se clasificó o se ligó a otra cosa): quita el emparejamiento del abono y vuelve a emparejarlos.',
+        { abono_id: abono.id, cargo_id: cargo.id },
+      );
     }
     const devueltoPor = await this.abonoQueDevuelve(cargo.id);
     const motivo = motivoParInvalido(abono, cargo, devueltoPor?.id ?? null);
@@ -11049,11 +11191,13 @@ export class ConciliacionService {
     gastos_n: number;
     ingreso_id: string | null;
     clasificacion_id: string | null;
+    /** Nombre de su clasificación (misma lectura; candado de la omisión). */
+    clasificacion_nombre: string | null;
     notas: string | null;
   }> {
     const cols: string = (await this.ingresosOn())
-      ? 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas, ingreso_id'
-      : 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas';
+      ? 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre), ingreso_id'
+      : 'id, tipo, gasto_id, gastos_n, monto, cuenta_bancaria_id, clasificacion_id, notas, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)';
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
       .select(cols)
@@ -11075,6 +11219,16 @@ export class ConciliacionService {
         typeof m.clasificacion_id === 'string' && m.clasificacion_id
           ? m.clasificacion_id
           : null,
+      clasificacion_nombre: ((): string | null => {
+        const c = unwrapOne(
+          m.clasificacion as
+            | { nombre?: unknown }
+            | { nombre?: unknown }[]
+            | null
+            | undefined,
+        );
+        return typeof c?.nombre === 'string' ? c.nombre : null;
+      })(),
       notas: typeof m.notas === 'string' ? m.notas : null,
     };
   }
@@ -11107,7 +11261,12 @@ export class ConciliacionService {
     }
     // OMITIDO (14-oct-2026, invariante 75): 409 sin llamar la RPC (el
     // trigger de la BD lo rechazaría igual). Desligar sigue siendo un no-op.
-    await this.bloquearSiOmitido(movId, mov.clasificacion_id, mov.notas);
+    await this.bloquearSiOmitido(
+      movId,
+      mov.clasificacion_id,
+      mov.notas,
+      mov.clasificacion_nombre,
+    );
     if (mov.tipo !== (TipoMovimientoBancario.CARGO as string)) {
       throw new BadRequestException({
         message: MENSAJE_SOLO_CARGOS,

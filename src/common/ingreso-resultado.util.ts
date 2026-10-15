@@ -42,6 +42,7 @@ import {
   etiquetaCategoriaIngreso,
   etiquetaIngreso,
 } from './categoria-ingreso.util';
+import { fmtDineroTexto } from './dinero-texto.util';
 import { ingresosDisponibles } from './ingreso-disponible.util';
 
 export interface IngresoParaLibro {
@@ -275,9 +276,10 @@ export interface TcOficialDia {
 /**
  * T.C. con el que ESTE libro convierte el gasto que el ingreso reembolsa: lo
  * arma CADA libro con SU conversión de ese gasto (balance: la fila de su
- * vuelo o sus hojas; reparto: `tc_gasto` ?? oficial del día del gasto).
- * `lugar`: «T.C. promedio de las hojas» | «T.C. de costos del vuelo #430» |
- * «T.C. del gasto» | «T.C. oficial del día del gasto».
+ * vuelo o sus hojas; reparto: `tc_gasto` ?? oficial del día del gasto) por
+ * la fuente única `gastosLigadosDelLibro`. `lugar`: «T.C. promedio de las
+ * hojas» | «T.C. de costos del vuelo #430» | «T.C. del gasto» | «T.C.
+ * oficial del día del gasto» | `LUGAR_TC_PONDERADO`.
  */
 export interface TcGastoLigado {
   gasto_id: string;
@@ -285,6 +287,85 @@ export interface TcGastoLigado {
   /** Día del gasto (YYYY-MM-DD) o null. */
   fecha: string | null;
   lugar: string;
+  /**
+   * Pesos de ESE gasto que ESTE libro le CARGA al avión (revisión del
+   * 14-oct-2026): la Σ de sus partes que RESTAN en la utilidad —balance: los
+   * vínculos 'suma' de las filas de vuelo con ganancia y sus filas de hojas;
+   * reparto: monto − TUA/extensión de cada parte que resta—, a centavos y
+   * SIEMPRE > 0 (un gasto que el avión no carga no es «ligado»). Contra él
+   * se mide si un reembolso se anula con su gasto o lo excede.
+   */
+  cargado_mxn: number;
+}
+
+/** `lugar` de un gasto cuyas partes ESTE libro convierte con T.C. distintos. */
+export const LUGAR_TC_PONDERADO = 'T.C. ponderado de sus partes en este libro';
+
+/**
+ * Una parte de un gasto en PESOS que un libro le CARGA al avión: lo que esa
+ * parte resta en su utilidad (`mxn`) y el divisor EXACTO con que el libro la
+ * convierte (`tc`).
+ */
+export interface ParteGastoCargada {
+  gasto_id: string;
+  tc: number;
+  mxn: number;
+  /** Día del gasto (YYYY-MM-DD) o null. */
+  fecha: string | null;
+  lugar: string;
+}
+
+/**
+ * GASTOS LIGABLES DE UN LIBRO — fuente ÚNICA de los dos libros (revisión del
+ * 14-oct-2026, invariante 67): agrupa por gasto las partes que ESE libro le
+ * carga al avión y devuelve, por gasto, el divisor y `cargado_mxn` (Σ de sus
+ * partes, a centavos). Un gasto cuya Σ no es > 0 (el avión no lo carga: TUA
+ * o extensión trasladadas, una fila sin parte en la venta…) NO entra: su
+ * reembolso no se convierte como «ligado». Si todas sus partes comparten
+ * divisor, ese; si no (por construcción no ocurre: un gasto vive en UNA fila
+ * de vuelo o en hojas con el mismo T.C.), el ponderado Σ mxn ÷ Σ (mxn ÷ tc),
+ * para que un reembolso igual a lo cargado se anule igual. PURA; conserva el
+ * orden de aparición.
+ */
+export function gastosLigadosDelLibro(
+  partes: Iterable<ParteGastoCargada>,
+): Map<string, TcGastoLigado> {
+  const acum = new Map<
+    string,
+    { primera: ParteGastoCargada; mxn: number; usd: number; mismoTc: boolean }
+  >();
+  for (const p of partes) {
+    const mxn = Number(p.mxn);
+    if (!p.gasto_id || !(p.tc > 0) || !Number.isFinite(mxn) || mxn === 0) {
+      continue;
+    }
+    const a = acum.get(p.gasto_id);
+    if (!a) {
+      acum.set(p.gasto_id, {
+        primera: p,
+        mxn,
+        usd: mxn / p.tc,
+        mismoTc: true,
+      });
+      continue;
+    }
+    a.mxn += mxn;
+    a.usd += mxn / p.tc;
+    if (p.tc !== a.primera.tc) a.mismoTc = false;
+  }
+  const out = new Map<string, TcGastoLigado>();
+  for (const [id, a] of acum) {
+    const cargado = r2(a.mxn);
+    if (!(cargado > 0) || !(a.usd > 0)) continue;
+    out.set(id, {
+      gasto_id: id,
+      tc: a.mismoTc ? a.primera.tc : a.mxn / a.usd,
+      fecha: a.primera.fecha,
+      lugar: a.mismoTc ? a.primera.lugar : LUGAR_TC_PONDERADO,
+      cargado_mxn: cargado,
+    });
+  }
+  return out;
 }
 
 /** De dónde salió el T.C. de un ingreso en pesos. */
@@ -339,9 +420,11 @@ export function diaTcOficialIngreso(
  *  - MXN ⇒ neto ÷ (T.C. PROPIO del ingreso ?? T.C. del GASTO LIGADO ?? T.C.
  *    oficial del día de su `fecha`), a centavos (`netoIngresoUsd`).
  *  - GASTO LIGADO (revisión F3): un REEMBOLSO_DEVOLUCION en pesos con
- *    `gasto_id` de un gasto en pesos que ESE libro cuenta (`ctx.gastoLigado`
- *    con el mismo id) se convierte con el T.C. con que ESE libro convierte su
- *    gasto: reembolso y gasto se ANULAN exactos en cada libro.
+ *    `gasto_id` de un gasto en pesos que ESE libro le CARGA al avión
+ *    (`ctx.gastoLigado` con el mismo id y `cargado_mxn` > 0: revisión del
+ *    14-oct-2026) se convierte con el T.C. con que ESE libro convierte su
+ *    gasto: hasta lo cargado, reembolso y gasto se ANULAN exactos en cada
+ *    libro; lo que exceda lo avisa `avisosReembolsoGasto`.
  *  - Sin T.C. ⇒ `usd` null (jamás se inventa uno); cada libro decide qué
  *    hace (balance: fila sin NETO USD y pendiente; reparto: no suma).
  */
@@ -380,7 +463,8 @@ export function usdDeIngresoAvion(
     i.gasto_id &&
     g &&
     g.gasto_id === i.gasto_id &&
-    g.tc > 0
+    g.tc > 0 &&
+    g.cargado_mxn > 0
   ) {
     return {
       usd: netoIngresoUsd(i, g.tc),
@@ -400,6 +484,82 @@ export function usdDeIngresoAvion(
     oficial: of,
     gasto: null,
   };
+}
+
+/** Neto en pesos (monto − comisión) de un ingreso, a centavos. */
+function netoMxnDe(
+  i: Pick<IngresoParaLibro, 'monto' | 'comision_monto'>,
+): number {
+  const monto = Number(i.monto) || 0;
+  const comision = Number(i.comision_monto) > 0 ? Number(i.comision_monto) : 0;
+  return r2(monto - comision);
+}
+
+/**
+ * Lo que un reembolso de `netoMxn` pesos EXCEDE a lo que el libro le carga al
+ * avión de su gasto (≥ 0, a centavos; medio centavo o menos ⇒ 0). Pura.
+ */
+export function excedenteSobreCargado(
+  netoMxn: number,
+  g: Pick<TcGastoLigado, 'cargado_mxn'>,
+): number {
+  const d = r2(netoMxn - g.cargado_mxn);
+  return d > 0.005 ? d : 0;
+}
+
+/**
+ * AVISOS de un REEMBOLSO_DEVOLUCION en pesos con `gasto_id` (revisión del
+ * 14-oct-2026, invariante 67): cuándo NO se anula exacto con su gasto en
+ * ESTE libro. Textos ÚNICOS de los dos libros (balance: un pendiente por
+ * aviso con el prefijo de la hoja; reparto: `tc_aviso` de la línea). `clave`
+ * = «ING-7»; `delLibro` = lo que ESTE libro le carga al avión de ese gasto
+ * (`gastosLigadosDelLibro`; null = nada).
+ *  - El libro no le carga el gasto ⇒ se convirtió por la regla por ingreso
+ *    y no se anula con él.
+ *  - T.C. PROPIO (manda: captura explícita) distinto del divisor del gasto
+ *    en este libro ⇒ no se anulan al centavo.
+ *  - El reembolso EXCEDE lo cargado ⇒ ese resto no se anula con nada y suma
+ *    al avión (la oficina decide con el `aeronave_id`; aquí solo se avisa).
+ * Otra categoría, USD, sin `gasto_id` o sin USD (su pendiente ya lo dice)
+ * ⇒ []. Pura.
+ */
+export function avisosReembolsoGasto(
+  i: Pick<
+    IngresoParaLibro,
+    'categoria' | 'moneda' | 'monto' | 'comision_monto'
+  > & { gasto_id?: string | null },
+  clave: string,
+  conv: ConversionIngreso,
+  delLibro: TcGastoLigado | null | undefined,
+): string[] {
+  if (i.categoria !== 'REEMBOLSO_DEVOLUCION' || i.moneda !== 'MXN') return [];
+  if (!i.gasto_id || conv.usd == null) return [];
+  if (!delLibro || !(delLibro.cargado_mxn > 0)) {
+    const conQue =
+      conv.origen === 'PROPIO' ? 'su T.C. propio' : 'el T.C. oficial de su día';
+    return [
+      `${clave} reembolsa un gasto que este libro no le carga al avión (otro mes, otro avión u otra moneda, o un traslado, un gasto de VuelaTour o un tramo sin venta): se convirtió con ${conQue} y no se anula con su gasto`,
+    ];
+  }
+  const out: string[] = [];
+  const neto = netoMxnDe(i);
+  if (
+    conv.origen === 'PROPIO' &&
+    conv.tc != null &&
+    delLibro.tc > 0 &&
+    Math.abs(r2(conv.usd - r2(neto / delLibro.tc))) >= 0.01
+  ) {
+    out.push(
+      `${clave} trae T.C. propio (${conv.tc.toFixed(4)}) y este libro convierte el gasto que reembolsa con ${delLibro.tc.toFixed(4)} (${delLibro.lugar}): reembolso y gasto no se anulan exactos`,
+    );
+  }
+  const exceso = excedenteSobreCargado(neto, delLibro);
+  if (exceso > 0) {
+    out.push(
+      `${clave} reembolsa ${fmtDineroTexto(neto, 'MXN')} de un gasto del que este libro solo le carga ${fmtDineroTexto(delLibro.cargado_mxn, 'MXN')} al avión: ${fmtDineroTexto(exceso, 'MXN')} no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso`,
+    );
+  }
+  return out;
 }
 
 /**

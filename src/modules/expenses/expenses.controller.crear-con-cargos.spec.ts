@@ -126,6 +126,21 @@ describe('POST /v1/expenses con `conciliar_con_movimientos`', () => {
     ).toBe(201);
   });
 
+  it('la llave en `null` = ausente (el MISMO criterio del servicio): 201 para cualquier rol que captura', async () => {
+    for (const r of [Rol.COORDINADOR, Rol.PILOTO, Rol.ADMIN]) {
+      rol = r;
+      const res = await request(http())
+        .post('/v1/expenses')
+        .send(cuerpo({ conciliar_con_movimientos: null }));
+      expect(res.status).toBe(201);
+      expect(svc.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({ conciliar_con_movimientos: null }),
+        'u-1',
+        r,
+      );
+    }
+  });
+
   it('DTO: 1 cargo, repetidos, más de 50 o no uuid ⇒ 400 con el texto del lote', async () => {
     const muchos = Array.from(
       { length: 51 },

@@ -494,9 +494,22 @@ describe('motivoTriggerReverso', () => {
       }),
     ).toBe('Ese cargo ya tiene su devolución emparejada.');
   });
+  it('23514 MOVIMIENTO_OMITIDO (abono o CARGO omitido, 0.0.77) ⇒ el motivo de la omisión, nunca null (sería un 500)', () => {
+    for (const message of [
+      'MOVIMIENTO_OMITIDO: el movimiento se omitió de la conciliación; deshaz la omisión antes de vincularlo',
+      'MOVIMIENTO_OMITIDO: el cargo se omitió de la conciliación; deshaz la omisión antes de emparejarlo con su devolución',
+    ]) {
+      expect(motivoTriggerReverso({ code: '23514', message })).toBe(
+        'Uno de los dos movimientos se omitió de la conciliación: deshaz la omisión antes de emparejarlos.',
+      );
+    }
+  });
   it('cualquier otro error ⇒ null', () => {
     expect(
       motivoTriggerReverso({ code: '23514', message: 'GASTO_YA_CUBIERTO: …' }),
+    ).toBeNull();
+    expect(
+      motivoTriggerReverso({ code: '40P01', message: 'deadlock detected' }),
     ).toBeNull();
     expect(motivoTriggerReverso(null)).toBeNull();
   });

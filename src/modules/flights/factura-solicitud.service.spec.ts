@@ -923,8 +923,8 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
         tipo: 'factura_solicitud_ya_no_aplica',
         titulo: 'Ya no aplica: factura del vuelo #341',
         cuerpo:
-          'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
-        link: `/admin/facturas-emitidas?resaltar=${V1}#ya-no-aplican`,
+          'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
+        link: `/admin/flights/${V1}#cobros`,
         data: {
           vuelo_id: V1,
           folio: 341,
@@ -1029,7 +1029,7 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
       expect(rc.transicion).toBe('YA_NO_APLICA');
       const [, nc] = cambio.notifyUser.mock.calls[0] as [string, Fila];
       expect(nc.cuerpo).toBe(
-        'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+        'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
       );
     });
 

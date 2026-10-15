@@ -574,6 +574,52 @@ describe('revisar la selección (solo lectura; funciona sin la migración)', () 
     expect(escrituras(w.log)).toHaveLength(0);
   });
 
+  // Revisión del 14-oct-2026: la lectura de cobros exactos va PAGINADA por
+  // la PK (antes `.limit(1000)`: un cobro exacto después de la fila 1000
+  // daba 0 y el abono se omitía sin aviso) y falla CERRADO pasado el tope.
+  const cobro = (n: number, monto: number): Row => ({
+    id: `c0000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+    vuelo_id: null,
+    monto,
+    moneda: 'MXN',
+    metodo_cobro: 'TRANSFERENCIA',
+    fecha_cobro: '2026-09-25T12:00:00-05:00',
+    comision_banco_monto: null,
+    cobro_grupo_id: null,
+    ingreso_anticipo_id: null,
+  });
+  const abono100 = () =>
+    mov(1, '2026-09-25', 100, { tipo: 'ABONO', descripcion: 'SPEI' });
+
+  it('el cobro exacto DESPUÉS de la fila 1,000 sí se ve (COBRO_QUE_CUADRA)', async () => {
+    const cobros = Array.from({ length: 1200 }, (_, k) => cobro(k + 1, 777));
+    cobros.push(cobro(5000, 100));
+    const w = armar(
+      mundo({ movimiento_bancario: [abono100()], cobro_vuelo: cobros }),
+    );
+    const r = await w.svc.revisarOmision([id(1)]);
+    expect(r.movimientos[0].riesgo).toBe('COBRO_QUE_CUADRA');
+  });
+
+  it(`más de 3,000 cobros candidatos en la ventana ⇒ SIN_VERIFICAR (jamás un 0 falso)`, async () => {
+    const cobros = Array.from({ length: 3000 }, (_, k) => cobro(k + 1, 777));
+    const w = armar(
+      mundo({ movimiento_bancario: [abono100()], cobro_vuelo: cobros }),
+    );
+    const r = await w.svc.revisarOmision([id(1)]);
+    expect(r.movimientos[0].riesgo).toBe('SIN_VERIFICAR');
+    // Por debajo del tope y sin exacto: sin riesgo.
+    const w2 = armar(
+      mundo({
+        movimiento_bancario: [abono100()],
+        cobro_vuelo: cobros.slice(0, 1500),
+      }),
+    );
+    expect(
+      (await w2.svc.revisarOmision([id(1)])).movimientos[0].riesgo,
+    ).toBeNull();
+  });
+
   it('un abono cuyos cobros no se pudieron revisar es SIN_VERIFICAR', async () => {
     const db = mundo({
       movimiento_bancario: [
@@ -1020,7 +1066,22 @@ describe('candados: un omitido no se liga por los caminos de siempre', () => {
 
   it('el trigger de la BD es el candado real (la RPC G sobre un omitido ⇒ 409, no 500)', async () => {
     const w = await conOmitido();
-    // Sin la canónica en el memo del API (otra réplica), la BD lo rechaza.
+    // La omisión entró entre la lectura TS y la RPC (carrera): el candado TS
+    // no la vio y la BD la rechaza.
+    jest
+      .spyOn(
+        w.svc as unknown as { bloquearSiOmitido: () => Promise<void> },
+        'bloquearSiOmitido',
+      )
+      .mockResolvedValue(undefined);
+    const r = await rechazo(w.svc.link(id(1), 'g-1', USER));
+    expect([r.status, r.body.error]).toEqual([409, 'MOVIMIENTO_OMITIDO']);
+  });
+
+  // Revisión del 14-oct-2026: el candado TS decide por el NOMBRE embebido en
+  // la misma lectura; ya no depende del memo ni de otra consulta que falle.
+  it('con la lectura de la canónica CAÍDA, el nombre embebido frena el «desvincular cobro» y «Clasificar» (sin escribir)', async () => {
+    const w = await conOmitido({ tipo: 'ABONO', monto: 1.12 });
     (w.svc as unknown as { omitidoMemo: unknown }).omitidoMemo = null;
     jest
       .spyOn(
@@ -1030,7 +1091,70 @@ describe('candados: un omitido no se liga por los caminos de siempre', () => {
         'idClasificacionOmitido',
       )
       .mockResolvedValue(null);
-    const r = await rechazo(w.svc.link(id(1), 'g-1', USER));
+    const escritas = escrituras(w.log).length;
+    const r = await rechazo(
+      w.svc.linkCobro(id(1), { cobro_id: null, cobro_grupo_id: null }, USER),
+    );
+    expect([r.status, r.body.error]).toEqual([409, 'MOVIMIENTO_OMITIDO']);
+    const r2 = await rechazo(
+      w.svc.clasificarMovimiento(id(1), 'clasif-comision', undefined, USER),
+    );
+    expect([r2.status, r2.body.error]).toEqual([409, 'MOVIMIENTO_OMITIDO']);
+    expect(escrituras(w.log).length).toBe(escritas);
+    // «Quitar clasificación» = deshacer por la RPC (no el UPDATE suelto).
+    const quitada = await w.svc.clasificarMovimiento(
+      id(1),
+      null,
+      undefined,
+      USER,
+    );
+    expect(quitada).toMatchObject({
+      id: id(1),
+      omision: null,
+      conciliado: false,
+    });
+  });
+
+  it('la canónica como DESTINO de «Clasificar» se reconoce por nombre aunque la lectura de su id caiga ⇒ 400 USA_OMITIR', async () => {
+    const w = armar(
+      mundo({
+        conciliacion_clasificacion: [
+          { id: 'c-omit', nombre: CANONICA, activo: true },
+        ],
+        movimiento_bancario: [mov(1, '2026-09-24', 1)],
+      }),
+    );
+    jest
+      .spyOn(
+        w.svc as unknown as {
+          idClasificacionOmitido: () => Promise<string | null>;
+        },
+        'idClasificacionOmitido',
+      )
+      .mockResolvedValue(null);
+    const r = await rechazo(
+      w.svc.clasificarMovimiento(id(1), 'c-omit', undefined, USER),
+    );
+    expect([r.status, r.body.error]).toEqual([400, 'USA_OMITIR']);
+    expect(escrituras(w.log)).toHaveLength(0);
+  });
+
+  it('el trigger rechaza quitar la omisión por un UPDATE suelto de «Clasificar» (carrera) ⇒ 409 MOVIMIENTO_OMITIDO, no 500', async () => {
+    const w = armar(mundo({ movimiento_bancario: [mov(1, '2026-09-24', 1)] }), {
+      fake: {
+        antes: (op) =>
+          op.tabla === 'movimiento_bancario' && op.op === 'update'
+            ? {
+                code: '23514',
+                message:
+                  'MOVIMIENTO_OMITIDO: el movimiento se omitió de la conciliación; solo «Deshacer la omisión» lo regresa a pendiente o le quita la clasificación',
+              }
+            : undefined,
+      },
+    });
+    const r = await rechazo(
+      w.svc.clasificarMovimiento(id(1), 'clasif-comision', undefined, USER),
+    );
     expect([r.status, r.body.error]).toEqual([409, 'MOVIMIENTO_OMITIDO']);
   });
 });

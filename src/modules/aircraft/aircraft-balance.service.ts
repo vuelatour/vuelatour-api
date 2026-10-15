@@ -8,13 +8,14 @@ import { SupabaseService } from '../supabase/supabase.service';
 import {
   diaTcOficialIngreso,
   filaLibroDeIngreso,
+  gastosLigadosDelLibro,
   leerIngresosDeResultado,
   partirIngresosPorAvion,
   usdDeIngresoAvion,
   type ConversionIngreso,
   type IngresoParaLibro,
   type IngresosDeResultadoPartidos,
-  type TcGastoLigado,
+  type ParteGastoCargada,
 } from '../../common/ingreso-resultado.util';
 // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): hoja
 // «Otros ingresos» del libro de cada avión y su consolidada del general
@@ -4472,11 +4473,16 @@ export class AircraftBalanceService {
     // 2,710.47). El oficial de su día sale de la puerta única
     // `tcOficialDeDias` (memo por día compartido con el general). REEMBOLSO
     // LIGADO (revisión F3): un REEMBOLSO_DEVOLUCION en pesos cuyo gasto en
-    // pesos cuenta en ESTE libro se convierte con el divisor con que el libro
-    // convierte ese gasto, armado de lo que el libro YA calculó (cero
-    // consultas): los 'suma' de los vínculos de cada fila de vuelo ⇒
-    // `tc_costos ?? tcPromedio` (el divisor de `ganancia_usd`); las filas de
-    // sus hojas ledger ⇒ `tcHojas`. Así reembolso y gasto se anulan.
+    // pesos le CARGA este libro al avión se convierte con el divisor con que
+    // el libro convierte ese gasto, armado de lo que el libro YA calculó
+    // (cero consultas) por la fuente única `gastosLigadosDelLibro`: las
+    // partes que RESTAN en la utilidad —los 'suma' de los vínculos de cada
+    // fila de vuelo CON ganancia (`tc_costos ?? tcPromedio`, el divisor de
+    // `ganancia_usd`; una fila sin parte en la venta no resta sus gastos) y
+    // las filas de sus hojas ledger (`tcHojas`)— con su MONTO cargado
+    // (revisión del 14-oct-2026: la TUA o la extensión trasladadas, el resto
+    // de un reparto manual o una fila con factor 0 NO son del avión). Hasta
+    // lo cargado, reembolso y gasto se anulan; lo demás lo avisa la hoja.
     const gastoDeVueloPorId = new Map<string, GastoRow>();
     for (const lista of gastosPorVuelo.values()) {
       for (const g of lista) if (g.id) gastoDeVueloPorId.set(g.id, g);
@@ -4485,8 +4491,9 @@ export class AircraftBalanceService {
       typeof g.fecha_gasto === 'string' && g.fecha_gasto
         ? g.fecha_gasto.slice(0, 10)
         : null;
-    const divisorDeGastoMxn = new Map<string, TcGastoLigado>();
+    const partesCargadas: ParteGastoCargada[] = [];
     for (const fila of filasVuelo) {
+      if (fila.ganancia_usd == null) continue;
       const tc = fila.tc_costos ?? tcPromedio;
       if (tc == null || !(tc > 0)) continue;
       const lugar =
@@ -4498,12 +4505,13 @@ export class AircraftBalanceService {
         ...(fila.piloto_vinculos ?? []),
         ...(fila.otros_vinculos ?? []),
       ]) {
-        if (vinc.rol !== 'suma' || divisorDeGastoMxn.has(vinc.id)) continue;
+        if (vinc.rol !== 'suma' || vinc.monto_mxn == null) continue;
         const g = gastoDeVueloPorId.get(vinc.id);
         if (!g || g.moneda !== 'MXN') continue;
-        divisorDeGastoMxn.set(vinc.id, {
+        partesCargadas.push({
           gasto_id: vinc.id,
           tc,
+          mxn: vinc.monto_mxn,
           fecha: diaGasto(g),
           lugar,
         });
@@ -4517,17 +4525,17 @@ export class AircraftBalanceService {
         ...filasPermisos,
         ...gastosGas,
       ]) {
-        if (!g.id || g.moneda !== 'MXN' || divisorDeGastoMxn.has(g.id)) {
-          continue;
-        }
-        divisorDeGastoMxn.set(g.id, {
+        if (!g.id || g.moneda !== 'MXN') continue;
+        partesCargadas.push({
           gasto_id: g.id,
           tc: tcHojas,
+          mxn: round2(num(g.monto) ?? 0),
           fecha: diaGasto(g),
           lugar: 'T.C. promedio de las hojas',
         });
       }
     }
+    const divisorDeGastoMxn = gastosLigadosDelLibro(partesCargadas);
     const oficialIngresos = await this.tcOficialDeDias(
       ingresosAvion
         .map(diaTcOficialIngreso)
@@ -4551,7 +4559,7 @@ export class AircraftBalanceService {
       ingresosAvion,
       conversiones,
       pendientes,
-      new Set(divisorDeGastoMxn.keys()),
+      divisorDeGastoMxn,
     );
     // Vigilancia MENSUAL del combustible (sustituye a los regaños por vuelo):
     // un avión que voló sin una sola carga en el mes es captura faltante.

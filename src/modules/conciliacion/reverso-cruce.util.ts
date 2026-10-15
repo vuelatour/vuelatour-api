@@ -556,10 +556,18 @@ export function cargoLigadoConDinero(m: MovimientoParReverso): boolean {
   );
 }
 
+/** Motivo del par cuando uno de los dos está OMITIDO de la conciliación. */
+export const MOTIVO_REVERSO_OMITIDO =
+  'Uno de los dos movimientos se omitió de la conciliación: deshaz la omisión antes de emparejarlos.';
+
 /**
  * Motivo legible de un rechazo de la BD al escribir el par: el trigger
  * lanza 23514 «REVERSO_INVALIDO: <motivo>» y el índice único
  * `uq_mov_bancario_reverso_de` un 23505 cuando otro abono ganó la carrera.
+ * Desde el 0.0.77 (invariante 75, revisión del 14-oct-2026) también el
+ * 23514 «MOVIMIENTO_OMITIDO: …» de los triggers de la omisión: el abono
+ * omitido (`trg_mov_bancario_omitido_sin_ligas`) o el CARGO omitido
+ * (`trg_mov_bancario_reverso_omitido`) ⇒ `MOTIVO_REVERSO_OMITIDO`.
  * Cualquier otro error ⇒ null (no es de esta regla).
  */
 export function motivoTriggerReverso(
@@ -567,6 +575,7 @@ export function motivoTriggerReverso(
 ): string | null {
   if (!err) return null;
   const msg = err.message ?? '';
+  if (msg.includes('MOVIMIENTO_OMITIDO')) return MOTIVO_REVERSO_OMITIDO;
   const i = msg.indexOf('REVERSO_INVALIDO');
   if (i >= 0) {
     const resto = msg
