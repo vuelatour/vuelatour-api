@@ -175,6 +175,7 @@ import {
   terminacionPrevia,
 } from './medio-tarjeta.util';
 import { estadoBancoGasto, etiquetaEstadoBanco } from './estado-banco.util';
+import { celdaAvionGasto } from './gasto-avion.util';
 import { etiquetaComprobante } from '../../common/comprobante.util';
 import {
   etiquetaFacturacion,
@@ -384,6 +385,8 @@ export class ExpensesService {
       // notas del gasto (lo que capturó el piloto / la IA), o el lugar si no
       // hay notas — sin esto el Excel no decía QUÉ se compró.
       { label: 'Concepto' },
+      // Avión (15-oct-2026): dice LO MISMO que la columna «Avión · vuelo» de
+      // la tabla del panel, con la MISMA precedencia (`celdaAvionGasto`).
       { label: 'Avión' },
       { label: 'Proveedor' },
       { label: 'Capturó' },
@@ -407,7 +410,6 @@ export class ExpensesService {
     ];
     const filas = data.map((g) => {
       const x = g;
-      const aeronave = x.aeronave as { matricula?: string } | null;
       const proveedor = x.proveedor as { nombre?: string } | null;
       const captura = x.captura as { nombre?: string } | null;
       const medio = (x.medio_pago as string) ?? '';
@@ -417,10 +419,11 @@ export class ExpensesService {
         (x.fecha_gasto as string) ?? '',
         etiquetaCategoriaGasto(x.categoria as string | null),
         conceptoDeGasto(x),
-        // Gasto repartido entre aviones: no está "pendiente" de nada.
-        Array.isArray(x.repartos) && x.repartos.length > 0
-          ? `Repartido (${x.repartos.length})`
-          : (aeronave?.matricula ?? '(pendiente)'),
+        // «Repartido: N4142R, N621TX», «Personal», «VuelaTour (ref. N4142R)»,
+        // la matrícula o «Falta avión» (= la bandeja de pendientes). Antes
+        // decía «Repartido (N)», la matrícula o «(pendiente)» y contradecía
+        // a la tabla (hallazgo #20 de la revisión del panel de Gastos).
+        celdaAvionGasto(x),
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
         etiquetaMedioPago(medio),

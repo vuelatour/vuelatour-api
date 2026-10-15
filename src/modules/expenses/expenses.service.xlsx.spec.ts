@@ -25,6 +25,7 @@ import {
   NOTA_FOLIOS_NO_DISPONIBLES,
   TEXTO_DETALLE_BANCO_NO_DISPONIBLE,
 } from './gastos-xlsx.util';
+import { FILAS_REALES } from './gasto-avion.fixture-spec';
 
 /**
  * EXCEL DE GASTOS (13-oct-2026, invariante 71): paginado (prod tiene 1,112
@@ -512,5 +513,33 @@ describe('Excel de gastos — detalle del banco por rol', () => {
     for (const l of folios) expect(String(l.args[0])).not.toMatch(/\bserie\b/);
     const h0 = (payloadDe(w.generateTablaXlsx).hojas as TablaHojaPayload[])[0];
     expect(fila(h0, 0)[h0.columnas.length - 3]).toBe('A-0411');
+  });
+});
+
+describe('Excel de gastos — columna «Avión» = la tabla del panel (15-oct-2026)', () => {
+  it('cada gasto REAL dice lo que dice la tabla, con y sin el detalle del banco', async () => {
+    const db: Tablas = {
+      gasto: FILAS_REALES.map((c, i) =>
+        gastoFila(i, { ...c.fila, notas: `Gasto ${i}` }),
+      ),
+    };
+    const simple = armar(db);
+    await simple.service.listXlsx(Q);
+    const p = payloadDe(simple.generateTablaXlsx);
+    expect(p.columnas.map((c) => c.label)).toEqual(COLUMNAS_DE_HOY);
+    expect(p.columnas[3]).toEqual({ label: 'Avión' });
+    FILAS_REALES.forEach((c, i) => {
+      expect([c.nombre, fila(p, i)[3]]).toEqual([c.nombre, c.celda]);
+    });
+
+    const banco = armar(db);
+    await banco.service.listXlsx(Q, { detalleBanco: true });
+    const [h0] = payloadDe(banco.generateTablaXlsx).hojas as TablaHojaPayload[];
+    expect(h0.columnas[3]).toEqual({ label: 'Avión' });
+    FILAS_REALES.forEach((c, i) => {
+      expect([c.nombre, fila(h0, i)[3]]).toEqual([c.nombre, c.celda]);
+      // La pestaña con el banco repite la de siempre: misma fila, mismas celdas.
+      expect(fila(h0, i).slice(0, p.columnas.length)).toEqual(fila(p, i));
+    });
   });
 });
