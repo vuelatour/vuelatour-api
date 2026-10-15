@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   ServiceUnavailableException,
@@ -30,6 +31,10 @@ import {
   type ModoExcelCaja,
 } from './caja-chica-reposicion-xlsx';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  leerUbicacionBalance,
+  type BalanceDeGasto,
+} from '../../common/ubicacion-balance-lector';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
 import {
   CreateCajaMovimientoDto,
@@ -111,6 +116,8 @@ function nombreEmbed(v: unknown): string | null {
  */
 @Injectable()
 export class CajaChicaService {
+  private readonly logger = new Logger(CajaChicaService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     // Excel de la reposición (24-sep-2026). @Optional: los specs construyen
@@ -393,6 +400,9 @@ export class CajaChicaService {
     const { movs, efectivo, historial } = await this.cargarLibro(fondo);
     const ultimo = historial[historial.length - 1];
     const esAcumulada = fondo.es_acumulada === true;
+    const balances = await this.balancesDeGastos(
+      historial.filter((e) => e.origen === 'gasto').map((e) => e.id),
+    );
 
     return {
       ...fondo,
@@ -419,10 +429,43 @@ export class CajaChicaService {
           vuelo_folio: e.vuelo_folio,
           saldo: e.saldo,
           por_reponer: e.por_reponer,
+          // ADITIVO (15-oct-2026, invariante 82), SIEMPRE la última llave y
+          // solo en los GASTOS: en qué libro y en qué mes vive (enlaces «Ver
+          // en balance…» del panel). Sin la llave = lectura caída o gasto
+          // que no volvió; null = no vive en ningún libro.
+          ...(e.origen === 'gasto' && balances?.has(e.id)
+            ? { balance: balances.get(e.id) ?? null }
+            : {}),
         }))
         .reverse(),
       ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
     };
+  }
+
+  /**
+   * Ubicación en el balance de los gastos del historial (invariante 82): UNA
+   * llamada en lote al lector COMPARTIDO con Conciliación
+   * (`leerUbicacionBalance`, regla de la invariante 72). BEST-EFFORT: si la
+   * lectura falla devuelve null (warn) y el detalle sale sin la llave; nunca
+   * lanza ni toca el libro, el saldo ni el orden.
+   */
+  private async balancesDeGastos(
+    gastoIds: string[],
+  ): Promise<Map<string, BalanceDeGasto | null> | null> {
+    if (gastoIds.length === 0) return null;
+    try {
+      return await leerUbicacionBalance(
+        this.supabase.service,
+        gastoIds,
+        this.logger,
+        'Caja chica',
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Caja chica sin enlaces al balance: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**

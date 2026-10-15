@@ -409,12 +409,7 @@ import {
   etiquetaMedioSinBanco,
 } from '../expenses/estado-banco.util';
 import { candadoMesDelVuelo } from '../expenses/cambio-fecha-gasto.util';
-import {
-  necesitaTramosVivos,
-  ubicacionBalanceDeGasto,
-  type GastoParaUbicacion,
-  type UbicacionBalanceGasto,
-} from '../../common/ubicacion-balance-gasto.util';
+import { leerUbicacionBalance } from '../../common/ubicacion-balance-lector';
 import {
   aCargoDeGasto,
   alertasConciliacionGasto,
@@ -1349,16 +1344,6 @@ const GASTO_CONCILIACION_COLS =
  */
 const GASTO_PARTE_LISTA_COLS =
   'id, monto, moneda, categoria, fecha_gasto, vuelo_id, lugar, notas, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
-
-/**
- * «¿En qué balance y en qué mes vive este gasto?» (13-oct-2026, API 0.0.75,
- * invariante 72): lo que necesita `ubicacionBalanceDeGasto`, en una lectura
- * PROPIA (nunca en el select principal de la bandeja: un embed rechazado la
- * tumbaría). Embeds en la forma por COLUMNA que ya corre en prod
- * (`pendienteGasSinAvion`).
- */
-const GASTO_UBICACION_COLS =
-  'id, categoria, fecha_gasto, monto, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(fecha_vuelo, aeronave_id, es_externo)';
 
 /** Gasto de cada parte en el Excel (categoría, matrícula, vuelo). */
 const GASTO_PARTE_REPORTE_COLS =
@@ -11567,7 +11552,9 @@ export class ConciliacionService {
    * ÚNICA `ubicacionBalanceDeGasto` (espejo de los libros):
    * `{periodo: {desde, hasta}, eje, aviones: [{id, matricula}] (por
    * matrícula, null al final), general, hoja_avion, hoja_general}` o null
-   * (no vive en ningún libro: sin enlace). Lecturas PROPIAS, en lote: los
+   * (no vive en ningún libro: sin enlace). Lecturas PROPIAS, en lote, del
+   * LECTOR COMPARTIDO `common/ubicacion-balance-lector.ts`
+   * (`leerUbicacionBalance`, también de Caja chica — invariante 82): los
    * gastos (`GASTO_UBICACION_COLS`) y sus repartos; las escalas vivas solo
    * de los gastos sellados a otro avión sin tramo (`necesitaTramosVivos`;
    * si falla, no se verifica); las matrículas son cosméticas (si fallan,
@@ -11597,121 +11584,24 @@ export class ConciliacionService {
       }
     }
     if (destinos.length === 0) return;
-    const ids = [...new Set(destinos.map((d) => d.id as string))];
-    let gastos: GastoParaUbicacion[];
-    let repartos: Map<string, GastoRepartoFila[]>;
-    try {
-      const [filasGasto, deReparto] = await Promise.all([
-        this.leerPorLotes(ids, (lote) =>
-          this.supabase.service
-            .from('gasto')
-            .select(GASTO_UBICACION_COLS)
-            .in('id', lote),
-        ),
-        fetchRepartos(this.supabase.service, ids),
-      ]);
-      gastos = filasGasto as unknown as GastoParaUbicacion[];
-      repartos = deReparto;
-    } catch (err) {
-      this.logger.warn(
-        `Conciliación sin enlaces al balance (lectura de gastos o repartos): ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return;
-    }
-    // Escalas VIVAS solo de los vuelos que lo necesitan (caso #255).
-    const verificar = gastos.filter((g) => necesitaTramosVivos(g));
-    let tramosVivos: Map<string, string[]> | null = null;
-    if (verificar.length > 0) {
-      try {
-        const vueloIds = [
-          ...new Set(verificar.map((g) => g.vuelo_id as string)),
-        ];
-        const escalas = await this.leerPorLotes(vueloIds, (lote) =>
-          this.supabase.service
-            .from('escala')
-            .select('vuelo_id, aeronave_id')
-            .in('vuelo_id', lote)
-            .is('cancelada_at', null),
-        );
-        tramosVivos = new Map(vueloIds.map((v) => [v, [] as string[]]));
-        for (const e of escalas) {
-          if (typeof e.aeronave_id !== 'string') continue;
-          tramosVivos.get(e.vuelo_id as string)?.push(e.aeronave_id);
-        }
-      } catch (err) {
-        this.logger.warn(
-          `Enlaces al balance sin verificar tramos vivos: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        tramosVivos = null;
-      }
-    }
-    const ubicacion = new Map<string, UbicacionBalanceGasto | null>();
-    for (const g of gastos) {
-      if (typeof g.id !== 'string') continue;
-      const conTramos =
-        tramosVivos && g.vuelo_id && necesitaTramosVivos(g)
-          ? {
-              ...g,
-              aviones_con_tramo_vivo: tramosVivos.get(g.vuelo_id) ?? [],
-            }
-          : g;
-      ubicacion.set(
-        g.id,
-        ubicacionBalanceDeGasto(
-          conTramos,
-          (repartos.get(g.id) ?? []).map((r) => ({
-            aeronave_id: r.aeronave_id,
-            monto: r.monto,
-          })),
-        ),
-      );
-    }
-    // Matrículas: COSMÉTICAS (si fallan, null; jamás se quita `balance`).
-    const avionIds = [
-      ...new Set([...ubicacion.values()].flatMap((u) => (u ? u.aviones : []))),
-    ];
-    const matriculas = new Map<string, string>();
-    if (avionIds.length > 0) {
-      try {
-        const aviones = await this.leerPorLotes(avionIds, (lote) =>
-          this.supabase.service
-            .from('aeronave')
-            .select('id, matricula')
-            .in('id', lote),
-        );
-        for (const a of aviones) {
-          if (typeof a.id === 'string' && typeof a.matricula === 'string') {
-            matriculas.set(a.id, a.matricula);
-          }
-        }
-      } catch (err) {
-        this.logger.warn(
-          `Enlaces al balance sin matrículas: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    // Lector COMPARTIDO con Caja chica (invariante 82): misma lectura en
+    // lote y mismos warns; null = lectura principal caída ⇒ no se anota.
+    const ubicacion = await leerUbicacionBalance(
+      this.supabase.service,
+      destinos.map((d) => d.id as string),
+      this.logger,
+    );
+    if (!ubicacion) return;
     for (const d of destinos) {
       const id = d.id as string;
       if (!ubicacion.has(id)) continue;
       const u = ubicacion.get(id) ?? null;
+      // Copia por destino (el mismo gasto puede salir en varias filas).
       d.balance = u
         ? {
-            periodo: u.periodo,
-            eje: u.eje,
-            aviones: u.aviones
-              .map((a) => ({ id: a, matricula: matriculas.get(a) ?? null }))
-              .sort((x, y) =>
-                x.matricula == null
-                  ? y.matricula == null
-                    ? 0
-                    : 1
-                  : y.matricula == null
-                    ? -1
-                    : x.matricula.localeCompare(y.matricula),
-              ),
-            general: u.general,
-            hoja_avion: u.hoja_avion,
-            hoja_general: u.hoja_general,
+            ...u,
+            periodo: { ...u.periodo },
+            aviones: u.aviones.map((a) => ({ ...a })),
           }
         : null;
     }

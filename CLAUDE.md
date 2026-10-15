@@ -8031,7 +8031,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       enlace). Lo pone `anotarUbicacionBalance` con lecturas PROPIAS en lote
       (`GASTO_UBICACION_COLS` con los embeds por columna, `fetchRepartos`,
       escalas vivas solo de los que lo necesitan, matrículas cosméticas) —
-      NUNCA en el select principal de la bandeja. Best-effort: si falla la
+      NUNCA en el select principal de la bandeja. Desde el 15-oct-2026 esa
+      lectura es el LECTOR COMPARTIDO `common/ubicacion-balance-lector.ts`
+      (`leerUbicacionBalance`, mudado sin cambio de conducta; también lo usa
+      Caja chica, invariante 82): quien quiera `balance` de un gasto lo llama
+      a él, jamás copia la lectura ni decide libro o mes por su cuenta. Best-effort: si falla la
       lectura de gastos o de repartos no hay campo (el panel no pinta
       enlaces); si fallan las escalas, no se verifica; si fallan las
       matrículas, `matricula: null`. `hoja_general` = la PRIMERA hoja del
@@ -9052,6 +9056,39 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       404, 503), `cargos-de-gasto.util.spec` (Gastos con las MISMAS llaves en
       el MISMO orden), `ligas-cobro.lector.spec` (`conAutor`) e
       `ingresos.util.spec` (`conceptoDeCobro`).
+
+82. **CAJA CHICA: UBICACIÓN EN EL BALANCE DE CADA GASTO DEL FONDO
+    (15-oct-2026, sin migración).** Pedido del cliente con la captura del
+    fondo de Pablo Canales («Gasto en efectivo #436 · Taxi / estacionamiento
+    · −$500.00»): «estaria genial que se mande a la celda en los balances» y
+    «que diga en qué hoja del excel del balance está». `getFondoDetail`
+    (`GET /v1/caja-chica/fondos/:id`) pone en cada entrada del `historial`
+    con `origen: 'gasto'` el ADITIVO `balance` — la MISMA forma de la 72
+    (iii): `{periodo, eje, aviones: [{id, matricula}], general, hoja_avion,
+    hoja_general}` o null (no vive en ningún libro) — como ÚLTIMA llave de
+    la entrada. Las entradas de `origen: 'caja'` no cambian (sin la llave).
+    - **Fuente**: el lector COMPARTIDO `common/ubicacion-balance-lector.ts`
+      (`leerUbicacionBalance`; la regla sigue siendo SOLO
+      `ubicacionBalanceDeGasto`, invariante 72), UNA llamada en lote por
+      detalle con los ids de los gastos del libro (`balancesDeGastos`). El
+      panel NUNCA decide libro, mes ni hoja: pinta lo que dice `balance`.
+    - **Best-effort**: si falla la lectura de gastos o de repartos, NINGUNA
+      entrada lleva la llave (warn «Caja chica sin enlaces al balance …»;
+      el panel no pinta enlaces); un gasto que no volvió en la lectura queda
+      sin la llave; escalas y matrículas como en la 72. Nunca lanza y no toca
+      el libro: saldos, `por_reponer`, orden y `cargarLibro` son los mismos
+      (ningún número cambia). Skew-safe: panel viejo ignora la llave; panel
+      nuevo con API viejo no ve la llave y no pinta enlaces.
+    - Specs: `ubicacion-balance-lector.spec` (paridad con la bandeja de
+      Conciliación, reglas puras, lecturas, #255, principal caída ⇒ null con
+      el warn de la etiqueta, escalas/matrículas best-effort, lotes de 200
+      sin repetidos, cero consultas sin ids) y
+      `caja-chica.service.balance.spec` (#436 Taxi del vuelo ⇒ avión y
+      general de octubre, EMPRESA ⇒ «otros gastos», PERSONAL_DUENO ⇒ null,
+      `balance` última llave, caja sin la llave, UNA lectura sin el gasto de
+      otra moneda, lectura caída ⇒ sin la llave y lo demás idéntico, sin
+      gastos ⇒ cero lecturas). `conciliacion.service.ubicacion-balance.spec`
+      sigue verde sin tocarse.
 
 ## Convenciones NestJS
 
