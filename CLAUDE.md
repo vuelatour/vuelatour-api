@@ -9427,7 +9427,10 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   14 + 7; 0 nuevos); jest 309 suites / 5,123 pruebas, 0 fallos (en
   `db54502d`: 263 / 4,433, 0 fallos; las 15 pruebas de antes que ya no
   están con su nombre son renombres o reemplazos intencionales del lote).
-- **PENDIENTE (14-oct-2026) — `20261014000001_revoke_rpc_tg_vuelo_consecutivo_cliente.sql`**
+- **APLICADA (14-oct-2026 ~20:00 Cancún, por el usuario en el SQL Editor; verificada
+  por MCP: `has_function_privilege` anon=false, authenticated=false,
+  service_role=true; renglón del historial; trigger activo; `get_advisors` sin
+  los 0028/0029 de esta función) — `20261014000001_revoke_rpc_tg_vuelo_consecutivo_cliente.sql`**
   (solo SQL Editor: el MCP declina el `revoke`). Tras aplicar la 000006 el
   advisor marcó dos WARN (0028/0029): `tg_vuelo_consecutivo_cliente()` es
   SECURITY DEFINER y anon/authenticated la podían invocar por RPC. Es función
@@ -9525,9 +9528,15 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   N990GG sep-2026 (individual y general) dentro de la regeneración de
   septiembre (después del PASO 0 de ING-4 y del checklist de datos).
 
-- **PENDIENTE (14-oct-2026, lote B del 0.0.77) —
+- **APLICADA (15-oct-2026 03:13Z = 14-oct 22:13 Cancún, por MCP `apply_migration`
+  con el API 0.0.77 ya desplegado; en el historial `version` = 20261015031335,
+  `name` = 20261014000002_conciliacion_omitir_y_cargos_a_gasto, sentencia con md5
+  2e169f29ed5c85993a5ba0a8888fc6e1 = el archivo; antes DRYRUN_OK T1–T31 (md5 del
+  bloque 7ff0af6591515e360bc1e10fa89efe69) y después POSTCHECK_OK T1–T31; 6
+  funciones SECURITY INVOKER con `search_path ""`, 2 triggers, 0 canónicas;
+  `get_advisors` sin nada nuevo) — lote B del 0.0.77 —
   `20261014000002_conciliacion_omitir_y_cargos_a_gasto.sql`** (invariantes
-  75 y 76; NO aplicada: la aplica el orquestador). SOLO funciones nuevas +
+  75 y 76). SOLO funciones nuevas +
   DOS triggers nuevos: `conciliacion_clasificacion_omitido`,
   `conciliacion_omitir_movimientos`, `conciliacion_quitar_omision`,
   `conciliacion_ligar_cargos_a_gasto`, `tg_mov_bancario_omitido_sin_ligas`
