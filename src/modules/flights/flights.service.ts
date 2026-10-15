@@ -119,7 +119,21 @@ import type {
   UpdateCobroDto,
 } from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
-import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
+import {
+  cobroEnUsd,
+  cobrosEnUsd,
+  type CobroLike,
+} from '../../common/cobros-usd.util';
+import {
+  cobradoDeMas,
+  entradaCobradoDeMas,
+  esCobroSinBancoDeOtroVuelo,
+  necesitaOtrosCobrosCliente,
+  ventanaOtrosCobrosCliente,
+  type CobradoDeMas,
+  type OtroCobroDelCliente,
+} from '../../common/cobrado-de-mas.util';
+import { METODOS_COBRO_ABONO_AUTO } from '../../common/metodo-cobro.util';
 import { normalizarTc } from '../../common/tc.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
@@ -466,6 +480,12 @@ export interface CobroConSobre extends CobroLike {
   faltante?: number | null;
   sobrante?: number | null;
   abonos_banco?: AbonoBancoDeCobro[];
+  /**
+   * ADITIVO SOLO del snapshot (14-oct-2026, invariante 77, D21): el USD del
+   * cobro con la MISMA cadena de T.C. que `total_cobrado` (`cobroEnUsd`);
+   * null = MXN sin T.C.
+   */
+  monto_usd?: number | null;
 }
 
 /**
@@ -3090,10 +3110,12 @@ export class FlightsService {
     // repo): la suma cruda mezclaba monedas y un cobro parcial en MXN
     // inflaba el total — la app del piloto bloqueaba el cobro del saldo y el
     // panel pintaba pendientes negativos. Los MXN sin TC quedan expuestos.
-    const conv = cobrosEnUsd(
-      cobros,
-      Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null,
-    );
+    // El MISMO respaldo de T.C. alimenta `total_cobrado`, `cobros[i].monto_usd`
+    // y «Cobrado de más» (14-oct-2026, invariante 77): las tres cifras salen
+    // de `cobrosEnUsd` con la misma cadena.
+    const tcCobros =
+      Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null;
+    const conv = cobrosEnUsd(cobros, tcCobros);
     // La app esconde la captura de tacómetros con esta bandera: true cuando el
     // solicitante va de APOYO y esa es su ÚNICA relación con el vuelo (no es
     // piloto, ni copiloto, ni piloto de tramo) — misma regla que el candado
@@ -3155,6 +3177,18 @@ export class FlightsService {
       },
       escalas,
     );
+    // «COBRADO DE MÁS» (14-oct-2026, API 0.0.78, invariante 77, D13): excedente
+    // (la MISMA cifra que el balance manda a «otros movimientos»), causa
+    // probable y qué hacer. Detalle de dinero de oficina: la llave se OMITE
+    // para PILOTO/MECANICO/VISITANTE (ni se calcula).
+    const cobradoDeMasBloque = FlightsService.esRolDeCampo(current)
+      ? undefined
+      : await this.cobradoDeMasDelVuelo(
+          vuelo,
+          snapRow ?? null,
+          cobros,
+          tcCobros,
+        );
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
@@ -3178,10 +3212,22 @@ export class FlightsService {
       ultimo_taco_avion_detalle: ultimoTacoDetalle,
       grupo_total_aviones: grupoTotalAviones,
       escalas: escalasEnriquecidas,
-      cobros,
+      // `monto_usd` ADITIVO (14-oct-2026, invariante 77, D21): el USD de cada
+      // cobro con la MISMA cadena que `total_cobrado` (`cobroEnUsd`; null =
+      // MXN sin T.C.). La vista previa «Rebasa el pendiente» del panel lo usa
+      // al corregir un cobro.
+      cobros: cobros.map((c) => ({
+        ...c,
+        monto_usd: cobroEnUsd(c, tcCobros),
+      })),
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
       cobros_sin_tc_count: conv.sin_tc_count,
       cobros_sin_tc_mxn: conv.sin_tc_mxn,
+      // «COBRADO DE MÁS» (ADITIVO): `CobradoDeMas | null`; omitida para la
+      // tripulación y el visitante.
+      ...(cobradoDeMasBloque === undefined
+        ? {}
+        : { cobrado_de_mas: cobradoDeMasBloque }),
       // «CÓMO SE COBRÓ AL FINAL» (11-sep-2026): DERIVADO de los cobros, nunca
       // persistido en `vuelo.metodo_cobro` (esa columna es el PREVISTO y un
       // insumo del precio: ver `metodoCobroFinalDe`). null mientras el vuelo
@@ -3203,6 +3249,144 @@ export class FlightsService {
       // (number; null = lectura fallida). Omitidas para la tripulación.
       ...seguimientoContadores,
     };
+  }
+
+  /**
+   * «COBRADO DE MÁS» del snapshot (14-oct-2026, API 0.0.78, invariante 77,
+   * D13): la regla PURA `common/cobrado-de-mas.util` con las fuentes únicas
+   * —lo cobrado con los MISMOS cobros y el MISMO respaldo de T.C. que
+   * `total_cobrado`; total e IVA de `particionIngresoVuelo(snapRow)`—. Solo
+   * cuando ninguna causa 1–5 lo explica (SIN_CAUSA_CLARA) se leen,
+   * best-effort, los cobros sin banco de OTROS vuelos del cliente para la
+   * causa OTRO_VUELO_DEL_CLIENTE. Sin la fila de precios (`snapRow` null:
+   * lectura caída) no se afirma nada: null.
+   */
+  private async cobradoDeMasDelVuelo(
+    vuelo: Record<string, unknown>,
+    snapRow: Record<string, unknown> | null,
+    cobros: ReadonlyArray<CobroConSobre>,
+    tcCobros: number | null,
+  ): Promise<CobradoDeMas | null> {
+    if (!snapRow) return null;
+    const grupo = vuelo.grupo as
+      | { folio?: unknown }
+      | Array<{ folio?: unknown }>
+      | null
+      | undefined;
+    const g = Array.isArray(grupo) ? (grupo[0] ?? null) : (grupo ?? null);
+    const base = {
+      vuelo: {
+        ...(snapRow as VueloIngresoInput),
+        estado: vuelo.estado,
+        cotizacion_abierta: vuelo.cotizacion_abierta,
+      },
+      cobros,
+      tcFallback: tcCobros,
+      grupoFolio: g?.folio == null ? null : Number(g.folio),
+    };
+    const sinOtros = cobradoDeMas(entradaCobradoDeMas(base));
+    if (!necesitaOtrosCobrosCliente(sinOtros)) return sinOtros;
+    const otros = await this.otrosCobrosSinBancoDelCliente(
+      String(vuelo.id),
+      typeof vuelo.cliente_id === 'string' ? vuelo.cliente_id : null,
+      cobros,
+    );
+    if (!otros || otros.length === 0) return sinOtros;
+    return cobradoDeMas(
+      entradaCobradoDeMas({ ...base, otrosCobrosCliente: otros }),
+    );
+  }
+
+  /**
+   * Cobros SIN BANCO de OTROS vuelos VIVOS (no cancelados) del mismo cliente
+   * a ±30 días (fecha_cobro, Cancún) de los cobros de este vuelo, para la
+   * causa OTRO_VUELO_DEL_CLIENTE de «Cobrado de más» (invariante 77, D13).
+   * «Sin banco» = método que llega al banco (`METODOS_COBRO_ABONO_AUTO`), sin
+   * sobre ni anticipo y SIN liga según el LECTOR ÚNICO (`leerLigasDeCobros`:
+   * puente o espejo); la regla es `esCobroSinBancoDeOtroVuelo`. Lecturas
+   * paginadas por la PK (max-rows 1000) y `in (…)` en lotes de ≤ 150.
+   * Best-effort: cualquier falla ⇒ null + warn (el snapshot nunca da 5xx
+   * por esto; el aviso queda SIN_CAUSA_CLARA).
+   */
+  private async otrosCobrosSinBancoDelCliente(
+    vueloId: string,
+    clienteId: string | null,
+    cobros: ReadonlyArray<{ monto?: unknown; fecha_cobro?: unknown }>,
+  ): Promise<OtroCobroDelCliente[] | null> {
+    const ventana = ventanaOtrosCobrosCliente(cobros);
+    if (!clienteId || !ventana) return null;
+    const PAGINA = 1000;
+    const LOTE = 150;
+    try {
+      const sb = this.supabase.service;
+      const folios = new Map<string, number | null>();
+      for (let desde = 0; ; desde += PAGINA) {
+        const { data, error } = await sb
+          .from('vuelo')
+          .select('id, folio')
+          .eq('cliente_id', clienteId)
+          .neq('estado', 'CANCELADO')
+          .neq('id', vueloId)
+          .order('id', { ascending: true })
+          .range(desde, desde + PAGINA - 1);
+        if (error) throw new Error(error.message);
+        const pagina = (data ?? []) as Array<{ id: string; folio: unknown }>;
+        for (const v of pagina) {
+          folios.set(v.id, v.folio == null ? null : Number(v.folio));
+        }
+        if (pagina.length < PAGINA) break;
+      }
+      if (folios.size === 0) return [];
+      // `ingreso_anticipo_id` solo existe con la migración de ingresos.
+      const conIngresos = await ingresosDisponibles(sb);
+      const cols = `id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, cobro_grupo_id${conIngresos ? ', ingreso_anticipo_id' : ''}`;
+      const ids = [...folios.keys()];
+      const filas: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < ids.length; i += LOTE) {
+        const lote = ids.slice(i, i + LOTE);
+        for (let desde = 0; ; desde += PAGINA) {
+          const { data, error } = await sb
+            .from('cobro_vuelo')
+            .select(cols)
+            .in('vuelo_id', lote)
+            .in('metodo_cobro', [...METODOS_COBRO_ABONO_AUTO])
+            .gte('fecha_cobro', `${ventana.desde}T00:00:00-05:00`)
+            .lte('fecha_cobro', `${ventana.hasta}T23:59:59-05:00`)
+            .order('id', { ascending: true })
+            .range(desde, desde + PAGINA - 1);
+          if (error) throw new Error(error.message);
+          const pagina = (data ?? []) as unknown as Array<
+            Record<string, unknown>
+          >;
+          filas.push(...pagina);
+          if (pagina.length < PAGINA) break;
+        }
+      }
+      if (filas.length === 0) return [];
+      const ligas = await leerLigasDeCobros(sb, {
+        cobroIds: filas.map((c) => String(c.id)),
+      });
+      return filas
+        .filter((c) =>
+          esCobroSinBancoDeOtroVuelo({
+            ...c,
+            ligado: movimientoDeCobro({ id: String(c.id) }, ligas) !== null,
+          }),
+        )
+        .map((c) => ({
+          vuelo_id: String(c.vuelo_id),
+          folio: folios.get(String(c.vuelo_id)) ?? null,
+          cobro_id: String(c.id),
+          monto: Number(c.monto) || 0,
+          moneda: typeof c.moneda === 'string' ? c.moneda : '',
+          fecha_cobro: typeof c.fecha_cobro === 'string' ? c.fecha_cobro : null,
+        }));
+    } catch (err) {
+      this.logger.warn(
+        `cobrado de más: no se pudieron leer los cobros de otros vuelos del cliente ${clienteId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**

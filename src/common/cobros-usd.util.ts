@@ -72,6 +72,22 @@ export function cobrosEnUsd(
 }
 
 /**
+ * USD de UN cobro con la MISMA regla y el MISMO respaldo de T.C. que
+ * `cobrosEnUsd` (14-oct-2026, API 0.0.78, invariante 77): el
+ * `cobros[i].monto_usd` del snapshot del vuelo y el `usd` de cada cobro de
+ * «Cobrado de más». `null` = MXN que no convierte (sin T.C. propio ni de
+ * respaldo): jamás 0 en falso ni el monto crudo como USD. Un reembolso
+ * (negativo) da su USD negativo; un monto 0 / no numérico, 0.
+ */
+export function cobroEnUsd(
+  c: CobroLike,
+  tcFallback?: number | null,
+): number | null {
+  const conv = cobrosEnUsd([c], tcFallback);
+  return conv.sin_tc_count > 0 ? null : conv.total_usd;
+}
+
+/**
  * ¿El reparto lee este CANCELADO? Lo cobrado y no reembolsado es venta del
  * avión (invariante 2): un cancelado RETIENE cobros si lo convertido a USD
  * es positivo o si quedan cobros MXN sin T.C. (positivos). Puro.

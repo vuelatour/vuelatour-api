@@ -327,8 +327,16 @@ export function cobradoParteAvion(
   return p.total_usd > 0 ? Math.min(parte, p.avion_usd) : parte;
 }
 
-/** Exceso cobrado sobre el total del vuelo (sobrecobro); 0 si no lo hay. */
-export function sobrecobroUsd(cobradoUsd: number, p: ParticionIngreso): number {
+/**
+ * Exceso cobrado sobre el total del vuelo (sobrecobro); 0 si no lo hay.
+ * Solo lee `total_usd`: «Cobrado de más» (`common/cobrado-de-mas.util`,
+ * invariante 77) la llama con el total de la MISMA partición y así el aviso
+ * de la card y la fila «sobrecobro» del balance dicen la MISMA cifra.
+ */
+export function sobrecobroUsd(
+  cobradoUsd: number,
+  p: Pick<ParticionIngreso, 'total_usd'>,
+): number {
   if (p.total_usd <= 0) return 0;
   return Math.max(0, round2(cobradoUsd - p.total_usd));
 }

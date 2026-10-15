@@ -51,6 +51,7 @@ import {
   cobradoParteAvion,
   pagoVendedorUsd,
   particionIngresoVuelo,
+  type VueloIngresoInput,
 } from '../../common/ingreso-vuelo.util';
 import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
 // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): los
@@ -150,6 +151,14 @@ import {
   type VueloCobradoRow,
   type VueloCobradoSinFactura,
 } from './vuelos-sin-factura.util';
+import {
+  renglonVuelosCobradosDeMas,
+  type VueloConCobradoDeMas,
+} from './vuelos-cobrados-de-mas.util';
+import {
+  cobradoDeMas,
+  entradaCobradoDeMas,
+} from '../../common/cobrado-de-mas.util';
 import { facturasDeVuelos } from '../flights/factura-cliente-etiquetas';
 import { itemPrecierreLigasUsdTc } from './ligas-usd-tc-precierre.util';
 import type { ResultadoLigasUsdTc } from '../conciliacion/ligas-usd-tc.util';
@@ -340,6 +349,10 @@ interface GastoCategoriaAcc {
   tc_oficial_mxn: number;
 }
 interface CobroRow {
+  /** ADITIVOS (14-oct-2026, invariante 77): «Vuelos cobrados de más». */
+  id?: string;
+  fecha_cobro?: string | null;
+  cobro_grupo_id?: string | null;
   vuelo_id: string;
   monto: string;
   moneda: string;
@@ -2351,7 +2364,9 @@ export class ProfitSharingService {
           // grupo_id (4-sep-2026): folio del grupo ADITIVO en cobros_pendientes.
           // aeronave_id/es_externo (5-oct-2026): universo de
           // vuelos_sin_gasto_operaciones (solo vuelos PROPIOS con avión).
-          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+          // cotizacion_abierta (14-oct-2026, invariante 77): «Cobrado de más»
+          // no avisa en una cotización abierta.
+          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, cotizacion_abierta, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -2645,12 +2660,12 @@ export class ProfitSharingService {
         ),
       [],
     );
+    /** La cadena de T.C. del pre-cierre: cotización ?? TC oficial del día. */
+    const tcCadena = (v: Record<string, unknown>): number | null =>
+      pos(v.tc_usd_mxn) ?? tcOficialPre.vuelo.get(v.id as string)?.tc ?? null;
     /** cobrosEnUsd con la cadena tc de cotización ?? TC oficial del día. */
     const convCobros = (v: Record<string, unknown>) =>
-      cobrosEnUsd(
-        cobrosPorVueloPre.get(v.id as string) ?? [],
-        pos(v.tc_usd_mxn) ?? tcOficialPre.vuelo.get(v.id as string)?.tc ?? null,
-      );
+      cobrosEnUsd(cobrosPorVueloPre.get(v.id as string) ?? [], tcCadena(v));
     const cobrosTcOficialVuelos: Array<{ id: string; folio: number }> = [];
     const cobrosSinTcVuelos: Array<{ id: string; folio: number }> = [];
     let cobrosSinTcMxn = 0;
@@ -2783,6 +2798,10 @@ export class ProfitSharingService {
       saldo_usd: number;
       grupo_folio: number | null;
     }> = [];
+    // «VUELOS COBRADOS DE MÁS» (14-oct-2026, API 0.0.78, invariante 77,
+    // D14): MISMO universo y MISMA cadena de T.C. que `cobros_pendientes`,
+    // sin lecturas nuevas y sin la causa OTRO_VUELO_DEL_CLIENTE.
+    const cobradosDeMas: VueloConCobradoDeMas[] = [];
     for (const v of completados) {
       // Cliente interno: nunca aparece como "saldo por cobrar" (aunque la
       // cotización llevara monto), es operación propia.
@@ -2790,6 +2809,10 @@ export class ProfitSharingService {
       const total = Number(v.monto_total_usd ?? 0);
       const conv = convCobros(v);
       const saldo = round2(total - conv.total_usd);
+      const grupoFolio =
+        typeof v.grupo_id === 'string'
+          ? (grupoFolioPorId.get(v.grupo_id) ?? null)
+          : null;
       if (saldo > 1) {
         cobrosPendientes.push({
           id: v.id as string,
@@ -2797,10 +2820,27 @@ export class ProfitSharingService {
           total_usd: round2(total),
           cobrado_usd: conv.total_usd,
           saldo_usd: saldo,
-          grupo_folio:
-            typeof v.grupo_id === 'string'
-              ? (grupoFolioPorId.get(v.grupo_id) ?? null)
-              : null,
+          grupo_folio: grupoFolio,
+        });
+      }
+      const cdm = cobradoDeMas(
+        entradaCobradoDeMas({
+          vuelo: {
+            ...(v as VueloIngresoInput),
+            estado: 'COMPLETADO',
+            cotizacion_abierta: v.cotizacion_abierta,
+          },
+          cobros: cobrosPorVueloPre.get(v.id as string) ?? [],
+          tcFallback: tcCadena(v),
+          grupoFolio,
+        }),
+      );
+      if (cdm) {
+        cobradosDeMas.push({
+          id: v.id as string,
+          folio: v.folio as number,
+          grupo_folio: grupoFolio,
+          cobrado: cdm,
         });
       }
     }
@@ -3319,6 +3359,9 @@ export class ProfitSharingService {
         ),
         vuelos: cobrosPendientes,
       },
+      // «Vuelos cobrados de más» (0.0.78, invariante 77, D14): NO bloquea;
+      // count = los que requieren revisión, los explicados aparte.
+      renglonVuelosCobradosDeMas(cobradosDeMas),
       // GRUPOS (Fase 2): avisos de grupo ADEMÁS de los avisos por vuelo.
       {
         clave: 'grupo_con_saldo',
@@ -4091,9 +4134,11 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
       // comision_banco_*/metodo_cobro (6-oct-2026, API 0.0.65): comisiones a
-      // cargo del avión (`comisionesDelVuelo`).
+      // cargo del avión (`comisionesDelVuelo`). id/fecha_cobro/cobro_grupo_id
+      // (14-oct-2026, invariante 77): «Vuelos cobrados de más» del pre-cierre
+      // (cobro duplicado y sobre del grupo).
       .select(
-        'vuelo_id, monto, moneda, tc_usd_mxn, comision_banco_monto, comision_banco_pct, metodo_cobro',
+        'id, vuelo_id, monto, moneda, tc_usd_mxn, comision_banco_monto, comision_banco_pct, metodo_cobro, fecha_cobro, cobro_grupo_id',
       )
       .in('vuelo_id', vueloIds);
     if (error) throw new Error(error.message);
