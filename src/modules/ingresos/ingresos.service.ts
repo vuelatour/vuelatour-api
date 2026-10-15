@@ -51,9 +51,18 @@ import {
   partesDeLigas,
 } from '../conciliacion/ligas-cobro.lector';
 import {
+  alVincularAbono,
   coberturaCobro,
+  netoDeCobro,
   type CoberturaCobro,
 } from '../../common/cobro-banco.util';
+import { cobrosLoteDisponibles } from '../../common/cobros-lote-disponible.util';
+import { cobrosParcialesDisponibles } from '../../common/cobros-parciales-disponible.util';
+import {
+  cobroParaCruce,
+  mensajeAbonoDeCobroParcial,
+  mensajeComisionAlRegistrarCobro,
+} from '../conciliacion/cobros-lote.util';
 import {
   etiquetaMetodoCobro,
   METODOS_COBRO_ABONO_MANUAL,
@@ -69,7 +78,11 @@ import {
 } from '../../common/version-cas.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { posibleDuplicado } from '../conciliacion/abono-cruce.util';
-import { primeraLinea, ventanaDias } from '../conciliacion/auto-cruce.util';
+import {
+  primeraLinea,
+  TOLERANCIA_TC_OFICIAL_PCT,
+  ventanaDias,
+} from '../conciliacion/auto-cruce.util';
 import {
   AVISO_INGRESO_SIN_AVION,
   MSG_AVION_SOLO_EN_RESULTADO,
@@ -279,14 +292,16 @@ function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
 
 /**
  * Candidato del 409 `ABONO_TIENE_COBRO_CANDIDATO` con el shape EXACTO del
- * contrato (`{tipo, id, etiqueta, cliente, fecha, monto, neto}`): el
- * `vuelo_id` solo sirve para filtrar dentro del servicio.
+ * contrato (`{tipo, id, etiqueta, cliente, fecha, monto, neto}` + los
+ * aditivos del parcial): el `vuelo_id` y el `folio_vuelo` solo sirven dentro
+ * del servicio (filtrar, armar el texto).
  */
-function sinVuelo<T extends { vuelo_id: string | null }>(
+function sinVuelo<T extends { vuelo_id: string | null; folio_vuelo?: unknown }>(
   c: T,
-): Omit<T, 'vuelo_id'> {
-  const { vuelo_id: _vuelo, ...resto } = c;
+): Omit<T, 'vuelo_id' | 'folio_vuelo'> {
+  const { vuelo_id: _vuelo, folio_vuelo: _folio, ...resto } = c;
   void _vuelo;
+  void _folio;
   return resto;
 }
 
@@ -1842,16 +1857,40 @@ export class IngresosService {
   }
 
   /**
+   * ¿La cuenta del abono es una PASARELA (Paywise)? (invariante 77: un abono
+   * de la pasarela no completa cobros parciales). Un error se LANZA.
+   */
+  private async abonoEsDePasarela(abono: Row): Promise<boolean> {
+    const { data, error } = await this.sb
+      .from('cuenta_bancaria')
+      .select('tipo')
+      .eq('id', abono.cuenta_bancaria_id as string)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as { tipo?: unknown } | null)?.tipo === 'PASARELA';
+  }
+
+  /**
    * Cobros de vuelo y sobres LIBRES (métodos manuales, positivos, sin sobre
    * ni anticipo, sin liga) de la moneda del abono, ±30 días Cancún, cuyo
    * neto o bruto está a ≤ 1.00 del abono — el candado anti doble conteo de
    * «registrar como otro ingreso». Con `soloVuelo` (candado de «Es el pago
    * de un vuelo»): solo los cobros de ESE vuelo, sin sobres ni recorte.
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D12): con la sonda de
+   * 20261014000003 también los cobros PARCIALES cuyo FALTANTE cuadra con el
+   * abono (`montoCuadraIngreso` con {monto: faltante, comision_monto:
+   * null}): todavía esperan ese dinero. Ocupado = la MISMA regla del
+   * auto-cruce (`cobroParaCruce`); un abono de la PASARELA no completa
+   * parciales (`opts.pasarela`; si no se sabe, se lee la cuenta). El
+   * candidato parcial gana `parcial: true`, `faltante` y `monto_vinculado`
+   * (los demás, byte a byte como siempre).
    */
   private async cobrosQueCuadranConAbono(
     abono: Row,
     moneda: string,
     soloVuelo?: string,
+    opts: { pasarela?: boolean } = {},
   ): Promise<
     Array<{
       tipo: 'COBRO_VUELO' | 'SOBRE_GRUPO';
@@ -1865,6 +1904,13 @@ export class IngresosService {
       neto: number;
       /** Vuelo del cobro (null en sobres de grupo). */
       vuelo_id: string | null;
+      /** INTERNO (no viaja): folio del vuelo o del grupo, para los textos. */
+      folio_vuelo: number | null;
+      /** ADITIVOS (0.0.78, invariante 77): solo en un cobro PARCIAL. */
+      parcial?: true;
+      faltante?: number;
+      monto_vinculado?: number;
+      abonos_n?: number;
     }>
   > {
     const v = ventanaDias(abono.fecha as string, 30);
@@ -1873,7 +1919,7 @@ export class IngresosService {
     let qCobros = this.sb
       .from('cobro_vuelo')
       .select(
-        'id, vuelo_id, monto, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
+        'id, vuelo_id, monto, metodo_cobro, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
       )
       .gt('monto', 0)
       .is('cobro_grupo_id', null)
@@ -1918,17 +1964,44 @@ export class IngresosService {
         },
         TOLERANCIA_INGRESO,
       ).cuadra;
-    const cCuadran = ((cobros.data ?? []) as unknown as Row[]).filter(
-      (c) => cuadra(c) && (!soloVuelo || c.vuelo_id === soloVuelo),
+    const delVuelo = ((cobros.data ?? []) as unknown as Row[]).filter(
+      (c) => !soloVuelo || c.vuelo_id === soloVuelo,
     );
+    const cCuadran = delVuelo.filter(cuadra);
     const sCuadran = soloVuelo
       ? []
       : ((sobres.data ?? []) as unknown as Row[]).filter(cuadra);
-    if (cCuadran.length === 0 && sCuadran.length === 0) return [];
+    // D12 (invariante 77): un cobro cuyo neto REBASA el abono (menos la
+    // tolerancia) puede ser un PARCIAL al que le falte justo el abono. Las
+    // sondas (y la cuenta) solo se leen si hay alguno.
+    const montoAbono = r2(Number(abono.monto) || 0);
+    const yaCuadran = new Set(cCuadran.map((c) => c.id as string));
+    const posibles = delVuelo.filter(
+      (c) =>
+        !yaCuadran.has(c.id as string) &&
+        netoDeCobro(
+          c.monto as number | string | null,
+          c.comision_banco_monto as number | string | null,
+        ) >
+          montoAbono - TOLERANCIA_INGRESO,
+    );
+    const conParciales =
+      posibles.length > 0 &&
+      (await cobrosLoteDisponibles(this.sb)) &&
+      (await cobrosParcialesDisponibles(this.sb)) &&
+      !(opts.pasarela ?? (await this.abonoEsDePasarela(abono)));
+    const cParciales = conParciales ? posibles : [];
+    if (
+      cCuadran.length === 0 &&
+      sCuadran.length === 0 &&
+      cParciales.length === 0
+    ) {
+      return [];
+    }
     // Lector único (12-oct-2026): un cobro pagado dentro de un lote también
     // está ocupado aunque su espejo `cobro_id` sea NULL.
     const ligas = await leerLigasDeCobros(this.sb, {
-      cobroIds: cCuadran.map((c) => c.id as string),
+      cobroIds: [...cCuadran, ...cParciales].map((c) => c.id as string),
       sobreIds: sCuadran.map((s) => s.id as string),
     });
     const ocupC = new Set(
@@ -1941,6 +2014,45 @@ export class IngresosService {
         .map((m) => m.cobro_grupo_id)
         .filter((x): x is string => typeof x === 'string'),
     );
+    // Con la sonda de parciales la COBERTURA decide (`cobroParaCruce`): sin
+    // otros abonos, cuenta si cuadró por neto/bruto (lo de siempre); un
+    // parcial de banco, SOLO si lo que le falta cuadra (±1.00, la misma
+    // regla). Sin la sonda: cualquier liga ocupa (0.0.77).
+    const parcialDe = new Map<
+      string,
+      { faltante: number; monto_vinculado: number; abonos_n: number }
+    >();
+    let cobrosLibres = cCuadran.filter((c) => !ocupC.has(c.id as string));
+    if (conParciales) {
+      const partes = partesDeLigas(ligas);
+      const libre = (c: Row): boolean => {
+        const id = c.id as string;
+        const p = partes.get(id) ?? [];
+        const v = cobroParaCruce({ ...c, moneda }, p, null, {
+          conParciales: true,
+          pasarela: false,
+        });
+        if (!v.libre) return false;
+        if (v.faltante == null) return yaCuadran.has(id);
+        if (
+          !montoCuadraIngreso(
+            abonoMonto,
+            { monto: v.faltante, comision_monto: null },
+            TOLERANCIA_INGRESO,
+          ).cuadra
+        ) {
+          return false;
+        }
+        const cob = coberturaCobro({ ...c, moneda }, p);
+        parcialDe.set(id, {
+          faltante: v.faltante,
+          monto_vinculado: cob.suma,
+          abonos_n: cob.n_partes,
+        });
+        return true;
+      };
+      cobrosLibres = [...cCuadran, ...cParciales].filter(libre);
+    }
     const nombreDe = (rel: unknown) => {
       const p = unwrapOne(
         rel as {
@@ -1959,22 +2071,30 @@ export class IngresosService {
     const neto = (c: Row) =>
       r2((Number(c.monto) || 0) - (Number(c.comision_banco_monto) || 0));
     return [
-      ...cCuadran
-        .filter((c) => !ocupC.has(c.id as string))
-        .map((c) => {
-          const n = nombreDe(c.vuelo);
-          return {
-            tipo: 'COBRO_VUELO' as const,
-            id: c.id as string,
-            etiqueta: `Cobro · vuelo #${n.folio ?? '?'}`,
-            cliente: n.cliente,
-            fecha: diaCancun(c.fecha_cobro as string),
-            fecha_vuelo: n.fecha_vuelo,
-            monto: r2(Number(c.monto) || 0),
-            neto: neto(c),
-            vuelo_id: (c.vuelo_id as string | null) ?? null,
-          };
-        }),
+      ...cobrosLibres.map((c) => {
+        const n = nombreDe(c.vuelo);
+        const parcial = parcialDe.get(c.id as string);
+        return {
+          tipo: 'COBRO_VUELO' as const,
+          id: c.id as string,
+          etiqueta: `Cobro · vuelo #${n.folio ?? '?'}`,
+          cliente: n.cliente,
+          fecha: diaCancun(c.fecha_cobro as string),
+          fecha_vuelo: n.fecha_vuelo,
+          monto: r2(Number(c.monto) || 0),
+          neto: neto(c),
+          vuelo_id: (c.vuelo_id as string | null) ?? null,
+          folio_vuelo: n.folio,
+          ...(parcial
+            ? {
+                parcial: true as const,
+                faltante: parcial.faltante,
+                monto_vinculado: parcial.monto_vinculado,
+                abonos_n: parcial.abonos_n,
+              }
+            : {}),
+        };
+      }),
       ...sCuadran
         .filter((s) => !ocupS.has(s.id as string))
         .map((s) => {
@@ -1989,9 +2109,35 @@ export class IngresosService {
             monto: r2(Number(s.monto) || 0),
             neto: neto(s),
             vuelo_id: null,
+            folio_vuelo: n.folio,
           };
         }),
     ].slice(0, 5);
+  }
+
+  /** Texto del 409 con un candidato PARCIAL (invariante 77). */
+  private textoCandidatoParcial(
+    c: {
+      folio_vuelo: number | null;
+      monto: number;
+      faltante?: number;
+      monto_vinculado?: number;
+      abonos_n?: number;
+    },
+    moneda: string,
+    destino: 'INGRESO' | 'COBRO',
+  ): string {
+    return mensajeAbonoDeCobroParcial(
+      {
+        folio: c.folio_vuelo,
+        moneda,
+        monto: c.monto,
+        monto_vinculado: c.monto_vinculado ?? 0,
+        abonos_n: c.abonos_n ?? 1,
+        faltante: c.faltante ?? 0,
+      },
+      destino,
+    );
   }
 
   /** Ingreso ya registrado con esa llave (idempotencia), o null. */
@@ -2119,7 +2265,10 @@ export class IngresosService {
               ? `el cobro del ${c.etiqueta.replace('Cobro · ', '')}`
               : `el pago del grupo ${c.etiqueta.replace('Sobre ', '')}`;
           throw new ConflictException({
-            message: `Este abono cuadra con ${quien}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro. Si de verdad es otro dinero, confírmalo.`,
+            // Un cobro PARCIAL (invariante 77) dice cuánto le falta.
+            message: c.parcial
+              ? `${this.textoCandidatoParcial(c, estado.moneda, 'INGRESO')} Si de verdad es otro dinero, confírmalo.`
+              : `Este abono cuadra con ${quien}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro. Si de verdad es otro dinero, confírmalo.`,
             error: 'ABONO_TIENE_COBRO_CANDIDATO',
             details: { candidatos: candidatos.map(sinVuelo) },
           });
@@ -3023,6 +3172,50 @@ export class IngresosService {
         },
       });
     }
+    // UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D6): el cobro nuevo
+    // se liga a ESTE abono con la regla del trigger A (`alVincularAbono`, el
+    // espejo de `linkCobro`). «Cuadra por bruto» con una comisión tecleada
+    // que el banco no descontó (o una pasarela sin la comisión real) haría
+    // fallar la liga DESPUÉS de crear el cobro (y la compensación lo
+    // borraría): se dice ANTES, sin escribir nada.
+    {
+      const v = alVincularAbono({
+        cobro: { monto, moneda, comision_banco_monto: comision },
+        tcVuelo: null,
+        otras: [],
+        abono: {
+          monto: Math.abs(Number(abono.monto) || 0),
+          moneda_cuenta: moneda,
+          pasarela: cuenta.tipo === 'PASARELA',
+        },
+        toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+      });
+      if (v.estado === 'COMISION_NO_CUADRA') {
+        const neto = netoDeCobro(monto, comision);
+        const parte = r2(Math.abs(Number(abono.monto) || 0));
+        const real = v.comision_real ?? 0;
+        throw new ConflictException({
+          message: mensajeComisionAlRegistrarCobro({
+            moneda,
+            comision_capturada: comision > 0 ? comision : 0,
+            neto,
+            parte,
+            comision_real: real,
+          }),
+          error: 'COMISION_NO_CUADRA',
+          details: {
+            movimiento_id: movId,
+            moneda,
+            monto_cobro: monto,
+            comision_capturada: comision > 0 ? comision : null,
+            neto,
+            parte,
+            comision_real: real,
+            por: cuenta.tipo === 'PASARELA' ? 'PASARELA' : 'COMISION',
+          },
+        });
+      }
+    }
     await this.flights.assertAccess(dto.vuelo_id, actor);
     // ANTI DOBLE CONTEO (revisión adversaria 24-sep-2026): si ESE vuelo ya
     // tiene un cobro LIBRE que cuadra con el abono (neto o bruto ±1.00), el
@@ -3036,11 +3229,16 @@ export class IngresosService {
         abono,
         moneda,
         dto.vuelo_id,
+        { pasarela: cuenta.tipo === 'PASARELA' },
       );
       if (candidatos.length > 0) {
         const c = candidatos[0];
         throw new ConflictException({
-          message: `Este abono cuadra con el cobro que ya tiene registrado el ${c.etiqueta.replace('Cobro · ', '')}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro en vez de registrar otro.`,
+          // Un cobro PARCIAL del vuelo (invariante 77): el abono es lo que le
+          // falta, no otro cobro.
+          message: c.parcial
+            ? this.textoCandidatoParcial(c, moneda, 'COBRO')
+            : `Este abono cuadra con el cobro que ya tiene registrado el ${c.etiqueta.replace('Cobro · ', '')}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro en vez de registrar otro.`,
           error: 'ABONO_TIENE_COBRO_CANDIDATO',
           details: { candidatos: candidatos.map(sinVuelo) },
         });

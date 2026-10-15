@@ -56,6 +56,7 @@ import {
 import {
   alVincularSobre,
   cobroOcupadoParaAbono,
+  cobroParaCruce,
   comisionRealParaCorregir,
   diferenciaLoteCobros,
   etiquetaConciliadoCobroUnico,
@@ -74,9 +75,11 @@ import {
   type VeredictoLoteCobros,
 } from './cobros-lote.util';
 import {
+  colsPuenteLigas,
   leerLigasDeCobros,
   leerPartesDeCobros,
   partesDeAbonos,
+  partesDeFilasPuente,
   partesDeLigas,
   type ParteCobroLeida,
 } from './ligas-cobro.lector';
@@ -1082,6 +1085,14 @@ interface CandidatoAbonoLeido {
   es_anticipo: boolean;
   descripcion: string | null;
   libre: boolean;
+  /**
+   * Solo COBRO_VUELO PARCIAL (0.0.78, invariante 77, con la sonda de
+   * 20261014000003): lo que le FALTA (sus abonos no lo cubren). Libre SOLO
+   * por ese monto exacto (`montoExactoAbono`, la decisión del auto); un
+   * abono de la PASARELA no lo ve y la IA no lo recibe (v1). Ausente = sin
+   * abonos.
+   */
+  faltante?: number | null;
 }
 
 /** Acciones que la IA puede proponer para un abono. */
@@ -3984,6 +3995,18 @@ export class ConciliacionService {
    * parte de $2,060.16 cuadraría en falso con un depósito ajeno del mismo
    * monto). Candidato ÚNICO entre cobros y sobres: si empatan un cobro y un
    * sobre, es ambiguo y no se cruza.
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D11): con la sonda de
+   * 20261014000003 el universo es UNO: los cobros SIN abonos por neto/bruto
+   * (lo de siempre) MÁS los cobros PARCIALES por su FALTANTE exacto (el
+   * segundo SPEI de un pago en partes). La cobertura de los cobros de la
+   * ventana se lee ANTES del filtro de monto (el faltante no es el monto del
+   * cobro) con el lector único y la MISMA regla de «ocupado» que los
+   * candidatos (`cobroParaCruce`: cubierto, cruzado o «de un solo abono» ⇒
+   * fuera). Un parcial que gana solo ⇒ criterio FALTANTE; empate ⇒ nombre
+   * del ordenante o AMBIGUO, como siempre. Nunca crea un parcial: solo liga
+   * un abono que COMPLETA el cobro. Sin la sonda: cualquier liga ocupa (como
+   * el 0.0.77).
    */
   private async autoMatchAbono(
     mov: {
@@ -4012,16 +4035,24 @@ export class ConciliacionService {
     // cobros nacidos de un anticipo NUNCA son candidatos (su dinero se
     // concilia UNA vez, como anticipo). Sin la migración: lo de siempre.
     const conIngresos = await this.ingresosOn();
+    // UN COBRO, VARIOS ABONOS (invariante 77): los PARCIALES compiten por su
+    // faltante solo con la puente Y la sonda de 20261014000003.
+    const conPuente = await this.cobrosLoteOn();
+    const conParciales = conPuente && (await this.cobrosParcialesOn());
 
     // El banco deposita monto − comisión bancaria: el abono real es el NETO.
     // Se matchea por bruto (cobros sin comisión) O por neto (con comisión) —
     // antes solo por bruto y los cobros con comisión jamás conciliaban.
     // El cliente (vuelo/grupo) viaja para desempatar por NOMBRE del
-    // ordenante (transferencias SPEI) cuando ≥ 2 candidatos cuadran.
+    // ordenante (transferencias SPEI) cuando ≥ 2 candidatos cuadran. Con
+    // parciales, también la moneda y el método (cobertura y «de un solo
+    // abono»).
     let q = this.supabase.service
       .from('cobro_vuelo')
       .select(
-        'id, monto, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(cliente:cliente_id(nombre))',
+        conParciales
+          ? 'id, monto, moneda, metodo_cobro, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(cliente:cliente_id(nombre))'
+          : 'id, monto, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(cliente:cliente_id(nombre))',
       )
       // Solo cobros POSITIVOS: un REEMBOLSO (monto negativo, 29-ago) sale
       // como CARGO en el banco, no como abono — queda FUERA de la
@@ -4092,8 +4123,43 @@ export class ConciliacionService {
       const cliente = unwrapOne(padre?.cliente);
       return typeof cliente?.nombre === 'string' ? cliente.nombre : null;
     };
+    const filasCobro = (cobrosRes.data ?? []) as unknown as Array<
+      Record<string, unknown>
+    >;
+    // D11: la cobertura de TODOS los cobros de la ventana (≤ 50) ANTES del
+    // filtro de monto, con las partes de la PUENTE (lector único; con la
+    // sonda la puente ya existe y es la fuente): ocupados (cubiertos,
+    // cruzados, «de un solo abono») fuera; parciales de banco por su
+    // FALTANTE. Una lectura caída ⇒ ERROR (el abono queda pendiente: jamás
+    // «libre» a ciegas).
+    const ocupadosCobro = new Set<string>();
+    const faltantes = new Map<string, number>();
+    if (conParciales && filasCobro.length > 0) {
+      let partes: Map<string, ParteCobroBanco[]>;
+      try {
+        partes = await leerPartesDeCobros(
+          this.supabase.service,
+          filasCobro.map((c) => c.id as string),
+        );
+      } catch (err) {
+        return {
+          ...base,
+          resultado: 'ERROR',
+          motivo: `No se pudieron leer los abonos de los cobros candidatos: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      for (const c of filasCobro) {
+        const id = c.id as string;
+        const v = cobroParaCruce(c, partes.get(id) ?? [], movId, {
+          conParciales: true,
+          pasarela: false,
+        });
+        if (!v.libre) ocupadosCobro.add(id);
+        else if (v.faltante != null) faltantes.set(id, v.faltante);
+      }
+    }
     const candidatos: CandidatoAbonoCruce[] = [
-      ...((cobrosRes.data ?? []) as Array<Record<string, unknown>>).map(
+      ...filasCobro.map(
         (c): CandidatoAbonoCruce => ({
           tipo: 'COBRO_VUELO',
           id: c.id as string,
@@ -4102,6 +4168,10 @@ export class ConciliacionService {
           fecha: (c.fecha_cobro as string) ?? '',
           cliente: nombreDe(c.vuelo),
           cuenta_bancaria_id: null,
+          // Solo un PARCIAL lleva faltante (cuadra SOLO por él).
+          ...(faltantes.has(c.id as string)
+            ? { faltante: faltantes.get(c.id as string) }
+            : {}),
         }),
       ),
       ...((sobresRes.data ?? []) as Array<Record<string, unknown>>).map(
@@ -4130,50 +4200,64 @@ export class ConciliacionService {
         },
       ),
     ];
-    // Primero el MONTO (misma regla de siempre): los ids que cuadran.
-    const cuadran = candidatos.filter(
-      (c) =>
-        cuadraMontoAbono(abono, c, false) &&
-        (c.tipo !== 'INGRESO' ||
-          c.cuenta_bancaria_id === abono.cuenta_bancaria_id),
-    );
+    // Primero el MONTO (misma regla de siempre; un PARCIAL, por su faltante):
+    // los ids que cuadran.
+    const cuadraCand = (c: CandidatoAbonoCruce) =>
+      cuadraMontoAbono(abono, c, false) &&
+      (c.tipo !== 'INGRESO' ||
+        c.cuenta_bancaria_id === abono.cuenta_bancaria_id);
+    const cuadran = candidatos.filter(cuadraCand);
     if (cuadran.length === 0) {
+      // Un PARCIAL cuyo monto completo es el abono ya está tomado (le falta
+      // otra cifra): el motivo dice «libre», como el de un cobro ligado.
+      const tomado = candidatos.some(
+        (c) => c.faltante != null && cuadraCand({ ...c, faltante: null }),
+      );
       return {
         ...base,
-        motivo: `Ningún cobro bancario de ${montoBonito(monto)} ${moneda ?? ''} entre ${lo.slice(0, 10)} y ${hi.slice(0, 10)}.`,
+        motivo: `Ningún cobro bancario ${tomado ? 'libre ' : ''}de ${montoBonito(monto)} ${moneda ?? ''} entre ${lo.slice(0, 10)} y ${hi.slice(0, 10)}.`,
       };
     }
 
     // Descarta cobros/sobres/ingresos ya enlazados a otro movimiento; exige
-    // candidato único ENTRE LOS UNIVERSOS (o el nombre del ordenante).
-    const cobroIds = cuadran
-      .filter((c) => c.tipo === 'COBRO_VUELO')
-      .map((c) => c.id);
+    // candidato único ENTRE LOS UNIVERSOS (o el nombre del ordenante). Con
+    // parciales los cobros ya se decidieron por su cobertura (arriba).
+    const cobroIds = conParciales
+      ? []
+      : cuadran.filter((c) => c.tipo === 'COBRO_VUELO').map((c) => c.id);
     const sobreIds = cuadran
       .filter((c) => c.tipo === 'SOBRE_GRUPO')
       .map((c) => c.id);
     const ingresoIds = cuadran
       .filter((c) => c.tipo === 'INGRESO')
       .map((c) => c.id);
-    // Ligas del espejo + de la PUENTE de cobros (12-oct-2026): un cobro
-    // dentro del lote de otro abono también está ocupado.
-    const yaEnlazados = await leerLigasDeCobros(this.supabase.service, {
-      cobroIds,
-      sobreIds,
-      anticipoIds: conIngresos ? ingresoIds : [],
-      cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
-      conPuente: await this.cobrosLoteOn(),
-    });
-    const ocupados = new Set<string>();
-    for (const m of (yaEnlazados ?? []) as Array<
-      MovimientoLiga & { ingreso_id?: unknown }
-    >) {
-      if (typeof m.cobro_id === 'string')
-        ocupados.add(`COBRO_VUELO:${m.cobro_id}`);
-      if (typeof m.cobro_grupo_id === 'string')
-        ocupados.add(`SOBRE_GRUPO:${m.cobro_grupo_id}`);
-      if (typeof m.ingreso_id === 'string')
-        ocupados.add(`INGRESO:${m.ingreso_id}`);
+    const ocupados = new Set<string>(
+      [...ocupadosCobro].map((id) => `COBRO_VUELO:${id}`),
+    );
+    if (
+      cobroIds.length > 0 ||
+      sobreIds.length > 0 ||
+      (conIngresos && ingresoIds.length > 0)
+    ) {
+      // Ligas del espejo + de la PUENTE de cobros (12-oct-2026): un cobro
+      // dentro del lote de otro abono también está ocupado.
+      const yaEnlazados = await leerLigasDeCobros(this.supabase.service, {
+        cobroIds,
+        sobreIds,
+        anticipoIds: conIngresos ? ingresoIds : [],
+        cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+        conPuente,
+      });
+      for (const m of (yaEnlazados ?? []) as Array<
+        MovimientoLiga & { ingreso_id?: unknown }
+      >) {
+        if (typeof m.cobro_id === 'string')
+          ocupados.add(`COBRO_VUELO:${m.cobro_id}`);
+        if (typeof m.cobro_grupo_id === 'string')
+          ocupados.add(`SOBRE_GRUPO:${m.cobro_grupo_id}`);
+        if (typeof m.ingreso_id === 'string')
+          ocupados.add(`INGRESO:${m.ingreso_id}`);
+      }
     }
     const libres = cuadran.filter((c) => !ocupados.has(`${c.tipo}:${c.id}`));
     const eleccion = elegirCandidatoAbono(abono, libres, false);
@@ -4185,13 +4269,18 @@ export class ConciliacionService {
     }
     if (!eleccion.elegido) {
       const hayIngreso = libres.some((c) => c.tipo === 'INGRESO');
+      const parcialesN = libres.filter((c) => c.faltante != null).length;
+      const porFaltante =
+        parcialesN > 0
+          ? ` (${parcialesN === 1 ? 'uno' : parcialesN} por lo que le falta a un pago parcial)`
+          : '';
       return {
         ...base,
         resultado: 'AMBIGUO',
         candidatos_n: eleccion.candidatos_n,
         motivo: hayIngreso
-          ? `${eleccion.candidatos_n} cobros/sobres/ingresos cuadran con este abono: vincúlalo a mano.`
-          : `${eleccion.candidatos_n} cobros/sobres cuadran con este abono: vincúlalo a mano.`,
+          ? `${eleccion.candidatos_n} cobros/sobres/ingresos cuadran con este abono${porFaltante}: vincúlalo a mano.`
+          : `${eleccion.candidatos_n} cobros/sobres cuadran con este abono${porFaltante}: vincúlalo a mano.`,
       };
     }
 
@@ -4299,6 +4388,12 @@ export class ConciliacionService {
    * (revisión del 14-oct-2026): con `.limit(1000)` un cobro exacto después
    * de la fila 1000 daba 0 en vez de null —omitir o ligar al ingreso sin
    * aviso—; hoy, más de `TOPE_UNIVERSO` candidatos ⇒ null (falla CERRADO).
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D12): con la sonda de
+   * 20261014000003 un cobro PARCIAL cuyo FALTANTE es el abono al centavo
+   * cuenta como «libre exacto» (todavía espera ese dinero: es su pago, no
+   * otro ingreso), con la MISMA regla de ocupado que el auto-cruce
+   * (`cobroParaCruce`). Un abono de la PASARELA no completa parciales.
    */
   private async cobrosExactosLibresDeAbono(
     abono: AbonoCruce,
@@ -4316,7 +4411,7 @@ export class ConciliacionService {
           (a, b) =>
             sb
               .from('cobro_vuelo')
-              .select('id, monto, comision_banco_monto')
+              .select('id, monto, metodo_cobro, comision_banco_monto')
               .gt('monto', 0)
               .is('cobro_grupo_id', null)
               .is('ingreso_anticipo_id', null)
@@ -4377,23 +4472,92 @@ export class ConciliacionService {
     const sobreIds = sobres
       .filter((s) => exacto('SOBRE_GRUPO', s))
       .map((s) => s.id as string);
-    if (cobroIds.length === 0 && sobreIds.length === 0) return 0;
+    // D12: solo un cobro cuyo neto REBASA el abono puede ser un parcial al
+    // que le falte exactamente el abono (sus otros abonos suman > 0). Las
+    // sondas solo se consultan si hay alguno (sin ellos, lo de siempre).
+    const montoAbono = r2(Number(abono.monto) || 0);
+    const exactosIds = new Set(cobroIds);
+    const posiblesParciales = pasarela
+      ? []
+      : cobros.filter(
+          (c) =>
+            !exactosIds.has(c.id as string) &&
+            netoDeCobro(
+              c.monto as number | string | null,
+              c.comision_banco_monto as number | string | null,
+            ) > montoAbono,
+        );
+    let conPuente: boolean | null = null;
+    let conParciales = false;
+    if (posiblesParciales.length > 0) {
+      conPuente = await this.cobrosLoteOn();
+      conParciales = conPuente && (await this.cobrosParcialesOn());
+    }
+    const parcialIds = conParciales
+      ? posiblesParciales.map((c) => c.id as string)
+      : [];
+    if (
+      cobroIds.length === 0 &&
+      sobreIds.length === 0 &&
+      parcialIds.length === 0
+    )
+      return 0;
     let ligados: MovimientoLiga[];
     try {
       ligados = await leerLigasDeCobros(sb, {
-        cobroIds,
+        cobroIds: [...cobroIds, ...parcialIds],
         sobreIds,
-        conPuente: await this.cobrosLoteOn(),
+        conPuente: conPuente ?? (await this.cobrosLoteOn()),
       });
     } catch {
       return null;
     }
     const ocupados = new Set<string>();
     for (const m of ligados) {
-      if (typeof m.cobro_id === 'string') ocupados.add(m.cobro_id);
       if (typeof m.cobro_grupo_id === 'string') ocupados.add(m.cobro_grupo_id);
+      // Sin la sonda de parciales, cualquier liga ocupa el cobro (0.0.77).
+      if (!conParciales && typeof m.cobro_id === 'string') {
+        ocupados.add(m.cobro_id);
+      }
     }
-    return [...cobroIds, ...sobreIds].filter((id) => !ocupados.has(id)).length;
+    if (!conParciales) {
+      return [...cobroIds, ...sobreIds].filter((id) => !ocupados.has(id))
+        .length;
+    }
+    // Con la sonda: la cobertura de cada cobro decide (`cobroParaCruce`):
+    // sin otros abonos cuenta si cuadra por neto/bruto; un parcial de banco,
+    // si lo que le falta es el abono al centavo.
+    const partes = partesDeLigas(ligados);
+    const porId = new Map(cobros.map((c) => [c.id as string, c]));
+    let libresCobro = 0;
+    for (const id of [...cobroIds, ...parcialIds]) {
+      const c = porId.get(id);
+      if (!c) continue;
+      const v = cobroParaCruce({ ...c, moneda }, partes.get(id) ?? [], null, {
+        conParciales: true,
+        pasarela: false,
+      });
+      if (!v.libre) continue;
+      const cuadra =
+        v.faltante == null
+          ? exacto('COBRO_VUELO', c)
+          : cuadraMontoAbono(
+              abono,
+              {
+                tipo: 'COBRO_VUELO',
+                id,
+                monto: Number(c.monto) || 0,
+                comision: Number(c.comision_banco_monto) || null,
+                fecha: '',
+                cliente: null,
+                cuenta_bancaria_id: null,
+                faltante: v.faltante,
+              },
+              false,
+            );
+      if (cuadra) libresCobro += 1;
+    }
+    return libresCobro + sobreIds.filter((id) => !ocupados.has(id)).length;
   }
 
   /**
@@ -14885,6 +15049,14 @@ export class ConciliacionService {
    * [min − 30, max + 30] — cobros positivos sin sobre ni anticipo, sobres,
    * ingresos vivos con cuenta —, paginados (PostgREST corta en 1000). Si
    * una lectura de candidatos falla o llega al tope, `completo = false`.
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): con la sonda de
+   * 20261014000003 un cobro está ocupado por su COBERTURA, no por «tener
+   * liga»: la puente (universo paginado por su llave completa, con el abono
+   * y su cuenta embebidos: `colsPuenteLigas`) da las partes y
+   * `cobroParaCruce` decide — cubierto, cruzado o «de un solo abono» ⇒
+   * ocupado; parcial de banco ⇒ libre con `faltante` (la MISMA regla del
+   * auto-cruce). Sin la sonda, cualquier liga ocupa (como el 0.0.77).
    */
   private async contextoAbonos(
     abonos: Array<Record<string, unknown>>,
@@ -15066,9 +15238,14 @@ export class ConciliacionService {
           TOPE_UNIVERSO * 3,
         ),
       ]);
+      // UN COBRO, VARIOS ABONOS (invariante 77): con la sonda de
+      // 20261014000003 el cobro se decide por su COBERTURA (abajo), no por
+      // su espejo `cobro_id`.
+      const conPuente = await this.cobrosLoteOn();
+      const conParciales = conPuente && (await this.cobrosParcialesOn());
       const ocupados = new Set<string>();
       for (const m of ligas.filas) {
-        if (typeof m.cobro_id === 'string')
+        if (!conParciales && typeof m.cobro_id === 'string')
           ocupados.add(`COBRO_VUELO:${m.cobro_id}`);
         if (typeof m.cobro_grupo_id === 'string')
           ocupados.add(`SOBRE_GRUPO:${m.cobro_grupo_id}`);
@@ -15079,28 +15256,52 @@ export class ConciliacionService {
       // espejo `cobro_id`; se leen de la puente (universo, paginado). Con
       // varios abonos por cobro (0.0.78, invariante 77) el orden va por la
       // PK completa (cobro_id, movimiento_id): solo por cobro_id las páginas
-      // podrían saltar o repetir filas.
-      if (await this.cobrosLoteOn()) {
+      // podrían saltar o repetir filas. Con la sonda de parciales, con
+      // `monto_parte` y el abono (cuenta) embebido para la cobertura.
+      let partesTruncadas = false;
+      let partesPorCobro = new Map<string, ParteCobroBanco[]>();
+      if (conPuente) {
         const partes = await this.leerPaginado(
           (a, b) =>
             sb
               .from('movimiento_bancario_cobro')
-              .select('cobro_id')
+              .select(
+                conParciales ? colsPuenteLigas(MOV_LIGA_COLS) : 'cobro_id',
+              )
               .order('cobro_id', { ascending: true })
               .order('movimiento_id', { ascending: true })
               .range(a, b),
           TOPE_UNIVERSO * 3,
         );
-        for (const p of partes.filas) {
-          if (typeof p.cobro_id === 'string')
-            ocupados.add(`COBRO_VUELO:${p.cobro_id}`);
+        partesTruncadas = partes.truncado;
+        if (conParciales) {
+          partesPorCobro = partesDeFilasPuente(partes.filas);
+        } else {
+          for (const p of partes.filas) {
+            if (typeof p.cobro_id === 'string')
+              ocupados.add(`COBRO_VUELO:${p.cobro_id}`);
+          }
         }
       }
+      /** ¿Libre (y por cuánto, si es parcial)? Sin la sonda: sin liga. */
+      const cruceDeCobro = (
+        c: Record<string, unknown>,
+      ): { libre: boolean; faltante: number | null } =>
+        conParciales
+          ? cobroParaCruce(c, partesPorCobro.get(c.id as string) ?? [], null, {
+              conParciales: true,
+              pasarela: false,
+            })
+          : {
+              libre: !ocupados.has(`COBRO_VUELO:${c.id as string}`),
+              faltante: null,
+            };
       const truncado =
         cobros.truncado ||
         sobres.truncado ||
         ingresos.truncado ||
-        ligas.truncado;
+        ligas.truncado ||
+        partesTruncadas;
       const lista: CandidatoAbonoLeido[] = [];
       for (const c of cobros.filas) {
         const vuelo = unwrapOne(
@@ -15116,6 +15317,7 @@ export class ConciliacionService {
           Number(c.comision_banco_monto) > 0
             ? r2(Number(c.comision_banco_monto))
             : null;
+        const cruce = cruceDeCobro(c);
         lista.push({
           tipo: 'COBRO_VUELO',
           id: c.id as string,
@@ -15137,7 +15339,8 @@ export class ConciliacionService {
           es_anticipo: false,
           descripcion: null,
           fecha_cobro: c.fecha_cobro as string,
-          libre: !ocupados.has(`COBRO_VUELO:${c.id as string}`),
+          libre: cruce.libre,
+          ...(cruce.faltante != null ? { faltante: cruce.faltante } : {}),
         });
       }
       for (const s of sobres.filas) {
@@ -15217,21 +15420,29 @@ export class ConciliacionService {
     return vacio;
   }
 
-  /** ¿El candidato cuadra EXACTO (r2) con el abono por neto o bruto? */
+  /**
+   * ¿El candidato cuadra EXACTO (r2) con el abono por neto o bruto? Un cobro
+   * PARCIAL (invariante 77), solo por lo que le falta.
+   */
   private montoExactoAbono(
     abono: { monto: number; monto_bruto: number | null },
     c: CandidatoAbonoLeido,
   ): boolean {
     const m = r2(abono.monto);
+    if (c.faltante != null) return r2(c.faltante) === m;
     if (r2(c.neto) === m || r2(c.monto) === m) return true;
     return abono.monto_bruto != null && r2(c.monto) === r2(abono.monto_bruto);
   }
 
-  /** |neto − abono| (o bruto vs monto_bruto en pasarela): el menor. */
+  /**
+   * |neto − abono| (o bruto vs monto_bruto en pasarela): el menor. Un cobro
+   * PARCIAL (invariante 77): |faltante − abono|.
+   */
   private difMontoAbono(
     abono: { monto: number; monto_bruto: number | null },
     c: CandidatoAbonoLeido,
   ): number {
+    if (c.faltante != null) return r2(Math.abs(c.faltante - abono.monto));
     let d = Math.min(
       Math.abs(c.neto - abono.monto),
       Math.abs(c.monto - abono.monto),
@@ -15289,11 +15500,16 @@ export class ConciliacionService {
     };
     // Candidatos MANUALES: libres, misma moneda, ±30 días; ingresos con
     // cuenta (los de otra cuenta viajan a la IA marcados, pero NO cuentan
-    // como «exactos» porque no se pueden ligar a este abono).
+    // como «exactos» porque no se pueden ligar a este abono). Un cobro
+    // PARCIAL (invariante 77) solo para un abono de BANCO: la pasarela no
+    // completa parciales.
     const manuales = moneda
       ? ctx.candidatos.filter(
           (c) =>
-            c.libre && c.moneda === moneda && dentro(c, VENTANA_MANUAL_DIAS),
+            c.libre &&
+            c.moneda === moneda &&
+            dentro(c, VENTANA_MANUAL_DIAS) &&
+            !(pasarela && c.faltante != null),
         )
       : [];
     const abonoCruce: AbonoCruce = {
@@ -15357,6 +15573,7 @@ export class ConciliacionService {
           .filter(
             (c) =>
               c.libre &&
+              c.faltante == null &&
               c.tipo !== 'INGRESO' &&
               c.moneda === moneda &&
               c.metodo != null &&
@@ -15457,7 +15674,10 @@ export class ConciliacionService {
     };
   }
 
-  /** Candidato leído ⇒ forma de la decisión única de abonos. */
+  /**
+   * Candidato leído ⇒ forma de la decisión única de abonos (un PARCIAL
+   * viaja con su faltante: cuadra SOLO por él, como en el auto-cruce).
+   */
   private aCandidatoCruceAbono(c: CandidatoAbonoLeido): CandidatoAbonoCruce {
     return {
       tipo: c.tipo,
@@ -15467,6 +15687,7 @@ export class ConciliacionService {
       fecha: c.fecha_cobro,
       cliente: c.cliente,
       cuenta_bancaria_id: c.cuenta_bancaria_id,
+      ...(c.faltante != null ? { faltante: c.faltante } : {}),
     };
   }
 
@@ -15679,9 +15900,12 @@ export class ConciliacionService {
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
     const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
-    // Candidatos por abono ordenados por (dif de monto, |días|).
+    // Candidatos por abono ordenados por (dif de monto, |días|). Los cobros
+    // PARCIALES (invariante 77) NO viajan a la IA en v1: su contrato no
+    // conoce el faltante (abajo se protege el anti doble conteo).
     const candidatosDe = (an: (typeof analisis)[number], tope: number) =>
-      [...an.manuales]
+      an.manuales
+        .filter((c) => c.faltante == null)
         .sort(
           (x, y) =>
             this.difMontoAbono(an.abono, x) - this.difMontoAbono(an.abono, y) ||
@@ -15800,6 +16024,35 @@ export class ConciliacionService {
         ) {
           // CLASIFICAR_* de la IA no traen candidato.
           candidato = null;
+        }
+        // UN COBRO, VARIOS ABONOS (invariante 77, D12): la IA no ve los
+        // cobros PARCIALES, pero si a uno le falta EXACTAMENTE este abono,
+        // ese dinero es (probablemente) su pago: ni «registrar como otro
+        // ingreso» ni ligarlo a un ingreso registrado, y ningún cobro exacto
+        // se elige solo entre él y el parcial (REVISAR sin preselección).
+        const parcialesExactos = an.manuales.filter(
+          (c) =>
+            c.faltante != null &&
+            c.tipo === 'COBRO_VUELO' &&
+            this.montoExactoAbono(a, c),
+        );
+        if (
+          parcialesExactos.length > 0 &&
+          (accion === 'REGISTRAR_INGRESO' ||
+            (accion === 'LIGAR' && candidato?.tipo === 'INGRESO'))
+        ) {
+          const otrosExactos = porAbono[idx].some(
+            (c) =>
+              c.tipo !== 'INGRESO' &&
+              permitidos.has(`${c.tipo}:${c.id}`) &&
+              this.montoExactoAbono(a, c),
+          );
+          accion = 'REVISAR';
+          candidato = null;
+          motivoSinMatch =
+            parcialesExactos.length === 1 && !otrosExactos
+              ? `Al cobro del vuelo #${parcialesExactos[0].folio ?? '?'} (pago parcial) le falta exactamente este monto: revísalo y vincula el abono a ese cobro`
+              : 'Hay varios cobros de vuelo que esperan exactamente este monto (al menos uno con pago parcial): revísalos y vincula el abono al que corresponda';
         }
         // Jamás «registrar como otro ingreso» dinero que ya tiene un cobro
         // de vuelo con el monto EXACTO: único ⇒ LIGAR (≤ 0.7); varios ⇒ REVISAR.

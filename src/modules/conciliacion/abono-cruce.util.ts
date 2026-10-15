@@ -16,6 +16,15 @@
  * comisión > 0 se compara el NETO (bruto − comisión), sin comisión el
  * BRUTO, igualdad a centavos (r2). En una cuenta PASARELA, además, el bruto
  * del candidato contra el `monto_bruto` del abono.
+ *
+ * UN COBRO, VARIOS ABONOS (14-oct-2026, API 0.0.78, invariante 77, D11): un
+ * cobro PARCIAL (ya tiene abonos que no lo cubren) compite en el MISMO
+ * universo, pero SOLO por lo que le FALTA (`faltante`, al centavo): el
+ * segundo SPEI de un pago en partes cuadra exacto con el faltante y es
+ * inequívoco; un cobro libre de OTRO cliente por el mismo monto lo empata
+ * ⇒ desempate por nombre o AMBIGUO, como siempre. Un parcial jamás cuadra
+ * «por neto/bruto» (su monto es el del cobro completo) y el auto-cruce
+ * nunca CREA un parcial: solo liga montos que cubren.
  */
 import { normalizarPlano, tokensTexto } from './auto-cruce.util';
 
@@ -33,6 +42,12 @@ export interface CandidatoAbonoCruce {
   cliente: string | null;
   /** Solo INGRESO: la cuenta donde se registró (null en cobros/sobres). */
   cuenta_bancaria_id: string | null;
+  /**
+   * Solo COBRO_VUELO PARCIAL (0.0.78, invariante 77, D11): lo que le FALTA
+   * fuera de este abono (`faltanteFueraDe`). Ausente o null = cobro sin
+   * abonos: cuadra por neto/bruto, como siempre.
+   */
+  faltante?: number | null;
 }
 
 export interface AbonoCruce {
@@ -51,12 +66,18 @@ function r2(x: number): number {
  * ¿El candidato cuadra con el abono? MISMA regla que el auto-cruce de
  * siempre (con comisión el NETO, sin comisión el BRUTO, igualdad r2) y, en
  * pasarela, también el bruto del candidato contra el `monto_bruto` del abono.
+ * Un cobro PARCIAL (`faltante` != null, invariante 77) cuadra SOLO si lo que
+ * le falta es el abono al centavo: ni por neto ni por bruto.
  */
 export function cuadraMontoAbono(
   abono: AbonoCruce,
   c: CandidatoAbonoCruce,
   pasarela: boolean,
 ): boolean {
+  if (c.faltante != null) {
+    const falta = r2(Number(c.faltante) || 0);
+    return falta > 0 && falta === r2(Number(abono.monto) || 0);
+  }
   const bruto = Number(c.monto) || 0;
   const comision = Number(c.comision) || 0;
   const monto = Number(abono.monto) || 0;
@@ -94,7 +115,11 @@ export function empataNombre(
 
 export interface EleccionAbono {
   elegido: CandidatoAbonoCruce | null;
-  criterio: 'MONTO_EXACTO' | 'DESCRIPCION' | null;
+  /**
+   * FALTANTE (0.0.78, invariante 77): el único que cuadra es un cobro
+   * PARCIAL por lo que le falta (con ≥ 2, el nombre desempata: DESCRIPCION).
+   */
+  criterio: 'MONTO_EXACTO' | 'DESCRIPCION' | 'FALTANTE' | null;
   motivo: 'SIN_CANDIDATOS' | 'AMBIGUO' | null;
   /** Candidatos que cuadran por monto (antes del desempate). */
   candidatos_n: number;
@@ -105,7 +130,8 @@ export interface EleccionAbono {
  * universo). Recibe candidatos LIBRES (no ligados a otro movimiento):
  *  1) filtra por monto (`cuadraMontoAbono`); un INGRESO además exige estar
  *     registrado en la MISMA cuenta del abono;
- *  2) 0 ⇒ SIN_CANDIDATOS; 1 ⇒ MONTO_EXACTO;
+ *  2) 0 ⇒ SIN_CANDIDATOS; 1 ⇒ MONTO_EXACTO (FALTANTE si es un cobro
+ *     PARCIAL que cuadra por lo que le falta, invariante 77);
  *  3) ≥ 2 ⇒ los que empatan nombre con la descripción: exactamente 1 ⇒
  *     DESCRIPCION; si no, AMBIGUO (se queda pendiente, jamás a la brava).
  */
@@ -132,7 +158,7 @@ export function elegirCandidatoAbono(
   if (n === 1) {
     return {
       elegido: cuadran[0],
-      criterio: 'MONTO_EXACTO',
+      criterio: cuadran[0].faltante != null ? 'FALTANTE' : 'MONTO_EXACTO',
       motivo: null,
       candidatos_n: 1,
     };

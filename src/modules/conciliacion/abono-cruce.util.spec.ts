@@ -247,3 +247,87 @@ describe('posibleDuplicado — el par REAL del 03-sep (36,456.58)', () => {
     expect(posibleDuplicado(lineas[3], lineas)).toBeNull();
   });
 });
+
+describe('UN COBRO, VARIOS ABONOS — un cobro PARCIAL compite por su FALTANTE (0.0.78, invariante 77, D11)', () => {
+  // #315 de Beh Kay: $3,400 con un SPEI previo de $1,700 ⇒ le faltan $1,700.
+  const parcial = (extra: Partial<CandidatoAbonoCruce> = {}) =>
+    cand('c315', 3400, {
+      faltante: 1700,
+      cliente: 'Beh Kay',
+      ...extra,
+    });
+
+  it('cuadra SOLO si el faltante es el abono al centavo (1,699.99 no)', () => {
+    expect(cuadraMontoAbono(abono(1700), parcial(), false)).toBe(true);
+    expect(cuadraMontoAbono(abono(1699.99), parcial(), false)).toBe(false);
+    expect(cuadraMontoAbono(abono(1700.01), parcial(), false)).toBe(false);
+  });
+
+  it('un parcial jamás cuadra «por neto/bruto» aunque su monto sea el abono (ni por el bruto de la pasarela)', () => {
+    const c = parcial({ monto: 1700, faltante: 900 });
+    expect(cuadraMontoAbono(abono(1700), c, false)).toBe(false);
+    expect(cuadraMontoAbono(abono(1500, { monto_bruto: 1700 }), c, true)).toBe(
+      false,
+    );
+    // faltante 0 (o negativo) nunca cuadra con nada.
+    expect(cuadraMontoAbono(abono(0), parcial({ faltante: 0 }), false)).toBe(
+      false,
+    );
+  });
+
+  it('faltante null o ausente = cobro sin abonos: la regla de siempre byte a byte', () => {
+    const c = cand('c', 20400, { comision: 1020, faltante: null });
+    expect(cuadraMontoAbono(abono(19380), c, false)).toBe(true);
+    expect(cuadraMontoAbono(abono(20400), c, false)).toBe(false);
+  });
+
+  it('2.º SPEI de Beh Kay: el parcial único ⇒ criterio FALTANTE', () => {
+    const r = elegirCandidatoAbono(
+      abono(1700),
+      [parcial(), cand('c-otro', 3400)],
+      false,
+    );
+    expect(r).toEqual({
+      elegido: parcial(),
+      criterio: 'FALTANTE',
+      motivo: null,
+      candidatos_n: 1,
+    });
+  });
+
+  it('el parcial y un cobro LIBRE de $1,700 de otro cliente ⇒ AMBIGUO; el nombre del ordenante desempata (DESCRIPCION)', () => {
+    const libre = cand('c-villa', 1700, { cliente: 'Villanueva' });
+    expect(
+      elegirCandidatoAbono(abono(1700), [parcial(), libre], false),
+    ).toEqual({
+      elegido: null,
+      criterio: null,
+      motivo: 'AMBIGUO',
+      candidatos_n: 2,
+    });
+    const porBehKay = elegirCandidatoAbono(
+      abono(1700, { descripcion: 'SPEI BEH KAY SA DE CV CAMIONETAS' }),
+      [parcial(), libre],
+      false,
+    );
+    expect(porBehKay.elegido?.id).toBe('c315');
+    expect(porBehKay.criterio).toBe('DESCRIPCION');
+    const porVilla = elegirCandidatoAbono(
+      abono(1700, { descripcion: 'SPEI VILLANUEVA PAGO' }),
+      [parcial(), libre],
+      false,
+    );
+    expect(porVilla.elegido?.id).toBe('c-villa');
+    expect(porVilla.criterio).toBe('DESCRIPCION');
+  });
+
+  it('el lote de $69,000: el cobro de $30,000 con $11,999 previos cuadra con $18,001 (FALTANTE), no con $30,000', () => {
+    const c = cand('c278', 30000, { faltante: 18001 });
+    expect(elegirCandidatoAbono(abono(18001), [c], false).criterio).toBe(
+      'FALTANTE',
+    );
+    expect(elegirCandidatoAbono(abono(30000), [c], false).motivo).toBe(
+      'SIN_CANDIDATOS',
+    );
+  });
+});

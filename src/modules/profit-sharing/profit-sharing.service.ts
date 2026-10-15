@@ -3443,8 +3443,14 @@ export class ProfitSharingService {
       {
         clave: 'cobros_bancarios_sin_conciliar',
         titulo: 'Cobros bancarios sin conciliar al corte',
+        // UN COBRO, VARIOS ABONOS (0.0.78, invariante 77, D14): «Cobros sin
+        // banco» ya cuenta los cobros PARCIALES (abonos que no los cubren);
+        // con alguno, el detalle explica qué es un parcial.
         detalle:
-          'Transferencia, HSBC link, cheque o Paywise sin cruzar con ningún abono importado: importa el estado de cuenta (o el de Paywise → Auditoría Paywise) y concilia. Un cobro que nunca llegó al banco es dinero que se cree cobrado.',
+          'Transferencia, HSBC link, cheque o Paywise sin cruzar con ningún abono importado: importa el estado de cuenta (o el de Paywise → Auditoría Paywise) y concilia. Un cobro que nunca llegó al banco es dinero que se cree cobrado.' +
+          ((cobrosSinBanco?.parciales ?? 0) > 0
+            ? ' Un cobro «parcial» ya tiene parte en el banco: falta vincular el resto.'
+            : ''),
         count: cobrosSinBanco?.total ?? 0,
         cobros: (cobrosSinBanco?.data ?? []).map((c) => ({
           tipo: c.tipo,
@@ -3455,9 +3461,16 @@ export class ProfitSharingService {
           monto: c.monto,
           moneda: c.moneda,
           metodo_cobro: c.metodo_cobro ?? null,
+          // ADITIVOS (0.0.78, invariante 77): lo que ya vinculó el banco y
+          // lo que falta (sin abonos: su neto), de `cobrosSinBanco`.
+          parcial: c.parcial === true,
+          faltante: c.faltante,
+          monto_vinculado: c.monto_vinculado,
         })),
         por_moneda: cobrosSinBanco?.por_moneda ?? [],
         paywise: cobrosPaywiseSinBanco.length,
+        // ADITIVO (0.0.78): cuántos de `count` son cobros PARCIALES.
+        parciales: cobrosSinBanco?.parciales ?? 0,
       },
       {
         clave: 'pistas_sin_gasto',

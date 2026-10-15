@@ -303,6 +303,18 @@ export function partesDeLigas(
 }
 
 /**
+ * Filas CRUDAS de la puente leídas con `colsPuenteLigas(...)` ⇒ las partes de
+ * cada cobro (la MISMA conversión que `leerPartesDeCobros`). Para quien lee
+ * el UNIVERSO de la puente paginado por su cuenta (`contextoAbonos`, la
+ * única excepción de la regla del lector).
+ */
+export function partesDeFilasPuente(
+  filas: ReadonlyArray<Record<string, unknown>>,
+): Map<string, ParteCobroBanco[]> {
+  return partesDeLigas(ligasDePuente([...filas]));
+}
+
+/**
  * Partes de la PUENTE de estos cobros (TODAS sus ligas, de cualquier abono),
  * con el mismo select y la misma paginación que `leerLigasDeCobros`. Quien
  * llama YA sondeó `cobrosLoteDisponibles` (nombra la puente). Cobros sin

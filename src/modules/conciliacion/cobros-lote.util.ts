@@ -12,6 +12,7 @@
  */
 import {
   alVincularAbono,
+  cobroDeUnSoloAbono,
   coberturaCobro,
   cubreCobro,
   EPSILON_COBRO_BANCO,
@@ -645,6 +646,52 @@ export function cobroOcupadoParaAbono(
   return f.cubierto_por_otras || f.cruzado_otras || opts.pasarela;
 }
 
+/** Cómo entra un cobro de vuelo al universo AUTOMÁTICO de un abono. */
+export interface CobroParaCruce {
+  /** false = ocupado para este abono (no es candidato del auto). */
+  libre: boolean;
+  /**
+   * Cobro PARCIAL: lo que le FALTA fuera de este abono (solo cuadra por ese
+   * monto exacto). null = sin otros abonos (cuadra por neto/bruto).
+   */
+  faltante: number | null;
+}
+
+/**
+ * ¿Cómo entra un cobro al universo del AUTO-CRUCE de un abono (D11) y de los
+ * frenos anti doble conteo (D12: `cobrosExactosLibresDeAbono`, Ingresos)?
+ * (invariante 77). Sobre `cobroOcupadoParaAbono` (la MISMA regla de los
+ * candidatos y los sugeridos):
+ * - sin otros abonos ⇒ libre, `faltante: null` (neto/bruto, como siempre);
+ * - ocupado para «Vincular» (sin la sonda de 20261014000003: cualquier otro
+ *   abono; con ella: cubierto, con un abono en otra moneda, o este abono
+ *   es de la PASARELA, que no recibe parciales) ⇒ ocupado;
+ * - parcial «de un solo abono» (`cobroDeUnSoloAbono`: comisión capturada,
+ *   método o abono de la pasarela) ⇒ ocupado: no admite otro abono (el
+ *   trigger A lo rechaza; con el método PAYWISE, el auto no adivina);
+ * - parcial de BANCO ⇒ libre con `faltante` = lo que le falta FUERA de este
+ *   abono (`faltanteFueraDe`). Quien llama solo lo liga si el abono es
+ *   EXACTAMENTE ese faltante: el auto nunca crea un parcial.
+ * `movimientoId` null = un abono sin ligas (nada que excluir).
+ */
+export function cobroParaCruce(
+  c: CobroParaCobertura & { metodo_cobro?: unknown },
+  partes: ReadonlyArray<ParteCobroBanco>,
+  movimientoId: string | null,
+  opts: { conParciales: boolean; pasarela: boolean },
+): CobroParaCruce {
+  const movId = movimientoId ?? '';
+  const f = faltanteFueraDe(c, partes, movId);
+  if (f.n_otras === 0) return { libre: true, faltante: null };
+  if (
+    cobroOcupadoParaAbono(c, partes, movId, opts) ||
+    cobroDeUnSoloAbono(c, f.otras)
+  ) {
+    return { libre: false, faltante: null };
+  }
+  return { libre: true, faltante: f.faltante };
+}
+
 /** Lo que el API decide al vincular un abono con un SOBRE de grupo (D8). */
 export interface AlVincularSobre {
   estado: 'CONCILIADO' | 'SOBRE_NO_CUADRA';
@@ -1101,6 +1148,65 @@ export function mensajeSobreNoCuadra(d: {
     `(${dinero(d.neto_sobre, m)}${d.con_comision === true ? ' después de la comisión' : ''}): ` +
     `${faltan ? 'faltan' : 'sobran'} ${dinero(Math.abs(d.diferencia), m)}. ` +
     'Revisa que sea el depósito del grupo o corrige el sobre antes de vincular.'
+  );
+}
+
+/**
+ * 409 COMISION_NO_CUADRA de «Es el pago de un vuelo» (Ingresos, invariante
+ * 77): el cobro que se iba a registrar con su comisión NO se podría ligar a
+ * su abono (un cobro con comisión o pagado por la pasarela se concilia con
+ * UN depósito = su neto ± $1.00). Se dice ANTES de crearlo.
+ */
+export function mensajeComisionAlRegistrarCobro(d: {
+  moneda?: string | null;
+  comision_capturada: number;
+  neto: number;
+  parte: number;
+  comision_real: number;
+}): string {
+  const m = d.moneda ?? null;
+  const esperado =
+    d.comision_capturada > 0
+      ? `Con la comisión de ${dinero(d.comision_capturada)} el banco tendría que haber depositado ${dinero(d.neto, m)}`
+      : `Sin comisión el depósito tendría que ser de ${dinero(d.neto, m)}`;
+  const real =
+    d.comision_real > 0.01
+      ? `la comisión real es ${dinero(d.comision_real)}. Captura esa comisión`
+      : 'el banco no descontó comisión. Déjala en 0';
+  return (
+    `${esperado}, pero depositó ${dinero(d.parte, m)}: ${real} y vuelve a registrar el pago ` +
+    '(un cobro con comisión se concilia con un depósito igual a su neto).'
+  );
+}
+
+/**
+ * 409 ABONO_TIENE_COBRO_CANDIDATO de Ingresos cuando el candidato es un
+ * cobro PARCIAL (invariante 77, D12): el abono cuadra con lo que le FALTA,
+ * así que es su pago — ni «otro ingreso» (`destino` INGRESO) ni un cobro
+ * nuevo del vuelo (`destino` COBRO, «Es el pago de un vuelo»).
+ */
+export function mensajeAbonoDeCobroParcial(
+  d: {
+    folio?: unknown;
+    moneda?: string | null;
+    monto: number;
+    monto_vinculado: number;
+    abonos_n: number;
+    faltante: number;
+  },
+  destino: 'INGRESO' | 'COBRO',
+): string {
+  const n = Math.max(1, Math.trunc(Number(d.abonos_n) || 0));
+  const ya =
+    n === 1
+      ? `un abono de ${dinero(d.monto_vinculado)}`
+      : `${n} abonos por ${dinero(d.monto_vinculado)}`;
+  return (
+    `El cobro del vuelo #${textoDe(d.folio)} (${dinero(d.monto, d.moneda ?? null)}) ya tiene ` +
+    `${ya} y le faltan ${dinero(d.faltante)}: vincula este abono a ese cobro en vez de ` +
+    (destino === 'INGRESO'
+      ? 'registrarlo como ingreso.'
+      : 'registrar otro cobro.')
   );
 }
 

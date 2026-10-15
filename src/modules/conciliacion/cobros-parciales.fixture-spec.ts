@@ -59,6 +59,8 @@ export interface OperacionRegistrada {
   op: 'select' | 'update' | 'insert' | 'delete' | 'rpc';
   sel: string;
   cuerpo?: Row;
+  /** Solo SELECT: el `order` pedido (columna, ascendente), en orden. */
+  orden?: Array<[string, boolean]>;
 }
 
 /** Columnas de migraciones que estos specs NO tienen (como los demás specs de cobros). */
@@ -974,6 +976,7 @@ export function fakeCobrosParciales(
           op,
           sel,
           ...(op === 'update' || op === 'insert' ? { cuerpo } : {}),
+          ...(op === 'select' ? { orden: [...orden] } : {}),
         };
         log.push(registro);
         if (prohibido) {
@@ -1102,6 +1105,45 @@ export function fakeCobrosParciales(
           marcar(col);
           if (o === 'is' && val === null)
             filtros.push((r) => (r[col] ?? null) !== null);
+          return api;
+        },
+        /**
+         * `or` de PostgREST con condiciones `col.[not.]is.null|true|false`
+         * y `col.[not.]eq.valor` (lo que piden «Por conciliar» y la IA).
+         */
+        or(expr: string) {
+          const partes: string[] = [];
+          let nivel = 0;
+          let actual = '';
+          for (const ch of expr) {
+            if (ch === '(') nivel += 1;
+            if (ch === ')') nivel -= 1;
+            if (ch === ',' && nivel === 0) {
+              partes.push(actual);
+              actual = '';
+              continue;
+            }
+            actual += ch;
+          }
+          if (actual) partes.push(actual);
+          const conds = partes.map((c) => {
+            const m = /^([a-z_]+)\.(not\.)?(is|eq)\.(.+)$/.exec(c.trim());
+            if (!m) throw new Error(`or() no soportado en el fixture: ${c}`);
+            const [, col, neg, op, crudo] = m;
+            marcar(col);
+            const val =
+              crudo === 'null'
+                ? null
+                : crudo === 'true'
+                  ? true
+                  : crudo === 'false'
+                    ? false
+                    : crudo;
+            const base = (r: Row): boolean =>
+              op === 'is' ? (r[col] ?? null) === val : txt(r[col]) === crudo;
+            return neg ? (r: Row) => !base(r) : base;
+          });
+          filtros.push((r) => conds.some((f) => f(r)));
           return api;
         },
         ilike(col: string, patron: string) {

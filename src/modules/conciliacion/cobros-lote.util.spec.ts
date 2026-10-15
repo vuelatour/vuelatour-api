@@ -1,6 +1,7 @@
 import {
   alVincularSobre,
   cobroOcupadoParaAbono,
+  cobroParaCruce,
   comisionRealParaCorregir,
   CODIGOS_ERROR_COBROS,
   diferenciaLoteCobros,
@@ -9,11 +10,13 @@ import {
   leerErrorCobros,
   ligasDesdePartes,
   LOTE_COBROS_MAX,
+  mensajeAbonoDeCobroParcial,
   mensajeAbonoExcedeCobro,
   mensajeAbonoNoCuadra,
   mensajeCobroConciliado,
   mensajeCobroMonedaDistinta,
   mensajeCobroYaCubierto,
+  mensajeComisionAlRegistrarCobro,
   mensajeComisionNoCuadra,
   mensajeCorregirComisionNoAplica,
   mensajeErrorCobros,
@@ -1230,6 +1233,139 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
         pasarela: true,
       }),
     ).toBe(true);
+  });
+
+  it('cobroParaCruce (D11/D12): sin abonos ⇒ libre por neto/bruto; parcial de BANCO ⇒ libre por su faltante; cubierto, cruzado, pasarela o «de un solo abono» ⇒ ocupado', () => {
+    const c = { monto: 3400, moneda: 'MXN', metodo_cobro: 'TRANSFERENCIA' };
+    const con = { conParciales: true, pasarela: false };
+    expect(cobroParaCruce(c, [], null, con)).toEqual({
+      libre: true,
+      faltante: null,
+    });
+    // Beh Kay: un SPEI de 1,700 ⇒ le faltan 1,700.
+    expect(cobroParaCruce(c, [parteDe('m1', 1700)], null, con)).toEqual({
+      libre: true,
+      faltante: 1700,
+    });
+    // Su PROPIA parte no cuenta (re-liga idéntica).
+    expect(cobroParaCruce(c, [parteDe('m2', 1700)], 'm2', con)).toEqual({
+      libre: true,
+      faltante: null,
+    });
+    // Cubierto (dentro de $1.00) o con un abono en otra moneda ⇒ ocupado.
+    expect(cobroParaCruce(c, [parteDe('m1', 3399)], null, con).libre).toBe(
+      false,
+    );
+    expect(
+      cobroParaCruce(
+        c,
+        [parteDe('m1', 100, { moneda_cuenta: 'USD' })],
+        null,
+        con,
+      ).libre,
+    ).toBe(false);
+    // Un abono de la PASARELA no completa parciales.
+    expect(
+      cobroParaCruce(c, [parteDe('m1', 1700)], null, {
+        conParciales: true,
+        pasarela: true,
+      }).libre,
+    ).toBe(false);
+    // «De un solo abono»: comisión capturada, método Paywise o un abono
+    // previo de la pasarela.
+    expect(
+      cobroParaCruce(
+        { ...c, comision_banco_monto: 250 },
+        [parteDe('m1', 1700)],
+        null,
+        con,
+      ).libre,
+    ).toBe(false);
+    expect(
+      cobroParaCruce(
+        { ...c, metodo_cobro: 'PAYWISE' },
+        [parteDe('m1', 1700)],
+        null,
+        con,
+      ).libre,
+    ).toBe(false);
+    expect(
+      cobroParaCruce(c, [parteDe('m1', 1700, { pasarela: true })], null, con)
+        .libre,
+    ).toBe(false);
+    // Sin la sonda de 20261014000003: cualquier otro abono ocupa (0.0.77).
+    expect(
+      cobroParaCruce(c, [parteDe('m1', 1700)], null, {
+        conParciales: false,
+        pasarela: false,
+      }),
+    ).toEqual({ libre: false, faltante: null });
+    // El lote de $69,000: $30,000 con $11,999 previos ⇒ le faltan $18,001.
+    expect(
+      cobroParaCruce(
+        { monto: 30000, moneda: 'MXN', metodo_cobro: 'TRANSFERENCIA' },
+        [parteDe('m-previo', 11999)],
+        null,
+        con,
+      ),
+    ).toEqual({ libre: true, faltante: 18001 });
+  });
+
+  it('mensajeAbonoDeCobroParcial: el 409 de Ingresos dice cuánto le falta al cobro (otro ingreso / otro cobro)', () => {
+    const d = {
+      folio: 315,
+      moneda: 'MXN',
+      monto: 3400,
+      monto_vinculado: 1700,
+      abonos_n: 1,
+      faltante: 1700,
+    };
+    expect(mensajeAbonoDeCobroParcial(d, 'INGRESO')).toBe(
+      'El cobro del vuelo #315 ($3,400.00 MXN) ya tiene un abono de $1,700.00 y le faltan $1,700.00: vincula este abono a ese cobro en vez de registrarlo como ingreso.',
+    );
+    expect(mensajeAbonoDeCobroParcial(d, 'COBRO')).toBe(
+      'El cobro del vuelo #315 ($3,400.00 MXN) ya tiene un abono de $1,700.00 y le faltan $1,700.00: vincula este abono a ese cobro en vez de registrar otro cobro.',
+    );
+    expect(
+      mensajeAbonoDeCobroParcial(
+        {
+          ...d,
+          folio: null,
+          monto: 30000,
+          monto_vinculado: 11999,
+          abonos_n: 2,
+          faltante: 18001,
+        },
+        'INGRESO',
+      ),
+    ).toBe(
+      'El cobro del vuelo #? ($30,000.00 MXN) ya tiene 2 abonos por $11,999.00 y le faltan $18,001.00: vincula este abono a ese cobro en vez de registrarlo como ingreso.',
+    );
+  });
+
+  it('mensajeComisionAlRegistrarCobro: «Es el pago de un vuelo» con una comisión que el banco no descontó (o sin la real de la pasarela)', () => {
+    expect(
+      mensajeComisionAlRegistrarCobro({
+        moneda: 'MXN',
+        comision_capturada: 250,
+        neto: 4750,
+        parte: 5000,
+        comision_real: 0,
+      }),
+    ).toBe(
+      'Con la comisión de $250.00 el banco tendría que haber depositado $4,750.00 MXN, pero depositó $5,000.00 MXN: el banco no descontó comisión. Déjala en 0 y vuelve a registrar el pago (un cobro con comisión se concilia con un depósito igual a su neto).',
+    );
+    expect(
+      mensajeComisionAlRegistrarCobro({
+        moneda: 'MXN',
+        comision_capturada: 0,
+        neto: 10000,
+        parte: 9000,
+        comision_real: 1000,
+      }),
+    ).toBe(
+      'Sin comisión el depósito tendría que ser de $10,000.00 MXN, pero depositó $9,000.00 MXN: la comisión real es $1,000.00. Captura esa comisión y vuelve a registrar el pago (un cobro con comisión se concilia con un depósito igual a su neto).',
+    );
   });
 
   it('alVincularSobre + mensajeSobreNoCuadra: banco en la moneda del sobre ⇒ neto ± 1.00; pasarela u otra moneda, como hoy', () => {
