@@ -10201,7 +10201,9 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   con filas marcadas dentro de un `begin … rollback` da `1 · 1 · 0`: sí
   detecta) ⇒ un 2.º abono al parcial ⇒ §9 lo lista y `99` aborta ⇒
   desligado ⇒ §9 0 filas y `99` `COMMIT` con los md5 de prod ⇒ `02` y `03`
-  otra vez OK.
+  otra vez OK. Re-corrido OTRA vez en la verificación final del lote
+  (15-oct-2026, réplica nueva): todo igual; el detalle va al final del
+  bullet siguiente.
 - **ORDEN DE DESPLIEGUE 0.0.78 (15-oct-2026: un cobro con varios abonos,
   detalle de «Conciliado» en Ingresos y columna «Avión» del Excel de gastos;
   UN solo despliegue: manda sobre el «Procedimiento» del bullet anterior).**
@@ -10216,10 +10218,12 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      candados) · `045a7b53` (auto-cruce, Paywise e Ingresos) · `2ebf915c`
      («Cobrado de más») · `7fe1a0ea` (detalle de «Conciliado» en Ingresos,
      inv. 78) · `a0616798` (columna «Avión» del Excel de gastos, inv. 71) ·
-     «Versión 0.0.78» (`6b29b614`) · «Revisión: …» (los hallazgos del
-     15-oct-2026: «Corregir la comisión» solo con COMISION_NO_CUADRA, Paywise
-     sin escritura que no cuadre, frenos con la regla de A, sonda estricta de
-     la hoja, `cobrado_de_mas` omitido si no se pudo verificar). Después `GET
+     «Versión 0.0.78» (`6b29b614`) · «Revisión: …» (`cf60c4f7`, los
+     hallazgos del 15-oct-2026: «Corregir la comisión» solo con
+     COMISION_NO_CUADRA, Paywise sin escritura que no cuadre, frenos con la
+     regla de A, sonda estricta de la hoja, `cobrado_de_mas` omitido si no se
+     pudo verificar) · «Verificación: …» (solo este CLAUDE.md: el registro
+     al final de este bullet). Después `GET
      https://vuelatour-api-production.up.railway.app/v1/version` = `0.0.78`
      (nunca un health). Sin la migración (estado intermedio normal): estados y
      parciales visibles (salen de la puente), «Cobrado de más» completo y la
@@ -10284,9 +10288,34 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   Editor, con confirmación) y después se reinicia el API. Los mensajes de los
   commits de paso del lote NO registran sus corridas de `tsc`, eslint y jest
   (solo listan los specs que agregan); las de la revisión del 15-oct-2026
-  van en su commit «Revisión: …» y la verificación COMPLETA del lote (los dos
-  tsconfig, eslint sin --fix contra `527560b0` y jest completo) la agrega su
-  commit «Verificación: …».
+  van en su commit «Revisión: …» y la verificación COMPLETA del lote, aquí
+  (commit «Verificación: …»). Verificado en local el 15-oct-2026 (API,
+  `527560b0..HEAD`, worktree propio): `tsc --noEmit` limpio (también con
+  `tsconfig.build.json`, el del build de Railway); eslint (sin --fix) de los
+  60 `.ts` cambiados (30 nuevos): 69 errores y 5 avisos, idénticos
+  (archivo, regla, mensaje y renglón de código) a `527560b0` (expenses 5,
+  flights 64 + 5; 0 nuevos; los otros 58, limpios); jest `--maxWorkers=2`
+  completo: 346 suites / 5,899 pruebas, 0 fallos y 0 saltadas con el panel
+  junto (`VUELATOUR_NEXT_DIR`; sin el repo hermano —CI, Railway, un
+  worktree suelto— las 6 de `gasto-avion.paridad.spec` se saltan por
+  diseño); en `527560b0`: 326 / 5,509, 0 fallos; 4 cambiaron de nombre a
+  propósito por la invariante 77 («UN cobro: parte = |abono|», «otra
+  moneda dentro de un lote», `partesDeAbonos` paginada y «un cobro de un
+  LOTE se ve ligado») y hay 394 nuevas. Paquete de `20261014000003`
+  regenerado con `armar.py --fecha 15-oct-2026`: los 6 archivos, byte a
+  byte los de `docs/` (md5 del README); el archivo (md5
+  `9e6baebd279ebf261b16a636b2d809f1`) va entero en `02` y su CUERPO, TAL
+  CUAL en `01`. En una réplica NUEVA (PostgreSQL 17.2, `reconstruir.sh`,
+  puerto propio, detenida al terminar): `00` (4 md5 = prod; §4 `0 · 0 · 0 ·
+  0 · 1 · 1 · 0 · 1`) ⇒ `01` `DRYRUN_OK … T1–T17` con la foto idéntica
+  antes y después ⇒ `02` `COMMIT` (datos intactos; los 7 `md5(prosrc)` del
+  README) ⇒ `03` `POSTCHECK_OK … T1–T16` sin residuos ⇒ `03b` (§8 `0 · 0 ·
+  0`, §9 0 filas) ⇒ `99` `COMMIT` con la foto IGUAL a la de antes de la
+  migración (datos, funciones con ACL, índices, triggers, vistas,
+  comentario e historial) ⇒ `02` y `03` otra vez OK; `01` con la migración
+  aplicada ⇒ `DRYRUN_FALLA A`; un 2.º abono al parcial ⇒ §9 lo lista y
+  `99` ⇒ `REVERSA_ABORTADA` sin cambios; desligado ⇒ `99` `COMMIT` con la
+  foto de antes.
 
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
