@@ -603,3 +603,119 @@ describe('«Es el pago de un vuelo» — anti doble conteo por faltante y la com
     );
   });
 });
+
+describe('El freno ofrece un cobro que cuadra por BRUTO con comisión capturada: su liga directa rebotaría (revisión del 15-oct-2026)', () => {
+  const V374 = 'f0000000-0000-4000-8000-000000000374';
+  const C374 = 'b0000000-0000-4000-8000-000000000374';
+  const M14600 = 'a0000000-0000-4000-8000-000000014600';
+  const M13870 = 'a0000000-0000-4000-8000-000000013870';
+
+  /** #374: TRANSFERENCIA de $14,600 con $730 de comisión (neto $13,870). */
+  function mundo374(): Tablas {
+    const db = mundo();
+    db.cliente.push({ id: 'k-maqar', nombre: 'Maqar', activo: true });
+    db.vuelo.push({
+      id: V374,
+      folio: 374,
+      estado: 'COMPLETADO',
+      fecha_vuelo: '2026-09-15T14:00:00Z',
+      cliente_id: 'k-maqar',
+    });
+    db.cobro_vuelo.push({
+      id: C374,
+      vuelo_id: V374,
+      monto: 14600,
+      moneda: 'MXN',
+      metodo_cobro: 'TRANSFERENCIA',
+      comision_banco_monto: 730,
+      fecha_cobro: '2026-09-15T17:00:00Z',
+      cobro_grupo_id: null,
+      ingreso_anticipo_id: null,
+      client_request_id: null,
+    });
+    db.movimiento_bancario.push(abono(M14600, 14600), abono(M13870, 13870));
+    return db;
+  }
+
+  it('«otro ingreso» con el bruto ⇒ 409 que pide corregir la comisión (no un «vincúlalo» que rebota) y el candidato con su veredicto', async () => {
+    const { svc } = armar(mundo374());
+    const r = await error(
+      svc.crear(otroIngreso(M14600, 14600), undefined, ADMIN),
+    );
+    expect(r.code).toBe('ABONO_TIENE_COBRO_CANDIDATO');
+    expect(r.message).toBe(
+      'Este abono cuadra con el monto del cobro del vuelo #374 (Maqar), pero ese cobro tiene registrada una comisión de $730.00 y espera un depósito de $13,870.00 MXN; el banco depositó $14,600.00 MXN, así que la comisión real fue $0.00. Si es su pago, corrige la comisión del cobro y vincúlalo. Si de verdad es otro dinero, confírmalo.',
+    );
+    const candidatos = (r.details as { candidatos: Row[] }).candidatos;
+    expect(candidatos).toEqual([
+      expect.objectContaining({
+        id: C374,
+        monto: 14600,
+        neto: 13870,
+        liga_no_cuadra: 'COMISION_NO_CUADRA',
+        comision_real: 0,
+      }),
+    ]);
+  });
+
+  it('control: el NETO exacto ⇒ el 409 de siempre («vincúlalo a ese cobro») y el candidato sin veredicto', async () => {
+    const { svc } = armar(mundo374());
+    const r = await error(
+      svc.crear(otroIngreso(M13870, 13870), undefined, ADMIN),
+    );
+    expect(r.code).toBe('ABONO_TIENE_COBRO_CANDIDATO');
+    expect(r.message).toBe(
+      'Este abono cuadra con el cobro del vuelo #374 (Maqar): vincúlalo a ese cobro. Si de verdad es otro dinero, confírmalo.',
+    );
+    const c = (r.details as { candidatos: Row[] }).candidatos[0];
+    expect(c).toMatchObject({ id: C374 });
+    expect(c).not.toHaveProperty('liga_no_cuadra');
+    expect(c).not.toHaveProperty('comision_real');
+  });
+
+  it('«Es el pago de un vuelo» con el bruto ⇒ el mismo aviso («en vez de registrar otro»), nada creado', async () => {
+    const { svc, flights, conciliacion } = armar(mundo374());
+    const r = await error(
+      svc.cobroDeVueloDesdeAbono(
+        M14600,
+        { vuelo_id: V374, client_request_id: LLAVE },
+        ADMIN,
+      ),
+    );
+    expect(r.code).toBe('ABONO_TIENE_COBRO_CANDIDATO');
+    expect(r.message).toBe(
+      'Este abono cuadra con el monto del cobro que ya tiene registrado el vuelo #374 (Maqar), pero ese cobro tiene registrada una comisión de $730.00 y espera un depósito de $13,870.00 MXN; el banco depositó $14,600.00 MXN, así que la comisión real fue $0.00. Si es su pago, corrige la comisión de ese cobro y vincúlalo en vez de registrar otro.',
+    );
+    expect(flights.createCobro).not.toHaveBeenCalled();
+    expect(conciliacion.linkCobro).not.toHaveBeenCalled();
+  });
+
+  it('abono de la PASARELA que cuadró por su bruto con un cobro sin comisión ⇒ veredicto con la comisión real (la cuenta se lee una vez)', async () => {
+    const db = mundo();
+    db.cobro_vuelo.push({
+      id: 'b0000000-0000-4000-8000-000000010000',
+      vuelo_id: V315,
+      monto: 10000,
+      moneda: 'MXN',
+      metodo_cobro: 'TRANSFERENCIA',
+      comision_banco_monto: null,
+      fecha_cobro: '2026-09-15T17:00:00Z',
+      cobro_grupo_id: null,
+      ingreso_anticipo_id: null,
+      client_request_id: null,
+    });
+    const { svc, log } = armar(db);
+    const antes = log.filter((o) => o.tabla === 'cuenta_bancaria').length;
+    const c = await cuadranCon(svc, M_PW_BRUTO, db);
+    expect(c).toEqual([
+      expect.objectContaining({
+        monto: 10000,
+        liga_no_cuadra: 'COMISION_NO_CUADRA',
+        comision_real: 1000,
+      }),
+    ]);
+    expect(
+      log.filter((o) => o.tabla === 'cuenta_bancaria').length - antes,
+    ).toBe(1);
+  });
+});

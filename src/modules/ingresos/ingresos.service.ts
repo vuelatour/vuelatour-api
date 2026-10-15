@@ -53,13 +53,17 @@ import {
 import {
   alVincularAbono,
   coberturaCobro,
+  EPSILON_COBRO_BANCO,
   netoDeCobro,
+  TOLERANCIA_COBRO_BANCO,
   type CoberturaCobro,
 } from '../../common/cobro-banco.util';
 import { cobrosLoteDisponibles } from '../../common/cobros-lote-disponible.util';
 import { cobrosParcialesDisponibles } from '../../common/cobros-parciales-disponible.util';
 import {
   cobroParaCruce,
+  ligaCandidatoNoCuadra,
+  mensajeAbonoCuadraSoloPorMonto,
   mensajeAbonoDeCobroParcial,
   mensajeComisionAlRegistrarCobro,
 } from '../conciliacion/cobros-lote.util';
@@ -1917,6 +1921,15 @@ export class IngresosService {
       faltante?: number;
       monto_vinculado?: number;
       abonos_n?: number;
+      /**
+       * ADITIVOS (revisión del 15-oct-2026): solo si la liga DIRECTA
+       * («Vincular a este cobro») rebotaría — cuadra por el monto (bruto)
+       * pero con comisión capturada o un abono de la pasarela solo se liga
+       * por su NETO ± $1.00 (`ligaCandidatoNoCuadra`). `comision_real` solo
+       * en COMISION_NO_CUADRA (la que dejaría «Corregir la comisión»).
+       */
+      liga_no_cuadra?: 'COMISION_NO_CUADRA' | 'SOBRE_NO_CUADRA';
+      comision_real?: number | null;
     }>
   > {
     const v = ventanaDias(abono.fecha as string, 30);
@@ -2079,7 +2092,7 @@ export class IngresosService {
     };
     const neto = (c: Row) =>
       r2((Number(c.monto) || 0) - (Number(c.comision_banco_monto) || 0));
-    return [
+    const candidatos = [
       ...cobrosLibres.map((c) => {
         const n = nombreDe(c.vuelo);
         const parcial = parcialDe.get(c.id as string);
@@ -2122,6 +2135,86 @@ export class IngresosService {
           };
         }),
     ].slice(0, 5);
+    return this.anotarLigaNoCuadra(candidatos, abono, moneda, opts.pasarela);
+  }
+
+  /**
+   * Marca los candidatos del freno cuya liga DIRECTA rebotaría
+   * (`ligaCandidatoNoCuadra`, revisión del 15-oct-2026): el freno sigue
+   * frenando (casi seguro es ESE dinero) pero el 409 ya no dice «vincúlalo» a
+   * secas. Solo se evalúa lo que NO cuadra por neto ± $1.00 (un parcial
+   * nunca: es de banco sin comisión). La cuenta del abono se lee UNA vez y
+   * solo si decide algo (cobro sin comisión o sobre); si no se puede leer, el
+   * candidato queda sin marca (best-effort: nunca tumba el 409).
+   */
+  private async anotarLigaNoCuadra<
+    T extends {
+      tipo: 'COBRO_VUELO' | 'SOBRE_GRUPO';
+      monto: number;
+      neto: number;
+      parcial?: true;
+    },
+  >(
+    candidatos: T[],
+    abono: Row,
+    moneda: string,
+    pasarela?: boolean,
+  ): Promise<
+    Array<
+      T & {
+        liga_no_cuadra?: 'COMISION_NO_CUADRA' | 'SOBRE_NO_CUADRA';
+        comision_real?: number | null;
+      }
+    >
+  > {
+    const parte = r2(Math.abs(Number(abono.monto) || 0));
+    let esPasarela: boolean | null | undefined = pasarela;
+    const leerPasarela = async (): Promise<boolean | null> => {
+      if (esPasarela === undefined) {
+        try {
+          esPasarela = await this.abonoEsDePasarela(abono);
+        } catch (err) {
+          this.logger.warn(
+            `Candidatos del abono ${String(abono.id)}: no se pudo leer la cuenta (${err instanceof Error ? err.message : String(err)}); sin veredicto de la liga.`,
+          );
+          esPasarela = null;
+        }
+      }
+      return esPasarela;
+    };
+    const salida: Array<
+      T & {
+        liga_no_cuadra?: 'COMISION_NO_CUADRA' | 'SOBRE_NO_CUADRA';
+        comision_real?: number | null;
+      }
+    > = [];
+    for (const c of candidatos) {
+      if (
+        c.parcial ||
+        Math.abs(parte - c.neto) <= TOLERANCIA_COBRO_BANCO + EPSILON_COBRO_BANCO
+      ) {
+        salida.push(c);
+        continue;
+      }
+      // Un cobro con comisión capturada se liga por su neto sea cual sea la
+      // cuenta; sin comisión (o un sobre) decide si el abono es de la pasarela.
+      const conComision = r2(c.monto - c.neto) > 0;
+      const p =
+        c.tipo === 'COBRO_VUELO' && conComision ? false : await leerPasarela();
+      const v =
+        p == null
+          ? null
+          : ligaCandidatoNoCuadra({
+              tipo: c.tipo,
+              monto: c.monto,
+              neto: c.neto,
+              moneda,
+              parte,
+              pasarela: p,
+            });
+      salida.push(v ? { ...c, ...v } : c);
+    }
+    return salida;
   }
 
   /** Texto del 409 con un candidato PARCIAL (invariante 77). */
@@ -2277,7 +2370,21 @@ export class IngresosService {
             // Un cobro PARCIAL (invariante 77) dice cuánto le falta.
             message: c.parcial
               ? `${this.textoCandidatoParcial(c, estado.moneda, 'INGRESO')} Si de verdad es otro dinero, confírmalo.`
-              : `Este abono cuadra con ${quien}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro. Si de verdad es otro dinero, confírmalo.`,
+              : c.liga_no_cuadra
+                ? mensajeAbonoCuadraSoloPorMonto(
+                    {
+                      tipo: c.tipo,
+                      quien,
+                      cliente: c.cliente,
+                      moneda: estado.moneda,
+                      monto: c.monto,
+                      neto: c.neto,
+                      parte: r2(Math.abs(Number(abono.monto) || 0)),
+                      comision_real: c.comision_real ?? null,
+                    },
+                    'INGRESO',
+                  )
+                : `Este abono cuadra con ${quien}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro. Si de verdad es otro dinero, confírmalo.`,
             error: 'ABONO_TIENE_COBRO_CANDIDATO',
             details: { candidatos: candidatos.map(sinVuelo) },
           });
@@ -3247,7 +3354,21 @@ export class IngresosService {
           // falta, no otro cobro.
           message: c.parcial
             ? this.textoCandidatoParcial(c, moneda, 'COBRO')
-            : `Este abono cuadra con el cobro que ya tiene registrado el ${c.etiqueta.replace('Cobro · ', '')}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro en vez de registrar otro.`,
+            : c.liga_no_cuadra
+              ? mensajeAbonoCuadraSoloPorMonto(
+                  {
+                    tipo: c.tipo,
+                    quien: `el cobro que ya tiene registrado el ${c.etiqueta.replace('Cobro · ', '')}`,
+                    cliente: c.cliente,
+                    moneda,
+                    monto: c.monto,
+                    neto: c.neto,
+                    parte: r2(Math.abs(Number(abono.monto) || 0)),
+                    comision_real: c.comision_real ?? null,
+                  },
+                  'COBRO',
+                )
+              : `Este abono cuadra con el cobro que ya tiene registrado el ${c.etiqueta.replace('Cobro · ', '')}${c.cliente ? ` (${c.cliente})` : ''}: vincúlalo a ese cobro en vez de registrar otro.`,
           error: 'ABONO_TIENE_COBRO_CANDIDATO',
           details: { candidatos: candidatos.map(sinVuelo) },
         });

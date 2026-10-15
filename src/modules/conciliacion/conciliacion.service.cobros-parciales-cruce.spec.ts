@@ -769,7 +769,7 @@ describe('Paywise con abonos como los de prod (sin bruto ni comisión, D6)', () 
     const e = r.errores[0] as { error: string; cobro_id: string };
     expect(e.cobro_id).toBe('c-x');
     expect(e.error).toBe(
-      'El cobro del vuelo #293 ($10,000.00 MXN) espera un depósito de $10,000.00 MXN y el banco depositó $9,000.00 MXN: la comisión real fue $1,000.00 MXN (10.00 %). Corrige la comisión del cobro o usa «Corregir la comisión a $1,000.00 y vincular».',
+      'El cobro del vuelo #293 ($10,000.00 MXN) espera un depósito de $10,000.00 MXN y el banco depositó $9,000.00 MXN: la comisión real fue $1,000.00 MXN (10.00 %). Corrige la comisión del cobro antes de vincular.',
     );
     expect(e.error).not.toMatch(/ABONO_NO_CUADRA|COMISION_NO_CUADRA:/);
     expect(partesDe(db, 'c-x')).toEqual([]);
@@ -778,5 +778,140 @@ describe('Paywise con abonos como los de prod (sin bruto ni comisión, D6)', () 
       comision_banco_monto: null,
       comision_banco_pct: null,
     });
+  });
+});
+
+describe('Los frenos de «Por conciliar» y de la IA usan la regla del FRENO (parcial PAYWISE sin comisión con un SPEI de banco, revisión del 15-oct-2026)', () => {
+  const PERIODO = { desde: '2026-09-01', hasta: '2026-09-30' };
+
+  /** ING-7 de $1,700 tecleado a mano en la MISMA cuenta, sin abono. */
+  const ing7 = (fecha: string): Row => ({
+    id: 'i-1',
+    folio: 7,
+    categoria: 'OTRO_INGRESO',
+    fecha,
+    monto: 1700,
+    comision_monto: null,
+    moneda: 'MXN',
+    cuenta_bancaria_id: CTA,
+    pagador: 'Alguien',
+    descripcion: 'Tecleado a mano',
+    referencia: null,
+    deleted_at: null,
+  });
+
+  /**
+   * Cobro #332 PAYWISE de $3,400 SIN comisión con un 1.er SPEI de banco de
+   * $1,700 (PARCIAL: la BD SÍ le acepta el 2.º SPEI) y el 2.º pendiente.
+   */
+  function paywiseParcial(fechaCobro: string, fechaIngreso: string) {
+    const db = mundo({
+      cobro_vuelo: [
+        cobro('c332', 'v332', 3400, {
+          metodo_cobro: 'PAYWISE',
+          fecha_cobro: `${fechaCobro}T17:00:00Z`,
+        }),
+      ],
+      ingreso: [ing7(fechaIngreso)],
+    });
+    ligado(db, 'm1', 1700, 'c332', { fecha: fechaCobro });
+    db.movimiento_bancario.push(abono('m2', 1700));
+    return db;
+  }
+
+  it('ING a ±3 días: el auto queda AMBIGUO y «Por conciliar» dice lo MISMO (antes: SE_PUEDE_CRUZAR, un ciclo sin salida)', async () => {
+    const { svc, escrituras } = armar(
+      paywiseParcial('2026-09-15', '2026-09-16'),
+      CON_INGRESOS,
+    );
+    const pc = await svc.abonosPendientes(PERIODO);
+    expect(pc.motivos_calculados).toBe(true);
+    expect(pc.data.find((x) => x.id === 'm2')).toMatchObject({
+      motivo_pendiente: 'AMBIGUO',
+      candidatos_n: 2,
+      exactos_manual: 2,
+    });
+    const { d } = await cruzar(svc, 'm2');
+    expect(d).toMatchObject({ resultado: 'AMBIGUO', candidatos_n: 2 });
+    expect(escrituras()).toEqual([]);
+  });
+
+  it.each(['LIGAR', 'REGISTRAR_INGRESO'])(
+    'ING a 10 días: la IA no recibe el parcial y su %s ⇒ REVISAR (al cobro le falta exactamente el abono)',
+    async (accion) => {
+      let enviados: string[] = [];
+      const fetchMock = jest
+        .spyOn(global, 'fetch')
+        .mockImplementation((_u, init) => {
+          const body = JSON.parse(String(init?.body as string)) as {
+            abonos: Array<{ id: string; candidato_ids: string[] }>;
+          };
+          enviados = body.abonos.flatMap((x) => x.candidato_ids);
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                modelo: 'claude',
+                sugerencias: [
+                  {
+                    movimiento_id: 'm2',
+                    candidato_id: accion === 'LIGAR' ? 'INGRESO:i-1' : null,
+                    accion,
+                    confianza: 0.9,
+                    razon: 'Monto exacto con el ingreso ING-7',
+                    categoria_sugerida: 'OTRO_INGRESO',
+                  },
+                ],
+              }),
+          } as unknown as Response);
+        });
+      try {
+        const { svc, escrituras } = armar(
+          paywiseParcial('2026-09-06', '2026-09-06'),
+          { ...CON_INGRESOS, config: CONFIG_IA },
+        );
+        const r = await svc.sugerirAbonos({ movimiento_ids: ['m2'] }, USER);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        // La IA sigue con la regla de LIGAR: el parcial PAYWISE no viaja.
+        expect(enviados).toEqual(['INGRESO:i-1']);
+        expect(r.propuestas[0]).toMatchObject({
+          movimiento_id: 'm2',
+          origen: 'IA',
+          accion: 'REVISAR',
+          candidato: null,
+        });
+        expect(r.propuestas[0].motivo_sin_match).toBe(
+          'Al cobro del vuelo #332 (pago parcial) le falta exactamente este monto: revísalo y vincula el abono a ese cobro',
+        );
+        expect(escrituras()).toEqual([]);
+      } finally {
+        fetchMock.mockRestore();
+      }
+    },
+  );
+
+  it('control: el MISMO parcial con comisión capturada (de un solo abono por el trigger A) no frena', async () => {
+    const db = mundo({
+      cobro_vuelo: [
+        cobro('c332', 'v332', 3400, {
+          metodo_cobro: 'PAYWISE',
+          comision_banco_monto: 170,
+          comision_banco_pct: 5,
+        }),
+      ],
+      ingreso: [ing7('2026-09-16')],
+    });
+    ligado(db, 'm1', 1700, 'c332');
+    db.movimiento_bancario.push(abono('m2', 1700));
+    const { svc } = armar(db, CON_INGRESOS);
+    const pc = await svc.abonosPendientes(PERIODO);
+    expect(pc.data.find((x) => x.id === 'm2')).toMatchObject({
+      motivo_pendiente: 'SE_PUEDE_CRUZAR',
+      candidatos_n: 1,
+      exactos_manual: 1,
+    });
+    const { d } = await cruzar(svc, 'm2');
+    expect(d).toMatchObject({ resultado: 'CONCILIADO' });
   });
 });

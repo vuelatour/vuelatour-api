@@ -1124,6 +1124,33 @@ interface CandidatoAbonoLeido {
    * abonos.
    */
   faltante?: number | null;
+  /**
+   * INTERNO (revisión del 15-oct-2026, invariante 77). Solo COBRO_VUELO con
+   * la sonda de 20261014000003: cómo lo ven los FRENOS anti doble conteo
+   * (`cobroParaCruce(…, {freno: true})`, la regla del trigger A sin el
+   * método PAYWISE), igual que `cobrosExactosLibresDeAbono` del AUTO.
+   * `libre`/`faltante` siguen con la regla de LIGAR (lo que la IA y el auto
+   * pueden ligar). Ausente = igual que `libre`/`faltante`. Nunca viaja.
+   */
+  freno?: { libre: boolean; faltante: number | null };
+}
+
+/**
+ * Vista de FRENO de un candidato (revisión del 15-oct-2026): la ocupación y
+ * el faltante con la regla del trigger A sin el método PAYWISE. Un cobro
+ * PAYWISE sin comisión con un SPEI de banco ES un parcial que la BD deja
+ * completar: los frenos (el espejo del auto en «Por conciliar» y la guarda
+ * D12 de la IA) lo cuentan aunque el auto no lo ligue.
+ */
+function vistaFrenoCandidato(c: CandidatoAbonoLeido): CandidatoAbonoLeido {
+  if (!c.freno) return c;
+  const { freno, faltante: _faltante, ...resto } = c;
+  void _faltante;
+  return {
+    ...resto,
+    libre: freno.libre,
+    ...(freno.faltante != null ? { faltante: freno.faltante } : {}),
+  };
 }
 
 /** Acciones que la IA puede proponer para un abono. */
@@ -16009,6 +16036,21 @@ export class ConciliacionService {
               libre: !ocupados.has(`COBRO_VUELO:${c.id as string}`),
               faltante: null,
             };
+      /**
+       * Lo mismo para los FRENOS (revisión del 15-oct-2026): la regla del
+       * trigger A sin el método PAYWISE, la de `cobrosExactosLibresDeAbono`.
+       * Sin la sonda no hay parciales y es la misma que la de ligar.
+       */
+      const frenoDeCobro = (
+        c: Record<string, unknown>,
+      ): { libre: boolean; faltante: number | null } | null =>
+        conParciales
+          ? cobroParaCruce(c, partesPorCobro.get(c.id as string) ?? [], null, {
+              conParciales: true,
+              pasarela: false,
+              freno: true,
+            })
+          : null;
       const truncado =
         cobros.truncado ||
         sobres.truncado ||
@@ -16031,6 +16073,7 @@ export class ConciliacionService {
             ? r2(Number(c.comision_banco_monto))
             : null;
         const cruce = cruceDeCobro(c);
+        const freno = frenoDeCobro(c);
         lista.push({
           tipo: 'COBRO_VUELO',
           id: c.id as string,
@@ -16054,6 +16097,7 @@ export class ConciliacionService {
           fecha_cobro: c.fecha_cobro as string,
           libre: cruce.libre,
           ...(cruce.faltante != null ? { faltante: cruce.faltante } : {}),
+          ...(freno ? { freno } : {}),
         });
       }
       for (const s of sobres.filas) {
@@ -16175,7 +16219,11 @@ export class ConciliacionService {
   private analizarAbono(
     m: Record<string, unknown>,
     ctx: Awaited<ReturnType<ConciliacionService['contextoAbonos']>>,
-  ): { abono: AbonoPendiente; manuales: CandidatoAbonoLeido[] } {
+  ): {
+    abono: AbonoPendiente;
+    manuales: CandidatoAbonoLeido[];
+    manualesFreno: CandidatoAbonoLeido[];
+  } {
     const cuenta = ctx.cuentas.get(m.cuenta_bancaria_id as string) ?? null;
     const moneda = cuenta?.moneda ?? null;
     const pasarela = cuenta?.tipo === TIPO_CUENTA_PASARELA;
@@ -16216,14 +16264,19 @@ export class ConciliacionService {
     // como «exactos» porque no se pueden ligar a este abono). Un cobro
     // PARCIAL (invariante 77) solo para un abono de BANCO: la pasarela no
     // completa parciales.
-    const manuales = moneda
-      ? ctx.candidatos.filter(
-          (c) =>
-            c.libre &&
-            c.moneda === moneda &&
-            dentro(c, VENTANA_MANUAL_DIAS) &&
-            !(pasarela && c.faltante != null),
-        )
+    const esManual = (c: CandidatoAbonoLeido) =>
+      c.libre &&
+      c.moneda === moneda &&
+      dentro(c, VENTANA_MANUAL_DIAS) &&
+      !(pasarela && c.faltante != null);
+    const manuales = moneda ? ctx.candidatos.filter(esManual) : [];
+    // Los mismos candidatos con la regla de los FRENOS (revisión del
+    // 15-oct-2026, invariante 77): un parcial PAYWISE sin comisión con un
+    // SPEI de banco espera este dinero aunque el auto no lo ligue. Lo leen
+    // el espejo del freno del AUTO (`cobrosExactos`), `exactos_manual` y la
+    // guarda D12 de la IA; la IA sigue recibiendo `manuales`.
+    const manualesFreno = moneda
+      ? ctx.candidatos.map(vistaFrenoCandidato).filter(esManual)
       : [];
     const abonoCruce: AbonoCruce = {
       monto,
@@ -16236,9 +16289,10 @@ export class ConciliacionService {
     let exactos: number | null = null;
     // Espejo de `cobrosExactosLibresDeAbono` (lo que hace el AUTO): si el
     // auto elegiría un INGRESO pero un cobro/sobre libre ±30 días cuadra
-    // EXACTO, el auto NO liga ⇒ AMBIGUO (anti doble conteo).
+    // EXACTO, el auto NO liga ⇒ AMBIGUO (anti doble conteo). Con la regla
+    // del FRENO, como el auto (`freno: true`).
     const cobrosExactos = (pas: boolean) =>
-      manuales.filter(
+      manualesFreno.filter(
         (c) =>
           c.tipo !== 'INGRESO' &&
           cuadraMontoAbono(abonoCruce, this.aCandidatoCruceAbono(c), pas),
@@ -16257,7 +16311,7 @@ export class ConciliacionService {
       candidatosN = e.candidatos_n;
     };
     if (ctx.completo && moneda) {
-      exactos = manuales.filter(
+      exactos = manualesFreno.filter(
         (c) =>
           (c.tipo !== 'INGRESO' ||
             c.cuenta_bancaria_id === m.cuenta_bancaria_id) &&
@@ -16384,6 +16438,7 @@ export class ConciliacionService {
         categoria_sugerida: categoriaSugerida,
       },
       manuales,
+      manualesFreno,
     };
   }
 
@@ -16743,7 +16798,9 @@ export class ConciliacionService {
         // ese dinero es (probablemente) su pago: ni «registrar como otro
         // ingreso» ni ligarlo a un ingreso registrado, y ningún cobro exacto
         // se elige solo entre él y el parcial (REVISAR sin preselección).
-        const parcialesExactos = an.manuales.filter(
+        // Con la regla del FRENO (revisión del 15-oct-2026): también el
+        // parcial PAYWISE sin comisión que la BD sí deja completar.
+        const parcialesExactos = an.manualesFreno.filter(
           (c) =>
             c.faltante != null &&
             c.tipo === 'COBRO_VUELO' &&

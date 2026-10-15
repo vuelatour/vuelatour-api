@@ -8719,7 +8719,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       neto ± $1.00: abono > monto + $1.00 ⇒ `ABONO_EXCEDE_COBRO` (`un_solo:
       true`); si no cuadra ⇒ `COMISION_NO_CUADRA` (`comision_real`,
       `corregible`). `corregir_comision: true` en el PATCH (booleano ESTRICTO
-      del cuerpo, patrón `solo_enriquecer`: el texto `"false"` no es true)
+      del cuerpo, patrón `solo_enriquecer`: el texto `"false"` no es true;
+      el texto del 409 no nombra ese botón —«Corrige la comisión del cobro
+      antes de vincular.»—, API 0.0.79: el 409 también lo ve quien no lo
+      tiene a la mano)
       escribe la comisión real r2(monto − |abono|) con `escribirComisionReal`
       y liga (si la liga falla después, la comisión QUEDA y
       `details.comision_corregida` lo dice) SOLO si el veredicto SIN corregir
@@ -8792,14 +8795,22 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       criterio `FALTANTE`;
       empate ⇒ nombre del ordenante o AMBIGUO; nunca crea un parcial. La IA de
       abonos no recibe parciales y, si un parcial espera EXACTAMENTE ese
-      abono, su REGISTRAR_INGRESO o LIGAR a un ingreso pasa a REVISAR. Anti
+      abono, su REGISTRAR_INGRESO o LIGAR a un ingreso pasa a REVISAR (la
+      guarda D12 lee los candidatos con la regla del FRENO: también el
+      parcial Paywise sin comisión con un SPEI de banco; API 0.0.79). Anti
       doble conteo: `cobrosExactosLibresDeAbono` (riesgo de «Omitir» y freno
       de ligar a un ingreso; un abono de la pasarela no completa parciales;
       sus sondas solo corren si algún neto rebasa el abono) y
       `cobrosQueCuadranConAbono` de Ingresos (409
       `ABONO_TIENE_COBRO_CANDIDATO` en «otro ingreso» y en «Es el pago de un
       vuelo»; faltante ±$1.00; el candidato parcial gana `parcial`,
-      `faltante`, `monto_vinculado` y `abonos_n`, los demás byte a byte)
+      `faltante`, `monto_vinculado` y `abonos_n`; uno que cuadra solo por el
+      MONTO y cuya liga directa rebotaría —comisión capturada o abono de la
+      pasarela: solo se liga por su neto ± $1.00— gana `liga_no_cuadra`
+      (COMISION_NO_CUADRA | SOBRE_NO_CUADRA, `ligaCandidatoNoCuadra`) y
+      `comision_real`, y el 409 pide corregir la comisión
+      (`mensajeAbonoCuadraSoloPorMonto`) en vez de «vincúlalo» —API 0.0.79,
+      el freno sigue frenando—; los demás, byte a byte)
       cuentan el faltante de los parciales con `cobroParaCruce(…, {freno:
       true})`: «de un solo abono» por la regla del trigger A tal cual
       (`cobroDeUnSoloAbonoSegunA`: comisión capturada, parte de la pasarela
@@ -8809,7 +8820,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «otro ingreso»). Límite HEREDADO (no se cambió): los frenos miran
       ±30 días por `fecha_cobro`; un parcial registrado antes no frena
       («Vincular» sí lo ofrece: ±60). «Por conciliar» (`contextoAbonos`) es
-      el espejo del AUTO y sigue con la regla de ligar. El replay de «Es el
+      el espejo del AUTO: cada cobro candidato lleva además su vista de FRENO
+      (`freno`, `vistaFrenoCandidato` ⇒ `manualesFreno`) y con ella deciden
+      `cobrosExactos` (el espejo de `cobrosExactosLibresDeAbono`),
+      `exactos_manual` y la guarda D12 de la IA; los candidatos que se le
+      ENVÍAN a la IA siguen con la regla de ligar (sin parciales; API
+      0.0.79: antes las tres decidían con la regla de ligar y un parcial
+      Paywise sin comisión quedaba «Se puede cruzar» mientras el auto lo
+      dejaba AMBIGUO). El replay de «Es el
       pago de un
       vuelo» usa `some()` y ese camino pre-valida con `alVincularAbono` ANTES
       de `createCobro` (409 `COMISION_NO_CUADRA` con

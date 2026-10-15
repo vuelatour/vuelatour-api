@@ -9,8 +9,10 @@ import {
   etiquetaConciliadoCobroUnico,
   etiquetaConciliadoCobros,
   leerErrorCobros,
+  ligaCandidatoNoCuadra,
   ligasDesdePartes,
   LOTE_COBROS_MAX,
+  mensajeAbonoCuadraSoloPorMonto,
   mensajeAbonoDeCobroParcial,
   mensajeAbonoExcedeCobro,
   mensajeAbonoNoCuadra,
@@ -573,7 +575,7 @@ describe('cobros-lote.util — un cobro, varios abonos (0.0.78, invariante 77)',
       expect(t).not.toMatch(/\$\d+(?![\d,.])/); // jamás un monto sin centavos
     }
     expect(mensajeErrorCobros(textos[0][0], textos[0][1], '')).toBe(
-      'El cobro del vuelo #293 ($13,000.00 MXN) espera un depósito de $11,870.24 MXN después de la comisión registrada ($1,129.76) y el banco depositó $11,800.00 MXN: la comisión real fue $1,200.00 MXN (9.23 %). Corrige la comisión del cobro o usa «Corregir la comisión a $1,200.00 y vincular».',
+      'El cobro del vuelo #293 ($13,000.00 MXN) espera un depósito de $11,870.24 MXN después de la comisión registrada ($1,129.76) y el banco depositó $11,800.00 MXN: la comisión real fue $1,200.00 MXN (9.23 %). Corrige la comisión del cobro antes de vincular.',
     );
     expect(mensajeErrorCobros(textos[1][0], textos[1][1], '')).toBe(
       'El cobro del vuelo #315 está en USD y el abono en MXN: el tipo de cambio que resulta (0.50) no tiene sentido (se espera entre 15 y 25). Revisa que sea el abono correcto.',
@@ -649,7 +651,7 @@ describe('cobros-lote.util — un cobro, varios abonos (0.0.78, invariante 77)',
         comision_real: 695,
       }),
     ).toBe(
-      'El cobro del vuelo #400 ($7,000.00 MXN) espera un depósito de $7,000.00 MXN y el banco depositó $6,305.00 MXN: la comisión real fue $695.00 MXN (9.93 %). Corrige la comisión del cobro o usa «Corregir la comisión a $695.00 y vincular».',
+      'El cobro del vuelo #400 ($7,000.00 MXN) espera un depósito de $7,000.00 MXN y el banco depositó $6,305.00 MXN: la comisión real fue $695.00 MXN (9.93 %). Corrige la comisión del cobro antes de vincular.',
     );
     expect(
       mensajeCobroYaCubierto({
@@ -918,7 +920,7 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
     expect(
       !pwNo.ok &&
         pwNo.mensaje.endsWith(
-          'Corrige la comisión del cobro o usa «Corregir la comisión a $1,200.00 y vincular».',
+          'Corrige la comisión del cobro antes de vincular.',
         ),
     ).toBe(true);
     // Sin comisión capturada pero abono de la PASARELA: también «de un solo abono».
@@ -1598,7 +1600,7 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
     );
   });
 
-  it('mensajeComisionNoCuadra: no corregible ⇒ no ofrece el botón; depósito mayor que el cobro ⇒ revisar la comisión', () => {
+  it('mensajeComisionNoCuadra: no nombra ningún botón del panel (corregible o no); depósito mayor que el cobro ⇒ revisar la comisión', () => {
     const base = {
       folio: 293,
       moneda: 'MXN',
@@ -1611,8 +1613,13 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
     expect(
       mensajeComisionNoCuadra({ ...base, corregible: false }),
     ).not.toContain('Corregir la comisión a');
-    expect(mensajeComisionNoCuadra({ ...base, corregible: true })).toContain(
-      '«Corregir la comisión a $1,200.00 y vincular»',
+    // Revisión del 15-oct-2026: el 409 también lo ve quien no tiene el botón
+    // a la mano (registrar un ingreso, el panel de antes).
+    expect(mensajeComisionNoCuadra({ ...base, corregible: true })).toBe(
+      'El cobro del vuelo #293 ($13,000.00 MXN) espera un depósito de $11,870.24 MXN después de la comisión registrada ($1,129.76) y el banco depositó $11,800.00 MXN: la comisión real fue $1,200.00 MXN (9.23 %). Corrige la comisión del cobro antes de vincular.',
+    );
+    expect(mensajeComisionNoCuadra({ ...base, corregible: true })).not.toMatch(
+      /«|y vincular»/,
     );
     expect(
       mensajeComisionNoCuadra({ ...base, parte: 13000.5, comision_real: 0 }),
@@ -1631,5 +1638,118 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
       expect(t).not.toContain(A);
       expect(t).not.toContain('[ABONO_NO_CUADRA]');
     }
+  });
+});
+
+describe('ligaCandidatoNoCuadra / mensajeAbonoCuadraSoloPorMonto (freno de Ingresos, revisión del 15-oct-2026)', () => {
+  // #374: TRANSFERENCIA de $14,600 con $730 de comisión capturada (neto
+  // $13,870); el banco depositó el bruto.
+  const c374 = {
+    tipo: 'COBRO_VUELO' as const,
+    monto: 14600,
+    neto: 13870,
+    moneda: 'MXN',
+  };
+
+  it('cobro con comisión: cuadra por BRUTO ⇒ la liga directa rebota COMISION_NO_CUADRA (comisión real 0); por NETO ± $1.00 ⇒ pasa', () => {
+    expect(
+      ligaCandidatoNoCuadra({ ...c374, parte: 14600, pasarela: false }),
+    ).toEqual({
+      liga_no_cuadra: 'COMISION_NO_CUADRA',
+      comision_real: 0,
+    });
+    // La cuenta no cambia el veredicto con comisión capturada.
+    expect(
+      ligaCandidatoNoCuadra({ ...c374, parte: 14600, pasarela: true }),
+    ).toMatchObject({
+      liga_no_cuadra: 'COMISION_NO_CUADRA',
+    });
+    expect(
+      ligaCandidatoNoCuadra({ ...c374, parte: 13870, pasarela: false }),
+    ).toBeNull();
+    expect(
+      ligaCandidatoNoCuadra({ ...c374, parte: 13871, pasarela: false }),
+    ).toBeNull();
+  });
+
+  it('cobro SIN comisión: de banco pasa; de la pasarela (cuadró por su bruto) rebota con la comisión real', () => {
+    const c = {
+      tipo: 'COBRO_VUELO' as const,
+      monto: 10000,
+      neto: 10000,
+      moneda: 'MXN',
+    };
+    expect(
+      ligaCandidatoNoCuadra({ ...c, parte: 10000, pasarela: false }),
+    ).toBeNull();
+    expect(
+      ligaCandidatoNoCuadra({ ...c, parte: 9000, pasarela: true }),
+    ).toEqual({
+      liga_no_cuadra: 'COMISION_NO_CUADRA',
+      comision_real: 1000,
+    });
+  });
+
+  it('sobre con comisión: el bruto en una cuenta BANCO ⇒ SOBRE_NO_CUADRA; en la pasarela o por el neto ⇒ pasa', () => {
+    const s = {
+      tipo: 'SOBRE_GRUPO' as const,
+      monto: 20000,
+      neto: 19000,
+      moneda: 'MXN',
+    };
+    expect(
+      ligaCandidatoNoCuadra({ ...s, parte: 20000, pasarela: false }),
+    ).toEqual({
+      liga_no_cuadra: 'SOBRE_NO_CUADRA',
+      comision_real: null,
+    });
+    expect(
+      ligaCandidatoNoCuadra({ ...s, parte: 20000, pasarela: true }),
+    ).toBeNull();
+    expect(
+      ligaCandidatoNoCuadra({ ...s, parte: 19000, pasarela: false }),
+    ).toBeNull();
+  });
+
+  it('textos exactos (sin nombrar un botón del panel)', () => {
+    const base = {
+      tipo: 'COBRO_VUELO' as const,
+      quien: 'el cobro del vuelo #374',
+      cliente: 'Maqar',
+      moneda: 'MXN',
+      monto: 14600,
+      neto: 13870,
+      parte: 14600,
+      comision_real: 0,
+    };
+    expect(mensajeAbonoCuadraSoloPorMonto(base, 'INGRESO')).toBe(
+      'Este abono cuadra con el monto del cobro del vuelo #374 (Maqar), pero ese cobro tiene registrada una comisión de $730.00 y espera un depósito de $13,870.00 MXN; el banco depositó $14,600.00 MXN, así que la comisión real fue $0.00. Si es su pago, corrige la comisión del cobro y vincúlalo. Si de verdad es otro dinero, confírmalo.',
+    );
+    expect(
+      mensajeAbonoCuadraSoloPorMonto(
+        { ...base, quien: 'el cobro que ya tiene registrado el vuelo #374' },
+        'COBRO',
+      ),
+    ).toBe(
+      'Este abono cuadra con el monto del cobro que ya tiene registrado el vuelo #374 (Maqar), pero ese cobro tiene registrada una comisión de $730.00 y espera un depósito de $13,870.00 MXN; el banco depositó $14,600.00 MXN, así que la comisión real fue $0.00. Si es su pago, corrige la comisión de ese cobro y vincúlalo en vez de registrar otro.',
+    );
+    expect(
+      mensajeAbonoCuadraSoloPorMonto(
+        {
+          tipo: 'SOBRE_GRUPO',
+          quien: 'el pago del grupo G-5',
+          cliente: null,
+          moneda: 'MXN',
+          monto: 20000,
+          neto: 19000,
+          parte: 20000,
+          comision_real: null,
+        },
+        'INGRESO',
+      ),
+    ).toBe(
+      'Este abono cuadra con el monto del pago del grupo G-5, pero ese pago tiene registrada una comisión de $1,000.00 y espera un depósito de $19,000.00 MXN; el banco depositó $20,000.00 MXN. Si es su pago, corrige la comisión del pago del grupo y vincúlalo. Si de verdad es otro dinero, confírmalo.',
+    );
+    expect(mensajeAbonoCuadraSoloPorMonto(base, 'INGRESO')).not.toMatch(/«/);
   });
 });

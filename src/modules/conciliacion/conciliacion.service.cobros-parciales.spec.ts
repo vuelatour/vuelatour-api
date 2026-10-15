@@ -632,7 +632,7 @@ describe('Vincular — cobros «de un solo abono»: comisión (HSBC link) y pasa
     const r = await error(svc.linkCobro('mPw', { cobro_id: 'c293' }, USER));
     expect(r.code).toBe('COMISION_NO_CUADRA');
     expect(r.message).toBe(
-      'El cobro del vuelo #293 ($13,000.00 MXN) espera un depósito de $11,870.24 MXN después de la comisión registrada ($1,129.76) y el banco depositó $11,800.00 MXN: la comisión real fue $1,200.00 MXN (9.23 %). Corrige la comisión del cobro o usa «Corregir la comisión a $1,200.00 y vincular».',
+      'El cobro del vuelo #293 ($13,000.00 MXN) espera un depósito de $11,870.24 MXN después de la comisión registrada ($1,129.76) y el banco depositó $11,800.00 MXN: la comisión real fue $1,200.00 MXN (9.23 %). Corrige la comisión del cobro antes de vincular.',
     );
     expect(r.details).toMatchObject({
       por: 'PASARELA',

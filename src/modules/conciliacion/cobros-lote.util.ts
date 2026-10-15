@@ -30,6 +30,7 @@ import {
 import type { MovimientoLiga } from '../../common/cobro-conciliado.util';
 import { etiquetaMetodoCobro } from '../../common/metodo-cobro.util';
 import { normalizarTc } from '../../common/tc.util';
+import { TOLERANCIA_TC_OFICIAL_PCT } from './auto-cruce.util';
 import { fechaCortaEs, toleranciaLote } from './conciliacion-parcial.util';
 import { mensajeMovimientoOmitido } from './omision.util';
 
@@ -1047,8 +1048,10 @@ export function mensajeComisionNoCuadra(d: {
   return (
     `El cobro del vuelo #${folio}${d.monto_cobro != null ? ` (${dinero(d.monto_cobro, m)})` : ''} espera un depósito de ` +
     `${dinero(d.neto, m)}${capturadaTxt} y el banco depositó ${dinero(d.parte, m)}: ` +
-    `la comisión real fue ${dinero(d.comision_real, m)}${pct}. Corrige la comisión del cobro o usa ` +
-    `«Corregir la comisión a ${dinero(d.comision_real)} y vincular».`
+    // Sin nombrar un botón del panel (revisión del 15-oct-2026): el 409 lo
+    // ve también quien no lo tiene a la mano (registrar un ingreso, el panel
+    // de antes); el panel nuevo agrega su propia salida en la descripción.
+    `la comisión real fue ${dinero(d.comision_real, m)}${pct}. Corrige la comisión del cobro antes de vincular.`
   );
 }
 
@@ -1284,6 +1287,101 @@ export function mensajeAbonoDeCobroParcial(
       ? 'registrarlo como ingreso.'
       : 'registrar otro cobro.')
   );
+}
+
+/**
+ * Lo que respondería «Vincular a este cobro» (la liga directa de UN cobro o
+ * sobre SIN otros abonos, sin `corregir_comision`) para un candidato del
+ * freno anti doble conteo de Ingresos (`cobrosQueCuadranConAbono`,
+ * revisión del 15-oct-2026, invariante 77). El freno ofrece también los que
+ * cuadran por BRUTO, y uno con comisión capturada (o un abono de la
+ * pasarela) solo se liga por su NETO ± $1.00 (trigger A /
+ * `alVincularAbono`; sobre: `alVincularSobre`, D8): ahí la liga rebota y el
+ * 409 no puede decir «vincúlalo» a secas. `null` = la liga pasaría.
+ * PURO: misma moneda (los candidatos se leen en la moneda del abono).
+ */
+export function ligaCandidatoNoCuadra(i: {
+  tipo: 'COBRO_VUELO' | 'SOBRE_GRUPO';
+  monto: number;
+  neto: number;
+  moneda: string;
+  /** |abono| (lo que depositó el banco). */
+  parte: number;
+  pasarela: boolean;
+}): {
+  liga_no_cuadra: 'COMISION_NO_CUADRA' | 'SOBRE_NO_CUADRA';
+  comision_real: number | null;
+} | null {
+  const comision = Math.max(r2(i.monto - i.neto), 0);
+  if (i.tipo === 'SOBRE_GRUPO') {
+    const v = alVincularSobre({
+      montoAbono: i.parte,
+      monedaCuenta: i.moneda,
+      tipoCuenta: i.pasarela ? 'PASARELA' : 'BANCO',
+      sobre: {
+        monto: i.monto,
+        moneda: i.moneda,
+        comision_banco_monto: comision,
+      },
+    });
+    return v.estado === 'SOBRE_NO_CUADRA'
+      ? { liga_no_cuadra: 'SOBRE_NO_CUADRA', comision_real: null }
+      : null;
+  }
+  const v = alVincularAbono({
+    cobro: { monto: i.monto, moneda: i.moneda, comision_banco_monto: comision },
+    tcVuelo: null,
+    otras: [],
+    abono: { monto: i.parte, moneda_cuenta: i.moneda, pasarela: i.pasarela },
+    toleranciaTcPct: TOLERANCIA_TC_OFICIAL_PCT,
+  });
+  return v.estado === 'COMISION_NO_CUADRA'
+    ? { liga_no_cuadra: 'COMISION_NO_CUADRA', comision_real: v.comision_real }
+    : null;
+}
+
+/**
+ * 409 ABONO_TIENE_COBRO_CANDIDATO de Ingresos cuando el candidato cuadra
+ * con el MONTO (bruto) pero su liga directa rebotaría (`ligaCandidatoNoCuadra`):
+ * dice qué espera el banco y que primero se corrige la comisión. No nombra
+ * ningún botón del panel. `destino` INGRESO = «registrar como otro
+ * ingreso»; COBRO = «Es el pago de un vuelo».
+ */
+export function mensajeAbonoCuadraSoloPorMonto(
+  d: {
+    tipo: 'COBRO_VUELO' | 'SOBRE_GRUPO';
+    /** «el cobro del vuelo #374» / «el pago del grupo G-5». */
+    quien: string;
+    cliente: string | null;
+    moneda?: string | null;
+    monto: number;
+    neto: number;
+    parte: number;
+    comision_real: number | null;
+  },
+  destino: 'INGRESO' | 'COBRO',
+): string {
+  const m = d.moneda ?? null;
+  const cobro = d.tipo === 'COBRO_VUELO';
+  const comision = Math.max(r2(d.monto - d.neto), 0);
+  const tiene =
+    comision > 0
+      ? `tiene registrada una comisión de ${dinero(comision)} y `
+      : '';
+  const real =
+    d.comision_real != null
+      ? `, así que la comisión real fue ${dinero(d.comision_real)}`
+      : '';
+  const deQuien = d.quien.startsWith('el ')
+    ? `del ${d.quien.slice(3)}`
+    : `de ${d.quien}`;
+  const base =
+    `Este abono cuadra con el monto ${deQuien}${d.cliente ? ` (${d.cliente})` : ''}, ` +
+    `pero ${cobro ? 'ese cobro' : 'ese pago'} ${tiene}espera un depósito de ${dinero(d.neto, m)}; ` +
+    `el banco depositó ${dinero(d.parte, m)}${real}. `;
+  return destino === 'INGRESO'
+    ? `${base}Si es su pago, corrige la comisión ${cobro ? 'del cobro' : 'del pago del grupo'} y vincúlalo. Si de verdad es otro dinero, confírmalo.`
+    : `${base}Si es su pago, corrige la comisión de ese cobro y vincúlalo en vez de registrar otro.`;
 }
 
 /** Texto es-MX (sin uuid crudos) de cada código de la BD. */
