@@ -10115,12 +10115,24 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   las dos pruebas de `/version` pasan) y `ruff check app tests` con los
   mismos 19 de la base.
 
-- **PENDIENTE (14-oct-2026, API 0.0.78) —
-  `20261014000003_conciliacion_cobros_varios_abonos.sql`** (invariante 77; NO
-  aplicada: el 15-oct-2026 ~04:35 Cancún, por MCP, el historial tiene
-  `20261014000001` y `20261014000002` —`version` `20261015031335`— y no esta,
-  siguen `uq_mov_cobro_parte_cobro` y `uq_mov_bancario_cobro` y no existen la
-  vista ni las funciones nuevas; 268 cobros, 57 partes). Puente M:N (DROP
+- **APLICADA (15-oct-2026, ~09:50 Cancún, por el usuario en el SQL Editor,
+  con el API 0.0.78 ya desplegado) —
+  `20261014000003_conciliacion_cobros_varios_abonos.sql`** (invariante 77).
+  Por el usuario: `01-dryrun.sql` ⇒ `DRYRUN_OK 20261014000003 · A · T1–T17 ·
+  todo se revierte` y `02-aplicar-y-registrar.sql` ⇒ `COMMIT`. Después, por
+  MCP: historial con `version` `20261014000003` (una sentencia: el comentario
+  de la aplicación a mano); `03-postcheck-mcp.sql` ⇒ `POSTCHECK_OK
+  20261014000003 · T1–T16 · todo se revierte`; `03b` §2 todo `t` (sonda del
+  API `true`), §3 sin índice único sobre `cobro_id`
+  (`movimiento_bancario_cobro_pkey`, `idx_mov_cobro_parte_cobro` e
+  `idx_mov_bancario_cobro` no único), §4 E y K (K diferido, escucha `monto` y
+  `cuenta_bancaria_id`), §5 anon/authenticated sin permisos y los 7
+  `md5(prosrc)` = los del README del paquete, §6 `57 · 0 · 0 · 0 · 4 · 0`, §7
+  `0`, §8 `0 · 0 · 0` (sin residuos de 01 ni de 03) y §9 0 filas;
+  `get_advisors` sin nada nuevo. Antes de aplicar (prechequeo 00 por MCP,
+  15-oct-2026 ~04:35 y ~06:56 Cancún): historial con `20261014000001` y
+  `20261014000002` —`version` `20261015031335`— y sin esta, los 4 md5
+  esperados, §4 en 0 en las ocho columnas y 57 partes. Puente M:N (DROP
   INDEX `uq_mov_cobro_parte_cobro` y `uq_mov_bancario_cobro`; nace
   `idx_mov_cobro_parte_cobro`), funciones puras INVOKER `neto_de_cobro` y
   `regla_cobro_cubierto`, vista `v_cobro_conciliacion` (security_invoker),
