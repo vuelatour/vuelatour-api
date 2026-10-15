@@ -9,10 +9,12 @@ import {
   estadoConciliacionIngreso,
   montoCuadraIngreso,
   netoIngreso,
+  parcialDeCobertura,
   saldoAnticipo,
   textoCampoBitacora,
   vueloPorVolar,
 } from './ingresos.util';
+import { coberturaCobro } from '../../common/cobro-banco.util';
 
 describe('ingresos.util — dinero del ingreso', () => {
   it('neto = bruto − comisión; sin comisión = bruto', () => {
@@ -177,6 +179,54 @@ describe('estados de conciliación', () => {
         via: null,
       }),
     ).toBe('NO_BANCARIO');
+  });
+
+  it('cobro PARCIAL (0.0.78, invariante 77): liga directa con cubierto === false ⇒ SIN_CONCILIAR; los 4 valores no cambian', () => {
+    const transf = { monto: 3400, metodo: 'TRANSFERENCIA' };
+    expect(
+      estadoConciliacionCobro({ ...transf, via: 'DIRECTO', cubierto: false }),
+    ).toBe('SIN_CONCILIAR');
+    expect(
+      estadoConciliacionCobro({ ...transf, via: 'DIRECTO', cubierto: true }),
+    ).toBe('CONCILIADO');
+    // Sin el dato (null / ausente): como hoy, la liga basta.
+    expect(
+      estadoConciliacionCobro({ ...transf, via: 'DIRECTO', cubierto: null }),
+    ).toBe('CONCILIADO');
+    // Sobre y anticipo no dependen de la cobertura directa.
+    expect(
+      estadoConciliacionCobro({ ...transf, via: 'SOBRE', cubierto: false }),
+    ).toBe('CONCILIADO');
+    expect(
+      estadoConciliacionCobro({ ...transf, via: 'ANTICIPO', cubierto: false }),
+    ).toBe('VIA_ANTICIPO');
+  });
+
+  it('parcialDeCobertura: los números de coberturaCobro tal cual, solo para un parcial', () => {
+    const parte = (monto: number, id: string) => ({
+      movimiento_id: id,
+      cobro_id: 'c315',
+      monto_parte: monto,
+      moneda_cuenta: 'MXN',
+      pasarela: false,
+      fecha: '2026-09-15',
+      created_at: null,
+      monto_abono: monto,
+      cobros_n: 1,
+      cuenta_bancaria_id: null,
+      cuenta_alias: null,
+    });
+    const c315 = { monto: 3400, moneda: 'MXN' };
+    expect(
+      parcialDeCobertura(coberturaCobro(c315, [parte(1700, 'm1')])),
+    ).toEqual({ monto_vinculado: 1700, faltante: 1700, abonos_n: 1 });
+    expect(
+      parcialDeCobertura(
+        coberturaCobro(c315, [parte(1700, 'm1'), parte(1700, 'm2')]),
+      ),
+    ).toBeNull();
+    expect(parcialDeCobertura(coberturaCobro(c315, []))).toBeNull();
+    expect(parcialDeCobertura(null)).toBeNull();
   });
 });
 

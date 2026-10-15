@@ -7,11 +7,15 @@
  * (jamás se convierten aquí), `monto` = BRUTO y neto = monto − comisión. El
  * dinero de un vuelo sigue saliendo SOLO de `cobro_vuelo` vía `cobrosEnUsd`.
  */
-import { METODOS_COBRO_ABONO_AUTO } from '../../common/metodo-cobro.util';
+import {
+  estadoBancoCobro,
+  type CoberturaCobro,
+} from '../../common/cobro-banco.util';
 import type { ViaConciliacion } from '../../common/cobro-conciliado.util';
 import type {
   EstadoConciliacionEntrada,
   EstadoConciliacionIngreso,
+  ParcialEntrada,
 } from './ingresos.types';
 
 /** Tolerancia (moneda nativa) al cuadrar un abono con un ingreso. */
@@ -94,13 +98,17 @@ export function estadoConciliacionIngreso(
   return i.cuenta_bancaria_id ? 'SIN_CONCILIAR' : 'NO_BANCARIO';
 }
 
-const METODOS_AUTO: ReadonlySet<string> = new Set(METODOS_COBRO_ABONO_AUTO);
-
 /**
  * Estado de conciliación de un COBRO de vuelo — regla ÚNICA = la de «Cobros
  * sin banco» (y del aviso del pre-cierre), para que Ingresos y Conciliación
- * digan el MISMO número:
- * - liga directa o por sobre ⇒ CONCILIADO;
+ * digan el MISMO número. Desde el 0.0.78 (invariante 77) es
+ * `estadoBancoCobro` (common/cobro-banco.util) con los 4 valores de
+ * siempre: un PARCIAL viaja como SIN_CONCILIAR (+ el aditivo
+ * `conciliacion.parcial` de la fila):
+ * - liga directa CUBIERTA o por sobre ⇒ CONCILIADO (`cubierto` ausente o
+ *   null = como hoy: la liga basta);
+ * - liga directa con `cubierto === false` (abonos que no completan el
+ *   cobro) ⇒ SIN_CONCILIAR;
  * - cobro de un anticipo YA conciliado ⇒ VIA_ANTICIPO;
  * - positivo sin liga con método ∈ METODOS_COBRO_ABONO_AUTO (también el de
  *   un anticipo sin conciliar: su método ES el del anticipo y un método
@@ -112,13 +120,36 @@ export function estadoConciliacionCobro(p: {
   monto: number;
   metodo: string | null;
   via: ViaConciliacion | null;
+  /** Cobertura del cobro con sus abonos directos (`coberturaCobro().cubierto`). */
+  cubierto?: boolean | null;
 }): EstadoConciliacionEntrada {
-  if (p.via === 'DIRECTO' || p.via === 'SOBRE') return 'CONCILIADO';
-  if (p.via === 'ANTICIPO') return 'VIA_ANTICIPO';
-  if ((Number(p.monto) || 0) > 0 && p.metodo && METODOS_AUTO.has(p.metodo)) {
-    return 'SIN_CONCILIAR';
-  }
-  return 'NO_BANCARIO';
+  const e = estadoBancoCobro({
+    monto: p.monto,
+    metodo: p.metodo,
+    via: p.via,
+    cobertura:
+      typeof p.cubierto === 'boolean' ? { cubierto: p.cubierto } : null,
+  });
+  return e === 'PARCIAL' ? 'SIN_CONCILIAR' : e;
+}
+
+/**
+ * El aditivo `conciliacion.parcial` de una fila de cobro (invariante 77):
+ * solo si el cobro tiene abonos directos y NO está cubierto; los números
+ * son los de `coberturaCobro` tal cual (jamás se recalculan aquí).
+ */
+export function parcialDeCobertura(
+  cob: Pick<
+    CoberturaCobro,
+    'cubierto' | 'n_partes' | 'monto_vinculado' | 'faltante'
+  > | null,
+): ParcialEntrada | null {
+  if (!cob || cob.cubierto || cob.n_partes <= 0) return null;
+  return {
+    monto_vinculado: cob.monto_vinculado,
+    faltante: cob.faltante,
+    abonos_n: cob.n_partes,
+  };
 }
 
 /** Estados de un vuelo que todavía no vuela (su cobro es un DEPÓSITO). */

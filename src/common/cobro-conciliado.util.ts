@@ -1,20 +1,30 @@
 /**
- * FUENTE ÚNICA de "¿este cobro está conciliado con el banco?" (4-sep-2026,
- * sobre de cobro de grupo — Fase 2).
+ * FUENTE ÚNICA de "¿este cobro tiene LIGA con el banco, y por dónde?"
+ * (4-sep-2026, sobre de cobro de grupo — Fase 2).
  *
- * El banco enlaza un ABONO a UN cobro por dos caminos EXCLUYENTES (CHECK
+ * El banco enlaza un ABONO a un cobro por dos caminos EXCLUYENTES (CHECK
  * `movimiento_bancario_cobro_excluyente`):
- * - `movimiento_bancario.cobro_id`       → cobro de vuelo normal (1 ↔ 1,
- *   `uq_mov_bancario_cobro`).
+ * - liga DIRECTA → cobro de vuelo normal. Desde el 12-oct-2026 (invariante
+ *   56) la fuente es la PUENTE `movimiento_bancario_cobro` y
+ *   `movimiento_bancario.cobro_id` es su espejo; desde el 14-oct-2026
+ *   (invariante 77, migración 20261014000003, que retira
+ *   `uq_mov_bancario_cobro`) la liga es M:N: un cobro se paga con 1..N
+ *   abonos y un abono paga 1..N cobros. El lector único
+ *   `conciliacion/ligas-cobro.lector.ts` devuelve UNA liga por (abono,
+ *   cobro).
  * - `movimiento_bancario.cobro_grupo_id` → SOBRE de grupo (`cobro_grupo`,
  *   1 ↔ 1, `uq_mov_bancario_cobro_grupo`). Sus PARTES
  *   (`cobro_vuelo.cobro_grupo_id`) NUNCA tienen movimiento propio: heredan
  *   la conciliación del sobre.
  *
- * Todo lector que decida "conciliado" de un cobro pasa por aquí: la lista de
- * cobros por vuelo (badge del detalle), el candado del PATCH/DELETE por
- * vuelo, el detalle del grupo (sobre), el auto-cruce y la bandeja/reporte de
- * conciliación. Las consultas a `movimiento_bancario` deben traer
+ * OJO (invariante 77): «CONCILIADO» de un cobro ya NO es «tiene liga»: es
+ * CUBIERTO (Σ de sus abonos ≥ neto − $1.00) y lo decide
+ * `common/cobro-banco.util.ts` (`coberturaCobro` ⇒ `estadoBancoCobro`).
+ * `movimientoDeCobro`, `cobroEstaConciliado` y `conciliacionDeCobro`
+ * conservan su conducta —«tiene liga» y POR DÓNDE— porque es el criterio
+ * del CANDADO de dinero (fail-closed: también un cobro PARCIAL está
+ * ligado); ningún lector de ESTADO vuelve a usarlas para pintar
+ * «conciliado». Las consultas a `movimiento_bancario` deben traer
  * `MOV_LIGA_COLS` (cobro_id Y cobro_grupo_id): sin `cobro_grupo_id` el
  * helper no puede ver la liga del sobre y una parte se leería como "sin
  * conciliar" en falso.
@@ -33,6 +43,12 @@ export interface MovimientoLiga {
   id?: unknown;
   cobro_id?: unknown;
   cobro_grupo_id?: unknown;
+  /**
+   * ADITIVO (invariante 77): lo que ESE abono aporta a ESE cobro, cuando la
+   * liga sale de la PUENTE (`ligasDesdePartes`). Ausente en una liga del
+   * espejo (sin 20261012000002: la parte es el |abono| completo).
+   */
+  monto_parte?: number;
 }
 
 function idStr(v: unknown): string | null {
@@ -79,11 +95,37 @@ export function movimientoDeCobro<M extends MovimientoLiga>(
   return sobreId ? movimientoDeSobre(sobreId, movimientos) : null;
 }
 
+/**
+ * ¿El cobro tiene LIGA con el banco (directa o la de su sobre)? Es el
+ * criterio del CANDADO de dinero; el ESTADO («conciliado» = cubierto) sale
+ * de `cobro-banco.util` (invariante 77).
+ */
 export function cobroEstaConciliado(
   cobro: CobroConciliable,
   movimientos: ReadonlyArray<MovimientoLiga>,
 ): boolean {
   return movimientoDeCobro(cobro, movimientos) !== null;
+}
+
+/**
+ * TODAS las ligas DIRECTAS del cobro (M:N desde el 14-oct-2026, invariante
+ * 77), sin repetir movimiento, en el orden en que llegan. [] = sin liga
+ * directa (la de un sobre o un anticipo no cuenta aquí).
+ */
+export function movimientosDeCobro<M extends MovimientoLiga>(
+  cobro: CobroConciliable,
+  movimientos: ReadonlyArray<M>,
+): M[] {
+  const vistos = new Set<string>();
+  const out: M[] = [];
+  for (const m of movimientos) {
+    if (idStr(m.cobro_id) !== cobro.id) continue;
+    const id = idStr(m.id);
+    if (id === null || vistos.has(id)) continue;
+    vistos.add(id);
+    out.push(m);
+  }
+  return out;
 }
 
 /**

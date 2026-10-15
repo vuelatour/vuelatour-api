@@ -182,8 +182,24 @@ export interface EntradaDinero {
   conciliacion: {
     estado: EstadoConciliacionEntrada;
     movimiento_id: string | null;
+    /**
+     * ADITIVO (14-oct-2026, API 0.0.78, invariante 77): el cobro tiene
+     * abonos del banco que NO lo completan (estado SIN_CONCILIAR + esto =
+     * «Conciliado parcial»). null en lo demás (y en los ingresos).
+     */
+    parcial?: ParcialEntrada | null;
   };
   registrado_por_nombre: string | null;
+}
+
+/** Lo que el banco ya pagó de un cobro PARCIAL (`coberturaCobro`). */
+export interface ParcialEntrada {
+  /** Σ de sus abonos en su moneda. */
+  monto_vinculado: number;
+  /** Lo que falta para cubrir su neto. */
+  faltante: number;
+  /** Cuántos abonos tiene ligados. */
+  abonos_n: number;
 }
 export interface ListaEntradas {
   data: EntradaDinero[];

@@ -46,7 +46,14 @@ import {
   type MovimientoLiga,
   type ViaConciliacion,
 } from '../../common/cobro-conciliado.util';
-import { leerLigasDeCobros } from '../conciliacion/ligas-cobro.lector';
+import {
+  leerLigasDeCobros,
+  partesDeLigas,
+} from '../conciliacion/ligas-cobro.lector';
+import {
+  coberturaCobro,
+  type CoberturaCobro,
+} from '../../common/cobro-banco.util';
 import {
   etiquetaMetodoCobro,
   METODOS_COBRO_ABONO_MANUAL,
@@ -73,6 +80,7 @@ import {
   estadoConciliacionIngreso,
   montoCuadraIngreso,
   netoIngreso,
+  parcialDeCobertura,
   r2,
   saldoAnticipo,
   textoCampoBitacora,
@@ -124,6 +132,16 @@ const INGRESO_SELECT =
 /** Cobros de un periodo con lo que pinta «Todos / Cobros de vuelos». */
 const COBRO_PERIODO_SELECT =
   'id, vuelo_id, monto, moneda, metodo_cobro, comision_banco_monto, fecha_cobro, referencia, notas, registrado_por, created_at, cobro_grupo_id, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio, estado, fecha_vuelo, cliente:cliente_id(nombre)), sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio))';
+
+/**
+ * Cómo concilia un cobro de vuelo (fuente única `conciliacionDeCobro`) y,
+ * por la vía DIRECTA, su cobertura con TODOS sus abonos (invariante 77).
+ */
+interface ConciliacionCobroEntrada {
+  via: ViaConciliacion;
+  movimiento_id: string;
+  cobertura: CoberturaCobro | null;
+}
 
 /** Quién hace la operación. */
 export type ActorIngreso = Pick<AuthenticatedUser, 'userId' | 'rol'> &
@@ -673,17 +691,18 @@ export class IngresosService {
   }
 
   /**
-   * cobro_id ⇒ {via, movimiento_id} con la fuente única
+   * cobro_id ⇒ {via, movimiento_id, cobertura} con la fuente única
    * `conciliacionDeCobro` (directo, sobre o su anticipo). Tres lecturas en
-   * lote (≤ 200 ids) — jamás un `.or()` gigante.
+   * lote (≤ 200 ids) — jamás un `.or()` gigante. UN COBRO, VARIOS ABONOS
+   * (0.0.78, invariante 77): la vía DIRECTA trae además la `cobertura` del
+   * cobro con TODOS sus abonos (`partesDeLigas` de las ligas ya leídas ⇒
+   * `coberturaCobro`, sin otra consulta) y `movimiento_id` = el abono MÁS
+   * ANTIGUO (el mismo de la card del vuelo).
    */
   private async conciliacionDeCobros(
     cobros: Row[],
-  ): Promise<Map<string, { via: ViaConciliacion; movimiento_id: string }>> {
-    const out = new Map<
-      string,
-      { via: ViaConciliacion; movimiento_id: string }
-    >();
+  ): Promise<Map<string, ConciliacionCobroEntrada>> {
+    const out = new Map<string, ConciliacionCobroEntrada>();
     if (cobros.length === 0) return out;
     const cobroIds = cobros.map((c) => c.id as string);
     const sobreIds = cobros
@@ -701,6 +720,7 @@ export class IngresosService {
       anticipoIds,
       cols: MOV_LIGA_COLS_CON_INGRESO,
     });
+    const partesPorCobro = partesDeLigas(movs);
     for (const c of cobros) {
       const r = conciliacionDeCobro(
         {
@@ -711,7 +731,14 @@ export class IngresosService {
         movs,
       );
       if (r && typeof r.mov.id === 'string') {
-        out.set(c.id as string, { via: r.via, movimiento_id: r.mov.id });
+        const partes =
+          r.via === 'DIRECTO' ? (partesPorCobro.get(c.id as string) ?? []) : [];
+        const cobertura = partes.length > 0 ? coberturaCobro(c, partes) : null;
+        out.set(c.id as string, {
+          via: r.via,
+          movimiento_id: cobertura?.movimiento_ids[0] ?? r.mov.id,
+          cobertura,
+        });
       }
     }
     return out;
@@ -732,7 +759,7 @@ export class IngresosService {
   /** Cobro crudo ⇒ fila unificada `EntradaDinero`. */
   private entradaDeCobro(
     c: Row,
-    conc: Map<string, { via: ViaConciliacion; movimiento_id: string }>,
+    conc: Map<string, ConciliacionCobroEntrada>,
     folios: Map<string, number>,
     nombres: Map<string, string>,
     hoy: string,
@@ -766,6 +793,7 @@ export class IngresosService {
       monto,
       metodo: (c.metodo_cobro as string | null) ?? null,
       via: k?.via ?? null,
+      cubierto: k?.cobertura ? k.cobertura.cubierto : null,
     });
     const fechaVuelo =
       typeof vuelo?.fecha_vuelo === 'string' && vuelo.fecha_vuelo
@@ -804,7 +832,13 @@ export class IngresosService {
         : null,
       cuenta_en_total: anticipo === null,
       es_reembolso: monto < 0,
-      conciliacion: { estado, movimiento_id: k?.movimiento_id ?? null },
+      conciliacion: {
+        estado,
+        movimiento_id: k?.movimiento_id ?? null,
+        // ADITIVO (0.0.78, invariante 77): el cobro tiene abonos que no lo
+        // completan (badge «Sin conciliar» + chip «Parcial · faltan $X»).
+        parcial: parcialDeCobertura(k?.cobertura ?? null),
+      },
       registrado_por_nombre:
         typeof c.registrado_por === 'string'
           ? (nombres.get(c.registrado_por) ?? null)
@@ -841,6 +875,7 @@ export class IngresosService {
       conciliacion: {
         estado: i.conciliacion.estado,
         movimiento_id: i.conciliacion.movimiento_id,
+        parcial: null,
       },
       registrado_por_nombre: i.registrado_por_nombre,
       _creado: i.created_at,
@@ -993,6 +1028,8 @@ export class IngresosService {
           monto,
           metodo: (c.metodo_cobro as string | null) ?? null,
           via: k?.via ?? null,
+          // Un PARCIAL cuenta en `sin_conciliar` (= «Cobros sin banco»).
+          cubierto: k?.cobertura ? k.cobertura.cubierto : null,
         }),
         monto,
       );
@@ -2913,12 +2950,13 @@ export class IngresosService {
       if (ya.vuelo_id !== dto.vuelo_id) {
         throw clientRequestIdEnUso('cobro', dto.client_request_id);
       }
-      // Lector único (12-oct-2026): también si quedó dentro de un lote.
+      // Lector único (12-oct-2026): también si quedó dentro de un lote. Con
+      // varios abonos por cobro (0.0.78, invariante 77) ESTE abono puede no
+      // ser la primera liga: se busca entre todas.
       const ligasYa = await leerLigasDeCobros(this.sb, {
         cobroIds: [ya.id as string],
       });
-      const ligadoA = (ligasYa[0]?.id as string | undefined) ?? null;
-      if (ligadoA === movId) {
+      if (ligasYa.some((l) => l.id === movId)) {
         return {
           cobro: await this.cobroPublico(dto.vuelo_id, ya.id as string, ya),
           movimiento_id: movId,
@@ -2926,7 +2964,7 @@ export class IngresosService {
           idempotente: true,
         };
       }
-      if (!ligadoA) {
+      if (ligasYa.length === 0) {
         // El cobro quedó pero la liga no (reintento): se liga ahora.
         await this.conciliacion.linkCobro(
           movId,

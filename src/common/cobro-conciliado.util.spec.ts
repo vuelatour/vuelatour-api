@@ -8,6 +8,7 @@ import {
   filtroLigaCobros,
   movimientoDeCobro,
   movimientoDeSobre,
+  movimientosDeCobro,
   sobreDeCobro,
   sobreEstaConciliado,
 } from './cobro-conciliado.util';
@@ -62,6 +63,25 @@ describe('cobro-conciliado.util (fuente única de "conciliado")', () => {
     expect(esParteDeSobre({ id: 'x', cobro_grupo_id: undefined })).toBe(false);
     expect(esParteDeSobre({ id: 'x', cobro_grupo_id: '' })).toBe(false);
     expect(esParteDeSobre({ id: 'x' })).toBe(false);
+  });
+
+  it('movimientosDeCobro (M:N, invariante 77): TODAS las ligas directas, sin repetir movimiento; el sobre no cuenta', () => {
+    const movs = [
+      { id: 'm1', cobro_id: 'c315', cobro_grupo_id: null, monto_parte: 1700 },
+      { id: 'm2', cobro_id: 'c315', cobro_grupo_id: null, monto_parte: 1700 },
+      { id: 'm1', cobro_id: 'c315', cobro_grupo_id: null },
+      { id: 'm3', cobro_id: null, cobro_grupo_id: 's1' },
+      { id: 'm4', cobro_id: 'c999', cobro_grupo_id: null },
+    ];
+    expect(movimientosDeCobro({ id: 'c315' }, movs).map((m) => m.id)).toEqual([
+      'm1',
+      'm2',
+    ]);
+    expect(
+      movimientosDeCobro({ id: 'c7', cobro_grupo_id: 's1' }, movs),
+    ).toEqual([]);
+    // movimientoDeCobro sigue diciendo «tiene liga» (el criterio del candado).
+    expect(movimientoDeCobro({ id: 'c315' }, movs)?.id).toBe('m1');
   });
 
   it('sin movimientos: nada está conciliado', () => {

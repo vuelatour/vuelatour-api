@@ -139,7 +139,18 @@ import {
   type MovimientoLiga,
   type ViaConciliacion,
 } from '../../common/cobro-conciliado.util';
-import { leerLigasDeCobros } from '../conciliacion/ligas-cobro.lector';
+import {
+  leerLigasDeCobros,
+  partesDeLigas,
+} from '../conciliacion/ligas-cobro.lector';
+import {
+  coberturaCobro,
+  cobroCubiertoEnBanco,
+  estadoBancoCobro,
+  netoDeCobro,
+  type EstadoBancoCobro,
+  type ParteCobroBanco,
+} from '../../common/cobro-banco.util';
 import { ingresosDisponibles } from '../../common/ingreso-disponible.util';
 import { etiquetaIngreso } from '../../common/categoria-ingreso.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
@@ -426,6 +437,45 @@ export interface CobroConSobre extends CobroLike {
    */
   anticipo?: { ingreso_id: string; etiqueta: string } | null;
   conciliado_via?: ViaConciliacion | null;
+  /**
+   * ADITIVOS (14-oct-2026, API 0.0.78, invariante 77: un cobro acepta
+   * VARIOS abonos). `conciliado` pasa a ser CUBIERTO (Σ de sus abonos ≥
+   * neto − $1.00, `common/cobro-banco.util`): un PARCIAL ya no dice
+   * «Conciliado». Salen de las partes que YA lee el lector único (cero
+   * consultas nuevas; también sin la migración 20261014000003).
+   * - `conciliacion_estado`: CONCILIADO | PARCIAL | VIA_ANTICIPO |
+   *   SIN_CONCILIAR | NO_BANCARIO.
+   * - `ligado_banco`: tiene ≥ 1 abono directo o su sobre ligado (un
+   *   anticipo NO cuenta): el criterio del CANDADO de dinero, también para
+   *   un parcial.
+   * - `neto_banco`: lo que el banco debe depositar (`netoDeCobro`).
+   * - `monto_vinculado` / `faltante` / `sobrante`: null sin abonos directos.
+   * - `abonos_banco[]`: sus abonos directos por antigüedad (la llave se
+   *   OMITE para PILOTO/MECANICO/VISITANTE: es detalle del banco).
+   * `movimiento_bancario_id` = el abono MÁS ANTIGUO.
+   */
+  conciliacion_estado?: EstadoBancoCobro;
+  ligado_banco?: boolean;
+  neto_banco?: number;
+  monto_vinculado?: number | null;
+  faltante?: number | null;
+  sobrante?: number | null;
+  abonos_banco?: AbonoBancoDeCobro[];
+}
+
+/** Un abono del banco ligado DIRECTO a un cobro (invariante 77). */
+export interface AbonoBancoDeCobro {
+  movimiento_id: string;
+  fecha: string | null;
+  /** Lo que ESTE abono aporta al cobro (moneda de su cuenta). */
+  monto_parte: number;
+  /** |monto| del abono completo. */
+  monto_abono: number | null;
+  /** Cuántos cobros paga ese abono. */
+  cobros_n: number | null;
+  cuenta_bancaria_id: string | null;
+  cuenta_alias: string | null;
+  pasarela: boolean;
 }
 
 /**
@@ -2968,7 +3018,7 @@ export class FlightsService {
       clavesCliente,
     ] = await Promise.all([
       this.listEscalas(id),
-      this.listCobros(id),
+      this.listCobros(id, current),
       this.aeronaveResumen(aeronaveId),
       // Referencia para la app: validación en vivo de la SALIDA del tramo 1
       // (excepción donde el piloto sí fotografía la salida) — el tacómetro
@@ -11617,7 +11667,12 @@ export class FlightsService {
 
   // ============ Cobros ============
 
-  async listCobros(vueloId: string) {
+  /**
+   * Cobros del vuelo para la card (y el snapshot). `current` (opcional)
+   * solo decide si viaja el detalle del banco (`abonos_banco`): se OMITE
+   * para PILOTO/MECANICO/VISITANTE; sin `current` (lecturas internas) viaja.
+   */
+  async listCobros(vueloId: string, current?: AuthenticatedUser) {
     await this.findById(vueloId);
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
@@ -11625,7 +11680,9 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .order('fecha_cobro', { ascending: false });
     if (error) throw new Error(error.message);
-    return this.adjuntarSobres(data ?? []);
+    return this.adjuntarSobres(data ?? [], {
+      sinDetalleBanco: FlightsService.esRolDeCampo(current),
+    });
   }
 
   /**
@@ -11640,9 +11697,16 @@ export class FlightsService {
    * `registrado-por.util`). Este método es el CHOKEPOINT de los cobros de un
    * vuelo: por aquí pasan `listCobros` (card del detalle), la card de cobros
    * del cotizador (lee el mismo snapshot) y el PDF interno.
+   *
+   * UN COBRO, VARIOS ABONOS (14-oct-2026, invariante 77): `conciliado` =
+   * CUBIERTO con TODOS sus abonos (`partesDeLigas` de las ligas que ya trae
+   * el lector ⇒ `coberturaCobro` ⇒ `estadoBancoCobro`) y los aditivos de
+   * `CobroConSobre`; sin consultas nuevas y en las dos ramas (con y sin
+   * ingresos) igual. Si el lector falla, se lanza como siempre.
    */
   private async adjuntarSobres(
     cobros: Array<Record<string, unknown>>,
+    opts: { sinDetalleBanco?: boolean } = {},
   ): Promise<CobroConSobre[]> {
     if (cobros.length === 0) return [];
     const ids = [
@@ -11725,22 +11789,37 @@ export class FlightsService {
         moneda: (s.moneda as string) ?? 'USD',
       });
     }
+    // Partes DIRECTAS de cada cobro (puente o espejo), por antigüedad: de
+    // las ligas que el lector ya trajo (cero consultas nuevas).
+    const partesPorCobro = partesDeLigas(movsRes.data ?? []);
     return conNombreRegistrado(cobros, nombres).map((c) => {
       const cobroGrupo =
         typeof c.cobro_grupo_id === 'string'
           ? (porId.get(c.cobro_grupo_id) ?? null)
           : null;
+      const conciliable = {
+        id: c.id as string,
+        cobro_grupo_id: c.cobro_grupo_id,
+      };
+      // El CANDADO de dinero: liga directa o la de su sobre (un anticipo no).
+      const ligado = movimientoDeCobro(conciliable, movs);
+      const partes = partesPorCobro.get(c.id as string) ?? [];
       if (!conIngresos) {
-        const mov = movimientoDeCobro(
-          { id: c.id as string, cobro_grupo_id: c.cobro_grupo_id },
-          movs,
-        );
+        const via: ViaConciliacion | null = ligado
+          ? ligado.cobro_id === c.id
+            ? 'DIRECTO'
+            : 'SOBRE'
+          : null;
+        const banco = this.bancoDeCobro(c, partes, via, ligado, {
+          ligado: ligado !== null,
+          sinDetalleBanco: opts.sinDetalleBanco,
+        });
         return {
           ...c,
           cobro_grupo: cobroGrupo,
-          conciliado: mov !== null,
-          movimiento_bancario_id:
-            mov && typeof mov.id === 'string' ? mov.id : null,
+          conciliado: banco.conciliado,
+          movimiento_bancario_id: banco.movimiento_bancario_id,
+          ...banco.aditivos,
         };
       }
       // Con ingresos: fuente única `conciliacionDeCobro` (directo, sobre o
@@ -11748,19 +11827,21 @@ export class FlightsService {
       // `movimientoDeCobro` a propósito (desaplicar está permitido).
       const anticipoId = anticiposRes.get(c.id as string) ?? null;
       const conc = conciliacionDeCobro(
-        {
-          id: c.id as string,
-          cobro_grupo_id: c.cobro_grupo_id,
-          ingreso_anticipo_id: anticipoId,
-        },
+        { ...conciliable, ingreso_anticipo_id: anticipoId },
         movs as Array<MovimientoLiga & { ingreso_id?: unknown }>,
+      );
+      const banco = this.bancoDeCobro(
+        c,
+        partes,
+        conc?.via ?? null,
+        conc?.mov ?? null,
+        { ligado: ligado !== null, sinDetalleBanco: opts.sinDetalleBanco },
       );
       return {
         ...c,
         cobro_grupo: cobroGrupo,
-        conciliado: conc !== null,
-        movimiento_bancario_id:
-          conc && typeof conc.mov.id === 'string' ? conc.mov.id : null,
+        conciliado: banco.conciliado,
+        movimiento_bancario_id: banco.movimiento_bancario_id,
         anticipo: anticipoId
           ? {
               ingreso_id: anticipoId,
@@ -11768,8 +11849,79 @@ export class FlightsService {
             }
           : null,
         conciliado_via: conc?.via ?? null,
+        ...banco.aditivos,
       };
     });
+  }
+
+  /**
+   * Estado de UN cobro contra el banco (invariante 77) con lo que
+   * `adjuntarSobres` ya leyó: vía (directo / sobre / anticipo), sus partes
+   * directas y el movimiento de la vía. `conciliado` = CUBIERTO
+   * (`cobroCubiertoEnBanco`); `movimiento_bancario_id` = el abono MÁS
+   * ANTIGUO de la vía directa (o el del sobre / anticipo). `opts.ligado`
+   * es el criterio del candado (liga directa o la del sobre; un anticipo no).
+   */
+  private bancoDeCobro(
+    c: Record<string, unknown>,
+    partes: ReadonlyArray<ParteCobroBanco>,
+    via: ViaConciliacion | null,
+    movVia: MovimientoLiga | null,
+    opts: { ligado: boolean; sinDetalleBanco?: boolean },
+  ): {
+    conciliado: boolean;
+    movimiento_bancario_id: string | null;
+    aditivos: Pick<
+      CobroConSobre,
+      | 'conciliacion_estado'
+      | 'ligado_banco'
+      | 'neto_banco'
+      | 'monto_vinculado'
+      | 'faltante'
+      | 'sobrante'
+      | 'abonos_banco'
+    >;
+  } {
+    const directo = via === 'DIRECTO' && partes.length > 0;
+    const cobertura = directo ? coberturaCobro(c, partes) : null;
+    const estado = estadoBancoCobro({
+      monto: c.monto as number | string | null | undefined,
+      metodo: typeof c.metodo_cobro === 'string' ? c.metodo_cobro : null,
+      via,
+      cobertura,
+    });
+    const movId =
+      cobertura?.movimiento_ids[0] ??
+      (movVia && typeof movVia.id === 'string' ? movVia.id : null);
+    return {
+      conciliado: cobroCubiertoEnBanco(estado),
+      movimiento_bancario_id: movId,
+      aditivos: {
+        conciliacion_estado: estado,
+        ligado_banco: opts.ligado,
+        neto_banco: netoDeCobro(
+          c.monto as number | string | null | undefined,
+          c.comision_banco_monto as number | string | null | undefined,
+        ),
+        monto_vinculado: cobertura ? cobertura.monto_vinculado : null,
+        faltante: cobertura ? cobertura.faltante : null,
+        sobrante: cobertura ? cobertura.sobrante : null,
+        ...(opts.sinDetalleBanco
+          ? {}
+          : {
+              abonos_banco: (directo ? partes : []).map((p) => ({
+                movimiento_id: p.movimiento_id,
+                fecha: p.fecha,
+                monto_parte: p.monto_parte,
+                monto_abono: p.monto_abono,
+                cobros_n: p.cobros_n,
+                cuenta_bancaria_id: p.cuenta_bancaria_id,
+                cuenta_alias: p.cuenta_alias,
+                pasarela: p.pasarela,
+              })),
+            }),
+      },
+    };
   }
 
   /**

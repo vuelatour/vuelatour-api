@@ -979,7 +979,8 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.listCobros(id);
+    // El rol decide si viaja el detalle del banco (`abonos_banco`, 0.0.78).
+    return this.flights.listCobros(id, c);
   }
 
   @Get(':id/bitacora')

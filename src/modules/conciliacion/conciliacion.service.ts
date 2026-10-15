@@ -54,6 +54,7 @@ import {
 } from '../../common/cobros-lote-disponible.util';
 import {
   diferenciaLoteCobros,
+  etiquetaConciliadoCobroUnico,
   etiquetaConciliadoCobros,
   leerErrorCobros,
   LOTE_COBROS_MAX,
@@ -64,9 +65,19 @@ import {
 } from './cobros-lote.util';
 import {
   leerLigasDeCobros,
+  leerPartesDeCobros,
   partesDeAbonos,
+  partesDeLigas,
   type ParteCobroLeida,
 } from './ligas-cobro.lector';
+import {
+  coberturaCobro,
+  estadoBancoCobro,
+  faltanteFueraDe,
+  type EstadoBancoCobro,
+  type ParteCobroBanco,
+} from '../../common/cobro-banco.util';
+import { cobrosParcialesDisponibles } from '../../common/cobros-parciales-disponible.util';
 import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
 import {
   conFolioComprobante,
@@ -466,8 +477,43 @@ export interface CandidatoCobroVuelo {
   referencia: string | null;
   comision_banco_monto: number | null;
   neto: number;
-  /** |neto − monto del abono| (0 = cuadra exacto). */
+  /**
+   * |neto − monto del abono| (0 = cuadra exacto). Un cobro PARCIAL (0.0.78,
+   * invariante 77) se compara contra lo que le FALTA fuera de este abono.
+   */
   dif_monto: number;
+  /**
+   * ADITIVOS (14-oct-2026, API 0.0.78, invariante 77), siempre relativos a
+   * los OTROS abonos del cobro (no a este): `parcial` = ya tiene abonos
+   * que no lo cubren; `monto_vinculado` = Σ de esos abonos en su moneda;
+   * `faltante` = lo que le falta fuera de este abono (sin abonos = neto);
+   * `abonos` = los primeros 5 por antigüedad.
+   */
+  parcial?: boolean;
+  monto_vinculado?: number;
+  faltante?: number;
+  abonos_n?: number;
+  abonos?: AbonoDeCobroCorto[];
+}
+
+/** Ficha corta de un cobro de vuelo (lotes y estado de la bandeja). */
+interface FichaCobroEnLote {
+  vuelo_id: string | null;
+  folio: number | null;
+  cliente: string | null;
+  fecha_cobro: string | null;
+  monto: number;
+  moneda: string | null;
+  metodo_cobro: string | null;
+  comision_banco_monto: number | null;
+  neto: number;
+}
+
+/** Un abono ya ligado a un cobro, en corto (invariante 77). */
+export interface AbonoDeCobroCorto {
+  movimiento_id: string;
+  fecha: string | null;
+  monto_parte: number;
 }
 
 /** Sobre de grupo candidato (se manda `cobro_grupo_id` al PATCH). */
@@ -1335,6 +1381,15 @@ export class ConciliacionService {
   /** ¿Puente abono ↔ cobros aplicada? (12-oct-2026, invariante 56). */
   private cobrosLoteOn(): Promise<boolean> {
     return cobrosLoteDisponibles(this.supabase.service);
+  }
+
+  /**
+   * ¿Un cobro ya acepta VARIOS abonos? (14-oct-2026, invariante 77, sonda
+   * de 20261014000003). Gatea lo que ESCRIBE o propone el segundo abono; las
+   * lecturas de estado no.
+   */
+  private cobrosParcialesOn(): Promise<boolean> {
+    return cobrosParcialesDisponibles(this.supabase.service);
   }
 
   /** Fila cruda de la puente ⇒ parte (tipos normalizados). */
@@ -4692,39 +4747,11 @@ export class ConciliacionService {
     };
   }
 
-  /** Ficha corta de cada cobro de un lote (vuelo, folio, cliente, montos). */
+  /** Ficha corta de cada cobro (vuelo, folio, cliente, montos), por id. */
   private async fichasDeCobrosEnLote(
-    partes: ReadonlyArray<ParteCobroLeida>,
-  ): Promise<
-    Map<
-      string,
-      {
-        vuelo_id: string | null;
-        folio: number | null;
-        cliente: string | null;
-        fecha_cobro: string | null;
-        monto: number;
-        moneda: string | null;
-        metodo_cobro: string | null;
-        comision_banco_monto: number | null;
-        neto: number;
-      }
-    >
-  > {
-    const out = new Map<
-      string,
-      {
-        vuelo_id: string | null;
-        folio: number | null;
-        cliente: string | null;
-        fecha_cobro: string | null;
-        monto: number;
-        moneda: string | null;
-        metodo_cobro: string | null;
-        comision_banco_monto: number | null;
-        neto: number;
-      }
-    >();
+    partes: ReadonlyArray<Pick<ParteCobroLeida, 'cobro_id'>>,
+  ): Promise<Map<string, FichaCobroEnLote>> {
+    const out = new Map<string, FichaCobroEnLote>();
     const ids = [...new Set(partes.map((p) => p.cobro_id))];
     if (ids.length === 0) return out;
     const filas = await this.leerPorLotes(ids, (lote) =>
@@ -4761,25 +4788,50 @@ export class ConciliacionService {
   }
 
   /**
-   * 1 abono ↔ N cobros (12-oct-2026): a cada ABONO con 2+ partes de la
-   * página le pega `cobros[]` (cada parte con vuelo, folio, cliente,
-   * montos), `cobros_suma` y `cobros_diferencia` (= |monto| − Σ partes).
-   * Con UNA parte, el embed `cobro` de siempre basta. Best-effort: si una
-   * lectura falla no se anota NADA (el panel dice «detalle no disponible»).
+   * Lector de la bandeja (GET movimientos) para los abonos con COBROS
+   * (12-oct-2026, invariante 56; UN COBRO, VARIOS ABONOS desde el 0.0.78,
+   * invariante 77 —antes `anotarCobrosLote`—). Dos fases best-effort:
+   * 1) a cada ABONO con 2+ partes de la página le pega `cobros[]` (cada
+   *    parte con vuelo, folio, cliente, montos), `cobros_suma` y
+   *    `cobros_diferencia` (= |monto| − Σ partes), como siempre; si una
+   *    lectura falla no se anota NADA (el panel dice «detalle no
+   *    disponible»);
+   * 2) el ESTADO de cada cobro con TODOS sus abonos (UNA lectura de la
+   *    puente, paginada, de los cobros tocados): en un lote, cada `cobros[i]`
+   *    gana `cobro_estado`, `cobro_neto`, `cobro_faltante`, `cobro_abonos_n`;
+   *    un abono con UN cobro gana `cobro_conciliacion` {cobro_id, folio,
+   *    estado, neto, monto_vinculado, faltante, sobrante, abonos_n,
+   *    faltante_sin_este (lo que faltaría sin ESTE abono), abonos[]}. Si
+   *    falla, no se anota el estado (warn) y lo de la fase 1 se queda.
    */
-  private async anotarCobrosLote(
+  private async anotarCobrosDeAbonos(
     filas: Array<Record<string, unknown>>,
   ): Promise<void> {
-    const conLote = filas.filter((m) => Number(m.cobros_n) >= 2);
-    if (conLote.length === 0) return;
+    const conCobros = filas.filter((m) => Number(m.cobros_n) >= 1);
+    if (conCobros.length === 0) return;
+    const conLote = conCobros.filter((m) => Number(m.cobros_n) >= 2);
+    const unicos = conCobros.filter(
+      (m) =>
+        Number(m.cobros_n) === 1 &&
+        typeof m.cobro_id === 'string' &&
+        m.cobro_id.length > 0,
+    );
+    let partesLote: ParteCobroLeida[] = [];
+    let fichas = new Map<string, FichaCobroEnLote>();
     try {
-      const partes = await partesDeAbonos(
-        this.supabase.service,
-        conLote.map((m) => m.id as string),
-      );
-      const fichas = await this.fichasDeCobrosEnLote(partes);
+      partesLote =
+        conLote.length > 0
+          ? await partesDeAbonos(
+              this.supabase.service,
+              conLote.map((m) => m.id as string),
+            )
+          : [];
+      fichas = await this.fichasDeCobrosEnLote([
+        ...partesLote,
+        ...unicos.map((m) => ({ cobro_id: m.cobro_id as string })),
+      ]);
       const porMov = new Map<string, ParteCobroLeida[]>();
-      for (const p of partes) {
+      for (const p of partesLote) {
         const l = porMov.get(p.movimiento_id) ?? [];
         l.push(p);
         porMov.set(p.movimiento_id, l);
@@ -4806,6 +4858,85 @@ export class ConciliacionService {
         delete m.cobros_suma;
         delete m.cobros_diferencia;
       }
+      return;
+    }
+    // (2) Estado de cada cobro con TODOS sus abonos.
+    try {
+      const cobroIds = [
+        ...new Set([
+          ...partesLote.map((p) => p.cobro_id),
+          ...unicos.map((m) => m.cobro_id as string),
+        ]),
+      ];
+      const partesPorCobro = await leerPartesDeCobros(
+        this.supabase.service,
+        cobroIds,
+      );
+      const estadoDe = (cobroId: string, movId: string) => {
+        const ficha = fichas.get(cobroId);
+        if (!ficha) return null;
+        const partes = partesPorCobro.get(cobroId) ?? [];
+        const cob = coberturaCobro(ficha, partes);
+        const estado: EstadoBancoCobro = estadoBancoCobro({
+          monto: ficha.monto,
+          metodo: ficha.metodo_cobro,
+          via: partes.length > 0 ? 'DIRECTO' : null,
+          cobertura: cob,
+        });
+        return {
+          ficha,
+          partes,
+          cob,
+          estado,
+          faltanteSinEste: faltanteFueraDe(ficha, partes, movId).faltante,
+        };
+      };
+      // Todo se calcula ANTES de escribir: si algo truena, nada queda a medias.
+      const anotLote = conLote.map((m) =>
+        ((m.cobros ?? []) as Array<Record<string, unknown>>).map((item) => {
+          const e = estadoDe(item.cobro_id as string, m.id as string);
+          return e
+            ? {
+                ...item,
+                cobro_estado: e.estado,
+                cobro_neto: e.cob.neto,
+                cobro_faltante: e.cob.faltante,
+                cobro_abonos_n: e.cob.n_partes,
+              }
+            : item;
+        }),
+      );
+      const anotUnicos = unicos.map((m) => {
+        const e = estadoDe(m.cobro_id as string, m.id as string);
+        return e
+          ? {
+              cobro_id: m.cobro_id as string,
+              folio: e.ficha.folio,
+              estado: e.estado,
+              neto: e.cob.neto,
+              monto_vinculado: e.cob.monto_vinculado,
+              faltante: e.cob.faltante,
+              sobrante: e.cob.sobrante,
+              abonos_n: e.cob.n_partes,
+              faltante_sin_este: e.faltanteSinEste,
+              abonos: e.partes.map((p) => ({
+                movimiento_id: p.movimiento_id,
+                fecha: p.fecha,
+                monto_parte: p.monto_parte,
+              })),
+            }
+          : null;
+      });
+      conLote.forEach((m, i) => {
+        m.cobros = anotLote[i];
+      });
+      unicos.forEach((m, i) => {
+        if (anotUnicos[i]) m.cobro_conciliacion = anotUnicos[i];
+      });
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer el estado de los cobros de cada abono: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -4926,6 +5057,13 @@ export class ConciliacionService {
    * conciliar con OTRO movimiento) en ±`dias`, ordenados por cercanía del
    * NETO al monto del abono y luego por fecha. Las PARTES de un sobre nunca
    * se ofrecen (se concilia el sobre, que es lo que depositó el cliente).
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): con la sonda de
+   * 20261014000003 «ocupado» = CUBIERTO por OTROS abonos (o ligado a uno en
+   * otra moneda); un cobro PARCIAL sigue siendo candidato con sus aditivos y
+   * su `dif_monto` contra lo que le FALTA (el ★ «cuadra exacto» del panel
+   * sigue sirviendo). Un abono de la PASARELA no recibe parciales. Sin la
+   * sonda, «tiene liga» = ocupado, como siempre.
    */
   async candidatosCobro(
     movId: string,
@@ -4939,6 +5077,15 @@ export class ConciliacionService {
       moneda: string | null;
       cobro_id: string | null;
       cobro_grupo_id: string | null;
+      /** ADITIVOS (12-oct-2026, con la puente). */
+      cobros_n?: number;
+      cobro_ids?: string[];
+      /**
+       * ADITIVOS (0.0.78, invariante 77): ¿un cobro ya acepta varios abonos
+       * (sonda de 20261014000003)? y el tipo de la cuenta del abono.
+       */
+      cobros_parciales?: boolean;
+      tipo_cuenta?: string | null;
     };
     candidatos: CandidatoCobro[];
     exactos: number;
@@ -4971,7 +5118,10 @@ export class ConciliacionService {
         'Solo un ABONO (entrada de dinero) se concilia contra cobros de vuelo o sobres de grupo.',
       );
     }
-    const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id);
+    // Moneda y TIPO de la cuenta en la MISMA lectura de siempre (el tipo
+    // decide si el abono recibe cobros parciales: la pasarela no).
+    const cuentaAbono = await this.infoCuenta(mov.cuenta_bancaria_id);
+    const moneda = cuentaAbono.moneda;
     const { lo, hi } = this.ventanaAbono(mov.fecha, dias);
     // INGRESOS (24-sep-2026): los cobros nacidos de un anticipo NUNCA son
     // candidatos (su dinero se concilia como anticipo) y los ingresos
@@ -5014,21 +5164,43 @@ export class ConciliacionService {
     const sobres = (sobresRes.data ?? []) as Array<Record<string, unknown>>;
 
     // Ya conciliados con OTRO movimiento (fuente única: lector de ligas =
-    // espejo + puente de cobros). Los que YA paga ESTE abono siguen siendo
-    // candidatos (el panel los marca al editar el lote).
+    // puente de cobros + espejo). Los que YA paga ESTE abono siguen siendo
+    // candidatos (el panel los marca al editar el lote). Con la sonda de
+    // 20261014000003 (invariante 77) un cobro con OTROS abonos solo está
+    // ocupado si ya lo CUBREN (o uno es de otra moneda: 1↔1); si no, es
+    // PARCIAL y entra por lo que le falta (salvo que este abono sea de la
+    // PASARELA: un cobro de la pasarela es «de un solo abono»).
+    const conParciales = conCobrosLote && (await this.cobrosParcialesOn());
     const ocupadosCobro = new Set<string>();
     const ocupadosSobre = new Set<string>();
+    let partesPorCobro = new Map<string, ParteCobroBanco[]>();
     {
       const ligas = await leerLigasDeCobros(this.supabase.service, {
         cobroIds: cobros.map((c) => c.id as string),
         sobreIds: sobres.map((s) => s.id as string),
         conPuente: conCobrosLote,
       });
+      partesPorCobro = partesDeLigas(ligas);
       for (const m of ligas) {
         if (m.id === movId) continue;
-        if (typeof m.cobro_id === 'string') ocupadosCobro.add(m.cobro_id);
+        if (typeof m.cobro_id === 'string' && !conParciales)
+          ocupadosCobro.add(m.cobro_id);
         if (typeof m.cobro_grupo_id === 'string')
           ocupadosSobre.add(m.cobro_grupo_id);
+      }
+      if (conParciales) {
+        for (const c of cobros) {
+          const id = c.id as string;
+          const f = faltanteFueraDe(c, partesPorCobro.get(id) ?? [], movId);
+          if (f.n_otras === 0) continue;
+          if (
+            f.cubierto_por_otras ||
+            f.cruzado_otras ||
+            cuentaAbono.tipo === 'PASARELA'
+          ) {
+            ocupadosCobro.add(id);
+          }
+        }
       }
     }
     const yaLigados: string[] =
@@ -5057,7 +5229,15 @@ export class ConciliacionService {
           const cliente = unwrapOne(vuelo?.cliente);
           const bruto = Number(c.monto) || 0;
           const comision = Number(c.comision_banco_monto) || 0;
-          const neto = r2(bruto - (comision > 0 ? comision : 0));
+          const neto = netoDeCobro(bruto, comision);
+          // Lo que le falta FUERA de este abono (invariante 77): sin otros
+          // abonos es el neto (lo de siempre).
+          const f = faltanteFueraDe(
+            c,
+            partesPorCobro.get(c.id as string) ?? [],
+            movId,
+          );
+          const parcial = f.n_otras > 0;
           return {
             tipo: 'COBRO_VUELO',
             id: c.id as string,
@@ -5074,7 +5254,16 @@ export class ConciliacionService {
             referencia: (c.referencia as string | null) ?? null,
             comision_banco_monto: comision > 0 ? r2(comision) : null,
             neto,
-            dif_monto: r2(Math.abs(neto - montoMov)),
+            dif_monto: r2(Math.abs((parcial ? f.faltante : neto) - montoMov)),
+            parcial,
+            monto_vinculado: f.suma_otras,
+            faltante: f.faltante,
+            abonos_n: f.n_otras,
+            abonos: f.otras.slice(0, 5).map((p) => ({
+              movimiento_id: p.movimiento_id,
+              fecha: p.fecha,
+              monto_parte: p.monto_parte,
+            })),
           };
         }),
       ...sobres
@@ -5124,6 +5313,10 @@ export class ConciliacionService {
               cobro_ids: yaLigados,
             }
           : {}),
+        // ADITIVOS (0.0.78, invariante 77): capacidad de varios abonos por
+        // cobro y tipo de la cuenta (la pasarela no recibe parciales).
+        cobros_parciales: conParciales,
+        tipo_cuenta: cuentaAbono.tipo,
       },
       candidatos,
       exactos: candidatos.filter((c) => c.dif_monto === 0).length,
@@ -5364,19 +5557,34 @@ export class ConciliacionService {
   /**
    * Ligas banco↔cobro de estos cobros/sobres (fuente única MOV_LIGA_COLS):
    * mapa cobro (`${tipo}:${id}`) → id del movimiento que lo concilia.
+   * «Cualquier liga = ocupado»: lo usan el cruce y la auditoría de Paywise
+   * (un cobro de la pasarela es «de un solo abono», invariante 77).
    */
   private async ligasDeCobros(
     cobros: ReadonlyArray<CobroPaywise>,
   ): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    // Espejo + puente de cobros (12-oct-2026): un cobro de un lote también
-    // está conciliado.
-    const data = await leerLigasDeCobros(this.supabase.service, {
+    return this.mapaDeLigasCobros(await this.leerLigasDeCobrosCargados(cobros));
+  }
+
+  /** Las ligas crudas (lector único) de estos cobros/sobres. */
+  private async leerLigasDeCobrosCargados(
+    cobros: ReadonlyArray<CobroPaywise>,
+  ): Promise<MovimientoLiga[]> {
+    // Puente de cobros + espejo (12-oct-2026): un cobro de un lote también
+    // está ligado.
+    return leerLigasDeCobros(this.supabase.service, {
       cobroIds: cobros.filter((c) => c.tipo === 'COBRO_VUELO').map((c) => c.id),
       sobreIds: cobros.filter((c) => c.tipo === 'SOBRE_GRUPO').map((c) => c.id),
       conPuente: await this.cobrosLoteOn(),
     });
-    for (const m of data) {
+  }
+
+  /** Ligas ⇒ mapa `${tipo}:${id}` → movimiento. */
+  private mapaDeLigasCobros(
+    ligas: ReadonlyArray<MovimientoLiga>,
+  ): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const m of ligas) {
       if (typeof m.cobro_id === 'string')
         out.set(`COBRO_VUELO:${m.cobro_id}`, m.id as string);
       if (typeof m.cobro_grupo_id === 'string')
@@ -6107,6 +6315,15 @@ export class ConciliacionService {
    * con método bancario (transferencia / HSBC link / cheque / Paywise) sin
    * liga con ningún abono importado. Lo usa el pre-cierre como aviso.
    * Default: últimos 90 días por fecha_cobro (cortes Cancún).
+   *
+   * UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): el universo son los
+   * cobros NO CUBIERTOS: sin liga (como hoy) o con abonos directos que no lo
+   * completan (PARCIAL; la cobertura sale de las MISMAS ligas que ya lee el
+   * lector único, sin otra consulta; si la lectura falla, se lanza). Cada
+   * fila gana `parcial`, `monto_vinculado`, `faltante` (sin abonos = neto),
+   * `abonos_n` y `abonos[]`; la raíz, `parciales`; `por_moneda[i]`, la Σ de
+   * `faltante` (`monto` sigue siendo Σ bruto). No depende de la migración
+   * 20261014000003 (sale de la puente de 20261012000002 o del espejo).
    */
   async cobrosSinBanco(desde?: string, hasta?: string) {
     // Defaults en día CANCÚN (no UTC): a las 20:00 de Cancún el UTC ya es
@@ -6129,7 +6346,17 @@ export class ConciliacionService {
       undefined,
       { anticipos: 'INCLUIR' },
     );
-    const ligas = await this.ligasDeCobros(cobros);
+    const ligasLeidas = await this.leerLigasDeCobrosCargados(cobros);
+    const ligas = this.mapaDeLigasCobros(ligasLeidas);
+    const partesPorCobro = partesDeLigas(ligasLeidas);
+    /** Cobertura de un COBRO de vuelo con abonos directos (null = sin abonos directos). */
+    const coberturaDe = (c: (typeof cobros)[number]) => {
+      if (c.tipo !== 'COBRO_VUELO') return null;
+      const partes = partesPorCobro.get(c.id) ?? [];
+      return partes.length > 0
+        ? { partes, cob: coberturaCobro(c, partes) }
+        : null;
+    };
     const anticipoIds = [
       ...new Set(
         cobros
@@ -6153,18 +6380,42 @@ export class ConciliacionService {
         folioAnticipo.set(f.id as string, Number(f.folio));
     }
     const libres = cobros.filter((c) => {
-      if (ligas.has(`${c.tipo}:${c.id}`)) return false;
+      if (ligas.has(`${c.tipo}:${c.id}`)) {
+        // Ligado: solo sigue aquí si es un cobro PARCIAL (sus abonos directos
+        // no lo cubren). Un sobre ligado está conciliado (1 ↔ 1).
+        const banco = coberturaDe(c);
+        return banco !== null && !banco.cob.cubierto;
+      }
       const ant = c.ingreso_anticipo_id;
       return !(typeof ant === 'string' && ant && anticiposConciliados.has(ant));
     });
-    const porMoneda = new Map<string, number>();
+    const porMoneda = new Map<string, { monto: number; faltante: number }>();
+    let parciales = 0;
     const data = libres.map((c) => {
-      porMoneda.set(c.moneda, (porMoneda.get(c.moneda) ?? 0) + c.monto);
+      const neto = netoDeCobro(c.monto, c.comision_banco_monto);
+      const banco = coberturaDe(c);
+      const parcial = banco !== null && !banco.cob.cubierto;
+      if (parcial) parciales += 1;
+      const faltante = banco ? banco.cob.faltante : neto;
+      const acum = porMoneda.get(c.moneda) ?? { monto: 0, faltante: 0 };
+      acum.monto += c.monto;
+      acum.faltante += faltante;
+      porMoneda.set(c.moneda, acum);
       const { ingreso_anticipo_id: ant, ...resto } = c;
       const fila = {
         ...resto,
         metodo_label: etiquetaMetodoCobro(c.metodo_cobro),
-        neto: r2(c.monto - (c.comision_banco_monto ?? 0)),
+        neto,
+        // ADITIVOS (0.0.78, invariante 77).
+        parcial,
+        monto_vinculado: banco ? banco.cob.monto_vinculado : 0,
+        faltante,
+        abonos_n: banco ? banco.cob.n_partes : 0,
+        abonos: (banco ? banco.partes : []).map((p) => ({
+          movimiento_id: p.movimiento_id,
+          fecha: p.fecha,
+          monto_parte: p.monto_parte,
+        })),
       };
       if (!conIngresos) return fila;
       return {
@@ -6183,10 +6434,14 @@ export class ConciliacionService {
       total: data.length,
       desde: d,
       hasta: h,
-      por_moneda: [...porMoneda.entries()].map(([moneda, monto]) => ({
+      por_moneda: [...porMoneda.entries()].map(([moneda, x]) => ({
         moneda,
-        monto: r2(monto),
+        monto: r2(x.monto),
+        // ADITIVO (0.0.78): Σ de lo que FALTA (los sin abonos, su neto).
+        faltante: r2(x.faltante),
       })),
+      // ADITIVO (0.0.78): cuántos de `total` son cobros PARCIALES.
+      parciales,
     };
   }
 
@@ -9312,6 +9567,12 @@ export class ConciliacionService {
 
     // Lotes de COBROS (12-oct-2026): partes y vuelos de los abonos con 2+
     // cobros, en lote. Un fallo TUMBA el reporte (como con los gastos).
+    // UN COBRO, VARIOS ABONOS (0.0.78, invariante 77): + la COBERTURA de
+    // TODOS los cobros del reporte (los de un lote y los de un abono con UN
+    // cobro) en UNA lectura del lector único: «Conciliado con» dice si el
+    // abono deja el cobro parcial, lo completa o trae de más. Si falla, el
+    // reporte también se TUMBA (un «Conciliado con» incompleto diría que el
+    // abono explica el cobro entero).
     const lotesCobros = new Map<
       string,
       Array<{
@@ -9320,48 +9581,78 @@ export class ConciliacionService {
         folio: number | null;
         cliente: string | null;
         aeronave_id: string | null;
+        neto: number | null;
+        completa: boolean | null;
       }>
     >();
-    if (conCobrosReporte) {
-      const movsLoteCobros = movs.filter((m) => Number(m.cobros_n) >= 2);
-      if (movsLoteCobros.length > 0) {
-        const partes = await partesDeAbonos(
-          this.supabase.service,
-          movsLoteCobros.map((m) => m.id as string),
-        );
-        const cobrosLote = await this.leerPorLotes(
-          [...new Set(partes.map((p) => p.cobro_id))],
-          (lote) =>
+    const cobroDeReporte = new Map<string, Record<string, unknown>>();
+    let partesDeCobrosReporte = new Map<string, ParteCobroBanco[]>();
+    {
+      const movsLoteCobros = conCobrosReporte
+        ? movs.filter((m) => Number(m.cobros_n) >= 2)
+        : [];
+      const partes =
+        movsLoteCobros.length > 0
+          ? await partesDeAbonos(
+              this.supabase.service,
+              movsLoteCobros.map((m) => m.id as string),
+            )
+          : [];
+      const cobroIds = [
+        ...new Set([
+          ...partes.map((p) => p.cobro_id),
+          ...movs
+            .map((m) => m.cobro_id)
+            .filter((x): x is string => typeof x === 'string' && !!x),
+        ]),
+      ];
+      if (cobroIds.length > 0) {
+        const [filasCobro, partesCobro] = await Promise.all([
+          this.leerPorLotes(cobroIds, (lote) =>
             this.supabase.service
               .from('cobro_vuelo')
               .select(
-                'id, vuelo:vuelo!vuelo_id(folio, aeronave_id, cliente:cliente_id(nombre))',
+                'id, monto, moneda, comision_banco_monto, metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id, cliente:cliente_id(nombre))',
               )
               .in('id', lote),
+          ),
+          // Con la puente: SOLO la puente (todas las partes de esos cobros);
+          // sin ella, el espejo (parte = |abono|). Una lectura en cada caso.
+          conCobrosReporte
+            ? leerPartesDeCobros(this.supabase.service, cobroIds)
+            : leerLigasDeCobros(this.supabase.service, {
+                cobroIds,
+                conPuente: false,
+              }).then((ligas) => partesDeLigas(ligas)),
+        ]);
+        for (const c of filasCobro) cobroDeReporte.set(String(c.id), c);
+        partesDeCobrosReporte = partesCobro;
+      }
+      for (const p of partes) {
+        const c = cobroDeReporte.get(p.cobro_id);
+        const vuelo = unwrapOne(
+          c?.vuelo as {
+            folio?: unknown;
+            aeronave_id?: unknown;
+            cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+          } | null,
         );
-        const cobroDe = new Map(cobrosLote.map((c) => [String(c.id), c]));
-        for (const p of partes) {
-          const c = cobroDe.get(p.cobro_id);
-          const vuelo = unwrapOne(
-            c?.vuelo as {
-              folio?: unknown;
-              aeronave_id?: unknown;
-              cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
-            } | null,
-          );
-          const cliente = unwrapOne(vuelo?.cliente);
-          const l = lotesCobros.get(p.movimiento_id) ?? [];
-          l.push({
-            cobro_id: p.cobro_id,
-            monto_parte: p.monto_parte,
-            folio: vuelo?.folio == null ? null : Number(vuelo.folio),
-            cliente:
-              typeof cliente?.nombre === 'string' ? cliente.nombre : null,
-            aeronave_id:
-              typeof vuelo?.aeronave_id === 'string' ? vuelo.aeronave_id : null,
-          });
-          lotesCobros.set(p.movimiento_id, l);
-        }
+        const cliente = unwrapOne(vuelo?.cliente);
+        const cob = c
+          ? coberturaCobro(c, partesDeCobrosReporte.get(p.cobro_id) ?? [])
+          : null;
+        const l = lotesCobros.get(p.movimiento_id) ?? [];
+        l.push({
+          cobro_id: p.cobro_id,
+          monto_parte: p.monto_parte,
+          folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+          cliente: typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+          aeronave_id:
+            typeof vuelo?.aeronave_id === 'string' ? vuelo.aeronave_id : null,
+          neto: cob ? cob.neto : null,
+          completa: cob ? cob.cubierto : null,
+        });
+        lotesCobros.set(p.movimiento_id, l);
       }
     }
 
@@ -9522,6 +9813,29 @@ export class ConciliacionService {
       );
       if (cobro) {
         const folio = unwrapOne(cobro.vuelo)?.folio;
+        // UN COBRO, VARIOS ABONOS (0.0.78): parcial / N de N / de más.
+        const cobroId = typeof m.cobro_id === 'string' ? m.cobro_id : null;
+        const ficha = cobroId ? cobroDeReporte.get(cobroId) : undefined;
+        const partesCobro = cobroId
+          ? (partesDeCobrosReporte.get(cobroId) ?? [])
+          : [];
+        if (ficha && partesCobro.length > 0) {
+          const cob = coberturaCobro(ficha, partesCobro);
+          const propia = partesCobro.find((p) => p.movimiento_id === m.id);
+          const pos = cob.movimiento_ids.indexOf(m.id as string);
+          return etiquetaConciliadoCobroUnico({
+            folio: folio ?? null,
+            metodo_cobro: cobro.metodo_cobro ?? null,
+            monto_parte:
+              propia?.monto_parte ?? r2(Math.abs(Number(m.monto) || 0)),
+            neto: cob.neto,
+            faltante: cob.faltante,
+            sobrante: cob.sobrante,
+            cubierto: cob.cubierto,
+            abonos_n: cob.n_partes,
+            posicion: pos >= 0 ? pos + 1 : null,
+          });
+        }
         return [
           'Cobro',
           folio != null ? `vuelo #${folio}` : null,
@@ -9965,7 +10279,9 @@ export class ConciliacionService {
     if (conPartes)
       await this.anotarPartes(filas, embedFolioLista, foliosPorMov);
     // ADITIVOS (12-oct-2026): `cobros[]`, `cobros_suma`, `cobros_diferencia`.
-    if (conCobrosLote) await this.anotarCobrosLote(filas);
+    // UN COBRO, VARIOS ABONOS (0.0.78): + `cobro_conciliacion` (UN cobro) y
+    // el estado de cada cobro del lote.
+    if (conCobrosLote) await this.anotarCobrosDeAbonos(filas);
     // ADITIVO (0.0.75, invariante 72): `balance` en `gasto` y en cada
     // `gastos[]` (enlaces «Ver en balance…»). Best-effort, lectura propia.
     await this.anotarUbicacionBalance(filas);
@@ -13957,7 +14273,10 @@ export class ConciliacionService {
           ocupados.add(`INGRESO:${m.ingreso_id}`);
       }
       // Puente de cobros (12-oct-2026): los cobros de un LOTE no tienen
-      // espejo `cobro_id`; se leen de la puente (universo, paginado).
+      // espejo `cobro_id`; se leen de la puente (universo, paginado). Con
+      // varios abonos por cobro (0.0.78, invariante 77) el orden va por la
+      // PK completa (cobro_id, movimiento_id): solo por cobro_id las páginas
+      // podrían saltar o repetir filas.
       if (await this.cobrosLoteOn()) {
         const partes = await this.leerPaginado(
           (a, b) =>
@@ -13965,6 +14284,7 @@ export class ConciliacionService {
               .from('movimiento_bancario_cobro')
               .select('cobro_id')
               .order('cobro_id', { ascending: true })
+              .order('movimiento_id', { ascending: true })
               .range(a, b),
           TOPE_UNIVERSO * 3,
         );

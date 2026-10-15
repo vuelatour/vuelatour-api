@@ -80,6 +80,8 @@ function fakeSupabase(db: Tablas, fallos: Record<string, unknown> = {}) {
         },
         or: () => api,
         order: () => api,
+        // La puente de cobros se lee PAGINADA (0.0.78, invariante 77).
+        range: () => api,
         limit: () => api,
         maybeSingle: () => Promise.resolve(ejecutar(true)),
         then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
