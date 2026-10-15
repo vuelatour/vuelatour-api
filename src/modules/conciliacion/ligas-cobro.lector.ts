@@ -76,10 +76,24 @@ export function colsEspejoLigas(cols: string = MOV_LIGA_COLS): string {
 }
 
 /**
- * Select de la puente con su abono embebido (SOLO con la sonda de
- * 20261012000002: nombra la puente y `cobros_n`).
+ * QUIÉN y CUÁNDO creó cada PARTE de la puente (FK
+ * `movimiento_bancario_cobro_created_by_fkey`), a nivel de la PARTE —no del
+ * movimiento embebido, que trae su propio `created_at`—. Solo con
+ * `{ conAutor: true }` (conciliación al revés de una entrada, invariante 78).
  */
-export function colsPuenteLigas(cols: string = MOV_LIGA_COLS): string {
+export const PARTE_COBRO_AUTOR_COLS =
+  'created_at, ligador:usuario!created_by(nombre)';
+
+/**
+ * Select de la puente con su abono embebido (SOLO con la sonda de
+ * 20261012000002: nombra la puente y `cobros_n`). Con `{ conAutor: true }`
+ * pide además el autor de la PARTE (`PARTE_COBRO_AUTOR_COLS`); sin la opción,
+ * byte a byte el select de siempre.
+ */
+export function colsPuenteLigas(
+  cols: string = MOV_LIGA_COLS,
+  opts: { conAutor?: boolean } = {},
+): string {
   const abono = columnas(cols, [
     'fecha',
     'monto',
@@ -88,7 +102,8 @@ export function colsPuenteLigas(cols: string = MOV_LIGA_COLS): string {
     'created_at',
     'cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, moneda, tipo)',
   ]);
-  return `movimiento_id, cobro_id, monto_parte, movimiento:movimiento_bancario!movimiento_id(${abono})`;
+  const autor = opts.conAutor === true ? `${PARTE_COBRO_AUTOR_COLS}, ` : '';
+  return `movimiento_id, cobro_id, monto_parte, ${autor}movimiento:movimiento_bancario!movimiento_id(${abono})`;
 }
 
 export interface EntradaLigasCobros {
@@ -103,6 +118,12 @@ export interface EntradaLigasCobros {
    * specs y los callers que ya sondearon lo pasan.
    */
   conPuente?: boolean;
+  /**
+   * Invariante 78 (conciliación al revés de una entrada): cada liga de la
+   * PUENTE trae además `parte_created_at` y `ligada_por` (quién y cuándo
+   * creó la parte). Sin la opción, byte a byte la lectura de siempre.
+   */
+  conAutor?: boolean;
 }
 
 function trozos(ids: ReadonlyArray<string> | undefined): string[][] {
@@ -177,14 +198,35 @@ async function leerPuentePaginada(
   return out;
 }
 
-/** Filas de la puente (con el abono embebido) ⇒ ligas directas. */
-function ligasDePuente<M extends MovimientoLiga>(partes: Fila[]): M[] {
+/** Nombre del usuario embebido (`ligador:usuario!created_by(nombre)`). */
+function nombreEmbebido(v: unknown): string | null {
+  const u = (Array.isArray(v) ? v[0] : v) as { nombre?: unknown } | null;
+  return u && typeof u.nombre === 'string' && u.nombre.length > 0
+    ? u.nombre
+    : null;
+}
+
+/**
+ * Filas de la puente (con el abono embebido) ⇒ ligas directas. Con
+ * `conAutor`, cada liga conserva el `created_at` de la PARTE y quién la creó.
+ */
+function ligasDePuente<M extends MovimientoLiga>(
+  partes: Fila[],
+  conAutor = false,
+): M[] {
   return ligasDesdePartes(
     partes.map((p) => ({
       movimiento_id: String(p.movimiento_id),
       cobro_id: String(p.cobro_id),
       monto_parte: Number(p.monto_parte) || 0,
       movimiento: p.movimiento as MovimientoLiga | MovimientoLiga[] | null,
+      ...(conAutor
+        ? {
+            parte_created_at:
+              typeof p.created_at === 'string' ? p.created_at : null,
+            ligada_por: nombreEmbebido(p.ligador),
+          }
+        : {}),
     })),
   ) as M[];
 }
@@ -214,14 +256,16 @@ export async function leerLigasDeCobros<
       ? e.conPuente
       : await cobrosLoteDisponibles(sb);
   if (!conPuente) return unirLigas(espejo);
+  const conAutor = e.conAutor === true;
   const partes = await leerPuentePaginada(
     sb,
-    colsPuenteLigas(cols),
+    colsPuenteLigas(cols, { conAutor }),
     'cobro_id',
     cobroIds,
   );
-  // La PUENTE primero: la deduplicación conserva la liga con `monto_parte`.
-  return unirLigas(ligasDePuente<M>(partes), espejo);
+  // La PUENTE primero: la deduplicación conserva la liga con `monto_parte`
+  // (y, con `conAutor`, con el autor de la parte).
+  return unirLigas(ligasDePuente<M>(partes, conAutor), espejo);
 }
 
 function unwrapUno<T>(v: T | T[] | null | undefined): T | null {

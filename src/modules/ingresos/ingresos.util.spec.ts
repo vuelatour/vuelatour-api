@@ -5,6 +5,7 @@ import {
   avisoIngresoConAvion,
   coincideBusqueda,
   comisionDeAplicacion,
+  conceptoDeCobro,
   estadoConciliacionCobro,
   estadoConciliacionIngreso,
   montoCuadraIngreso,
@@ -227,6 +228,26 @@ describe('estados de conciliación', () => {
     ).toBeNull();
     expect(parcialDeCobertura(coberturaCobro(c315, []))).toBeNull();
     expect(parcialDeCobertura(null)).toBeNull();
+  });
+});
+
+describe('conceptoDeCobro — la regla de la lista, compartida con la hoja (invariante 78)', () => {
+  it('gana la referencia (recortada); si no, la 1.ª línea de las notas; si no, null', () => {
+    expect(
+      conceptoDeCobro({ referencia: '  SPEI 150926 ', notas: 'otra cosa' }),
+    ).toBe('SPEI 150926');
+    // #375 (real): sin referencia, la primera línea de sus notas.
+    expect(
+      conceptoDeCobro({
+        referencia: null,
+        notas: 'Pago dos vuelos en uno, el otro es el 21 oct\nsegunda línea',
+      }),
+    ).toBe('Pago dos vuelos en uno, el otro es el 21 oct');
+    expect(
+      conceptoDeCobro({ referencia: '   ', notas: '\nnada arriba' }),
+    ).toBeNull();
+    expect(conceptoDeCobro({ referencia: null, notas: null })).toBeNull();
+    expect(conceptoDeCobro({})).toBeNull();
   });
 });
 

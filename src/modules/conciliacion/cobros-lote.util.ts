@@ -1356,6 +1356,14 @@ export interface ParteAbonoCobro {
   cobro_id: string;
   monto_parte: number;
   movimiento?: MovimientoLiga | MovimientoLiga[] | null;
+  /**
+   * Solo con `leerLigasDeCobros({ conAutor: true })` (invariante 78): el
+   * `created_at` de la PARTE y el nombre de quien la creó. Si vienen, la
+   * liga los conserva con ESTOS nombres (el `created_at` de la liga es el
+   * del MOVIMIENTO embebido y no se pisa).
+   */
+  parte_created_at?: string | null;
+  ligada_por?: string | null;
 }
 
 /**
@@ -1380,6 +1388,12 @@ export function ligasDesdePartes(
       cobro_grupo_id: null,
       // ADITIVO (invariante 77): lo que ESTE abono aporta a ESTE cobro.
       monto_parte: Number(p.monto_parte) || 0,
+      // ADITIVOS (invariante 78): quién y cuándo creó la PARTE, solo si se
+      // pidieron (sin `conAutor` la liga sale byte a byte igual).
+      ...(p.parte_created_at !== undefined
+        ? { parte_created_at: p.parte_created_at }
+        : {}),
+      ...(p.ligada_por !== undefined ? { ligada_por: p.ligada_por } : {}),
     });
   }
   return out;

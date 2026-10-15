@@ -79,7 +79,6 @@ import {
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { posibleDuplicado } from '../conciliacion/abono-cruce.util';
 import {
-  primeraLinea,
   TOLERANCIA_TC_OFICIAL_PCT,
   ventanaDias,
 } from '../conciliacion/auto-cruce.util';
@@ -89,6 +88,7 @@ import {
   avisoIngresoConAvion,
   coincideBusqueda,
   comisionDeAplicacion,
+  conceptoDeCobro,
   estadoConciliacionCobro,
   estadoConciliacionIngreso,
   montoCuadraIngreso,
@@ -824,12 +824,16 @@ export class IngresosService {
       categoria_etiqueta: 'Cobro de vuelo',
       cliente_nombre:
         typeof cliente?.nombre === 'string' ? cliente.nombre : null,
-      concepto:
-        textoONull(c.referencia) ??
-        (primeraLinea(c.notas as string | null) || null),
+      // Regla ÚNICA del concepto y LA fórmula del neto (`netoDeCobro`), las
+      // mismas de la conciliación al revés (invariante 78): la lista y la
+      // hoja dicen el mismo número.
+      concepto: conceptoDeCobro({ referencia: c.referencia, notas: c.notas }),
       monto,
       comision,
-      neto: monto > 0 ? r2(monto - (comision ?? 0)) : monto,
+      neto: netoDeCobro(
+        c.monto as number | string | null | undefined,
+        c.comision_banco_monto as number | string | null | undefined,
+      ),
       moneda: c.moneda === 'USD' ? 'USD' : 'MXN',
       metodo: (c.metodo_cobro as string) ?? '',
       metodo_etiqueta: etiquetaMetodoCobro(c.metodo_cobro as string | null),

@@ -378,6 +378,27 @@ export class ConciliacionController {
     return this.conciliacion.conciliacionDeGasto(id);
   }
 
+  // CONCILIACIÓN AL REVÉS DE UNA ENTRADA (14-oct-2026, API 0.0.78,
+  // invariante 78): roles de la CLASE (ROLES_CONCILIACION), sin `@Roles`
+  // propio. `cobros/:id` es otro segmento que `cobros-sin-banco` (no chocan).
+  @Get('cobros/:id')
+  @ApiOperation({
+    summary:
+      'Conciliación AL REVÉS de un cobro de vuelo (14-oct-2026, API 0.0.78, invariante 78; también la parte de un sobre o el cobro de un anticipo): estado con el MISMO vocabulario de Ingresos (CONCILIADO, PARCIAL, VIA_ANTICIPO, SIN_CONCILIAR, NO_BANCARIO), la cobertura del cobro, sus abonos del banco (cuenta sin número ni CLABE, leyenda, referencia, lo que cada uno aporta, el lote completo si pagó varios cobros, el estado de cuenta de origen o por qué no hay archivo y quién registró la liga desde el 12-oct-2026) y, si sigue pendiente, qué hay importado por cuenta, los otros cobros sin conciliar del mismo cliente ese día y si el cruce ya no corrió. Solo lectura. 404 COBRO_NO_EXISTE.',
+  })
+  conciliacionDeCobroVuelo(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.conciliacionDeEntrada('COBRO_VUELO', id);
+  }
+
+  @Get('ingresos/:id')
+  @ApiOperation({
+    summary:
+      'Conciliación AL REVÉS de un ingreso (14-oct-2026, API 0.0.78, invariante 78; también un anticipo como fila de Ingresos): su abono del banco con la cuenta, el estado de cuenta de origen, el cuadre con el que se ligó y quién lo ligó (bitácora); si sigue pendiente, qué hay importado por cuenta. Solo lectura. 404 INGRESO_NO_EXISTE; 503 INGRESOS_NO_DISPONIBLE sin la migración de ingresos.',
+  })
+  conciliacionDeIngresoBanco(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.conciliacionDeEntrada('INGRESO', id);
+  }
+
   // VARIOS CARGOS → UN GASTO (14-oct-2026, API 0.0.77, invariante 76): otro
   // MÉTODO que `GET gastos/:id` (no chocan). Todo o nada, por la RPC.
   @Post('gastos/:id/cargos')

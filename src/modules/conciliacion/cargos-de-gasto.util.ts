@@ -77,8 +77,13 @@ export interface LoteDeCargo {
   gastos_diferencia: number | null;
 }
 
-/** Un cargo del banco ligado al gasto (una PARTE de la puente). */
-export interface CargoDeGastoDetalle {
+/**
+ * La base de un movimiento del banco en una conciliación AL REVÉS: la
+ * comparten el cargo de un gasto (invariante 71) y el abono de una entrada
+ * de dinero (invariante 78), con las MISMAS llaves en el MISMO orden
+ * (`aMovimientoDetalle`).
+ */
+export interface MovimientoDetalle {
   movimiento_id: string;
   /** DATE del movimiento. */
   fecha: string;
@@ -93,12 +98,16 @@ export interface CargoDeGastoDetalle {
   origen: string | null;
   /** `movimiento_bancario.created_at` (timestamptz). */
   creado_at: string | null;
-  /** Quien importó o capturó el cargo. */
+  /** Quien importó o capturó el movimiento. */
   creado_por: string | null;
   orden_archivo: number | null;
   cuenta: CuentaDeCargo | null;
   estado_cuenta: EstadoCuentaDeCargo | null;
   sin_archivo: MotivoSinArchivo | null;
+}
+
+/** Un cargo del banco ligado al gasto (una PARTE de la puente). */
+export interface CargoDeGastoDetalle extends MovimientoDetalle {
   parte: {
     /** Lo que ESTE cargo aporta a ESTE gasto. */
     monto_parte: number;
@@ -124,6 +133,13 @@ export interface CargosDeGastoLeidos {
 /** Último día con movimientos de una cuenta activa (best-effort). */
 export interface UltimoMovimientoCuenta {
   cuenta: CuentaDeCargo;
+  /**
+   * ADITIVO (conciliación al revés de ENTRADAS, invariante 78): el PRIMER
+   * día con movimientos (null sin movimientos). Solo viaja si se pidió
+   * (`ultimosMovimientosPorCuenta({ conPrimera: true })`): Gastos responde
+   * igual que siempre.
+   */
+  primera_fecha?: string | null;
   ultima_fecha: string | null;
 }
 
@@ -227,15 +243,23 @@ export function motivoSinArchivo(m: {
   return m.origen === 'MANUAL' ? 'CAPTURA_MANUAL' : 'IMPORTADO_SIN_ARCHIVO';
 }
 
-/** Registro de la liga SOLO desde `LIGAS_REGISTRADAS_DESDE` (si no, null). */
-export function registroDeParte(p: {
-  created_at: string | null;
-  ligada_por?: string | null;
-}): RegistroLiga | null {
+/**
+ * Registro de la liga SOLO desde el corte `desde` (si no, null). Sin el 2.º
+ * parámetro el corte es el de los GASTOS (`LIGAS_REGISTRADAS_DESDE`): la
+ * conciliación al revés de un gasto responde byte a byte igual; la de los
+ * cobros pasa `LIGAS_COBRO_REGISTRADAS_DESDE` (invariante 78).
+ */
+export function registroDeParte(
+  p: {
+    created_at: string | null;
+    ligada_por?: string | null;
+  },
+  desde: string = LIGAS_REGISTRADAS_DESDE,
+): RegistroLiga | null {
   if (typeof p.created_at !== 'string') return null;
   const t = Date.parse(p.created_at);
   if (!Number.isFinite(t)) return null;
-  if (t < Date.parse(LIGAS_REGISTRADAS_DESDE)) return null;
+  if (t < Date.parse(desde)) return null;
   return { por: p.ligada_por ?? null, at: p.created_at };
 }
 
@@ -250,16 +274,17 @@ export interface ParteParaCargo {
 
 /**
  * Fila de `movimiento_bancario` (con sus embeds `cuenta`, `estado_cuenta` +
- * `importo` y `creo`, más lo que le pegó `anotarPartes`) ⇒ el cargo de ESTE
- * gasto. Los valores del lote se copian TAL CUAL: el centavo de diferencia
- * jamás ajusta el gasto.
+ * `importo` y `creo`) ⇒ la BASE del movimiento en la conciliación al revés,
+ * compartida por el cargo de un gasto (`aCargoDeGasto`, invariante 71) y el
+ * abono de una entrada (`abonos-de-entrada.util#aAbonoDeEntrada`, invariante
+ * 78): mismas llaves, mismo orden. JAMÁS `storage_path`, `numero_cuenta` ni
+ * `clabe` aunque la fila cruda los traiga. `movIdRespaldo` = el id de la
+ * parte/liga si la fila no trae el suyo.
  */
-export function aCargoDeGasto(args: {
-  parte: ParteParaCargo;
-  mov: Record<string, unknown>;
-  gasto: { id: string; moneda: string | null };
-}): CargoDeGastoDetalle {
-  const { parte, mov, gasto } = args;
+export function aMovimientoDetalle(
+  mov: Record<string, unknown>,
+  movIdRespaldo: string,
+): MovimientoDetalle {
   const cuentaRaw = unwrap(
     mov.cuenta as Record<string, unknown> | Record<string, unknown>[] | null,
   );
@@ -293,22 +318,9 @@ export function aCargoDeGasto(args: {
   const creo = unwrap(
     mov.creo as { nombre?: unknown } | { nombre?: unknown }[] | null,
   );
-  const gastosN = Number(mov.gastos_n);
-  const lote: LoteDeCargo | null =
-    Number.isFinite(gastosN) && gastosN >= 2
-      ? {
-          gastos_n: gastosN,
-          gastos: Array.isArray(mov.gastos)
-            ? (mov.gastos as Array<Record<string, unknown>>)
-            : null,
-          gastos_suma: numeroONull(mov.gastos_suma),
-          gastos_diferencia: numeroONull(mov.gastos_diferencia),
-        }
-      : null;
-  const notas = texto(mov.notas);
   const orden = numeroONull(mov.orden_archivo);
   return {
-    movimiento_id: cadena(mov.id) || parte.movimiento_id,
+    movimiento_id: cadena(mov.id) || movIdRespaldo,
     fecha: cadena(mov.fecha),
     tipo: cadena(mov.tipo),
     monto: r2(Math.abs(Number(mov.monto) || 0)),
@@ -323,6 +335,37 @@ export function aCargoDeGasto(args: {
     cuenta,
     estado_cuenta,
     sin_archivo: motivoSinArchivo(mov),
+  };
+}
+
+/**
+ * Fila de `movimiento_bancario` (con sus embeds `cuenta`, `estado_cuenta` +
+ * `importo` y `creo`, más lo que le pegó `anotarPartes`) ⇒ el cargo de ESTE
+ * gasto. Los valores del lote se copian TAL CUAL: el centavo de diferencia
+ * jamás ajusta el gasto. La base del movimiento es `aMovimientoDetalle`
+ * (el MISMO objeto de siempre, mismo orden de llaves).
+ */
+export function aCargoDeGasto(args: {
+  parte: ParteParaCargo;
+  mov: Record<string, unknown>;
+  gasto: { id: string; moneda: string | null };
+}): CargoDeGastoDetalle {
+  const { parte, mov, gasto } = args;
+  const gastosN = Number(mov.gastos_n);
+  const lote: LoteDeCargo | null =
+    Number.isFinite(gastosN) && gastosN >= 2
+      ? {
+          gastos_n: gastosN,
+          gastos: Array.isArray(mov.gastos)
+            ? (mov.gastos as Array<Record<string, unknown>>)
+            : null,
+          gastos_suma: numeroONull(mov.gastos_suma),
+          gastos_diferencia: numeroONull(mov.gastos_diferencia),
+        }
+      : null;
+  const notas = texto(mov.notas);
+  return {
+    ...aMovimientoDetalle(mov, parte.movimiento_id),
     parte: {
       monto_parte: r2(Number(parte.monto_parte) || 0),
       moneda: parte.moneda,

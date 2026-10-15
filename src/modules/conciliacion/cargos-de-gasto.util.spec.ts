@@ -1,6 +1,7 @@
 import {
   aCargoDeGasto,
   alertasConciliacionGasto,
+  aMovimientoDetalle,
   LIGAS_REGISTRADAS_DESDE,
   motivoSinArchivo,
   ordenarCargosDeGasto,
@@ -8,6 +9,7 @@ import {
   type CargoDeGastoDetalle,
   type VistaConciliacionGasto,
 } from './cargos-de-gasto.util';
+import { LIGAS_COBRO_REGISTRADAS_DESDE } from './abonos-de-entrada.util';
 import { lineaNotaCargo } from '../../common/vinculo-no-bancario.util';
 
 /**
@@ -129,6 +131,78 @@ describe('registroDeParte — corte del backfill (2-oct-2026 00:00 Cancún)', ()
   it('null o ilegible ⇒ null', () => {
     expect(registroDeParte({ created_at: null })).toBeNull();
     expect(registroDeParte({ created_at: 'ayer' })).toBeNull();
+  });
+
+  it('2.º parámetro (invariante 78): el corte de COBROS (12-oct-2026); sin él, el de gastos idéntico', () => {
+    const backfillCobros = { created_at: '2026-10-08T18:17:53.188367Z' };
+    // Con el corte de gastos (default) una parte del 8-oct SÍ «registra»…
+    expect(registroDeParte(backfillCobros)).toEqual({
+      por: null,
+      at: '2026-10-08T18:17:53.188367Z',
+    });
+    expect(registroDeParte(backfillCobros, LIGAS_REGISTRADAS_DESDE)).toEqual(
+      registroDeParte(backfillCobros),
+    );
+    // …con el de cobros es BACKFILL de 20261012000002.
+    expect(
+      registroDeParte(backfillCobros, LIGAS_COBRO_REGISTRADAS_DESDE),
+    ).toBeNull();
+    expect(
+      registroDeParte(
+        {
+          created_at: '2026-10-13T15:56:03.671262Z',
+          ligada_por: 'Alejandro Canales',
+        },
+        LIGAS_COBRO_REGISTRADAS_DESDE,
+      ),
+    ).toEqual({ por: 'Alejandro Canales', at: '2026-10-13T15:56:03.671262Z' });
+  });
+});
+
+describe('aMovimientoDetalle — la base compartida con el abono de una entrada (invariante 78)', () => {
+  it('mismas llaves, MISMO orden y mismos valores que la base de aCargoDeGasto', () => {
+    const c = aCargoDeGasto({
+      parte: parteSaesa,
+      mov: movSaesa(),
+      gasto: GASTO_MXN,
+    });
+    const base = aMovimientoDetalle(movSaesa(), parteSaesa.movimiento_id);
+    const llaves = Object.keys(base);
+    expect(llaves).toEqual([
+      'movimiento_id',
+      'fecha',
+      'tipo',
+      'monto',
+      'moneda',
+      'descripcion',
+      'referencia',
+      'conciliado',
+      'origen',
+      'creado_at',
+      'creado_por',
+      'orden_archivo',
+      'cuenta',
+      'estado_cuenta',
+      'sin_archivo',
+    ]);
+    // El cargo = la base + lo del gasto, en ese orden (el objeto de siempre).
+    expect(Object.keys(c)).toEqual([
+      ...llaves,
+      'parte',
+      'lote',
+      'justificacion',
+      'notas_oficina',
+    ]);
+    for (const k of llaves) {
+      expect(c[k as keyof CargoDeGastoDetalle]).toEqual(
+        base[k as keyof typeof base],
+      );
+    }
+    expect(llavesProhibidas(base)).toEqual([]);
+    // Sin id en la fila ⇒ el de respaldo.
+    expect(
+      aMovimientoDetalle(movSaesa({ id: undefined }), 'respaldo').movimiento_id,
+    ).toBe('respaldo');
   });
 });
 

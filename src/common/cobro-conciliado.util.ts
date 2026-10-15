@@ -49,6 +49,14 @@ export interface MovimientoLiga {
    * espejo (sin 20261012000002: la parte es el |abono| completo).
    */
   monto_parte?: number;
+  /**
+   * ADITIVOS (invariante 78, solo con `leerLigasDeCobros({ conAutor: true
+   * })`): CUÁNDO y QUIÉN creó la PARTE de la puente (`created_at` /
+   * `created_by` de la parte, NO los del movimiento embebido). Ausentes sin
+   * la opción y en una liga del espejo.
+   */
+  parte_created_at?: string | null;
+  ligada_por?: string | null;
 }
 
 function idStr(v: unknown): string | null {

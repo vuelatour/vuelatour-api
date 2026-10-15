@@ -21,6 +21,8 @@ const C2 = '22222222-2222-4222-8222-222222222222';
 const C3 = '33333333-3333-4333-8333-333333333333';
 const S1 = '44444444-4444-4444-8444-444444444444';
 const CTA = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const DIEGO = 'c4d0633d-a5e9-4764-8e54-03c7fb00f3b7';
+const USUARIOS: Record<string, string> = { [DIEGO]: 'Diego Ramírez' };
 
 type Fila = Record<string, unknown>;
 type Consulta = {
@@ -148,7 +150,17 @@ function fake(
                     ),
                   }
                 : { ...p },
-            );
+            )
+            .map((p: Fila): Fila => {
+              // El autor de la PARTE (FK movimiento_bancario_cobro_created_by_fkey).
+              if (!q.cols.includes('ligador:usuario!created_by(nombre)'))
+                return p;
+              const autor =
+                typeof p.created_by === 'string'
+                  ? USUARIOS[p.created_by]
+                  : null;
+              return { ...p, ligador: autor ? { nombre: autor } : null };
+            });
         } else {
           rows = [];
         }
@@ -431,6 +443,128 @@ describe('ligas-cobro.lector — espejo + puente como UNA lista de ligas', () =>
     ]);
     expect(consultas[0].orden).toEqual(['movimiento_id', 'cobro_id']);
     expect(consultas[0].rango).toEqual([0, PAGINA_LIGAS - 1]);
+  });
+});
+
+describe('conAutor (invariante 78) — quién y cuándo creó cada PARTE de la puente', () => {
+  it('SOLO con la opción pide `created_at` + `ligador` de la PARTE; sin ella, el select es byte a byte el de antes', async () => {
+    const sin = fake();
+    const ligasSin = await leerLigasDeCobros(sin.sb, {
+      cobroIds: [C1, C2],
+      conPuente: true,
+    });
+    const selSin = sin.consultas.find(
+      (c) => c.tabla === 'movimiento_bancario_cobro',
+    )!.cols;
+    expect(selSin).toBe(
+      'movimiento_id, cobro_id, monto_parte, movimiento:movimiento_bancario!movimiento_id(id, cobro_id, cobro_grupo_id, fecha, monto, cobros_n, cuenta_bancaria_id, created_at, cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, moneda, tipo))',
+    );
+    expect(selSin).toBe(colsPuenteLigas());
+    for (const l of ligasSin) {
+      expect('parte_created_at' in l).toBe(false);
+      expect('ligada_por' in l).toBe(false);
+    }
+    const con = fake({
+      puente: [
+        {
+          movimiento_id: MOV1,
+          cobro_id: C1,
+          monto_parte: 1700,
+          created_at: '2026-10-14T21:21:49.025963+00:00',
+          created_by: DIEGO,
+        },
+        {
+          movimiento_id: MOV2,
+          cobro_id: C2,
+          monto_parte: 1000,
+          created_at: '2026-10-06T15:23:02.876349+00:00',
+          created_by: null,
+        },
+      ],
+    });
+    const ligas = await leerLigasDeCobros(con.sb, {
+      cobroIds: [C1, C2],
+      conPuente: true,
+      conAutor: true,
+    });
+    const selCon = con.consultas.find(
+      (c) => c.tabla === 'movimiento_bancario_cobro',
+    )!.cols;
+    expect(selCon).toBe(
+      'movimiento_id, cobro_id, monto_parte, created_at, ligador:usuario!created_by(nombre), movimiento:movimiento_bancario!movimiento_id(id, cobro_id, cobro_grupo_id, fecha, monto, cobros_n, cuenta_bancaria_id, created_at, cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, moneda, tipo))',
+    );
+    expect(selCon).toBe(colsPuenteLigas(undefined, { conAutor: true }));
+    // El espejo de MOV1 (cobro_id = C1) NO pisa a la puente: UNA liga, con
+    // `monto_parte` y el autor de la PARTE; el `created_at` de la liga sigue
+    // siendo el del MOVIMIENTO.
+    const deC1 = ligas.filter((l) => l.cobro_id === C1);
+    expect(deC1).toHaveLength(1);
+    expect(deC1[0]).toMatchObject({
+      id: MOV1,
+      monto_parte: 1700,
+      parte_created_at: '2026-10-14T21:21:49.025963+00:00',
+      ligada_por: 'Diego Ramírez',
+      created_at: '2026-10-06T15:22:46.58996+00:00',
+    });
+    expect(ligas.find((l) => l.cobro_id === C2)).toMatchObject({
+      parte_created_at: '2026-10-06T15:23:02.876349+00:00',
+      ligada_por: null,
+    });
+    // El espejo (sin puente) jamás trae autor.
+    const espejo = fake({ sinPuente: true });
+    const ligasEspejo = await leerLigasDeCobros(espejo.sb, {
+      cobroIds: [C1],
+      conPuente: false,
+      conAutor: true,
+    });
+    expect(ligasEspejo).toHaveLength(1);
+    expect('parte_created_at' in ligasEspejo[0]).toBe(false);
+    expect(
+      espejo.consultas.some((c) => c.tabla === 'movimiento_bancario_cobro'),
+    ).toBe(false);
+  });
+
+  it('con autor, la paginación por (cobro_id, movimiento_id) sigue igual: 1,050 partes en 2 páginas, ninguna repetida ni perdida', async () => {
+    const cobros = Array.from(
+      { length: 150 },
+      (_, i) => `c0000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    const movs: Fila[] = Array.from({ length: 7 }, (_, j) => ({
+      id: `a0000000-0000-4000-8000-${String(j).padStart(12, '0')}`,
+      cobro_id: null,
+      cobro_grupo_id: null,
+      fecha: `2026-09-1${j}`,
+      monto: 1050,
+      cobros_n: 150,
+      cuenta_bancaria_id: CTA,
+      created_at: '2026-10-06T15:00:00Z',
+    }));
+    const puente: Fila[] = cobros.flatMap((c) =>
+      movs.map((m) => ({
+        movimiento_id: m.id,
+        cobro_id: c,
+        monto_parte: 1,
+        created_at: '2026-10-13T00:00:00Z',
+        created_by: DIEGO,
+      })),
+    );
+    const { sb, consultas } = fake({ movs, puente });
+    const ligas = await leerLigasDeCobros(sb, {
+      cobroIds: cobros,
+      conPuente: true,
+      conAutor: true,
+    });
+    expect(
+      consultas
+        .filter((c) => c.tabla === 'movimiento_bancario_cobro')
+        .map((c) => c.rango),
+    ).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+    const llaves = ligas.map((l) => `${String(l.id)}|${String(l.cobro_id)}`);
+    expect(new Set(llaves).size).toBe(1050);
+    expect(ligas.every((l) => l.ligada_por === 'Diego Ramírez')).toBe(true);
   });
 });
 

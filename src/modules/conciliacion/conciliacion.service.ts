@@ -24,11 +24,14 @@ import {
   type GastoRepartoFila,
 } from '../../common/gasto-reparto.util';
 import {
+  conciliacionDeCobro,
   esParteDeSobre,
   MOV_LIGA_COLS,
   MOV_LIGA_COLS_CON_INGRESO,
+  movimientosDeCobro,
   type MovimientoLiga,
 } from '../../common/cobro-conciliado.util';
+import { fetchNombresUsuarios } from '../../common/registrado-por.util';
 import {
   etiquetaMetodoCobro,
   METODOS_COBRO_ABONO_AUTO,
@@ -85,6 +88,7 @@ import {
 } from './ligas-cobro.lector';
 import {
   alVincularAbono,
+  cobroDeUnSoloAbono,
   coberturaCobro,
   estadoBancoCobro,
   faltanteFueraDe,
@@ -114,6 +118,7 @@ import {
   etiquetaIngreso,
 } from '../../common/categoria-ingreso.util';
 import {
+  estadoConciliacionIngreso,
   montoCuadraIngreso,
   netoIngreso,
   TOLERANCIA_INGRESO,
@@ -418,6 +423,29 @@ import {
   type ConciliacionDeGastoRespuesta,
   type UltimoMovimientoCuenta,
 } from './cargos-de-gasto.util';
+import {
+  aAbonoDeEntrada,
+  alertasConciliacionEntrada,
+  anticipoDeEntrada,
+  coberturaDeEntrada,
+  cruceNoCorrio,
+  entradaDeCobroParaHoja,
+  entradaDeIngresoParaHoja,
+  estadoBancoEntradaDeCobro,
+  mismoDiaCliente,
+  ordenarAbonosDeEntrada,
+  registroDeBitacoraIngreso,
+  type AbonoDeEntrada,
+  type ConciliacionDeEntradaRespuesta,
+  type ConciliarDeBitacora,
+  type CruceNoCorrio,
+  type EntradaDeConciliacion,
+  type FuenteEntrada,
+  type LigaParaAbono,
+  type MismoDiaCliente,
+  type OrigenEntrada,
+  type SinRegistroLiga,
+} from './abonos-de-entrada.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -1244,6 +1272,42 @@ const PARTE_AUTOR_EMBED = 'ligador:usuario!created_by(nombre)';
 const MOV_DETALLE_GASTO_COLS =
   'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, origen, notas, created_at, estado_cuenta_id, cuenta:cuenta_bancaria!cuenta_bancaria_id(id, alias, banco, moneda, tipo), estado_cuenta:estado_cuenta_archivo!estado_cuenta_id(id, filename, formato, movimientos_importados, created_at, importo:usuario!created_by(nombre)), creo:usuario!created_by(nombre)';
 
+/**
+ * CONCILIACIÓN AL REVÉS DE UNA ENTRADA (14-oct-2026, API 0.0.78, invariante
+ * 78): el ABONO de un cobro o de un ingreso = lo de un cargo de gasto
+ * (`MOV_DETALLE_GASTO_COLS`, cuya constante NO cambia) + lo de la pasarela y
+ * sus ligas. `cobros_n`, `ingreso_id` y `orden_archivo` se agregan detrás de
+ * sus sondas. JAMÁS `numero_cuenta`, `clabe` ni `storage_path`.
+ */
+const MOV_DETALLE_ABONO_COLS = `${MOV_DETALLE_GASTO_COLS}, monto_bruto, comision_monto, cobro_id, cobro_grupo_id`;
+
+/**
+ * El COBRO de la hoja con su vuelo + cliente y su sobre (FK verificadas en
+ * prod: cobro_vuelo_vuelo_id_fkey, vuelo_cliente_id_fkey,
+ * cobro_vuelo_cobro_grupo_id_fkey). Las notas crudas NO viajan (solo
+ * `conceptoDeCobro`); jamás `foto_voucher_url`.
+ */
+const COBRO_HOJA_COLS =
+  'id, vuelo_id, monto, moneda, metodo_cobro, comision_banco_monto, tc_usd_mxn, fecha_cobro, referencia, notas, cuenta_destino, registrado_por, created_at, cobro_grupo_id, vuelo:vuelo!vuelo_id(folio, cliente_id, cliente:cliente_id(nombre)), sobre:cobro_grupo!cobro_grupo_id(id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre))';
+
+/** + el anticipo del cobro, SOLO con la sonda de ingresos (FK cobro_vuelo_ingreso_anticipo_id_fkey). */
+const COBRO_HOJA_ANTICIPO_COLS =
+  ', ingreso_anticipo_id, anticipo:ingreso!ingreso_anticipo_id(id, folio, monto, moneda, fecha, cuenta_bancaria_id)';
+
+/**
+ * El INGRESO de la hoja, vivo o de baja (FK ingreso_cliente_id_fkey,
+ * ingreso_vuelo_id_fkey, ingreso_cuenta_bancaria_id_fkey). Nunca
+ * `archivo_path`, `notas` ni la bitácora cruda.
+ */
+const INGRESO_HOJA_COLS =
+  'id, folio, categoria, fecha, descripcion, monto, comision_monto, moneda, tc_usd_mxn, metodo, cuenta_bancaria_id, pagador, created_by, created_at, deleted_at, vuelo_id, cliente:cliente_id(nombre), vuelo:vuelo_id(folio), cuenta:cuenta_bancaria!cuenta_bancaria_id(id, alias, banco, moneda, tipo)';
+
+/** Ids por consulta `in (…)` de la conciliación al revés de una entrada (URL de PostgREST: 200 uuids ⇒ 414). */
+const LOTE_IDS_ENTRADA = 150;
+
+/** Tope de vuelos de UN cliente para «mismo día» (paginado de 1000 en 1000; el mayor de prod tiene decenas). */
+const TOPE_VUELOS_CLIENTE = 10_000;
+
 /** El gasto de la conciliación al revés (+ `embedFolio()` para su factura). */
 const GASTO_CONCILIACION_COLS =
   'id, monto, moneda, tc_gasto, conciliado, medio_pago, tarjeta_terminacion, categoria, fecha_gasto, vuelo_id, lugar, notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
@@ -1795,18 +1859,22 @@ export class ConciliacionService {
     return { filas, truncado: filas.length >= tope };
   }
 
-  /** Lecturas `in (…)` en lotes de ≤ 200 ids; un error se LANZA. */
+  /**
+   * Lecturas `in (…)` en lotes de ≤ 200 ids (o `tamLote`); un error se
+   * LANZA.
+   */
   private async leerPorLotes(
     ids: ReadonlyArray<string>,
     consulta: (lote: string[]) => PromiseLike<{
       data: unknown[] | null;
       error: { message: string } | null;
     }>,
+    tamLote = 200,
   ): Promise<Array<Record<string, unknown>>> {
     const unicos = [...new Set(ids.filter(Boolean))];
     const out: Array<Record<string, unknown>> = [];
-    for (let i = 0; i < unicos.length; i += 200) {
-      const { data, error } = await consulta(unicos.slice(i, i + 200));
+    for (let i = 0; i < unicos.length; i += tamLote) {
+      const { data, error } = await consulta(unicos.slice(i, i + tamLote));
       if (error) throw new Error(error.message);
       out.push(...((data ?? []) as Array<Record<string, unknown>>));
     }
@@ -1829,11 +1897,12 @@ export class ConciliacionService {
       data: unknown[] | null;
       error: { message: string } | null;
     }>,
+    tamLote = 200,
   ): Promise<Array<Record<string, unknown>>> {
     const unicos = [...new Set(ids.filter(Boolean))];
     const out: Array<Record<string, unknown>> = [];
-    for (let i = 0; i < unicos.length; i += 200) {
-      const lote = unicos.slice(i, i + 200);
+    for (let i = 0; i < unicos.length; i += tamLote) {
+      const lote = unicos.slice(i, i + tamLote);
       for (let desde = 0; ; desde += PAGINA_BD) {
         const { data, error } = await consulta(
           lote,
@@ -12052,10 +12121,15 @@ export class ConciliacionService {
    * día hay estado de cuenta importado». No garantiza que el periodo esté
    * completo (un PDF puede empezar a media jornada). Best-effort: cualquier
    * error ⇒ null (la hoja simplemente no lo pinta).
+   *
+   * `{ conPrimera: true }` (conciliación al revés de una ENTRADA, invariante
+   * 78): una consulta más por cuenta, en paralelo, con el PRIMER día
+   * (`primera_fecha`, null sin movimientos). Sin la opción, idéntica (Gastos
+   * la llama así y responde byte a byte igual).
    */
-  private async ultimosMovimientosPorCuenta(): Promise<
-    UltimoMovimientoCuenta[] | null
-  > {
+  private async ultimosMovimientosPorCuenta(
+    opts: { conPrimera?: boolean } = {},
+  ): Promise<UltimoMovimientoCuenta[] | null> {
     try {
       const { data, error } = await this.supabase.service
         .from('cuenta_bancaria')
@@ -12064,19 +12138,36 @@ export class ConciliacionService {
         .order('alias', { ascending: true });
       if (error) throw new Error(error.message);
       const cuentas = (data ?? []) as Array<Record<string, unknown>>;
+      const fechaExtrema = async (
+        cuentaId: string,
+        ascendente: boolean,
+      ): Promise<string | null> => {
+        const { data: filas, error: err } = await this.supabase.service
+          .from('movimiento_bancario')
+          .select('fecha')
+          .eq('cuenta_bancaria_id', cuentaId)
+          .order('fecha', { ascending: ascendente })
+          .limit(1);
+        if (err) throw new Error(err.message);
+        const fila = ((filas ?? []) as Array<{ fecha?: unknown }>)[0];
+        return typeof fila?.fecha === 'string' ? fila.fecha : null;
+      };
       return await Promise.all(
         cuentas.map(async (c) => {
-          const { data: filas, error: err } = await this.supabase.service
-            .from('movimiento_bancario')
-            .select('fecha')
-            .eq('cuenta_bancaria_id', c.id as string)
-            .order('fecha', { ascending: false })
-            .limit(1);
-          if (err) throw new Error(err.message);
-          const fila = ((filas ?? []) as Array<{ fecha?: unknown }>)[0];
+          if (opts.conPrimera !== true) {
+            return {
+              cuenta: cuentaDeFila(c),
+              ultima_fecha: await fechaExtrema(c.id as string, false),
+            };
+          }
+          const [primera, ultima] = await Promise.all([
+            fechaExtrema(c.id as string, true),
+            fechaExtrema(c.id as string, false),
+          ]);
           return {
             cuenta: cuentaDeFila(c),
-            ultima_fecha: typeof fila?.fecha === 'string' ? fila.fecha : null,
+            primera_fecha: primera,
+            ultima_fecha: ultima,
           };
         }),
       );
@@ -12179,6 +12270,578 @@ export class ConciliacionService {
       alertas,
       ultimos_movimientos: ultimos,
     };
+  }
+
+  // =====================================================================
+  // CONCILIACIÓN AL REVÉS DE UNA ENTRADA (14-oct-2026, API 0.0.78,
+  // invariante 78): desde un COBRO de vuelo (o la parte de un sobre, o un
+  // cobro de un anticipo) o desde un INGRESO, sus ABONOS del banco. Gemela de
+  // `conciliacionDeGasto`. Solo LECTURAS; ningún número se recalcula: el
+  // modelo PURO vive en `abonos-de-entrada.util.ts`.
+  // =====================================================================
+
+  /**
+   * `GET /v1/conciliacion/cobros/:id` (origen COBRO_VUELO) y `GET
+   * /v1/conciliacion/ingresos/:id` (INGRESO): UN método, UNA respuesta
+   * (`ConciliacionDeEntradaRespuesta`), CERO escrituras. 404
+   * `COBRO_NO_EXISTE` / `INGRESO_NO_EXISTE`; 503 `INGRESOS_NO_DISPONIBLE`
+   * solo en `ingresos/:id` sin la migración 20260924000004; una lectura
+   * PRINCIPAL caída (la entrada, las ligas o los movimientos) ⇒ 500, JAMÁS
+   * «sin abonos». Lo demás es best-effort (detalle del lote, aviones del
+   * sobre, bitácora, nombres, `ultimos_movimientos`, `mismo_dia_cliente`,
+   * `cruce_no_corrio`, la sonda del 0.0.78).
+   */
+  async conciliacionDeEntrada(
+    origen: OrigenEntrada,
+    idRaw: string,
+  ): Promise<ConciliacionDeEntradaRespuesta> {
+    const id = normalizarUuid(idRaw);
+    return origen === 'INGRESO'
+      ? this.conciliacionDeIngresoEntrada(id)
+      : this.conciliacionDeCobroEntrada(id);
+  }
+
+  /** La sonda del 0.0.78 (20261014000003) sin tumbar la hoja: falla ⇒ false. */
+  private async cobrosParcialesOnSeguro(): Promise<boolean> {
+    try {
+      return await this.cobrosParcialesOn();
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación al revés: no se pudo sondear 20261014000003: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /** La hoja de un COBRO de vuelo (también la parte de un sobre o el cobro de un anticipo). */
+  private async conciliacionDeCobroEntrada(
+    id: string,
+  ): Promise<ConciliacionDeEntradaRespuesta> {
+    const sb = this.supabase.service;
+    const [conIngresos, conPuente, conOrden, conParciales] = await Promise.all([
+      this.ingresosOn(),
+      this.cobrosLoteOn(),
+      this.ordenArchivoOn(),
+      this.cobrosParcialesOnSeguro(),
+    ]);
+    // (1) PRINCIPAL — el cobro (con su vuelo + cliente, su sobre y, con la
+    // sonda de ingresos, su anticipo).
+    const { data, error } = await sb
+      .from('cobro_vuelo')
+      .select(
+        `${COBRO_HOJA_COLS}${conIngresos ? COBRO_HOJA_ANTICIPO_COLS : ''}`,
+      )
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: 'Ese cobro ya no existe: recarga la página.',
+        error: 'COBRO_NO_EXISTE',
+      });
+    }
+    const c = data as unknown as Record<string, unknown>;
+    const sobreId =
+      typeof c.cobro_grupo_id === 'string' && c.cobro_grupo_id
+        ? c.cobro_grupo_id
+        : null;
+    const anticipoId =
+      conIngresos &&
+      typeof c.ingreso_anticipo_id === 'string' &&
+      c.ingreso_anticipo_id
+        ? c.ingreso_anticipo_id
+        : null;
+    // (2) PRINCIPAL — sus ligas con el LECTOR ÚNICO (puente primero, con
+    // quién creó cada parte; su sobre y su anticipo por el espejo).
+    const ligas = await leerLigasDeCobros<
+      MovimientoLiga & { ingreso_id?: unknown }
+    >(sb, {
+      cobroIds: [id],
+      sobreIds: sobreId ? [sobreId] : [],
+      anticipoIds: anticipoId ? [anticipoId] : [],
+      cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+      conPuente,
+      conAutor: true,
+    });
+    // (3) PURO — estado, vía y cobertura: la cadena EXACTA de
+    // `flights.adjuntarSobres` (invariante 77).
+    const conc = conciliacionDeCobro(
+      { id, cobro_grupo_id: sobreId, ingreso_anticipo_id: anticipoId },
+      ligas,
+    );
+    const via = conc?.via ?? null;
+    const partes = partesDeLigas(ligas).get(id) ?? [];
+    const cob = coberturaCobro(c, partes);
+    const estado = estadoBancoEntradaDeCobro(
+      estadoBancoCobro({
+        monto: c.monto as number | string | null | undefined,
+        metodo: typeof c.metodo_cobro === 'string' ? c.metodo_cobro : null,
+        via,
+        cobertura: via === 'DIRECTO' && partes.length > 0 ? cob : null,
+      }),
+    );
+    const positivo = (Number(c.monto) || 0) > 0;
+    const cobertura =
+      positivo && !sobreId && !anticipoId && estado !== 'NO_BANCARIO'
+        ? coberturaDeEntrada(cob)
+        : null;
+    // Las ligas de la VÍA: todas las directas (M:N) o la del sobre / anticipo.
+    const ligasDeVia: Array<MovimientoLiga & { ingreso_id?: unknown }> =
+      via === 'DIRECTO'
+        ? movimientosDeCobro({ id }, ligas)
+        : conc
+          ? [conc.mov]
+          : [];
+    // (4) PRINCIPAL — los abonos de esas ligas, por id.
+    const colsMov = `${MOV_DETALLE_ABONO_COLS}${conPuente ? ', cobros_n' : ''}${conIngresos ? ', ingreso_id' : ''}${conOrden ? ', orden_archivo' : ''}`;
+    const movIds = ligasDeVia
+      .map((l) => (typeof l.id === 'string' ? l.id : ''))
+      .filter(Boolean);
+    const movs =
+      movIds.length > 0
+        ? await this.leerPorLotes(
+            movIds,
+            (lote) =>
+              sb.from('movimiento_bancario').select(colsMov).in('id', lote),
+            LOTE_IDS_ENTRADA,
+          )
+        : [];
+    // (5) BEST-EFFORT en paralelo.
+    const sinConciliar = estado === 'SIN_CONCILIAR';
+    const libre = sinConciliar && !sobreId && !anticipoId;
+    const lotes = conPuente ? movs.filter((m) => Number(m.cobros_n) >= 2) : [];
+    const vuelo = unwrapOne(
+      c.vuelo as { cliente_id?: unknown } | { cliente_id?: unknown }[] | null,
+    );
+    const entradaBase = entradaDeCobroParaHoja(c, new Map());
+    const [avionesN, bitacora, ultimos, mismoDia, cruce] = await Promise.all([
+      sobreId
+        ? this.contarPartesPorSobre([sobreId])
+            .then((m) => m.get(sobreId) ?? 0)
+            .catch((err: unknown) => {
+              this.logger.warn(
+                `Conciliación al revés: no se pudieron contar los aviones del sobre ${sobreId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return 0;
+            })
+        : Promise.resolve(0),
+      via === 'ANTICIPO' &&
+      anticipoId &&
+      conc &&
+      typeof conc.mov.id === 'string'
+        ? this.conciliarDeBitacoraIngreso(anticipoId, conc.mov.id)
+        : Promise.resolve(null),
+      sinConciliar || estado === 'PARCIAL'
+        ? this.ultimosMovimientosPorCuenta({ conPrimera: true })
+        : Promise.resolve(null),
+      libre
+        ? this.mismoDiaClienteDeCobro({
+            cobroId: id,
+            clienteId:
+              typeof vuelo?.cliente_id === 'string' ? vuelo.cliente_id : null,
+            entrada: entradaBase,
+            conIngresos,
+            conPuente,
+          })
+        : Promise.resolve(null),
+      libre
+        ? this.cruceNoCorrioDeCobro({
+            cobroId: id,
+            dia: entradaBase.dia,
+            moneda: entradaBase.moneda,
+            metodo: entradaBase.metodo,
+            registradoAt: entradaBase.registrado_at,
+          })
+        : Promise.resolve(null),
+      // El lote de GET movimientos (`cobros[]`, `cobros_suma`,
+      // `cobros_diferencia`) pegado a cada abono de 2+ cobros; si falla,
+      // borra sus llaves ⇒ `lote.cobros` null + LOTE_SIN_DETALLE.
+      lotes.length > 0
+        ? this.anotarCobrosDeAbonos(lotes).catch((err: unknown) => {
+            this.logger.warn(
+              `Conciliación al revés: no se pudo leer el lote de los abonos del cobro ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            for (const m of lotes) {
+              delete m.cobros;
+              delete m.cobros_suma;
+              delete m.cobros_diferencia;
+            }
+          })
+        : Promise.resolve(),
+    ]);
+    const nombres = await fetchNombresUsuarios(sb, [
+      typeof c.registrado_por === 'string' ? c.registrado_por : null,
+      bitacora?.conciliar?.actor_id ?? null,
+    ]);
+    const entrada = entradaDeCobroParaHoja(c, nombres);
+    // (6) PURO — cada abono con su liga; una liga cuyo abono ya no se lee
+    // (carrera) se OMITE con un warn, jamás se inventa.
+    const movDe = new Map(movs.map((m) => [String(m.id), m]));
+    const parteDe = new Map(partes.map((p) => [p.movimiento_id, p]));
+    const abonos: AbonoDeEntrada[] = [];
+    for (const l of ligasDeVia) {
+      const movId = typeof l.id === 'string' ? l.id : '';
+      const mov = movDe.get(movId);
+      if (!mov) {
+        this.logger.warn(
+          `Conciliación al revés: el abono ${movId} del cobro ${id} ya no se pudo leer`,
+        );
+        continue;
+      }
+      let liga: LigaParaAbono;
+      if (via === 'DIRECTO') {
+        liga = {
+          via,
+          movimiento_id: movId,
+          monto_parte: parteDe.get(movId)?.monto_parte ?? null,
+          ...(l.parte_created_at !== undefined
+            ? {
+                parte_created_at: l.parte_created_at,
+                ligada_por: l.ligada_por ?? null,
+              }
+            : {}),
+        };
+      } else if (via === 'ANTICIPO') {
+        liga = {
+          via,
+          movimiento_id: movId,
+          bitacora: this.bitacoraConNombre(bitacora, nombres),
+        };
+      } else {
+        liga = { via: 'SOBRE', movimiento_id: movId };
+      }
+      abonos.push(aAbonoDeEntrada({ mov, liga, entrada }));
+    }
+    const ordenados = ordenarAbonosDeEntrada(abonos);
+    const sobreRaw = unwrapOne<Record<string, unknown>>(
+      c.sobre as Record<string, unknown> | Record<string, unknown>[] | null,
+    );
+    const anticipoRaw = anticipoId
+      ? unwrapOne<Record<string, unknown>>(
+          c.anticipo as
+            | Record<string, unknown>
+            | Record<string, unknown>[]
+            | null,
+        )
+      : null;
+    const fuente: FuenteEntrada =
+      via === 'SOBRE' || via === 'ANTICIPO'
+        ? 'COLUMNA'
+        : conPuente
+          ? 'PUENTE'
+          : 'ESPEJO';
+    return {
+      entrada,
+      estado,
+      via,
+      fuente,
+      cobertura,
+      abonos: ordenados,
+      sobre:
+        sobreRaw && typeof sobreRaw.id === 'string'
+          ? this.normalizarSobre(sobreRaw, avionesN)
+          : null,
+      anticipo: anticipoRaw
+        ? anticipoDeEntrada(
+            anticipoRaw,
+            ligas.some((l) => l.ingreso_id === anticipoId),
+          )
+        : null,
+      alertas: alertasConciliacionEntrada({
+        estado,
+        via,
+        cobertura,
+        abonos: ordenados,
+      }),
+      ultimos_movimientos: ultimos,
+      mismo_dia_cliente: mismoDia,
+      cruce_no_corrio: cruce,
+      // R9/D15: un cobro con comisión, de pasarela o cruzado se concilia con
+      // UN solo abono; uno de sobre / anticipo / reembolso no acepta ninguno
+      // directo (trigger A).
+      varios_abonos_por_cobro:
+        conParciales &&
+        positivo &&
+        !sobreId &&
+        !anticipoId &&
+        !cobroDeUnSoloAbono(c, partes),
+    };
+  }
+
+  /** La hoja de un INGRESO (vivo o de baja; un anticipo como fila de Ingresos entra por aquí). */
+  private async conciliacionDeIngresoEntrada(
+    id: string,
+  ): Promise<ConciliacionDeEntradaRespuesta> {
+    if (!(await this.ingresosOn())) throw errorIngresosNoDisponibles();
+    const sb = this.supabase.service;
+    const conOrden = await this.ordenArchivoOn();
+    // (1) PRINCIPAL — el ingreso.
+    const { data, error } = await sb
+      .from('ingreso')
+      .select(INGRESO_HOJA_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: 'Ese ingreso ya no existe: recarga la página.',
+        error: 'INGRESO_NO_EXISTE',
+      });
+    }
+    const i = data as unknown as Record<string, unknown>;
+    // (2) PRINCIPAL — su abono (1 ↔ 1 por `uq_mov_bancario_ingreso`).
+    const { data: movRaw, error: movErr } = await sb
+      .from('movimiento_bancario')
+      .select(
+        `${MOV_DETALLE_ABONO_COLS}, ingreso_id${conOrden ? ', orden_archivo' : ''}`,
+      )
+      .eq('ingreso_id', id)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    const mov = (movRaw as unknown as Record<string, unknown> | null) ?? null;
+    const movId = mov && typeof mov.id === 'string' ? mov.id : null;
+    const estado = estadoConciliacionIngreso(
+      {
+        cuenta_bancaria_id:
+          typeof i.cuenta_bancaria_id === 'string'
+            ? i.cuenta_bancaria_id
+            : null,
+      },
+      movId,
+    );
+    // (3) BEST-EFFORT — quién ligó (bitácora) y, si sigue pendiente, qué hay
+    // importado por cuenta.
+    const [bitacora, ultimos] = await Promise.all([
+      movId
+        ? this.conciliarDeBitacoraIngreso(id, movId)
+        : Promise.resolve(null),
+      estado === 'SIN_CONCILIAR'
+        ? this.ultimosMovimientosPorCuenta({ conPrimera: true })
+        : Promise.resolve(null),
+    ]);
+    const nombres = await fetchNombresUsuarios(sb, [
+      typeof i.created_by === 'string' ? i.created_by : null,
+      bitacora?.conciliar?.actor_id ?? null,
+    ]);
+    const entrada = entradaDeIngresoParaHoja(i, nombres);
+    const abonos =
+      mov && movId
+        ? [
+            aAbonoDeEntrada({
+              mov,
+              liga: {
+                via: 'INGRESO',
+                movimiento_id: movId,
+                bitacora: this.bitacoraConNombre(bitacora, nombres),
+              },
+              entrada,
+            }),
+          ]
+        : [];
+    return {
+      entrada,
+      estado,
+      via: movId ? 'INGRESO' : null,
+      fuente: 'COLUMNA',
+      cobertura: null,
+      abonos,
+      sobre: null,
+      anticipo: null,
+      alertas: alertasConciliacionEntrada({
+        estado,
+        via: movId ? 'INGRESO' : null,
+        cobertura: null,
+        abonos,
+      }),
+      ultimos_movimientos: ultimos,
+      // Los ingresos SÍ tienen cruce «al revés» (`intentarCruzarIngreso`).
+      mismo_dia_cliente: null,
+      cruce_no_corrio: null,
+      varios_abonos_por_cobro: false,
+    };
+  }
+
+  /**
+   * El CONCILIAR más reciente de la bitácora de un ingreso / anticipo para
+   * ESTE abono (best-effort): `leido: false` si la lectura falló.
+   */
+  private async conciliarDeBitacoraIngreso(
+    ingresoId: string,
+    movimientoId: string,
+  ): Promise<{ leido: boolean; conciliar: ConciliarDeBitacora | null }> {
+    try {
+      const { data, error } = await this.supabase.service
+        .from('ingreso_bitacora')
+        .select('actor_id, created_at, diff')
+        .eq('ingreso_id', ingresoId)
+        .eq('accion', 'CONCILIAR')
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (error) throw new Error(error.message);
+      return {
+        leido: true,
+        conciliar: registroDeBitacoraIngreso(data ?? [], movimientoId),
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación al revés: no se pudo leer la bitácora del ingreso ${ingresoId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { leido: false, conciliar: null };
+    }
+  }
+
+  /** La bitácora leída + los nombres ⇒ el registro de la liga (o por qué no hay). */
+  private bitacoraConNombre(
+    b: { leido: boolean; conciliar: ConciliarDeBitacora | null } | null,
+    nombres: ReadonlyMap<string, string>,
+  ): {
+    registro: { por: string | null; at: string } | null;
+    sin_registro: SinRegistroLiga | null;
+  } {
+    if (!b || !b.leido) return { registro: null, sin_registro: 'NO_LEIDO' };
+    if (!b.conciliar) return { registro: null, sin_registro: 'SIN_BITACORA' };
+    return {
+      registro: {
+        por: b.conciliar.actor_id
+          ? (nombres.get(b.conciliar.actor_id) ?? null)
+          : null,
+        at: b.conciliar.at,
+      },
+      sin_registro: null,
+    };
+  }
+
+  /**
+   * «Mismo cliente, mismo día» de un cobro SIN conciliar (D13, best-effort):
+   * los vuelos del cliente (paginados por la PK) ⇒ sus cobros del MISMO día
+   * Cancún y moneda, positivos, bancarios, sin sobre (ni anticipo, SOLO con
+   * la sonda de ingresos), ≠ este (lotes de ≤ 150 ids, paginados) ⇒ el
+   * lector único descarta los que tienen liga ⇒ `mismoDiaCliente` (PURO).
+   * Cualquier falla (o un universo truncado) ⇒ null con un warn.
+   */
+  private async mismoDiaClienteDeCobro(a: {
+    cobroId: string;
+    clienteId: string | null;
+    entrada: EntradaDeConciliacion;
+    conIngresos: boolean;
+    conPuente: boolean;
+  }): Promise<MismoDiaCliente | null> {
+    if (!a.clienteId) return null;
+    const clienteId = a.clienteId;
+    try {
+      const sb = this.supabase.service;
+      const { filas: vuelos, truncado } = await this.leerPaginado(
+        (desde, hasta) =>
+          sb
+            .from('vuelo')
+            .select('id, folio')
+            .eq('cliente_id', clienteId)
+            .order('id', { ascending: true })
+            .range(desde, hasta),
+        TOPE_VUELOS_CLIENTE,
+      );
+      if (truncado) {
+        this.logger.warn(
+          `Conciliación al revés: el cliente ${clienteId} tiene ${TOPE_VUELOS_CLIENTE}+ vuelos; «mismo día» no se afirma`,
+        );
+        return null;
+      }
+      const folioDe = new Map<string, unknown>(
+        vuelos.map((v) => [String(v.id), v.folio]),
+      );
+      const dia = a.entrada.dia;
+      const cols = `id, vuelo_id, monto, moneda, metodo_cobro, comision_banco_monto, fecha_cobro, cobro_grupo_id${a.conIngresos ? ', ingreso_anticipo_id' : ''}`;
+      const filas = await this.leerPorLotesPaginado(
+        [...folioDe.keys()],
+        (lote, desde, hasta) => {
+          let q = sb
+            .from('cobro_vuelo')
+            .select(cols)
+            .in('vuelo_id', lote)
+            .gte('fecha_cobro', `${dia}T00:00:00-05:00`)
+            .lte('fecha_cobro', `${dia}T23:59:59-05:00`)
+            .eq('moneda', a.entrada.moneda)
+            .gt('monto', 0)
+            .in('metodo_cobro', METODOS_ABONO_AUTO)
+            .is('cobro_grupo_id', null)
+            .neq('id', a.cobroId);
+          if (a.conIngresos) q = q.is('ingreso_anticipo_id', null);
+          return q.order('id', { ascending: true }).range(desde, hasta);
+        },
+        LOTE_IDS_ENTRADA,
+      );
+      if (filas.length === 0) return null;
+      const ligas = await leerLigasDeCobros(sb, {
+        cobroIds: filas.map((f) => String(f.id)),
+        cols: MOV_LIGA_COLS,
+        conPuente: a.conPuente,
+      });
+      return mismoDiaCliente(
+        filas.map((f) => ({ ...f, folio: folioDe.get(String(f.vuelo_id)) })),
+        ligas,
+        a.entrada,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación al revés: no se pudieron leer los cobros del mismo día del cobro ${a.cobroId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * «El cruce no corrió» de un cobro SIN conciliar (D14, best-effort): los
+   * cobros NO tienen cruce «al revés» (solo `intentarCruzarGasto` e
+   * `intentarCruzarIngreso`), así que un cobro registrado DESPUÉS de importar
+   * no se vuelve a intentar. UN `count` (head, cero filas) de abonos
+   * PENDIENTES de las cuentas ACTIVAS de su moneda (BANCO; PAYWISE ⇒
+   * PASARELA) con fecha en su ventana de cruce (±MATCH_DAYS; Paywise
+   * ±PAYWISE_VENTANA_DIAS) importados ANTES de registrar el cobro. 0 o
+   * cualquier falla ⇒ null.
+   */
+  private async cruceNoCorrioDeCobro(a: {
+    cobroId: string;
+    dia: string;
+    moneda: string;
+    metodo: string;
+    registradoAt: string | null;
+  }): Promise<CruceNoCorrio | null> {
+    if (!a.registradoAt) return null;
+    const registradoAt = a.registradoAt;
+    try {
+      const sb = this.supabase.service;
+      const pasarela = METODOS_COBRO_PASARELA.includes(a.metodo);
+      const { desde, hasta } = ventanaDias(
+        a.dia,
+        pasarela ? PAYWISE_VENTANA_DIAS : MATCH_DAYS,
+      );
+      const { data, error } = await sb
+        .from('cuenta_bancaria')
+        .select('id, moneda, tipo')
+        .eq('activa', true);
+      if (error) throw new Error(error.message);
+      const tipo = pasarela ? TIPO_CUENTA_PASARELA : 'BANCO';
+      const cuentas = ((data ?? []) as Array<Record<string, unknown>>)
+        .filter((k) => k.moneda === a.moneda && k.tipo === tipo)
+        .map((k) => String(k.id));
+      if (cuentas.length === 0) return null;
+      const { count, error: errN } = await sb
+        .from('movimiento_bancario')
+        .select('id', { count: 'exact', head: true })
+        .eq('tipo', TipoMovimientoBancario.ABONO)
+        .eq('conciliado', false)
+        .in('cuenta_bancaria_id', cuentas)
+        .gte('fecha', desde)
+        .lte('fecha', hasta)
+        .lt('created_at', registradoAt);
+      if (errN) throw new Error(errN.message);
+      return cruceNoCorrio(count ?? null, desde, hasta);
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación al revés: no se pudo revisar si el cruce corrió para el cobro ${a.cobroId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**

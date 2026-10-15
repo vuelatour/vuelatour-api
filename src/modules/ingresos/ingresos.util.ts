@@ -12,6 +12,7 @@ import {
   type CoberturaCobro,
 } from '../../common/cobro-banco.util';
 import type { ViaConciliacion } from '../../common/cobro-conciliado.util';
+import { primeraLinea } from '../conciliacion/auto-cruce.util';
 import type {
   EstadoConciliacionEntrada,
   EstadoConciliacionIngreso,
@@ -87,6 +88,21 @@ export function montoCuadraIngreso(
     return { cuadra: true, diferencia: difBruto, por: 'BRUTO' };
   }
   return { cuadra: false, diferencia: difNeto, por: null };
+}
+
+/**
+ * «Concepto» de un COBRO de vuelo (regla ÚNICA, la de la lista de Ingresos y
+ * la de la conciliación al revés, invariante 78): la referencia capturada
+ * (recortada) o, si no hay, la PRIMERA línea de las notas; null si ninguna.
+ * Las notas crudas nunca viajan.
+ */
+export function conceptoDeCobro(c: {
+  referencia?: unknown;
+  notas?: unknown;
+}): string | null {
+  const ref = typeof c.referencia === 'string' ? c.referencia.trim() : '';
+  if (ref) return ref;
+  return primeraLinea(typeof c.notas === 'string' ? c.notas : null) || null;
 }
 
 /** Estado de conciliación de un INGRESO (sin cuenta = no pasa por el banco). */
