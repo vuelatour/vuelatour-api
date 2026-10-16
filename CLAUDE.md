@@ -2196,7 +2196,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Caja MADRE (invariante 83)**: el detalle trae `cajas_fondeadas`
       (por reponer de cada hija = última fila de SU libro, misma fuente) y
       `repuesto_a` en los espejos; la reposición a una hija se registra con
-      el POST de movimientos de la HIJA (el espejo sale solo).
+      el POST de movimientos de la HIJA (el espejo sale solo; sin fecha =
+      hoy Cancún, nunca el `CURRENT_DATE` UTC de la BD).
 
 27. **FACTURAS EMITIDAS (registro manual), «NECESITO FACTURA» y COMPROBANTE
     DEL COBRO (24-sep-2026, API 0.0.32, migración `20260924000003` APLICADA
@@ -9123,10 +9124,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       este fondo, ordenadas por nombre (`localeCompare` es-MX). `por_reponer`
       = `por_reponer` de la ÚLTIMA fila del libro de cada hija
       (`cargarLibro` → `historialConSaldo` → `porReponerCaja`; libro vacío ⇒
-      0) — la MISMA cifra que la tarjeta «Por reponer» de su detalle
-      (`porReponerDeFondo` del panel lee `historial[0].por_reponer`) y que su
-      Excel de lo pendiente (`tramoDeReposicion(…, null).por_reponer_antes`);
-      cero fórmulas nuevas. `ultima_reposicion` con `ultimaReposicion` (la de
+      0) — la MISMA cifra que su Excel de lo pendiente
+      (`tramoDeReposicion(…, null).por_reponer_antes`) y que la tarjeta «Por
+      reponer» de las CLÁSICAS con nominal (`porReponerDeFondo` del panel lee
+      `historial[0].por_reponer`). En una ACUMULADA la tarjeta «Por reponer
+      (caja acumulada)» pinta `fondo.saldo` CON signo (negativo si se repuso
+      de más) y aquí sale topado en 0 (`porReponerCaja`): 0 es lo correcto
+      para prellenar, no es un desfase. Cero fórmulas nuevas. `ultima_reposicion` con `ultimaReposicion` (la de
       la lista). Libros en paralelo con tope `TOPE_LIBROS_HIJAS` = 4
       (`mapConTope`). `[]` = no fondea a nadie; **null = cualquier lectura
       cayó** (la de hijas o el libro de UNA hija; warn «Caja chica sin «cajas
@@ -9141,8 +9145,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ahí el panel baja `GET /v1/caja-chica/movimientos/:id/reposicion.xlsx`
       — y `insertarEspejo` escribe solo el REINTEGRO espejo en la madre
       (referencia «Fondeo a <nombre>»; si falla, la reposición se revierte).
-      NO hay ruta nueva ni se duplica esa regla. No existe GET de un
-      movimiento suelto: `createMovimiento`/`updateMovimiento` devuelven la
+      NO hay ruta nueva ni se duplica esa regla. **Sin `fecha` (o vacía) el
+      API escribe `hoyCancun()`** — jamás el `DEFAULT CURRENT_DATE` de la BD,
+      que corre en UTC (`TimeZone` = 'UTC' en prod): de 19:00 a 23:59 Cancún
+      la reposición y su espejo (que copia `mov.fecha`) quedaban con el día
+      siguiente y el libro contaba como repuestos los gastos de ese día
+      (revisión del 15-oct-2026; aplica a todo `createMovimiento`). No
+      existe GET de un movimiento suelto: `createMovimiento`/`updateMovimiento` devuelven la
       fila cruda (con `espejo_de_id`) y un espejo no se edita (409).
     - **Filtro Desde/Hasta del historial**: lo hace el panel en el navegador
       sobre el historial COMPLETO (el saldo corrido es del libro entero);
@@ -9153,10 +9162,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       163 orígenes ⇒ 150 + 13, cada lectura caída ⇒ sin la llave con el
       resto idéntico; hijas activas de ESTA madre ordenadas, acumulada con
       arrastre 250, clásica nominal 700 sin el gasto USD, libro vacío 0,
-      paridad con la tarjeta de cada hija, no-madre ⇒ [], hijas o un libro
-      caído ⇒ null, tope 4 con 12 hijas; POST de la hija ⇒ fila con id,
-      espejo «Fondeo a Gregorio Jurado» en la madre con `repuesto_a` y por
-      reponer 0). `caja-chica.service.spec` y `.balance.spec` siguen verdes
+      paridad con la última fila del libro de cada hija (y en la acumulada
+      con su saldo topado en 0), acumulada repuesta de más ⇒ tarjeta −350 y
+      selector 0, no-madre ⇒ [], hijas o un libro caído ⇒ null, tope 4 con
+      12 hijas; POST de la hija ⇒ fila con id, espejo «Fondeo a Gregorio
+      Jurado» en la madre con `repuesto_a` y por reponer 0; sin fecha a las
+      19:30 Cancún ⇒ reposición y espejo con el día de Cancún y el gasto del
+      día siguiente sigue por reponer; fecha explícita se respeta; el fake
+      de la BD pone `1999-12-31` por default para que se note si el API deja
+      de mandar la fecha). `caja-chica.service.spec` y `.balance.spec` siguen verdes
       sin tocarse.
 
 ## Convenciones NestJS

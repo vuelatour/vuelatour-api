@@ -827,7 +827,12 @@ export class CajaChicaService {
         tipo: dto.tipo,
         monto: dto.monto,
         moneda: fondo.moneda,
-        fecha: dto.fecha ?? undefined,
+        // Sin fecha ⇒ HOY en Cancún (invariante 83): el `DEFAULT
+        // CURRENT_DATE` de la BD corre en UTC y de 19:00 a 23:59 Cancún ya
+        // es «mañana» — la reposición y su espejo (que copia esta fecha)
+        // quedaban un día adelante y el libro contaba como repuestos los
+        // gastos de ese día siguiente.
+        fecha: dto.fecha || hoyCancun(),
         autorizado_por: dto.autorizado_por ?? null,
         referencia: dto.referencia ?? null,
         notas: dto.notas ?? null,

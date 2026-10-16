@@ -51,14 +51,16 @@ function fakeSupabase(db: Tablas, falla?: (q: Consulta) => boolean) {
           return api;
         },
         insert(fila: Row) {
-          // Defaults de la BD (fecha = hoy Cancún, created_at, espejo null)
-          // solo donde el insert no trae valor.
+          // Defaults de la BD (fecha = `CURRENT_DATE` en UTC, created_at,
+          // espejo null) solo donde el insert no trae valor. La fecha de
+          // la BD es a propósito un día DISTINTO a cualquier «hoy» de las
+          // pruebas: si el API dejara de mandar la fecha, se notaría.
           const definidos = Object.fromEntries(
             Object.entries(fila).filter(([, v]) => v !== undefined),
           );
           insertada = {
             id: `nuevo-${++secuencia}`,
-            fecha: '2026-10-15',
+            fecha: '1999-12-31',
             created_at: `2026-10-15T12:00:${String(secuencia).padStart(2, '0')}+00:00`,
             espejo_de_id: null,
             ...definidos,
@@ -324,7 +326,7 @@ describe('CajaChicaService.getFondoDetail — `repuesto_a` de los espejos (invar
     ]);
   });
 
-  it('≤ 150 ids por `in`: 160 espejos ⇒ dos consultas de orígenes (150 + 10)', async () => {
+  it('≤ 150 ids por `in`: 163 orígenes (160 nuevos + 3 del mundo) ⇒ dos consultas de orígenes (150 + 13)', async () => {
     const db = mundo();
     for (let i = 0; i < 160; i++) {
       db.caja_chica_movimiento.push(
@@ -414,16 +416,38 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('por_reponer = la MISMA cifra que la tarjeta del detalle de cada hija (última fila del historial)', async () => {
+  it('por_reponer = la última fila del libro de cada hija (la del Excel y la tarjeta de las CLÁSICAS); en las ACUMULADAS es su saldo con signo topado en 0', async () => {
     const { d } = await detalle(mundo());
     for (const c of d.cajas_fondeadas!) {
       const hija = await detalle(mundo(), c.fondo_id);
-      const tarjeta =
+      // Última fila del libro = `porReponerDeFondo` del panel (tarjeta
+      // «Por reponer» de las clásicas con nominal) y `por_reponer_antes`
+      // del Excel de lo pendiente.
+      const ultimaFila =
         hija.historial.length > 0
           ? (hija.historial[0].por_reponer as number)
           : 0;
-      expect(c.por_reponer).toBe(tarjeta);
+      expect(c.por_reponer).toBe(ultimaFila);
+      // Acumulada: la tarjeta «Por reponer (caja acumulada)» pinta
+      // `fondo.saldo` CON signo; el selector lo topa en 0.
+      if (hija.d.es_acumulada) {
+        expect(c.por_reponer).toBe(Math.max(0, hija.d.saldo));
+      }
     }
+  });
+
+  it('ACUMULADA repuesta de más: su tarjeta dice el saldo NEGATIVO y el selector 0 (lo que se prellena)', async () => {
+    const db = mundo();
+    // Gregorio: −1200 + 1500 − 450.5 − 99.5 + 600 = +350 repuesto de más.
+    db.caja_chica_movimiento.push(
+      mov('r-greg-2', GREG, 'REPOSICION', 600, '2026-10-10'),
+    );
+    const { d } = await detalle(db);
+    const hija = await detalle(db, GREG);
+    expect(hija.d.saldo).toBe(-350);
+    expect(d.cajas_fondeadas!.find((c) => c.fondo_id === GREG)).toMatchObject({
+      por_reponer: 0,
+    });
   });
 
   it('una caja que no fondea a nadie ⇒ [] (no null)', async () => {
@@ -489,6 +513,69 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
 });
 
 describe('Reponer a una caja hija desde la madre — ruta de SIEMPRE (invariante 83)', () => {
+  /** Fija SOLO el reloj (`Date`); los timers y microtareas siguen reales. */
+  const fijarReloj = (iso: string) => {
+    jest.useFakeTimers({
+      doNotFake: [
+        'nextTick',
+        'setImmediate',
+        'clearImmediate',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'queueMicrotask',
+      ],
+    });
+    jest.setSystemTime(new Date(iso));
+  };
+  // Mediodía en Cancún del 15-oct-2026 (UTC y Cancún dicen el mismo día).
+  beforeEach(() => fijarReloj('2026-10-15T17:00:00Z'));
+  afterEach(() => jest.useRealTimers());
+
+  it('sin fecha a las 19:30 de Cancún (ya «mañana» en UTC) ⇒ la reposición y su espejo quedan con el día de CANCÚN, no el de la BD', async () => {
+    // 2026-10-16T00:30Z = 15-oct 19:30 Cancún (UTC−5).
+    fijarReloj('2026-10-16T00:30:00Z');
+    const db = mundo();
+    // Gasto que Gregorio captura al día siguiente: NO está repuesto.
+    db.gasto.push(gasto('g-greg-16', 'u-greg', 80, '2026-10-16'));
+    const f = fakeSupabase(db);
+    const svc = new CajaChicaService(f.supabase);
+    const creado = (await svc.createMovimiento(
+      GREG,
+      { tipo: TipoMovimientoCaja.REPOSICION, monto: 250 },
+      'u-mari',
+    )) as Row;
+    expect(creado.fecha).toBe('2026-10-15');
+    const espejoNuevo = db.caja_chica_movimiento.find(
+      (m) => m.espejo_de_id === creado.id,
+    )!;
+    expect(espejoNuevo.fecha).toBe('2026-10-15');
+
+    const madre = await svc.getFondoDetail(MARY);
+    expect(
+      madre.cajas_fondeadas!.find((c) => c.fondo_id === GREG),
+    ).toMatchObject({
+      // El gasto del 16 va DESPUÉS de la reposición del 15: sigue pendiente.
+      por_reponer: 80,
+      ultima_reposicion: { fecha: '2026-10-15', monto: 250 },
+    });
+  });
+
+  it('con fecha explícita se respeta tal cual (la reposición y su espejo)', async () => {
+    const db = mundo();
+    const svc = new CajaChicaService(fakeSupabase(db).supabase);
+    const creado = (await svc.createMovimiento(
+      GREG,
+      { tipo: TipoMovimientoCaja.REPOSICION, monto: 100, fecha: '2026-10-10' },
+      'u-mari',
+    )) as Row;
+    expect(creado.fecha).toBe('2026-10-10');
+    expect(
+      db.caja_chica_movimiento.find((m) => m.espejo_de_id === creado.id)!.fecha,
+    ).toBe('2026-10-10');
+  });
+
   it('POST de movimientos del fondo HIJO con REPOSICION: devuelve el movimiento con id y su espejo aparece en la madre con `repuesto_a`', async () => {
     const db = mundo();
     const f = fakeSupabase(db);
