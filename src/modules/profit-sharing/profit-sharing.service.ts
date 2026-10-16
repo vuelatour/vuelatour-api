@@ -42,6 +42,11 @@ import {
   ladoPagoVendedor,
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd, retieneCobros } from '../../common/cobros-usd.util';
+import {
+  gastoRestaEnColumnasDelVuelo,
+  pagoOperadorExternoEnGastos,
+  usdDelPagoOperador,
+} from '../../common/costo-externo.util';
 import { dineroDevueltoCompleto } from '../../common/cuentas-cobro';
 import {
   expandirConReparto,
@@ -758,7 +763,12 @@ export class ProfitSharingService {
       (a) => ingresosPartidos.porAvion.get(a.id) ?? [],
     );
     const vueloIds = vuelos.map((v) => v.id);
-    const [cobros, escalas, gastosVendedorPorVuelo] = await Promise.all([
+    // Vuelos EXTERNOS del periodo: la MISMA lectura por vuelo trae sus
+    // gastos para saber si uno ES el pago al operador (invariante 88).
+    const externosIds = new Set(
+      vuelos.filter((v) => v.es_externo === true).map((v) => v.id),
+    );
+    const [cobros, escalas, gastosDeVuelos] = await Promise.all([
       this.fetchCobros(vueloIds),
       this.fetchEscalasHoras(vueloIds),
       // PAGO REAL AL VENDEDOR por VUELO (13-oct-2026, API 0.0.74, invariante
@@ -766,8 +776,10 @@ export class ProfitSharingService {
       // (los gastos de cada vuelo del periodo, de cualquier fecha_gasto) — la
       // ÚNICA vía por la que el reparto la resta (`comisionesDelVuelo`, que
       // elige el lado; la «(VuelaTour)» solo se cuenta).
-      this.fetchGastosVendedorDeVuelos(vueloIds),
+      this.leerGastosDeVuelos(vueloIds, externosIds),
     ]);
+    const gastosVendedorPorVuelo = gastosDeVuelos.vendedor;
+    const gastosExternoPorVuelo = gastosDeVuelos.externos;
 
     // Ingreso canónico por vuelo: suma de cobro_vuelo convertida a USD
     // (cobrosEnUsd, la MISMA fuente que la bandera `cobrado` y el reporte por
@@ -813,7 +825,18 @@ export class ProfitSharingService {
           pagoVendedorAvionNecesitaK(
             gastosVendedorPorVuelo.get(v.id) ?? [],
             v.tc_usd_mxn,
-          ),
+          ) ||
+          // (e) Externo sin T.C. en la cotización con costo del operador y
+          // algún gasto de columnas: el K (oficial del día de la
+          // cotización, el MISMO del balance) decide si ese gasto es el pago
+          // al operador (invariante 88). Va al mapa de (c).
+          (v.es_externo === true &&
+            v.estado !== 'CANCELADO' &&
+            pos(v.tc_usd_mxn) == null &&
+            pos(v.costo_externo_usd) != null &&
+            (gastosExternoPorVuelo.get(v.id) ?? []).some((g) =>
+              gastoRestaEnColumnasDelVuelo(g.categoria),
+            )),
       ),
       gastos,
       ingresosDeAviones,
@@ -1028,7 +1051,25 @@ export class ProfitSharingService {
       if (v.costo_externo_usd == null) {
         extSinCosto += 1;
       } else {
-        extCosto += Number(v.costo_externo_usd);
+        // EL PAGO AL OPERADOR ES EL GASTO REAL (16-oct-2026, invariante 88;
+        // fuente única `pagoOperadorExternoEnGastos`, la MISMA del balance y
+        // del reporte por vuelo): si un gasto del vuelo coincide con el
+        // costo capturado, el costo del operador es LO PAGADO (ese gasto en
+        // USD: tc_gasto ?? K). Este bloque no cuenta ningún otro gasto del
+        // externo, así que jamás hubo doble conteo aquí: solo se alinea el
+        // monto con los otros dos lectores. Sin T.C. para pasarlo a USD,
+        // sigue el costo capturado.
+        const kExt = kComisionesDeVuelo(v, tcOficial.vuelo, tcKComisionesVuelo);
+        const pagoOp = pagoOperadorExternoEnGastos({
+          esExterno: true,
+          cancelado: false,
+          costoUsd: v.costo_externo_usd,
+          tcVenta: kExt,
+          gastos: gastosExternoPorVuelo.get(v.id) ?? [],
+        });
+        const pagadoUsd =
+          pagoOp.cubre != null ? usdDelPagoOperador(pagoOp.cubre, kExt) : null;
+        extCosto += pagadoUsd ?? Number(v.costo_externo_usd);
       }
       // COMISIÓN DEL VENDEDOR en externos (verificación 28-ago): el vuelo
       // externo no se parte (no hay avión de flota), así que lo cobrado
@@ -4302,8 +4343,26 @@ export class ProfitSharingService {
   private async fetchGastosVendedorDeVuelos(
     vueloIds: string[],
   ): Promise<Map<string, GastoVendedorVueloRow[]>> {
+    return (await this.leerGastosDeVuelos(vueloIds, new Set())).vendedor;
+  }
+
+  /**
+   * La lectura POR VUELO de arriba (UNA consulta) con dos salidas: el pago
+   * al vendedor (las DOS categorías) y, de los vuelos de `externos`, TODOS
+   * sus gastos — para decidir si uno ES el pago al operador (invariante 88,
+   * `pagoOperadorExternoEnGastos`; desempate por `fecha_gasto` y el orden
+   * por `id` de la lectura).
+   */
+  private async leerGastosDeVuelos(
+    vueloIds: string[],
+    externos: ReadonlySet<string>,
+  ): Promise<{
+    vendedor: Map<string, GastoVendedorVueloRow[]>;
+    externos: Map<string, GastoVendedorVueloRow[]>;
+  }> {
     const out = new Map<string, GastoVendedorVueloRow[]>();
-    if (vueloIds.length === 0) return out;
+    const outExternos = new Map<string, GastoVendedorVueloRow[]>();
+    if (vueloIds.length === 0) return { vendedor: out, externos: outExternos };
     const filas = await this.leerEnLotesPaginado(
       vueloIds,
       (lote, desde, hasta) =>
@@ -4317,12 +4376,17 @@ export class ProfitSharingService {
     for (const f of filas) {
       const g = f as unknown as GastoVendedorVueloRow;
       if (typeof g.vuelo_id !== 'string') continue;
+      if (externos.has(g.vuelo_id)) {
+        const listaExt = outExternos.get(g.vuelo_id) ?? [];
+        listaExt.push(g);
+        outExternos.set(g.vuelo_id, listaExt);
+      }
       if (!categoriaEsPagoVendedor(g.categoria)) continue;
       const lista = out.get(g.vuelo_id) ?? [];
       lista.push(g);
       out.set(g.vuelo_id, lista);
     }
-    return out;
+    return { vendedor: out, externos: outExternos };
   }
 
   private async fetchEscalasHoras(

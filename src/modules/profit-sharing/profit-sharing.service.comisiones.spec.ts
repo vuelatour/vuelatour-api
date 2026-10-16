@@ -1072,3 +1072,84 @@ describe('Reparto ↔ balance por avión — revisión 6-oct-2026', () => {
     ).toBeLessThan(0.01);
   });
 });
+
+/**
+ * EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, invariante 88).
+ * El bloque `externos` del reparto nunca contó los gastos del externo (solo
+ * `costo_externo_usd`): aquí no había doble conteo. Con la MISMA decisión
+ * del balance y del reporte (`pagoOperadorExternoEnGastos`), si un gasto
+ * del vuelo ES el pago al operador, `costo_usd` usa LO PAGADO (ese gasto ÷
+ * tc_gasto ?? K) — así los tres lectores dan el mismo número.
+ */
+describe('Reparto — bloque externos: el gasto real cubre el costo del operador (invariante 88)', () => {
+  const VEXT = 'v-ext';
+  const externo = (extra: Fila = {}): Fila => ({
+    ...vuelo2(),
+    id: VEXT,
+    folio: 308,
+    aeronave_id: null,
+    es_externo: true,
+    operador_externo: 'CarlosMuciño',
+    costo_externo_usd: '1490.26',
+    tc_usd_mxn: 17,
+    comision_vendedor_usd: 0,
+    ...extra,
+  });
+  const pago = (monto: number, extra: Fila = {}): Fila => ({
+    id: `g-ext-${monto}`,
+    vuelo_id: VEXT,
+    aeronave_id: null,
+    escala_id: null,
+    categoria: 'OPERACIONES',
+    monto,
+    moneda: 'MXN',
+    tc_gasto: null,
+    fecha_gasto: '2026-09-15',
+    vuelo: { es_externo: true, aeronave_id: null },
+    ...extra,
+  });
+  async function externosDe(
+    v: Fila,
+    gastos: Fila[],
+    tcOficial: number | null = null,
+  ) {
+    const m = mundoReparto();
+    const { svc } = armar(
+      { ...m, vuelo: [...m.vuelo, v], gasto: [...m.gasto, ...gastos] },
+      undefined,
+      tcOficial,
+    );
+    return (await svc.compute({ desde: DESDE, hasta: HASTA })).externos;
+  }
+
+  it('sin gasto que coincida ⇒ el costo capturado (igual que hoy)', async () => {
+    expect((await externosDe(externo(), [])).costo_usd).toBe(1490.26);
+    expect((await externosDe(externo(), [pago(1118.12)])).costo_usd).toBe(
+      1490.26,
+    );
+  });
+
+  it('un gasto ES el pago ⇒ costo_usd = lo pagado (25,500 ÷ 17 = 1,500), no el capturado', async () => {
+    expect((await externosDe(externo(), [pago(25500)])).costo_usd).toBe(1500);
+    // #308 real: 25,334.40 ÷ 17 = 1,490.26 — el mismo número que el balance.
+    expect((await externosDe(externo(), [pago(25334.4)])).costo_usd).toBe(
+      1490.26,
+    );
+  });
+
+  it('sin T.C. en la cotización: el K oficial del día de la cotización decide (el mismo del balance)', async () => {
+    const sinTc = externo({ tc_usd_mxn: null });
+    expect((await externosDe(sinTc, [pago(25500)], 17)).costo_usd).toBe(1500);
+    // Sin ningún T.C. el gasto en pesos no se puede comparar: el capturado.
+    expect((await externosDe(sinTc, [pago(25500)], null)).costo_usd).toBe(
+      1490.26,
+    );
+  });
+
+  it('CANCELADO ⇒ igual que hoy (el costo no resta)', async () => {
+    expect(
+      (await externosDe(externo({ estado: 'CANCELADO' }), [pago(25500)]))
+        .costo_usd,
+    ).toBe(0);
+  });
+});
