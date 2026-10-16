@@ -448,6 +448,24 @@ describe('BALANCE por avión con el vuelo diferido', () => {
     expect(p.cierre?.vienen.map((x) => x.vuelo_id)).toEqual([V2]);
     expect(p.cierre?.pasarian.map((x) => x.vuelo_id)).toEqual([V3]);
   });
+  it('OCTUBRE abierto: el que VIENE de septiembre y SIGUE sin cobrar también «pasará a noviembre» (marca doble) y suma como siempre', async () => {
+    const m = mundo();
+    m.cobro_vuelo = m.cobro_vuelo.filter((c) => c.vuelo_id !== V2);
+    const p = await balance(m).buildPayload(AV, OCT.desde, OCT.hasta);
+    const viene = p.vuelos.find((f) => f.vuelo_id === V2);
+    expect(viene).toMatchObject({
+      cierre_marca:
+        'Viene de septiembre 2026 · Pendiente de cobro: pasará a noviembre 2026 al cerrar',
+      diferido_de: '2026-09',
+      diferido_a: '2026-11',
+      total_mxn: 20000,
+      tiempo_vuelo: null,
+    });
+    expect(p.cierre?.vienen.map((x) => x.vuelo_id)).toEqual([V2]);
+    expect(p.cierre?.pasarian.map((x) => x.vuelo_id).sort()).toEqual(
+      [V2, V3].sort(),
+    );
+  });
 });
 
 describe('LIBRO DINERO con el vuelo diferido', () => {

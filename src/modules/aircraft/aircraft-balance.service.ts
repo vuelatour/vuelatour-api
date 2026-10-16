@@ -1920,6 +1920,45 @@ export class AircraftBalanceService {
     const ultimo = mes ? rangoDelMes(mes).hasta : null;
     const destinoAbierto =
       mes && estado !== 'CERRADO' ? mesSiguienteDe(mes) : null;
+    // Mes ABIERTO: ¿esta fila pasaría al cerrar? (la MISMA decisión del
+    // cierre). Si sí, la agrega a `pasarian` y devuelve true.
+    const pasariaAlCerrar = (
+      f: BalanceAvionVueloPayload,
+      v: VueloRow,
+    ): boolean => {
+      if (
+        !destinoAbierto ||
+        !ultimo ||
+        v.estado !== 'COMPLETADO' ||
+        f.cancelado === true ||
+        (f.participacion ?? 1) <= 0
+      )
+        return false;
+      const d = decisionDiferir(
+        {
+          estado: v.estado,
+          monto_total_usd: v.monto_total_usd,
+          tc_usd_mxn:
+            pos(v.tc_usd_mxn) ?? ctx.tcOficialPorVuelo.get(v.id)?.tc ?? null,
+          cliente_interno: v.cliente_id
+            ? ctx.clientesInternos.has(v.cliente_id)
+            : false,
+        },
+        ctx.cobrosPorVuelo.get(v.id) ?? [],
+        ultimo,
+      );
+      if (!d) return false;
+      pasarian.push(
+        itemCierreDeFila(f, ctx.matriculaLibro, {
+          venta_usd: d.venta_usd,
+          cobrado_usd: d.cobrado_usd,
+          por_cobrar_usd: d.por_cobrar_usd,
+          destino: destinoAbierto,
+          leyenda: leyendaPasara(destinoAbierto, d),
+        }),
+      );
+      return true;
+    };
     for (const f of ctx.filasVuelo) {
       const v = f.vuelo_id ? porId.get(f.vuelo_id) : undefined;
       if (!v) {
@@ -1968,43 +2007,19 @@ export class AircraftBalanceService {
           }),
         );
         aplicarFilaViene(f, origen);
+        // Mes ABIERTO: un vuelo que VIENE de un mes anterior y sigue sin
+        // cobrar también pasaría al cerrar este mes (misma decisión que
+        // una fila normal; la marca dice las dos cosas).
+        if (pasariaAlCerrar(f, v)) {
+          f.cierre_marca = `${leyendaVieneDe(origen)} · ${leyendaPasariaBalance(destinoAbierto as string)}`;
+          f.diferido_a = destinoAbierto;
+        }
         continue;
       }
       marcarFilaNormal(f);
-      // Mes ABIERTO: ¿pasaría al cerrar? (la MISMA decisión del cierre).
-      if (
-        destinoAbierto &&
-        ultimo &&
-        v.estado === 'COMPLETADO' &&
-        f.cancelado !== true &&
-        (f.participacion ?? 1) > 0
-      ) {
-        const d = decisionDiferir(
-          {
-            estado: v.estado,
-            monto_total_usd: v.monto_total_usd,
-            tc_usd_mxn:
-              pos(v.tc_usd_mxn) ?? ctx.tcOficialPorVuelo.get(v.id)?.tc ?? null,
-            cliente_interno: v.cliente_id
-              ? ctx.clientesInternos.has(v.cliente_id)
-              : false,
-          },
-          ctx.cobrosPorVuelo.get(v.id) ?? [],
-          ultimo,
-        );
-        if (d) {
-          f.cierre_marca = leyendaPasariaBalance(destinoAbierto);
-          f.diferido_a = destinoAbierto;
-          pasarian.push(
-            itemCierreDeFila(f, ctx.matriculaLibro, {
-              venta_usd: d.venta_usd,
-              cobrado_usd: d.cobrado_usd,
-              por_cobrar_usd: d.por_cobrar_usd,
-              destino: destinoAbierto,
-              leyenda: leyendaPasara(destinoAbierto, d),
-            }),
-          );
-        }
+      if (pasariaAlCerrar(f, v)) {
+        f.cierre_marca = leyendaPasariaBalance(destinoAbierto as string);
+        f.diferido_a = destinoAbierto;
       }
     }
     return {
