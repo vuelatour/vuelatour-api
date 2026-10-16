@@ -38,6 +38,15 @@ export const CAMPOS_NO_CLONABLES: readonly string[] = [
   // del cliente por el trigger vuelo_consecutivo_cliente, que ignoraría el
   // valor de todos modos; no se arrastra.
   'consecutivo_cliente',
+  // CIERRE DE MES (revisión 16-oct-2026, invariante 89): GENERATED ALWAYS
+  // (`coalesce(periodo_contable, fecha_vuelo)`, migración 20261016000004).
+  // Con la migración, `select('*')` la trae y el INSERT del clon reventaba
+  // («cannot insert a non-DEFAULT value into column fecha_contable»): TODA
+  // reasignación de avión moría. `periodo_contable` SÍ viaja: un vuelo
+  // diferido a un mes abierto que alguien regresó a EN_VUELO sigue
+  // contando en ese mes (sin él, el clon caería en el mes CERRADO de su
+  // fecha real).
+  'fecha_contable',
 ];
 
 export function payloadClonVuelo(

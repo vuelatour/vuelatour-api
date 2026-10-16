@@ -88,6 +88,27 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     expect(c).not.toHaveProperty('client_request_id');
     expect(CAMPOS_NO_CLONABLES).toContain('client_request_id');
   });
+
+  it('CIERRE DE MES (revisión 16-oct-2026): no clona la columna GENERADA fecha_contable (el INSERT reventaría) y SÍ conserva periodo_contable', () => {
+    // Con la migración 20261016000004 `select('*')` trae las dos columnas.
+    // Las DOS columnas generadas de `vuelo` en prod deben estar excluidas.
+    expect(CAMPOS_NO_CLONABLES).toEqual(
+      expect.arrayContaining(['pago_anticipado_req', 'fecha_contable']),
+    );
+    const c = payloadClonVuelo(
+      {
+        ...original,
+        estado: 'EN_VUELO',
+        periodo_contable: '2026-10-01T05:00:00+00:00',
+        fecha_contable: '2026-10-01T05:00:00+00:00',
+      },
+      { aeronaveId: 'av-nueva', userId: 'u-1', matricula: 'N4142R' },
+    );
+    expect(c).not.toHaveProperty('fecha_contable');
+    // Un diferido a un mes abierto sigue contando ahí (sin esto el clon
+    // caería en el mes CERRADO de su fecha real).
+    expect(c.periodo_contable).toBe('2026-10-01T05:00:00+00:00');
+  });
 });
 
 describe('patchCobrosAlClon (cobros del original → clon)', () => {
