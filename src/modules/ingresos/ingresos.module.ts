@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConciliacionModule } from '../conciliacion/conciliacion.module';
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { FlightsModule } from '../flights/flights.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
@@ -19,6 +20,7 @@ import { IngresosService } from './ingresos.service';
     ConciliacionModule,
     TipoCambioModule,
     PyservicesModule,
+    ConfiguracionModule,
   ],
   controllers: [IngresosController],
   providers: [IngresosService],

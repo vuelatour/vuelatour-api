@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CalendarModule } from '../calendar/calendar.module';
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { FlightsModule } from '../flights/flights.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { QuotesModule } from '../quotes/quotes.module';
@@ -14,7 +15,13 @@ import { GroupsService } from './groups.service';
  * propio.
  */
 @Module({
-  imports: [QuotesModule, FlightsModule, CalendarModule, PyservicesModule],
+  imports: [
+    QuotesModule,
+    FlightsModule,
+    CalendarModule,
+    PyservicesModule,
+    ConfiguracionModule,
+  ],
   controllers: [GroupsController],
   providers: [GroupsService, GroupsPdfService],
   exports: [GroupsService],

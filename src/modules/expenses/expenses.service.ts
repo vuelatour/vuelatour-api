@@ -11,6 +11,11 @@ import {
   Optional,
   forwardRef,
 } from '@nestjs/common';
+import {
+  inicioOficialDe,
+  pisoDia,
+  rangoConPiso,
+} from '../../common/inicio-oficial.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CajaChicaService } from '../caja-chica/caja-chica.service';
 import {
@@ -737,7 +742,17 @@ export class ExpensesService {
     else if (filtroFact?.op === 'eq')
       q = q.eq('estatus_facturacion', filtroFact.valor);
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
-    if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
+    // INICIO OFICIAL (16-oct-2026, invariante 86): piso sobre `fecha_gasto`
+    // en la tabla, la bandeja, `orden=captura`, duplicados y el Excel. NO
+    // con `vuelo_id` ni `compra_id`: son los gastos DE un registro abierto
+    // por id (detalle del vuelo, pagos de una compra de inventario) y se
+    // ven completos. Un `hasta` anterior al inicio ⇒ lista vacía (gte+lte).
+    const inicio =
+      filters.vuelo_id || filters.compra_id
+        ? null
+        : await inicioOficialDe(this.configuracion);
+    const desdeGasto = pisoDia(filters.desde, inicio);
+    if (desdeGasto) q = q.gte('fecha_gasto', desdeGasto);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
     // Fecha de CAPTURA (28-ago): "lo que capturaron esta semana" aunque el
     // ticket traiga otra fecha — así el panel muestra lo mismo que la app.
@@ -1131,11 +1146,16 @@ export class ExpensesService {
    * asigna solo (la IA propone, el humano confirma).
    */
   async sugerirAsignaciones() {
-    const { data, error } = await this.supabase.service
+    // INICIO OFICIAL (invariante 86): mismo universo que la bandeja — no
+    // gasta créditos de IA en gastos anteriores al inicio.
+    const inicio = await inicioOficialDe(this.configuracion);
+    let q = this.supabase.service
       .from('gasto')
       .select(
         'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
-      )
+      );
+    if (inicio) q = q.gte('fecha_gasto', inicio);
+    const { data, error } = await q
       .is('aeronave_id', null)
       // Mismo universo que la bandeja (fuente única
       // `CATEGORIAS_GASTO_SIN_AVION`): PERSONAL_DUENO jamás tendrá vuelo y
@@ -1239,7 +1259,14 @@ export class ExpensesService {
    * Aterrizajes del periodo (escalas con destino ≠ CUN) que aún NO tienen
    * gasto de pista, con el monto sugerido del tarifario aeródromo×modelo.
    */
-  async pistasPendientes(desde: string, hasta: string) {
+  async pistasPendientes(desdeQ: string, hasta: string) {
+    // INICIO OFICIAL (invariante 86): un periodo anterior ⇒ vacío.
+    const piso = rangoConPiso(
+      { desde: desdeQ, hasta },
+      await inicioOficialDe(this.configuracion),
+    );
+    if (piso.vacio) return { data: [] };
+    const desde = piso.desde ?? desdeQ;
     const d1 = `${desde}T00:00:00-05:00`;
     const d2 = `${hasta}T23:59:59-05:00`;
     const { data: escalas, error } = await this.supabase.service
@@ -4658,12 +4685,20 @@ export class ExpensesService {
     }).format(new Date());
     const [y, m] = hoy.split('-').map(Number);
     const fin = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    const desde = desdeQ ?? `${hoy.slice(0, 7)}-01`;
+    const desdeSinPiso = desdeQ ?? `${hoy.slice(0, 7)}-01`;
     const hasta =
       hastaQ ?? `${hoy.slice(0, 7)}-${String(fin).padStart(2, '0')}`;
-    if (desde > hasta) {
+    if (desdeSinPiso > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86): un mes anterior ⇒ vacío; si no, el
+    // `desde` sube y el periodo devuelto es el subido.
+    const piso = rangoConPiso(
+      { desde: desdeSinPiso, hasta },
+      await inicioOficialDe(this.configuracion),
+    );
+    const desde = piso.desde ?? desdeSinPiso;
+    if (piso.vacio) return { periodo: { desde, hasta }, data: [], resumen: [] };
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(await this.listCols())

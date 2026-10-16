@@ -1,3 +1,4 @@
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { Module } from '@nestjs/common';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { ProfitSharingModule } from '../profit-sharing/profit-sharing.module';
@@ -10,7 +11,12 @@ import { InvoicesService } from './invoices.service';
   // FlightsModule exporta FacturaClienteService: al timbrar un CFDI el vuelo
   // pasa a `factura_estatus = FACTURADO` por la MISMA fuente que usa el panel
   // (22-sep-2026). FlightsModule no importa FacturacionModule: sin ciclo.
-  imports: [PyservicesModule, ProfitSharingModule, FlightsModule],
+  imports: [
+    PyservicesModule,
+    ProfitSharingModule,
+    FlightsModule,
+    ConfiguracionModule,
+  ],
   controllers: [InvoicesController],
   providers: [FacturacionClient, InvoicesService],
   exports: [InvoicesService],

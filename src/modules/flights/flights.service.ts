@@ -18,6 +18,11 @@ import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import { cobroExigeFactura } from '../../common/cuentas-cobro';
 import {
+  corteTs,
+  esAntesDelInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import {
   buscarClientePorNombre,
   nombreClienteParaCrear,
   type ClienteNombreRow,
@@ -2567,6 +2572,15 @@ export class FlightsService {
           ? `${filters.hasta}T23:59:59-05:00`
           : filters.hasta,
       );
+    // INICIO OFICIAL (16-oct-2026, invariante 86): piso SIEMPRE como AND
+    // aparte (no reescribe `desde`: la app manda ISO con hora). Sin fecha de
+    // vuelo (cotización viva) sigue visible; `fecha_fin` puede ser null en
+    // esas, por eso el `is.null` va sobre `fecha_vuelo`. Aplica igual a Mis
+    // vuelos, EN_VUELO, mecánico y deltas (los `.or()` se combinan con AND).
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) {
+      q = q.or(`fecha_vuelo.is.null,fecha_fin.gte.${corteTs(inicio)}`);
+    }
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -11074,6 +11088,14 @@ export class FlightsService {
     const dia =
       fecha ??
       new Date().toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    // INICIO OFICIAL (invariante 86): un día anterior al inicio ⇒ tablero
+    // vacío (el default, hoy, no cambia).
+    if (
+      fecha &&
+      esAntesDelInicio(fecha, await inicioOficialDe(this.configuracion))
+    ) {
+      return { fecha: dia, vuelos: [] };
+    }
     // Solapamiento con el día vía fecha_fin: un viaje multi-día aparece en
     // el tablero TODOS sus días (antes solo el día 1 y la oficina no podía
     // confirmar el tramo de regreso desde aquí).

@@ -17,6 +17,11 @@ import { ConfiguracionService } from '../configuracion/configuracion.service';
 import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import {
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+  pisoDia,
+} from '../../common/inicio-oficial.util';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
 import { normalizarTc, round6 } from '../../common/tc.util';
 import {
@@ -1597,6 +1602,15 @@ export class ConciliacionService {
     // construyen el service sin él.
     @Optional() private readonly tipoCambio?: TipoCambioService,
   ) {}
+
+  /**
+   * INICIO OFICIAL (16-oct-2026, invariante 86): `desde` con piso para las
+   * LISTAS y bandejas (anclas). JAMÁS en candidatos ni ventanas ±N días: un
+   * cargo del 2-sep sigue viendo gastos del 30-ago.
+   */
+  private async pisoDesde(desde: string): Promise<string> {
+    return pisoDia(desde, await inicioOficialDe(this.configuracion)) ?? desde;
+  }
 
   /** `{ 'X-IA-Modelo': id }` con modelo configurado; `{}` si no. Nunca lanza. */
   private async headersModeloIa(): Promise<Record<string, string>> {
@@ -3831,11 +3845,14 @@ export class ConciliacionService {
     // (el operador señaló exactamente qué filas reintentar).
     const ids = dto.movimiento_ids?.length ? dto.movimiento_ids : null;
     const hasta = dto.hasta ?? hoyCancun();
-    const desde =
+    const desdePedido =
       dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
-    if (!ids && desde > hasta) {
+    if (!ids && desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86): piso SOLO sin ids (con ids el
+    // operador eligió las filas); rango que queda antes ⇒ nada que cruzar.
+    const desde = ids ? desdePedido : await this.pisoDesde(desdePedido);
     const limite = Math.min(dto.limite ?? 500, RECRUCE_MAX);
 
     let q = this.supabase.service
@@ -7110,9 +7127,26 @@ export class ConciliacionService {
    * en Paywise sin cobro, cobros sin Paywise, referencia con monto distinto
    * y ambiguos.
    */
-  async auditoriaPaywise(q: PaywiseAuditoriaQuery) {
+  /**
+   * INICIO OFICIAL (invariante 86): el periodo de la auditoría Paywise (y de
+   * su «conciliar» y su Excel) sube al inicio; uno anterior ⇒ 400
+   * `PERIODO_ANTES_DEL_INICIO`.
+   */
+  private async periodoPaywise(
+    q: PaywiseAuditoriaQuery,
+  ): Promise<PaywiseAuditoriaQuery> {
     if (q.desde > q.hasta)
       throw new BadRequestException('desde no puede ser posterior a hasta');
+    const p = exigirPeriodoDesdeInicio(
+      q.desde,
+      q.hasta,
+      await inicioOficialDe(this.configuracion),
+    );
+    return p.desde === q.desde ? q : { ...q, desde: p.desde };
+  }
+
+  async auditoriaPaywise(qPedido: PaywiseAuditoriaQuery) {
+    const q = await this.periodoPaywise(qPedido);
     const u = await this.universoPaywise(q);
     const r = cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias });
     return this.armarSalidaAuditoria(
@@ -7137,9 +7171,8 @@ export class ConciliacionService {
    * independiente: un fallo (carrera, cobro ya ligado) se reporta en
    * `errores` sin tumbar el resto.
    */
-  async conciliarPaywise(q: PaywiseAuditoriaQuery, userId: string) {
-    if (q.desde > q.hasta)
-      throw new BadRequestException('desde no puede ser posterior a hasta');
+  async conciliarPaywise(qPedido: PaywiseAuditoriaQuery, userId: string) {
+    const q = await this.periodoPaywise(qPedido);
     const u = await this.universoPaywise(q);
     const r = cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias });
     let conciliados = 0;
@@ -7188,8 +7221,10 @@ export class ConciliacionService {
    * naranja), «Paywise sin cobro» y «Cobros sin Paywise».
    */
   async auditoriaPaywiseXlsx(
-    q: PaywiseAuditoriaQuery,
-  ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    qPedido: PaywiseAuditoriaQuery,
+  ): Promise<{ buffer: Buffer; etiqueta: string; desde: string }> {
+    // Periodo con piso (invariante 86) también en los subtítulos.
+    const q = await this.periodoPaywise(qPedido);
     const a = await this.auditoriaPaywise(q);
     const quien = (c: CobroPaywise) =>
       c.tipo === 'SOBRE_GRUPO'
@@ -7397,7 +7432,7 @@ export class ConciliacionService {
         },
       ],
     });
-    return { buffer, etiqueta: 'paywise' };
+    return { buffer, etiqueta: 'paywise', desde: q.desde };
   }
 
   /**
@@ -7419,10 +7454,15 @@ export class ConciliacionService {
   async cobrosSinBanco(desde?: string, hasta?: string) {
     // Defaults en día CANCÚN (no UTC): a las 20:00 de Cancún el UTC ya es
     // mañana y el corte se corría un día.
-    const d = desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    const dPedido =
+      desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
     const h = hasta ?? hoyCancun();
-    if (d > h)
+    if (dPedido > h)
       throw new BadRequestException('desde no puede ser posterior a hasta');
+    // INICIO OFICIAL (invariante 86): eje `fecha_cobro` con piso (los 9
+    // cobros del 31-ago de vuelos de septiembre salen; decisión del
+    // contrato). Rango entero antes ⇒ lista vacía, nunca 400.
+    const d = await this.pisoDesde(dPedido);
     // ANTICIPOS (24-sep-2026, regla 1.3): un cobro nacido de un anticipo
     // sale aquí MIENTRAS su anticipo NO esté conciliado (un anticipo
     // tecleado a mano y jamás visto en el banco no esconde sus cobros del
@@ -10328,7 +10368,11 @@ export class ConciliacionService {
     // Default en día CANCÚN (no UTC), igual que `cobrosSinBanco`: a las
     // 20:00 de Cancún el UTC ya es mañana y el corte se corría un día
     // (invariante 4).
-    const d = desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    // INICIO OFICIAL (invariante 86): el default (hoy − 90 d) y un `desde`
+    // explícito suben al inicio.
+    const d = await this.pisoDesde(
+      desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000)),
+    );
     let q = this.supabase.service
       .from('gasto')
       .select(
@@ -10389,11 +10433,16 @@ export class ConciliacionService {
     // `diferencia_lotes`) salían de un subconjunto arbitrario y la oficina
     // creía la conciliación más avanzada (prod: 999 movimientos el 14-oct).
     // Llegar al tope ⇒ 400 explícito, jamás un total recortado.
+    // INICIO OFICIAL (invariante 86): conteos por periodo, con piso.
+    const desdeResumen = pisoDia(
+      desde,
+      await inicioOficialDe(this.configuracion),
+    );
     const { filas: data, truncado } = await this.leerPaginado((a, b) => {
       let q = this.supabase.service
         .from('movimiento_bancario')
         .select(colsResumen);
-      if (desde) q = q.gte('fecha', desde);
+      if (desdeResumen) q = q.gte('fecha', desdeResumen);
       if (hasta) q = q.lte('fecha', hasta);
       return q.order('id', { ascending: true }).range(a, b);
     }, RESUMEN_MOVIMIENTOS_TOPE);
@@ -10529,11 +10578,36 @@ export class ConciliacionService {
    * `sin_banco` cambia de universo (gastos bancarios que no aparecen en el
    * banco) y ahí la cuenta bancaria se IGNORA.
    */
+  /**
+   * INICIO OFICIAL (invariante 86, forma R): periodo subido en consulta,
+   * título y nombre de archivo (`desde` devuelto, ADITIVO); uno anterior ⇒
+   * 400 PERIODO_ANTES_DEL_INICIO.
+   */
   async reporteXlsx(
+    cuentaBancariaId: string | undefined,
+    desdePedido: string,
+    hasta: string,
+    estado: ReporteConciliacionEstado = 'todos',
+  ): Promise<{ buffer: Buffer; etiqueta: string; desde: string }> {
+    const { desde } = exigirPeriodoDesdeInicio(
+      desdePedido,
+      hasta,
+      await inicioOficialDe(this.configuracion),
+    );
+    const r = await this.reporteXlsxPeriodo(
+      cuentaBancariaId,
+      desde,
+      hasta,
+      estado,
+    );
+    return { ...r, desde };
+  }
+
+  private async reporteXlsxPeriodo(
     cuentaBancariaId: string | undefined,
     desde: string,
     hasta: string,
-    estado: ReporteConciliacionEstado = 'todos',
+    estado: ReporteConciliacionEstado,
   ): Promise<{ buffer: Buffer; etiqueta: string }> {
     if (estado === 'sin_banco') {
       return this.reporteGastosSinBancoXlsx(desde, hasta);
@@ -11338,7 +11412,12 @@ export class ConciliacionService {
       q = q.eq('conciliado', filters.conciliado);
     // ADITIVOS (24-sep-2026): tipo y ventana de fechas (DATE, día Cancún).
     if (filters.tipo) q = q.eq('tipo', filters.tipo);
-    if (filters.desde) q = q.gte('fecha', filters.desde);
+    // INICIO OFICIAL (invariante 86): piso AND; un rango anterior ⇒ vacío.
+    const desdeLista = pisoDia(
+      filters.desde,
+      await inicioOficialDe(this.configuracion),
+    );
+    if (desdeLista) q = q.gte('fecha', desdeLista);
     if (filters.hasta) q = q.lte('fecha', filters.hasta);
     if (idOmitidoLista) q = q.eq('clasificacion_id', idOmitidoLista);
 
@@ -14438,11 +14517,13 @@ export class ConciliacionService {
    */
   async sugerirLote(dto: SugerirLoteDto, userId: string) {
     const hasta = dto.hasta ?? hoyCancun();
-    const desde =
+    const desdePedido =
       dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
-    if (desde > hasta) {
+    if (desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86): anclas con piso.
+    const desde = await this.pisoDesde(desdePedido);
     const limite = Math.min(dto.limite ?? 15, 40);
     let q = this.supabase.service
       .from('movimiento_bancario')
@@ -16362,11 +16443,14 @@ export class ConciliacionService {
   ): Promise<AbonosPendientesRespuesta> {
     if (!(await this.ingresosOn())) throw errorIngresosNoDisponibles();
     const hasta = q.hasta ?? hoyCancun();
-    const desde =
+    const desdePedido =
       q.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
-    if (desde > hasta) {
+    if (desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86): ventana con piso (Ingresos › Por
+    // conciliar); el `desde` devuelto es el subido.
+    const desde = await this.pisoDesde(desdePedido);
     const limite = Math.min(Math.max(q.limite ?? 300, 1), 500);
     let qb = this.supabase.service
       .from('movimiento_bancario')
@@ -16451,11 +16535,13 @@ export class ConciliacionService {
     if (!(await this.ingresosOn())) throw errorIngresosNoDisponibles();
     const ids = dto.movimiento_ids?.length ? dto.movimiento_ids : null;
     const hasta = dto.hasta ?? hoyCancun();
-    const desde =
+    const desdePedido =
       dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
-    if (!ids && desde > hasta) {
+    if (!ids && desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86): piso SOLO sin ids.
+    const desde = ids ? desdePedido : await this.pisoDesde(desdePedido);
     const limite = Math.min(Math.max(dto.limite ?? 20, 1), 30);
     let qb = this.supabase.service
       .from('movimiento_bancario')

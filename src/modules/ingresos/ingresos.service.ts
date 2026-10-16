@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +17,12 @@ import { FlightsService } from '../flights/flights.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
+import {
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+  pisoDia,
+} from '../../common/inicio-oficial.util';
 import type { CreateCobroDto } from '../flights/dto/cobros.dto';
 import {
   LIMITE_ARCHIVO_FACTURA_BYTES,
@@ -394,6 +401,10 @@ export class IngresosService {
     private readonly conciliacion: ConciliacionService,
     private readonly tipoCambio: TipoCambioService,
     private readonly pyservices: PyservicesService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86). @Optional y ÚLTIMO: los
+    // specs construyen por posición (sin él ⇒ null ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private get sb() {
@@ -692,6 +703,19 @@ export class IngresosService {
     return { desde, hasta };
   }
 
+  /**
+   * INICIO OFICIAL (invariante 86): `periodo` con el `desde` subido al
+   * inicio (forma V: un periodo entero anterior queda `desde > hasta` y las
+   * lecturas salen vacías, nunca 400). La respuesta devuelve el subido.
+   */
+  private async periodoConPiso(
+    q: ResumenIngresosQuery,
+  ): Promise<{ desde: string; hasta: string }> {
+    const p = this.periodo(q);
+    const inicio = await inicioOficialDe(this.configuracion);
+    return { desde: pisoDia(p.desde, inicio) ?? p.desde, hasta: p.hasta };
+  }
+
   // ======================================================================
   // COBROS DE VUELOS (solo lectura) — la regla ÚNICA de «cobros sin banco»
   // ======================================================================
@@ -929,7 +953,7 @@ export class IngresosService {
 
   async resumen(q: ResumenIngresosQuery): Promise<ResumenIngresos> {
     await this.assertDisponible();
-    const { desde, hasta } = this.periodo(q);
+    const { desde, hasta } = await this.periodoConPiso(q);
     const hoy = hoyCancun();
     const [cobros, ingresosRaw, abonos, cuentas, anticiposVivos] =
       await Promise.all([
@@ -1162,7 +1186,7 @@ export class IngresosService {
   private async entradasFiltradas(
     q: FiltrosEntradasQuery,
   ): Promise<{ desde: string; hasta: string; filas: EntradaDinero[] }> {
-    const { desde, hasta } = this.periodo(q);
+    const { desde, hasta } = await this.periodoConPiso(q);
     const hoy = hoyCancun();
     const origen = q.origen ?? 'todos';
     const soloCobros =
@@ -1264,7 +1288,9 @@ export class IngresosService {
     hasta: string;
     ingresos: Ingreso[];
   }> {
-    const { desde, hasta } = this.periodo(q);
+    // Con `saldo=con_saldo` el periodo NO filtra (anticipos con saldo de
+    // cualquier fecha, invariante 86 «NO TOCAR»): el piso solo sube el eco.
+    const { desde, hasta } = await this.periodoConPiso(q);
     const vista = q.vista ?? 'otros';
     const conSaldo =
       vista === 'anticipos' && (q.saldo ?? 'con_saldo') === 'con_saldo';
@@ -3485,7 +3511,14 @@ export class IngresosService {
     q: ExportIngresosQuery,
   ): Promise<{ buffer: Buffer; filename: string }> {
     await this.assertDisponible();
-    const { desde, hasta } = this.periodo(q);
+    // INICIO OFICIAL (invariante 86): Excel = reporte (forma R): periodo
+    // subido en hojas y nombre; uno anterior ⇒ 400 PERIODO_ANTES_DEL_INICIO.
+    const p = this.periodo(q);
+    const { desde, hasta } = exigirPeriodoDesdeInicio(
+      p.desde,
+      p.hasta,
+      await inicioOficialDe(this.configuracion),
+    );
     // `vista` decide las hojas de ingresos: otros ⇒ sin anticipos,
     // anticipos ⇒ solo anticipos, todos (default) ⇒ las dos. Los cobros de
     // vuelos siguen los filtros de «entradas».

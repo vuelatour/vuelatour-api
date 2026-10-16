@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { saldoCaja } from '../../common/caja-chica-saldo.util';
 import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
@@ -99,6 +101,11 @@ export class AlertsService {
     private readonly email: EmailService,
     private readonly expirations: ExpirationsService,
     private readonly calendarSync: CalendarSyncService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86): piso de `vuelo_estancado`,
+    // `cobro_pendiente` y `gastos_sin_avion`. Saldos (caja, inventario,
+    // horas) sin piso. @Optional y ÚLTIMO (specs por posición).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   // ===== Cron =====
@@ -1085,13 +1092,18 @@ export class AlertsService {
   private async checkCobrosPendientes(config: AlertConfig): Promise<void> {
     const umbrales =
       config.dias_anticipacion.length > 0 ? config.dias_anticipacion : [3];
+    // INICIO OFICIAL (invariante 86): por `fecha_vuelo`, no por
+    // `updated_at`: un vuelo anterior editado hoy no vuelve a avisar.
+    const inicio = await inicioOficialDe(this.configuracion);
     for (const d of umbrales) {
       const corte = new Date(Date.now() - d * 86400 * 1000).toISOString();
-      const { data, error } = await this.supabase.service
+      let qv = this.supabase.service
         .from('vuelo')
         .select(
           'id, folio, origen_iata, destino_iata, monto_total_usd, updated_at',
-        )
+        );
+      if (inicio) qv = qv.gte('fecha_vuelo', corteTs(inicio));
+      const { data, error } = await qv
         .eq('estado', 'COMPLETADO')
         .eq('cobrado', false)
         // Sin precio no hay cuenta por cobrar: los vuelos de Servicio y
@@ -1599,9 +1611,11 @@ export class AlertsService {
   /** Bandeja de gastos sin avión: la meta del diseño es que SIEMPRE esté vacía. */
   private async checkGastosSinAvion(config: AlertConfig): Promise<void> {
     const hoy = dateOnly(new Date());
-    const { data, error } = await this.supabase.service
-      .from('gasto')
-      .select('id, monto, moneda')
+    // INICIO OFICIAL (invariante 86): mismo universo que la bandeja.
+    const inicio = await inicioOficialDe(this.configuracion);
+    let qg = this.supabase.service.from('gasto').select('id, monto, moneda');
+    if (inicio) qg = qg.gte('fecha_gasto', inicio);
+    const { data, error } = await qg
       .is('aeronave_id', null)
       // MISMO criterio que el pre-cierre y la bandeja de pendientes de
       // expenses.service (o el conteo no cuadra): fuente única
@@ -1640,21 +1654,30 @@ export class AlertsService {
    */
   private async checkVuelosEstancados(config: AlertConfig): Promise<void> {
     const hoyCancun = this.hoyCancun();
+    // INICIO OFICIAL (invariante 86): pre-vuelo por `fecha_vuelo`, EN_VUELO
+    // por `fecha_fin`; lo anterior al inicio deja de avisar.
+    const inicio = await inicioOficialDe(this.configuracion);
+    let qEnVuelo = this.supabase.service
+      .from('vuelo')
+      .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo');
+    let qPreVuelo = this.supabase.service
+      .from('vuelo')
+      .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo');
+    if (inicio) {
+      qEnVuelo = qEnVuelo.gte('fecha_fin', corteTs(inicio));
+      qPreVuelo = qPreVuelo.gte('fecha_vuelo', corteTs(inicio));
+    }
     // Dos ejes a propósito: un EN_VUELO multi-día sigue en curso hasta su
     // último tramo (fecha_fin), pero un vuelo PRE-VUELO (COTIZADO/RESERVA/
     // CONFIRMADO) cuyo día 1 ya pasó significa que nadie capturó salida — no
     // despegó, y esperar al fin del itinerario retrasaría el aviso días.
     const [enVuelo, preVuelo] = await Promise.all([
-      this.supabase.service
-        .from('vuelo')
-        .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
+      qEnVuelo
         .eq('estado', 'EN_VUELO')
         .eq('es_externo', false)
         .not('fecha_vuelo', 'is', null)
         .lt('fecha_fin', `${hoyCancun}T00:00:00-05:00`),
-      this.supabase.service
-        .from('vuelo')
-        .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
+      qPreVuelo
         .in('estado', ['COTIZADO', 'RESERVA', 'CONFIRMADO'])
         .eq('es_externo', false)
         .not('fecha_vuelo', 'is', null)

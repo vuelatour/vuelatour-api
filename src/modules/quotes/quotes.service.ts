@@ -1,4 +1,9 @@
 import {
+  corteTs,
+  esAntesDelInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import {
   BadRequestException,
   ConflictException,
   Injectable,
@@ -2016,6 +2021,7 @@ export class QuotesService implements ConfirmadorCotizacion {
     qb: T,
     filtros: VecinosQuotesQuery,
     condQ: string | null,
+    inicio: string | null,
   ): T {
     let q = qb;
     if (filtros.cliente_id) q = q.eq('cliente_id', filtros.cliente_id);
@@ -2028,8 +2034,18 @@ export class QuotesService implements ConfirmadorCotizacion {
     // Rango sobre fecha_vuelo (13-oct-2026): con rango, las cotizaciones SIN
     // fecha quedan fuera (NULL no cumple gte/lte) — en la lista y en las
     // cuatro consultas de las flechas. `desde > hasta` = lista vacía, no 400.
-    if (filtros.desde)
-      q = q.gte('fecha_vuelo', limiteFechaVuelo(filtros.desde, 'desde'));
+    // INICIO OFICIAL (16-oct-2026, invariante 86): un `desde` anterior sube
+    // al inicio; sin `desde`, piso que CONSERVA las cotizaciones sin fecha
+    // (NULL) — vivas y visibles como hoy.
+    if (filtros.desde) {
+      const desde =
+        inicio && esAntesDelInicio(filtros.desde, inicio)
+          ? inicio
+          : filtros.desde;
+      q = q.gte('fecha_vuelo', limiteFechaVuelo(desde, 'desde'));
+    } else if (inicio) {
+      q = q.or(`fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`);
+    }
     if (filtros.hasta)
       q = q.lte('fecha_vuelo', limiteFechaVuelo(filtros.hasta, 'hasta'));
     if (condQ) q = q.or(condQ);
@@ -2038,6 +2054,7 @@ export class QuotesService implements ConfirmadorCotizacion {
 
   async list(filters: ListQuotesQuery) {
     const condQ = await this.condicionesBusqueda(filters.q);
+    const inicio = await inicioOficialDe(this.configuracion);
     const q = this.aplicarFiltrosLista(
       this.supabase.service
         .from('vuelo')
@@ -2046,6 +2063,7 @@ export class QuotesService implements ConfirmadorCotizacion {
         .range(filters.offset, filters.offset + filters.limit - 1),
       filters,
       condQ,
+      inicio,
     );
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -2138,6 +2156,7 @@ export class QuotesService implements ConfirmadorCotizacion {
         : Number(actual.folio);
 
     const condQ = await this.condicionesBusqueda(filtros.q);
+    const inicio = await inicioOficialDe(this.configuracion);
     // `limit(1)` va en la BASE (antes de los filtros) y no al final: en ese
     // orden el genérico de `aplicarFiltrosLista` no revienta el chequeo de
     // tipos de supabase-js (TS2589). Cada llamada arma un builder NUEVO.
@@ -2146,6 +2165,7 @@ export class QuotesService implements ConfirmadorCotizacion {
         this.supabase.service.from('vuelo').select(COLS_VECINO).limit(1),
         filtros,
         condQ,
+        inicio,
       );
     const [sigMismo, sigDespues, antMismo, antAntes] = await Promise.all([
       folio == null

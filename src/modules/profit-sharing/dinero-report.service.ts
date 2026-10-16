@@ -1,5 +1,10 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
+import {
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
 import {
   CATEGORIAS_GASTO_EMPRESA,
   categoriaEsDeEmpresa,
@@ -177,21 +182,31 @@ export class DineroReportService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86). @Optional y ÚLTIMO (los
+    // specs construyen por posición; sin él ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   async xlsx(
-    desde: string,
+    desdePedido: string,
     hasta: string,
   ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
     if (
-      !/^\d{4}-\d{2}-\d{2}$/.test(desde) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(desdePedido) ||
       !/^\d{4}-\d{2}-\d{2}$/.test(hasta)
     ) {
       throw new BadRequestException('desde/hasta deben ser YYYY-MM-DD');
     }
-    if (desde > hasta) {
+    if (desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // Forma R: el periodo subido va en el libro y en el nombre del archivo.
+    const { desde } = exigirPeriodoDesdeInicio(
+      desdePedido,
+      hasta,
+      await inicioOficialDe(this.configuracion),
+    );
     const payload = await this.buildPayload(desde, hasta);
     const buffer = await this.pyservices.generateDineroXlsx(payload);
     return { buffer, desde, hasta };

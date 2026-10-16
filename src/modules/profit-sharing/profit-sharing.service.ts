@@ -126,6 +126,10 @@ import {
 import { UtilidadesMensualesSocios } from './reparto-utilidades.memo';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import {
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import {
   detalleTacosEnRevision,
   pilotosDeTacosEnRevision,
   resumenTacosEnRevision,
@@ -507,6 +511,26 @@ export class ProfitSharingService {
   private readonly logger = new Logger(ProfitSharingService.name);
 
   /**
+   * INICIO OFICIAL (16-oct-2026, invariante 86, forma R): el periodo del
+   * reparto, sus PDF/Excel y el pre-cierre sube al inicio; uno que termina
+   * antes ⇒ 400 `PERIODO_ANTES_DEL_INICIO`. Un periodo ≥ inicio sale
+   * IDÉNTICO (mismas consultas): el piso solo oculta.
+   */
+  private async periodoOficial(
+    q: ProfitSharingQuery,
+  ): Promise<ProfitSharingQuery> {
+    if (q.desde > q.hasta) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const p = exigirPeriodoDesdeInicio(
+      q.desde,
+      q.hasta,
+      await inicioOficialDe(this.configuracion),
+    );
+    return p.desde === q.desde ? q : { ...q, desde: p.desde };
+  }
+
+  /**
    * Reloj inyectable (specs): decide el MES EN CURSO de las cuentas de los
    * socios en el pre-cierre (hora Cancún).
    */
@@ -651,10 +675,15 @@ export class ProfitSharingService {
     return { buffer, desde, hasta };
   }
 
-  async compute(q: ProfitSharingQuery) {
-    if (q.desde > q.hasta) {
+  /**
+   * `opts.sinPiso` SOLO para las utilidades por mes de la cuenta corriente
+   * de los socios (saldo con su propio arranque, invariante 38: NO TOCAR).
+   */
+  async compute(qPedido: ProfitSharingQuery, opts: { sinPiso?: boolean } = {}) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = opts.sinPiso ? qPedido : await this.periodoOficial(qPedido);
 
     const aeronaves = await this.fetchAeronaves(q.aeronave_id);
     if (aeronaves.length === 0) {
@@ -1167,7 +1196,7 @@ export class ProfitSharingService {
     enCurso: boolean,
   ): Promise<UtilidadMesSocios> {
     const { desde, hasta } = rangoDeMes(mes);
-    const calculo = await this.compute({ desde, hasta });
+    const calculo = await this.compute({ desde, hasta }, { sinPiso: true });
     return utilidadMesDesdeAviones(mes, calculo.aviones, enCurso);
   }
 
@@ -2336,10 +2365,8 @@ export class ProfitSharingService {
    * `GET pagos` y en `GET /profit-sharing`). Sin `rol` ⇒ se omiten (falla
    * cerrado).
    */
-  async preCierre(q: ProfitSharingQuery, rol?: Rol) {
-    if (q.desde > q.hasta) {
-      throw new BadRequestException('desde no puede ser posterior a hasta');
-    }
+  async preCierre(qPedido: ProfitSharingQuery, rol?: Rol) {
+    const q = await this.periodoOficial(qPedido);
     const sb = this.supabase.service;
     const desdeTs = `${q.desde}T00:00:00-05:00`;
     const hastaTs = `${q.hasta}T23:59:59-05:00`;

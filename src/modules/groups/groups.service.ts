@@ -4,7 +4,14 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import {
+  corteTs,
+  esAntesDelInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   avionOcupadoEnFecha,
   avisoAvionOcupado,
@@ -445,6 +452,11 @@ export class GroupsService {
     private readonly quotes: QuotesService,
     private readonly flights: FlightsService,
     private readonly calendar: CalendarSyncService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86): piso de la lista.
+    // @Optional y ÚLTIMO: los specs construyen por posición (sin él ⇒ null
+    // ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   // =====================================================================
@@ -1958,7 +1970,18 @@ export class GroupsService {
       .order('fecha_vuelo', { ascending: false })
       .limit(500);
     if (q.cliente_id) query = query.eq('cliente_id', q.cliente_id);
-    if (q.desde) query = query.gte('fecha_vuelo', `${q.desde}T00:00:00-05:00`);
+    // INICIO OFICIAL (invariante 86): `desde` anterior sube; sin `desde`,
+    // piso que conserva los grupos sin fecha.
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (q.desde) {
+      const desde =
+        inicio && esAntesDelInicio(q.desde, inicio) ? inicio : q.desde;
+      query = query.gte('fecha_vuelo', `${desde}T00:00:00-05:00`);
+    } else if (inicio) {
+      query = query.or(
+        `fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`,
+      );
+    }
     if (q.hasta) query = query.lte('fecha_vuelo', `${q.hasta}T23:59:59-05:00`);
     if (q.q) {
       const raw = q.q.trim().replace(/[,()]/g, '_');

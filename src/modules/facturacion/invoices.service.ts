@@ -9,6 +9,13 @@ import {
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Cron } from '@nestjs/schedule';
+import {
+  corteTs,
+  esAntesDelInicio,
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
 import { FacturaClienteService } from '../flights/factura-cliente.service';
@@ -204,6 +211,10 @@ export class InvoicesService {
     // nunca se cae por él (y los specs no lo inyectan).
     @Optional()
     private readonly facturaCliente?: FacturaClienteService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86). @Optional y ÚLTIMO (los
+    // specs construyen por posición; sin él ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /** Diagnóstico de conexión con el PAC (no consume timbres ni toca BD). */
@@ -217,9 +228,16 @@ export class InvoicesService {
    * estados de cuenta no se almacenan en el sistema, así que se agregan aparte.
    */
   async cierreZip(
-    desde: string,
+    desdePedido: string,
     hasta: string,
   ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    // INICIO OFICIAL (invariante 86, forma R): periodo subido en el zip, el
+    // Excel y el nombre; uno anterior ⇒ 400 PERIODO_ANTES_DEL_INICIO.
+    const { desde } = exigirPeriodoDesdeInicio(
+      desdePedido,
+      hasta,
+      await inicioOficialDe(this.configuracion),
+    );
     // 1) Reporte mensual por avión (Excel) — reutiliza el cómputo de reparto.
     const { buffer: excel } = await this.profitSharing.repartoXlsx({
       desde,
@@ -369,6 +387,12 @@ export class InvoicesService {
       .order('created_at', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
     if (filters.estado) q = q.eq('estado', filters.estado);
+    // INICIO OFICIAL (invariante 86): sin fecha de emisión (aún sin leer)
+    // siguen visibles.
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) {
+      q = q.or(`fecha_emision.is.null,fecha_emision.gte.${corteTs(inicio)}`);
+    }
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
     return {
@@ -992,12 +1016,19 @@ export class InvoicesService {
       .range(f.offset, f.offset + f.limit - 1);
     // Fechas planas se anclan a hora Cancún (invariante #4): 'YYYY-MM-DD' a
     // secas corta en UTC y mueve vuelos de día/mes en el listado de pendientes.
-    if (f.desde) {
+    // INICIO OFICIAL (invariante 86): un `desde` anterior (o ninguno) sube
+    // al inicio.
+    const inicio = await inicioOficialDe(this.configuracion);
+    const desdePend =
+      inicio && (!f.desde || esAntesDelInicio(f.desde, inicio))
+        ? inicio
+        : f.desde;
+    if (desdePend) {
       q = q.gte(
         'fecha_vuelo',
-        /^\d{4}-\d{2}-\d{2}$/.test(f.desde)
-          ? `${f.desde}T00:00:00-05:00`
-          : f.desde,
+        /^\d{4}-\d{2}-\d{2}$/.test(desdePend)
+          ? `${desdePend}T00:00:00-05:00`
+          : desdePend,
       );
     }
     if (f.hasta) {

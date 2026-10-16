@@ -3,8 +3,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+import {
+  corteTs,
+  inicioOficialDe,
+  pisoDia,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
@@ -89,6 +96,10 @@ export class AircraftService {
     private readonly supabase: SupabaseService,
     private readonly expirations: ExpirationsService,
     private readonly pyservices: PyservicesService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86): SOLO `metrics.finanzas`
+    // y `combustible-mensual`. @Optional y ÚLTIMO (specs por posición).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /**
@@ -108,6 +119,28 @@ export class AircraftService {
       `${yyyy}-${mm}-01T00:00:00-05:00`,
     ).toISOString();
     const startYear = new Date(`${yyyy}-01-01T00:00:00-05:00`).toISOString();
+    // INICIO OFICIAL (invariante 86): piso SOLO en `finanzas` (cobros por
+    // `vuelo.fecha_vuelo`, gastos por `fecha_gasto`). Horas, vuelos,
+    // motores y hélices NO (promesa «no toca horas»).
+    const inicioFinanzas = await inicioOficialDe(this.configuracion);
+    let cobrosQ = this.supabase.service
+      .from('cobro_vuelo')
+      .select(
+        'monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado, fecha_vuelo)',
+      )
+      .eq('vuelo.aeronave_id', id)
+      .neq('vuelo.estado', 'CANCELADO');
+    // `categoria`: LA CATEGORÍA DE EMPRESA MANDA SOBRE EL AVIÓN
+    // (11-sep-2026) — se filtra abajo, en memoria, para no depender de un
+    // `not.in` de PostgREST que además descartaría una categoría nula.
+    let gastosQ = this.supabase.service
+      .from('gasto')
+      .select('monto, moneda, categoria')
+      .eq('aeronave_id', id);
+    if (inicioFinanzas) {
+      cobrosQ = cobrosQ.gte('vuelo.fecha_vuelo', corteTs(inicioFinanzas));
+      gastosQ = gastosQ.gte('fecha_gasto', inicioFinanzas);
+    }
 
     const [
       motorsRes,
@@ -157,18 +190,8 @@ export class AircraftService {
         id,
         'taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, aeronave_id, fecha_vuelo, estado)',
       ),
-      this.supabase.service
-        .from('cobro_vuelo')
-        .select('monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado)')
-        .eq('vuelo.aeronave_id', id)
-        .neq('vuelo.estado', 'CANCELADO'),
-      // `categoria`: LA CATEGORÍA DE EMPRESA MANDA SOBRE EL AVIÓN
-      // (11-sep-2026) — se filtra abajo, en memoria, para no depender de un
-      // `not.in` de PostgREST que además descartaría una categoría nula.
-      this.supabase.service
-        .from('gasto')
-        .select('monto, moneda, categoria')
-        .eq('aeronave_id', id),
+      cobrosQ,
+      gastosQ,
       // Squawk ALTA sin resolver = avión no apto — MISMO criterio que el
       // candado de asignación (flights.service.validateAssignTargets):
       // BAJA/MEDIA no bloquean.
@@ -376,6 +399,9 @@ export class AircraftService {
         vuelos_anio: vuelosAnio.size,
       },
       finanzas,
+      // ADITIVO (invariante 86): desde cuándo suman las finanzas (null = de
+      // por vida, como 0.0.83).
+      finanzas_desde: inicioFinanzas,
     };
   }
 
@@ -1558,9 +1584,13 @@ export class AircraftService {
     const hoy = this.hoyCancun();
     const [y, m] = hoy.split('-').map(Number);
     const idx = y * 12 + (m - 1) - (meses - 1);
-    const desde = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String(
+    const desdeVentana = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String(
       (idx % 12) + 1,
     ).padStart(2, '0')}-01`;
+    // INICIO OFICIAL (invariante 86): sin meses anteriores al inicio.
+    const desde =
+      pisoDia(desdeVentana, await inicioOficialDe(this.configuracion)) ??
+      desdeVentana;
     // Cota superior EXCLUSIVA = 1º del mes siguiente: cubre cargas del mes
     // corriente con fecha posterior a hoy sin fabricar "31 de septiembre".
     const sig = y * 12 + m; // índice del mes siguiente

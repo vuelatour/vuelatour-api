@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import {
+  corteTs,
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   categoriaFueraDelAvion,
   ladoPagoVendedor,
@@ -73,7 +79,26 @@ export class DashboardsService {
     private readonly supabase: SupabaseService,
     private readonly profitSharing: ProfitSharingService,
     private readonly pyservices: PyservicesService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86). @Optional y ÚLTIMO (los
+    // specs construyen por posición; sin él ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
+
+  /**
+   * INICIO OFICIAL (invariante 86, forma R): el periodo de los 5 tableros
+   * sube al inicio; uno anterior ⇒ 400 `PERIODO_ANTES_DEL_INICIO`.
+   */
+  private async periodoOficial<T extends { desde: string; hasta: string }>(
+    q: T,
+  ): Promise<T> {
+    const p = exigirPeriodoDesdeInicio(
+      q.desde,
+      q.hasta,
+      await inicioOficialDe(this.configuracion),
+    );
+    return p.desde === q.desde ? q : { ...q, desde: p.desde };
+  }
 
   /** Horas por piloto en Excel (mismos datos del tablero). */
   async horasPilotoXlsx(q: HorasPilotoQuery): Promise<Buffer> {
@@ -107,7 +132,7 @@ export class DashboardsService {
     ];
     return this.pyservices.generateTablaXlsx({
       titulo: 'Horas por piloto',
-      subtitulo: `Periodo ${q.desde} a ${q.hasta} · límite informativo ${LIMITE_HORAS_MES} hrs/mes`,
+      subtitulo: `Periodo ${r.periodo.desde} a ${r.periodo.hasta} · límite informativo ${LIMITE_HORAS_MES} hrs/mes`,
       columnas,
       filas,
       totales,
@@ -115,10 +140,11 @@ export class DashboardsService {
   }
 
   /** Tablero ejecutivo: financiero del periodo + pipeline operativo + top clientes. */
-  async overview(q: OverviewQuery) {
-    if (q.desde > q.hasta) {
+  async overview(qPedido: OverviewQuery) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = await this.periodoOficial(qPedido);
 
     const [profit, abiertos, vuelosPeriodo] = await Promise.all([
       this.profitSharing.compute({ desde: q.desde, hasta: q.hasta }),
@@ -251,10 +277,11 @@ export class DashboardsService {
    * pendientes, tasa de conversión (cotizado→confirmado) del periodo y vuelos
    * de la próxima semana. Doc 5.10.
    */
-  async operativo(q: OperativoQuery) {
-    if (q.desde > q.hasta) {
+  async operativo(qPedido: OperativoQuery) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = await this.periodoOficial(qPedido);
 
     // Día actual en hora Cancún (regla del repo), no UTC: después de las
     // 19:00 el "hoy" UTC ya es mañana y el tablero mostraba 0 solicitudes.
@@ -330,10 +357,11 @@ export class DashboardsService {
    * voladas, costo/hora y utilidad/hora. Las horas se derivan de las escalas
    * (taco_llegada − taco_salida) de los vuelos COMPLETADOS del periodo. Doc 5.10.
    */
-  async gastos(q: GastosQuery) {
-    if (q.desde > q.hasta) {
+  async gastos(qPedido: GastosQuery) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = await this.periodoOficial(qPedido);
 
     const [aeronaves, gastos, vuelos] = await Promise.all([
       this.fetchAeronavesActivas(),
@@ -486,10 +514,11 @@ export class DashboardsService {
    * tarjeta (terminación), por persona y por categoría dentro del periodo.
    * Doc 2.6 / 5.10. Considera gastos con medio_pago = TARJETA_CORP.
    */
-  async tarjetas(q: TarjetasQuery) {
-    if (q.desde > q.hasta) {
+  async tarjetas(qPedido: TarjetasQuery) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = await this.periodoOficial(qPedido);
 
     const gastos = await this.fetchGastosTarjeta(q.desde, q.hasta);
 
@@ -569,10 +598,11 @@ export class DashboardsService {
    * el acumulado del mes en curso para señalar el límite informativo de 90 hrs.
    * Doc 5.10 / 5.6. El límite NO bloquea, solo informa.
    */
-  async horasPiloto(q: HorasPilotoQuery) {
-    if (q.desde > q.hasta) {
+  async horasPiloto(qPedido: HorasPilotoQuery) {
+    if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    const q = await this.periodoOficial(qPedido);
 
     // Mes en curso para el control del límite de 90 hrs — corte en hora
     // Cancún (regla del repo), no UTC: un vuelo del día 31 en la noche caía
@@ -706,10 +736,16 @@ export class DashboardsService {
   // ============ fetchers ============
 
   private async fetchEstadosAbiertos(): Promise<string[]> {
-    const { data, error } = await this.supabase.service
+    let q = this.supabase.service
       .from('vuelo')
       .select('estado')
       .in('estado', ABIERTOS);
+    // INICIO OFICIAL (invariante 86): abiertos sin fecha o desde el inicio.
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) {
+      q = q.or(`fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`);
+    }
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     return (data ?? []).map((v) => v.estado as string);
   }

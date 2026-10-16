@@ -4,9 +4,16 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   PayloadTooLargeException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import {
+  corteTs,
+  inicioOficialDe,
+  pisoDia,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { randomUUID } from 'node:crypto';
 import { plainToInstance } from 'class-transformer';
 import { validate, type ValidationError } from 'class-validator';
@@ -338,6 +345,10 @@ export class FacturasEmitidasService {
     private readonly solicitud: FacturaSolicitudService,
     private readonly pyservices: PyservicesService,
     private readonly notifications: NotificationsService,
+    // INICIO OFICIAL (16-oct-2026, invariante 86). @Optional y ÚLTIMO (los
+    // specs construyen por posición; sin él ⇒ como 0.0.83).
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private get sb() {
@@ -1124,7 +1135,10 @@ export class FacturasEmitidasService {
     await this.asegurarDisponible();
     this.validarRango(query);
     const reg = await this.registroCompleto();
-    const filtros = this.filtrosDe(query);
+    const filtros = this.filtrosDe(
+      query,
+      await inicioOficialDe(this.configuracion),
+    );
     const idsFiltrados = new Set(
       filtrarFacturas(reg.filtrables, filtros).map((f) => f.id),
     );
@@ -1163,10 +1177,19 @@ export class FacturasEmitidasService {
     };
   }
 
-  private filtrosDe(q: ExportFacturasEmitidasQuery): FiltrosFacturas {
+  /**
+   * INICIO OFICIAL (invariante 86): la lista y el Excel filtran
+   * `fecha_emision ≥ inicio` (el `desde` sube). El `resumen` del registro
+   * (conteos, huecos por serie) sigue sobre TODAS las facturas: los huecos
+   * de folio necesitan la serie completa.
+   */
+  private filtrosDe(
+    q: ExportFacturasEmitidasQuery,
+    inicio: string | null,
+  ): FiltrosFacturas {
     return {
       q: q.q,
-      desde: q.desde,
+      desde: pisoDia(q.desde, inicio),
       hasta: q.hasta,
       cliente_id: q.cliente_id,
       emisora_id: q.emisora_id,
@@ -1190,7 +1213,10 @@ export class FacturasEmitidasService {
     await this.asegurarDisponible();
     this.validarRango(query);
     const reg = await this.registroCompleto();
-    const filtros = this.filtrosDe(query);
+    const filtros = this.filtrosDe(
+      query,
+      await inicioOficialDe(this.configuracion),
+    );
     const ids = new Set(
       filtrarFacturas(reg.filtrables, filtros).map((f) => f.id),
     );
@@ -1242,16 +1268,23 @@ export class FacturasEmitidasService {
   // ======================================================================
 
   /** Vuelos con solicitud (no cancelados, sin CFDI del PAC), anti-cap. */
-  private vuelosConSolicitud<T>(cols: string): Promise<T[]> {
-    return this.leerTodo<T>((d, h) =>
-      this.sb
+  private vuelosConSolicitud<T>(
+    cols: string,
+    inicio: string | null = null,
+  ): Promise<T[]> {
+    // INICIO OFICIAL (invariante 86): `inicio` SOLO desde la bandeja «Por
+    // facturar» y su conteo; `vuelos-candidatos` lo llama sin piso.
+    return this.leerTodo<T>((d, h) => {
+      let q = this.sb
         .from('vuelo')
         .select(cols)
         .not('factura_solicitada_at', 'is', null)
-        .neq('estado', 'CANCELADO')
-        .order('id')
-        .range(d, h),
-    );
+        .neq('estado', 'CANCELADO');
+      if (inicio) {
+        q = q.or(`fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`);
+      }
+      return q.order('id').range(d, h);
+    });
   }
 
   /**
@@ -1267,6 +1300,7 @@ export class FacturasEmitidasService {
     const vuelos = (
       await this.vuelosConSolicitud<VueloSolicitudRow & { id: string }>(
         `id, estado, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}`,
+        await inicioOficialDe(this.configuracion),
       )
     ).filter((v) => v.facturado !== true);
     const [ligadas, exigencias] = await Promise.all([
@@ -1565,6 +1599,7 @@ export class FacturasEmitidasService {
     const filas = (
       await this.vuelosConSolicitud<Fila>(
         `id, folio, estado, fecha_vuelo, origen_iata, destino_iata, es_externo, facturado, factura_estatus, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, cotizacion_abierta, cliente_id, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(id, nombre, rfc, razon_social_default, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, es_interno), grupo:grupo_id(id, folio, nombre)`,
+        await inicioOficialDe(this.configuracion),
       )
     ).filter((v) => v.facturado !== true);
     const [ligadas, exigencias] = await Promise.all([

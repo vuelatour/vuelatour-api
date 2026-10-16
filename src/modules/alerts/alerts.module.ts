@@ -1,3 +1,4 @@
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { Module } from '@nestjs/common';
 import { AircraftModule } from '../aircraft/aircraft.module';
 import { AirportsModule } from '../airports/airports.module';
@@ -17,6 +18,8 @@ import { AlertsService } from './alerts.service';
     // Espejo del mantenimiento auto-programado a Google Calendar (C1).
     CalendarModule,
     ExpirationsModule,
+    // Inicio oficial (16-oct-2026, invariante 86).
+    ConfiguracionModule,
   ],
   controllers: [AlertsController],
   providers: [AlertsService],

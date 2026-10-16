@@ -167,7 +167,8 @@ export class ConciliacionController {
   async reporteXlsx(
     @Query() q: ReporteConciliacionQuery,
   ): Promise<StreamableFile> {
-    const { buffer, etiqueta } = await this.conciliacion.reporteXlsx(
+    // `desde` = el periodo ya subido al inicio oficial (invariante 86).
+    const { buffer, etiqueta, desde } = await this.conciliacion.reporteXlsx(
       q.cuenta_bancaria_id,
       q.desde,
       q.hasta,
@@ -178,7 +179,7 @@ export class ConciliacionController {
       q.estado !== 'todos' ? `-${q.estado.replace(/_/g, '-')}` : '';
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="conciliacion-${etiqueta}${sufijoEstado}-${q.desde}-a-${q.hasta}.xlsx"`,
+      disposition: `attachment; filename="conciliacion-${etiqueta}${sufijoEstado}-${desde}-a-${q.hasta}.xlsx"`,
     });
   }
 
@@ -214,11 +215,11 @@ export class ConciliacionController {
   async paywiseAuditoriaXlsx(
     @Query() q: PaywiseAuditoriaQuery,
   ): Promise<StreamableFile> {
-    const { buffer, etiqueta } =
+    const { buffer, etiqueta, desde } =
       await this.conciliacion.auditoriaPaywiseXlsx(q);
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="auditoria-${etiqueta}-${q.desde}-a-${q.hasta}.xlsx"`,
+      disposition: `attachment; filename="auditoria-${etiqueta}-${desde}-a-${q.hasta}.xlsx"`,
     });
   }
 

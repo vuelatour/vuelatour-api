@@ -89,6 +89,10 @@ import {
   claveOtrosMovimientos,
 } from '../../common/clave-cliente.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+import {
+  exigirPeriodoDesdeInicio,
+  inicioOficialDe,
+} from '../../common/inicio-oficial.util';
 // Conjuntos y lectores COMPARTIDOS con el espejo de Conciliación
 // (`ubicacion-balance-gasto.util`, 13-oct-2026, invariante 72).
 import {
@@ -684,14 +688,26 @@ export class AircraftBalanceService {
     hasta?: string,
   ): Promise<{ payload: BalanceAvionPayload; desde: string; hasta: string }> {
     const def = this.mesCorrienteCancun();
-    const d = desde ?? def.desde;
+    const dPedido = desde ?? def.desde;
     const h = hasta ?? def.hasta;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{4}-\d{2}-\d{2}$/.test(h)) {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(dPedido) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(h)
+    ) {
       throw new BadRequestException('desde/hasta deben ser YYYY-MM-DD');
     }
-    if (d > h) {
+    if (dPedido > h) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (16-oct-2026, invariante 86, forma R): periodo subido
+    // en consultas, hojas y nombre; uno anterior ⇒ 400. La siembra de la
+    // cadena de tacómetros (`ultimaLlegadaAntesDe`) lee ANTES del `desde`
+    // subido SIN piso: no se toca.
+    const { desde: d } = exigirPeriodoDesdeInicio(
+      dPedido,
+      h,
+      await inicioOficialDe(this.configuracion),
+    );
     const payload = await this.buildPayload(aircraftId, d, h);
     // Avisos de FLOTA también en el libro individual (verificación 26-ago):
     // una carga de combustible SIN avión podría ser de ESTE avión y aquí
@@ -861,14 +877,26 @@ export class AircraftBalanceService {
       throw new BadRequestException(MENSAJE_MODO_BALANCE_INVALIDO);
     }
     const def = this.mesCorrienteCancun();
-    const d = desde ?? def.desde;
+    const dPedido = desde ?? def.desde;
     const h = hasta ?? def.hasta;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{4}-\d{2}-\d{2}$/.test(h)) {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(dPedido) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(h)
+    ) {
       throw new BadRequestException('desde/hasta deben ser YYYY-MM-DD');
     }
-    if (d > h) {
+    if (dPedido > h) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (16-oct-2026, invariante 86, forma R): periodo subido
+    // en consultas, hojas y nombre; uno anterior ⇒ 400. La siembra de la
+    // cadena de tacómetros (`ultimaLlegadaAntesDe`) lee ANTES del `desde`
+    // subido SIN piso: no se toca.
+    const { desde: d } = exigirPeriodoDesdeInicio(
+      dPedido,
+      h,
+      await inicioOficialDe(this.configuracion),
+    );
     // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura de
     // la vigencia para TODOS los libros y «otros movimientos» — un cambio de
     // la configuración a media descarga no parte el general en dos reglas.
