@@ -10023,7 +10023,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
 
 89. **CIERRE DE MES FORMAL + VUELOS PENDIENTES DE COBRO PASAN AL MES
     SIGUIENTE (16-oct-2026, API 0.0.88, migración `20261016000004`
-    PENDIENTE).** Pedido del cliente: «una opción para cerrar el mes que no
+    APLICADA el 16-oct-2026 ~17:38 Cancún por MCP).** Pedido del cliente: «una opción para cerrar el mes que no
     es el corriente (el anterior) y que los vuelos que aún no se cobren se
     marquen en el balance y se muevan al siguiente mes hasta que se cobren y
     completen». Decisiones del 16-oct-2026: el vuelo pasa COMPLETO (venta,
@@ -11682,7 +11682,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   los envíos grandes (base64 ≈ ×1.34). Rollback: API ⇒ 0.0.86 (ver la nota
   de rollback de la invariante 87); migración ⇒ SQL Editor con el pie del
   archivo y REINICIAR el API.
-- **16-oct-2026 — 0.0.88, migración `20261016000004` PENDIENTE** (cierre
+- **16-oct-2026 — 0.0.88, migración `20261016000004` APLICADA (16-oct-2026 ~17:38 Cancún por MCP: DRYRUN_OK T1–T12, POSTCHECK_OK, historial `20261016223807`; orden migración ⇒ pyservices 575c816 ⇒ API)** (cierre
   de mes formal + vuelos pendientes de cobro pasan al mes siguiente,
   invariante 89; rama `cierre-mes` sobre `32863830` = 0.0.87 en prod).
   Orden: (1) migración por MCP — dry-run (`dryrun-mcp.sql` del paquete:
