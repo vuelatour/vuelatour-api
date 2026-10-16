@@ -178,8 +178,15 @@ describe('QuotesService.confirm — CAS por estado (revisión 16-oct-2026)', () 
     expect(w.syncFlight).not.toHaveBeenCalled();
     await esperarAvisos();
     expect(w.notifyUser).not.toHaveBeenCalled();
-    // Ni tramos: la tabla `escala` no se toca.
-    expect(w.llamadas.some((l) => l.tabla === 'escala')).toBe(false);
+    // Ni tramos: `escala` solo se LEE (findById → findEscalas), nunca se
+    // escribe (ensureRedondoEscalas no corre cuando el CAS pierde).
+    expect(
+      w.llamadas.some(
+        (l) =>
+          l.tabla === 'escala' &&
+          l.ops.some((o) => o.m === 'insert' || o.m === 'upsert'),
+      ),
+    ).toBe(false);
   });
 
   it('CAS pierde y la relectura está CANCELADO ⇒ 409 con el estado vivo', async () => {
