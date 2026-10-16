@@ -148,7 +148,7 @@ describe('QuotesService.confirm — CAS por estado (revisión 16-oct-2026)', () 
     expect(eqDe(escritura!.ops, 'id')).toBe(V1);
     expect(eqDe(escritura!.ops, 'estado')).toBe('COTIZADO');
     expect(out.estado).toBe('CONFIRMADO');
-    expect(out.idempotente).toBeUndefined();
+    expect(out).not.toHaveProperty('idempotente');
     expect(w.syncFlight).toHaveBeenCalledWith(V1);
     await esperarAvisos();
   });

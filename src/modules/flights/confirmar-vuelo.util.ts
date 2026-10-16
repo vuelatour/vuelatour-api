@@ -77,8 +77,13 @@ export function errorVueloDeGrupo(vuelo: {
   grupo_posicion?: unknown;
   grupo?: unknown;
 }): ConflictException {
-  const g = (vuelo.grupo ?? null) as { folio?: unknown } | null;
-  const grupoFolio = g && typeof g === 'object' ? texto(g.folio) : '?';
+  // Sin cast: la guarda `'folio' in` es la que tipa (eslint
+  // no-unnecessary-type-assertion); sin folio ⇒ «?» y `grupo_folio: null`.
+  const g =
+    vuelo.grupo && typeof vuelo.grupo === 'object' && 'folio' in vuelo.grupo
+      ? vuelo.grupo
+      : null;
+  const grupoFolio = g ? texto(g.folio) : '?';
   const posicion =
     typeof vuelo.grupo_posicion === 'number'
       ? ` (avión ${vuelo.grupo_posicion})`
@@ -89,7 +94,7 @@ export function errorVueloDeGrupo(vuelo: {
     details: {
       estado: vuelo.estado ?? null,
       folio: vuelo.folio ?? null,
-      grupo_folio: g && typeof g === 'object' ? (g.folio ?? null) : null,
+      grupo_folio: g ? (g.folio ?? null) : null,
     },
   });
 }
