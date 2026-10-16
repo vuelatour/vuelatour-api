@@ -43,6 +43,7 @@ import {
   ClearTacoDto,
   ConfirmTacoDto,
   CreateEscalaDto,
+  OmitirTacoDto,
   OperationalLegDto,
   RestoreEscalaDto,
   TacoAiReadDto,
@@ -765,6 +766,35 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.confirmTaco(legId, dto, c.userId);
+  }
+
+  @Post('legs/:legId/taco/omitir')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Omite la lectura de tacómetro de UN tramo (falló el horómetro, foto ilegible…) con motivo auditable: el tramo deja de exigir llegada para completar el vuelo, aporta 0 h (no se inventa ninguna lectura) y sale de los avisos y del pre-cierre bloqueante. El vuelo NO se completa solo: la respuesta dice si ya es completable. Una llegada real posterior retira la omisión.',
+  })
+  omitirTaco(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: OmitirTacoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.omitirTaco(legId, dto, c.userId);
+  }
+
+  @Delete('legs/:legId/taco/omitir')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Deshace la omisión: el tramo vuelve a pedir su llegada (push al piloto); si el vuelo estaba COMPLETADO regresa a EN_VUELO.',
+  })
+  deshacerOmisionTaco(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.deshacerOmisionTaco(legId, c.userId);
   }
 
   @Post(':id/taco/fill-gaps')

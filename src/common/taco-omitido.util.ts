@@ -189,3 +189,17 @@ export function faltaTacoParaBadge(escalas: readonly EscalaTacoLike[]): {
   );
   return { falta, omitido };
 }
+
+/**
+ * Alerta ÁMBAR de la salida DEDUCIDA que cruza un tramo omitido del mismo
+ * avión (sección 9 del contrato): el horómetro SÍ avanzó en el tramo omitido
+ * y la copia del último taco real puede ser MENOR que la realidad — las horas
+ * del omitido se cargarían en silencio al tramo siguiente (invariante 5).
+ */
+export function textoSalidaCruzaOmitido(p: {
+  valor: number;
+  folio: number | null;
+  ruta: string | null;
+}): string {
+  return `La salida se copió del último tacómetro real del avión (${p.valor}), pero hay un tramo con tacómetro OMITIDO en medio (vuelo #${p.folio ?? '?'}, ${p.ruta ?? 'ruta desconocida'}): la lectura real puede ser mayor — confirmar contra la foto en oficina`;
+}

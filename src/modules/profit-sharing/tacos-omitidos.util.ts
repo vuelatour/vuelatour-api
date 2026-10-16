@@ -45,9 +45,7 @@ const texto = (v: unknown): string | null => {
 export function motivoOmisionCorto(motivo: unknown): string | null {
   const t = texto(motivo)?.replace(/\s+/g, ' ') ?? null;
   if (!t) return null;
-  return t.length > MAX_MOTIVO
-    ? `${t.slice(0, MAX_MOTIVO - 1).trimEnd()}…`
-    : t;
+  return t.length > MAX_MOTIVO ? `${t.slice(0, MAX_MOTIVO - 1).trimEnd()}…` : t;
 }
 
 /**

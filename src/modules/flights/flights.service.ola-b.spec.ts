@@ -1350,7 +1350,11 @@ describe('B5 · updated_at expuesto en vuelo y tramos (snapshot/legs)', () => {
       (l) => l.tabla === 'escala' && eqDe(l.ops, 'vuelo_id') === V1,
     )!;
     expect(selectDe(sel.ops)).toMatch(/\bupdated_at\b/);
-    expect(selectDe(sel.ops)).toMatch(/, client_request_id$/);
+    // Desde el 15-oct-2026 (invariante 79) pueden seguir las columnas del
+    // tacómetro omitido (detrás de su propia sonda).
+    expect(selectDe(sel.ops)).toMatch(
+      /, client_request_id(, taco_omitido_at, taco_omitido_por, taco_omitido_motivo)?$/,
+    );
     expect(filas[0].updated_at).toBe(TS_DB);
     expect(filas[0].client_request_id).toBe(LLAVE);
   });

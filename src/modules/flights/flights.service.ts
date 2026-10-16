@@ -109,6 +109,7 @@ import type {
   ClearTacoDto,
   ConfirmTacoDto,
   CreateEscalaDto,
+  OmitirTacoDto,
   OperationalLegDto,
   TacoAiReadDto,
   UpdateEscalaDto,
@@ -248,6 +249,25 @@ import {
   motivoDirecto,
   soloPendientes,
 } from '../../common/taco-motivo.util';
+import { fechaHoraCancun } from '../../common/fecha-cancun.util';
+import {
+  MIGRACION_TACO_OMITIDO,
+  colsTacoOmitido,
+  tacoOmitidoDisponible,
+} from '../../common/taco-omitido-disponible.util';
+import {
+  esTramoOmitido,
+  faltaTacoParaBadge,
+  faltanLlegadas as faltanLlegadasExigibles,
+  faltanLlegadasReales,
+  idsOmitidoPor,
+  lineaRegistroDeshacerOmision,
+  lineaRegistroOmision,
+  lineaRegistroOmisionRetirada,
+  normalizarMotivoOmision,
+  textoSalidaCruzaOmitido,
+  tramoExigeLlegada,
+} from '../../common/taco-omitido.util';
 import {
   apoyoItem,
   apoyosTramoConNombre,
@@ -377,7 +397,36 @@ interface EscalaTaco {
   orden: number;
   taco_salida: string | number | null;
   taco_llegada: string | number | null;
+  /** Tacómetro OMITIDO por la oficina (invariante 79); ausente sin migración. */
+  taco_omitido_at?: string | null;
 }
+
+/**
+ * Respuesta de `POST`/`DELETE /v1/flights/legs/:legId/taco/omitir`
+ * (invariante 79): la fila del tramo (con quién omitió y la bitácora aparte)
+ * y lo que la oficina puede hacer con el vuelo.
+ */
+export interface RespuestaOmisionTaco {
+  escala: Record<string, unknown> & {
+    taco_omitido_por_nombre: string | null;
+    revision_motivo: string | null;
+    procedencia: string | null;
+  };
+  vuelo: {
+    id: string;
+    folio: number;
+    estado: string;
+    /** EN_VUELO y ya no falta ninguna llegada exigible: la oficina puede pulsar «Completar vuelo». */
+    completable: boolean;
+    /** RESERVA/SOLICITUD/COTIZADO/CONFIRMADO y ya no falta ninguna llegada exigible: hay que iniciarlo y completarlo. */
+    requiere_iniciar: boolean;
+    /** Tramos vivos con tacómetro omitido tras esta operación. */
+    omitidos: number;
+  };
+}
+
+/** Estados en los que un vuelo propio aún no se inicia en la app. */
+const ESTADOS_INICIABLES = ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'];
 
 /**
  * Sugerencia de llegada pendiente (política del cliente, 25 jul 2026): el
@@ -755,6 +804,14 @@ export class FlightsService {
         mensajeAusente: `Columna escala.client_request_id no existe todavía: tramos sin idempotencia hasta aplicar la migración ${MIGRACION_CLIENT_REQUEST_ALTAS}`,
       },
     ).disponible();
+  }
+
+  /**
+   * Sonda de la migración 20261015000001 (tacómetro omitido, invariante 79):
+   * todo select/update que nombre `escala.taco_omitido_*` va detrás de ella.
+   */
+  private tacoOmitidoOk(): Promise<boolean> {
+    return tacoOmitidoDisponible(this.supabase.service);
   }
 
   /** Llave de idempotencia EFECTIVA del tramo (null si no viaja o no hay columna). */
@@ -7630,11 +7687,15 @@ export class FlightsService {
     // existe: la app deduplica su pendiente local contra el snapshot. Se
     // castea a la literal de ESCALA_COLS para que el parser tipado de
     // supabase-js conserve el tipo de fila (la columna extra vive en runtime).
-    const colsEscala = (
-      (await this.conClientRequestEscala())
-        ? `${ESCALA_COLS}, client_request_id`
-        : ESCALA_COLS
-    ) as typeof ESCALA_COLS;
+    // Tacómetro omitido (invariante 79): las tres columnas solo con la
+    // migración; sin ella las llaves salen en `null` (contrato estable).
+    const [conCrid, conOmitido] = await Promise.all([
+      this.conClientRequestEscala(),
+      this.tacoOmitidoOk(),
+    ]);
+    const colsEscala = `${ESCALA_COLS}${
+      conCrid ? ', client_request_id' : ''
+    }${colsTacoOmitido(conOmitido)}` as typeof ESCALA_COLS;
     const [{ data, error }, apoyosRows] = await Promise.all([
       this.supabase.service
         .from('escala')
@@ -7651,13 +7712,23 @@ export class FlightsService {
       }),
     ]);
     if (error) throw new Error(error.message);
-    const filas = (data ?? []).map((e) => ({
-      ...e,
-      // null mientras la columna no exista (contrato estable para la app).
-      client_request_id:
-        (e as unknown as { client_request_id?: string | null })
-          .client_request_id ?? null,
-    }));
+    type ExtrasEscala = {
+      client_request_id?: string | null;
+      taco_omitido_at?: string | null;
+      taco_omitido_por?: string | null;
+      taco_omitido_motivo?: string | null;
+    };
+    const filas = (data ?? []).map((e) => {
+      const x = e as unknown as ExtrasEscala;
+      return {
+        ...e,
+        // null mientras la columna no exista (contrato estable para la app).
+        client_request_id: x.client_request_id ?? null,
+        taco_omitido_at: x.taco_omitido_at ?? null,
+        taco_omitido_por: x.taco_omitido_por ?? null,
+        taco_omitido_motivo: x.taco_omitido_motivo ?? null,
+      };
+    });
 
     // Nombres de quien capturó / corrigió cada lectura: el detalle del vuelo
     // muestra la MISMA procedencia que el tablero de tacómetros en vivo (la
@@ -7671,6 +7742,8 @@ export class FlightsService {
       const cop = copilotoEfectivo(e, vuelo);
       if (cop) ids.add(cop);
     }
+    // Quién omitió el tacómetro (invariante 79): en el MISMO lote.
+    for (const id of idsOmitidoPor(filas)) ids.add(id);
     for (const a of apoyosRows) ids.add(a.usuario_id);
     const info = await this.usuariosInfo([...ids]);
     const nombreDe = (id: string | null | undefined): string | null =>
@@ -7693,6 +7766,8 @@ export class FlightsService {
         procedencia: leerBitacora(e.revision_motivo as string | null),
         capturado_por_nombre: nombreDe(e.capturado_por as string | null),
         corregido_por_nombre: nombreDe(e.corregido_por as string | null),
+        // Tacómetro omitido (invariante 79, aditivo): null si no resuelve.
+        taco_omitido_por_nombre: nombreDe(e.taco_omitido_por) || null,
         // Tripulación por tramo (29-ago, aditivo). `copiloto_id` crudo viene
         // en ESCALA_COLS (null = hereda); aquí va el EFECTIVO con nombre y
         // los apoyos: solo del tramo y efectivos (vuelo ∪ tramo, con origen).
@@ -8259,10 +8334,12 @@ export class FlightsService {
   }
 
   async captureTaco(escalaId: string, dto: CaptureTacoDto, userId: string) {
+    // Tacómetro omitido (invariante 79): las columnas solo con la migración.
+    const omitidoOk = await this.tacoOmitidoOk();
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo, fecha_fin)',
+        `id, vuelo_id, orden, aeronave_id, fecha_salida_plan, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo, fecha_fin)${colsTacoOmitido(omitidoOk)}` as 'id, vuelo_id, orden, aeronave_id, fecha_salida_plan, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo, fecha_fin)',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -8421,6 +8498,28 @@ export class FlightsService {
       capturado_por: userId,
       sincronizado_at: new Date().toISOString(),
     };
+    // Una LLEGADA REAL sobre un tramo con tacómetro OMITIDO retira la omisión
+    // en el MISMO update (CHECK escala_taco_omitido_chk, invariante 79) y lo
+    // asienta en la bitácora. Una salida sola NO la retira.
+    const lineaRetiro =
+      omitidoOk &&
+      esTramoOmitido(current as Record<string, unknown>) &&
+      dto.taco_llegada !== undefined &&
+      dto.taco_llegada !== null
+        ? lineaRegistroOmisionRetirada({
+            cuando: new Date(),
+            como: 'capturada',
+            quien: (await this.nombreUsuario(userId)) ?? 'el piloto',
+          })
+        : null;
+    if (lineaRetiro) {
+      patch.taco_omitido_at = null;
+      patch.taco_omitido_por = null;
+      patch.taco_omitido_motivo = null;
+    }
+    // Salida DEDUCIDA que cruza un tramo omitido del mismo avión (sección 9):
+    // la copia se escribe igual, pero el tramo queda en ÁMBAR.
+    let alertaCruce: string | null = null;
     // UNA foto por escala (acuerdo de junta): el piloto solo captura la
     // LLEGADA. Si este tramo aún no tiene salida, se llena sola con el último
     // tacómetro conocido del avión — físicamente es el mismo número (el
@@ -8432,14 +8531,25 @@ export class FlightsService {
     ) {
       // Avión con herencia: el tramo sin avión propio es del avión del vuelo
       // — con el null crudo el ancla/relleno se apagaba en silencio.
-      const ultimo = await this.ultimoTacoAeronave(
+      const avionEfectivo =
         (current.aeronave_id as string | null) ??
-          (await this.aeronaveDelVuelo(current.vuelo_id as string)),
-        null,
-      );
+        (await this.aeronaveDelVuelo(current.vuelo_id as string));
+      const ultimo = await this.ultimoTacoAeronave(avionEfectivo, null);
       if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
         patch.taco_salida = ultimo;
         patch.taco_salida_origen = 'DEDUCIDO';
+        alertaCruce = await this.alertaSalidaCruzaOmitido(
+          avionEfectivo,
+          {
+            id: escalaId,
+            fecha:
+              (current.fecha_salida_plan as string | null) ??
+              (current.vuelo as { fecha_vuelo?: string | null } | null)
+                ?.fecha_vuelo ??
+              null,
+          },
+          ultimo,
+        );
       }
     } else if (
       dto.taco_llegada !== undefined &&
@@ -8532,7 +8642,7 @@ export class FlightsService {
       correccionesALaBaja.length > 0
         ? `${CORRECCION_BAJA_PREFIX}${correccionesALaBaja.join(' · ')}`
         : null;
-    if (alertaCorreccion || alertaCede) {
+    if (alertaCorreccion || alertaCede || alertaCruce) {
       // Amarillo ATÓMICO con el valor (mismo update: si la request muere
       // después, el reintento idéntico del outbox ya no detectaría la baja y
       // la corrección quedaría sin rastro) y PEGAJOSO (applyConsistencyFlag
@@ -8550,10 +8660,16 @@ export class FlightsService {
           );
         }
       }
+      // El camino del cede se salta el recálculo: la omisión retirada se
+      // asienta aquí (en el normal la escribe applyConsistencyFlag).
+      if (salidaDeducidaCede && lineaRetiro) {
+        bitacoraPrev = agregarProcedencia(bitacoraPrev, lineaRetiro);
+      }
       patch.revision_requerida = true;
       patch.revision_motivo = [
         alertaCorreccion,
         alertaCede,
+        alertaCruce,
         ...correccionesBajaPendientes(previo).filter(
           (c) => c !== alertaCorreccion,
         ),
@@ -8630,12 +8746,15 @@ export class FlightsService {
         ...correccionesALaBaja.map((c) => `corregida a la baja: ${c}`),
       );
     }
+    if (lineaRetiro) procedencia.push(lineaRetiro);
 
     let finalRow = salidaDeducidaCede
       ? data
       : await this.applyConsistencyFlag(data, userId, {
           procedencia,
-          forzarRevision,
+          // El ámbar del cruce (sección 9) sobrevive al recálculo.
+          forzarRevision:
+            [forzarRevision, alertaCruce].filter(Boolean).join('; ') || null,
         });
     // Ahorra un paso: la llegada de un tramo es la salida del siguiente. Si se
     // capturó taco_llegada, se copia como taco_salida del próximo tramo comercial
@@ -8852,6 +8971,29 @@ export class FlightsService {
     }
 
     if (motivos.length === 0) return escala;
+    // Llegada leída con IA sobre un tramo con tacómetro OMITIDO: retira la
+    // omisión en el MISMO update (CHECK, invariante 79); sin esto el CHECK
+    // rechazaba el update y la lectura se perdía en silencio. Queda AMARILLA
+    // como toda lectura IA.
+    if (patch.taco_llegada !== undefined && (await this.tacoOmitidoOk())) {
+      const { data: om } = await this.supabase.service
+        .from('escala')
+        .select('taco_omitido_at')
+        .eq('id', escala.id as string)
+        .maybeSingle();
+      if (om && esTramoOmitido(om as Record<string, unknown>)) {
+        patch.taco_omitido_at = null;
+        patch.taco_omitido_por = null;
+        patch.taco_omitido_motivo = null;
+        bitacoraLineas.push(
+          lineaRegistroOmisionRetirada({
+            cuando: new Date(),
+            como: 'leída con IA',
+            quien: (await this.nombreUsuario(userId)) ?? 'el piloto',
+          }),
+        );
+      }
+    }
     patch.revision_requerida = true;
     // Bitácora (cómo entró el número) primero y motivos de revisión después:
     // el mismo formato que usa applyConsistencyFlag.
@@ -9045,11 +9187,344 @@ export class FlightsService {
     return data;
   }
 
+  // ===== Tacómetro OMITIDO por la oficina (15-oct-2026, invariante 79) =====
+
+  /** Lectura común de omitir/deshacer (con la sonda ya en «sí»). */
+  private async leerTramoParaOmision(
+    escalaId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, piloto_id, aeronave_id, taco_salida, taco_llegada, taco_llegada_origen, cancelada_at, cancelada_motivo, revision_motivo, taco_omitido_at, taco_omitido_por, taco_omitido_motivo, vuelo:vuelo_id(id, folio, estado, es_externo, piloto_id)',
+      )
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as unknown as Record<string, unknown> | null) ?? null;
+  }
+
+  /**
+   * Candados 0–4 (comunes a omitir y deshacer). Devuelve la fila y su vuelo.
+   * Errores ESTRUCTURADOS `{message, error, details}` en es-MX (el filtro
+   * proyecta `error` como `code`).
+   */
+  private async candadosOmision(escalaId: string): Promise<{
+    row: Record<string, unknown>;
+    vuelo: {
+      id: string;
+      folio: number;
+      estado: string;
+      es_externo: boolean;
+      piloto_id: string | null;
+    };
+  }> {
+    if (!(await this.tacoOmitidoOk())) {
+      throw new ServiceUnavailableException({
+        message: `Omitir el tacómetro necesita la migración ${MIGRACION_TACO_OMITIDO} (escala.taco_omitido_*) que aún no está aplicada. Avisa a sistemas; mientras, el tramo sigue pidiendo su lectura.`,
+        error: 'MIGRACION_PENDIENTE',
+        details: { migracion: MIGRACION_TACO_OMITIDO },
+      });
+    }
+    const row = await this.leerTramoParaOmision(escalaId);
+    if (!row) throw this.escalaNoExisteOmision(escalaId);
+    const emb = row.vuelo as unknown;
+    const v = (Array.isArray(emb) ? emb[0] : emb) as Record<
+      string,
+      unknown
+    > | null;
+    const vuelo = {
+      id: (v?.id as string | undefined) ?? (row.vuelo_id as string),
+      folio: Number(v?.folio ?? 0),
+      estado: (v?.estado as string | undefined) ?? '',
+      es_externo: v?.es_externo === true,
+      piloto_id: (v?.piloto_id as string | null | undefined) ?? null,
+    };
+    if (row.cancelada_at) {
+      throw new ConflictException({
+        message:
+          'Este tramo está cancelado (no voló): no hay tacómetro que omitir. Si sí voló, restáuralo primero en «Asignación por tramo».',
+        error: 'ESCALA_CANCELADA',
+        details: {
+          escala_id: escalaId,
+          cancelada_motivo: row.cancelada_motivo ?? null,
+        },
+      });
+    }
+    if (vuelo.es_externo) {
+      throw new ConflictException({
+        message:
+          'Este vuelo lo opera un externo: no lleva tacómetros. Complétalo con «Cerrar vuelo».',
+        error: 'VUELO_EXTERNO',
+        details: { vuelo_id: vuelo.id, folio: vuelo.folio },
+      });
+    }
+    if (vuelo.estado === 'CANCELADO') {
+      throw new ConflictException({
+        message: `El vuelo #${vuelo.folio} está CANCELADO: sus tacómetros ya no cuentan.`,
+        error: 'VUELO_CANCELADO',
+        details: {
+          vuelo_id: vuelo.id,
+          folio: vuelo.folio,
+          estado: vuelo.estado,
+        },
+      });
+    }
+    return { row, vuelo };
+  }
+
+  /** 404 es-MX de las rutas de omisión (las de tacos viejas siguen en inglés). */
+  private escalaNoExisteOmision(escalaId: string): NotFoundException {
+    return new NotFoundException({
+      message:
+        'Ese tramo ya no existe (quizá se borró o se reorganizó el vuelo). Recarga la página.',
+      error: 'ESCALA_NO_EXISTE',
+      details: { escala_id: escalaId },
+    });
+  }
+
+  private tacoPresente(row: Record<string, unknown>): ConflictException {
+    return new ConflictException({
+      message: `Este tramo ya tiene lectura de llegada (${String(row.taco_llegada)}): no hay nada que omitir. Si la lectura está mal, corrígela o bórrala.`,
+      error: 'TACO_PRESENTE',
+      details: {
+        escala_id: row.id,
+        taco_llegada: row.taco_llegada,
+        taco_llegada_origen: row.taco_llegada_origen ?? null,
+      },
+    });
+  }
+
+  private async tacoYaOmitido(
+    row: Record<string, unknown>,
+  ): Promise<ConflictException> {
+    const por = (row.taco_omitido_por as string | null) ?? null;
+    const nombre = por ? await this.nombreUsuario(por) : null;
+    const at = (row.taco_omitido_at as string | null) ?? null;
+    const motivo = (row.taco_omitido_motivo as string | null) ?? null;
+    return new ConflictException({
+      message: `Este tramo ya tiene el tacómetro omitido por ${nombre ?? 'oficina'} (${fechaHoraCancun(at)}): «${motivo ?? ''}».`,
+      error: 'TACO_YA_OMITIDO',
+      details: { por, nombre, at, motivo },
+    });
+  }
+
+  /**
+   * Omite la lectura de tacómetro de UN tramo (falló el horómetro, foto
+   * ilegible…) con motivo auditable: el tramo deja de exigir llegada, aporta
+   * 0 h (no se escribe ninguna lectura) y sale de avisos y pre-cierre
+   * bloqueante. NO completa el vuelo (la respuesta dice si ya es
+   * completable), NO toca `taco_salida` (una copia DEDUCIDA es dato físico
+   * verdadero), NO avisa al piloto y NO toca el calendario.
+   */
+  async omitirTaco(
+    escalaId: string,
+    dto: OmitirTacoDto,
+    userId: string,
+  ): Promise<RespuestaOmisionTaco> {
+    const { row, vuelo } = await this.candadosOmision(escalaId);
+    if (vuelo.estado === 'COMPLETADO') {
+      throw new ConflictException({
+        message: `El vuelo #${vuelo.folio} ya está COMPLETADO: todas sus llegadas están. Si una lectura está mal, corrígela o bórrala en «Tacómetros por tramo».`,
+        error: 'VUELO_COMPLETADO',
+        details: {
+          vuelo_id: vuelo.id,
+          folio: vuelo.folio,
+          estado: vuelo.estado,
+        },
+      });
+    }
+    if (row.taco_llegada != null) throw this.tacoPresente(row);
+    if (esTramoOmitido(row)) throw await this.tacoYaOmitido(row);
+    const motivo = normalizarMotivoOmision(dto.motivo);
+    if (!motivo) {
+      throw new BadRequestException({
+        message:
+          'Escribe el motivo por el que no se pudo capturar el tacómetro (de 10 a 500 caracteres).',
+        error: 'MOTIVO_INVALIDO',
+        details: {
+          largo:
+            typeof dto.motivo === 'string'
+              ? dto.motivo.replace(/\s+/g, ' ').trim().length
+              : 0,
+        },
+      });
+    }
+    const quienNombre = await this.nombreUsuario(userId);
+    const quien = quienNombre ?? 'oficina';
+    const ahora = new Date();
+    const previo = (row.revision_motivo as string | null) ?? null;
+    const patch = {
+      taco_omitido_at: ahora.toISOString(),
+      taco_omitido_por: userId,
+      taco_omitido_motivo: motivo,
+      // Nada que revisar en un tramo sin lectura: mismo criterio que
+      // clearTaco (se conserva SOLO la bitácora; los chunks pendientes y
+      // pegajosos caen).
+      revision_requerida: false,
+      revision_motivo: `${PROCEDENCIA_PREFIX}${agregarProcedencia(
+        leerBitacora(previo),
+        lineaRegistroOmision({ quien, cuando: ahora, motivo }),
+      )}`,
+      updated_by: userId,
+    };
+    // CAS contra el outbox del piloto (una llegada que entra a la vez) y el
+    // doble clic: solo si sigue sin omitir y sin llegada.
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escalaId)
+      .is('taco_omitido_at', null)
+      .is('taco_llegada', null)
+      .select(`${ESCALA_COLS}${colsTacoOmitido(true)}`)
+      .maybeSingle();
+    if (error) {
+      // 23514 (CHECK): una llegada ganó la carrera ⇒ 409, nunca 500.
+      if ((error as { code?: string }).code === '23514') {
+        throw await this.conflictoOmisionTrasCarrera(escalaId);
+      }
+      throw new Error(error.message);
+    }
+    if (!data) throw await this.conflictoOmisionTrasCarrera(escalaId);
+    return this.respuestaOmision(
+      data as unknown as Record<string, unknown>,
+      vuelo,
+      quienNombre,
+    );
+  }
+
+  /** 0 filas del CAS de omitir: relee y explica qué ganó la carrera. */
+  private async conflictoOmisionTrasCarrera(escalaId: string): Promise<Error> {
+    const ahora = await this.leerTramoParaOmision(escalaId);
+    if (!ahora) return this.escalaNoExisteOmision(escalaId);
+    if (esTramoOmitido(ahora)) return this.tacoYaOmitido(ahora);
+    if (ahora.taco_llegada != null) return this.tacoPresente(ahora);
+    return new ConflictException({
+      message:
+        'El tramo cambió mientras se omitía el tacómetro. Recarga la página e inténtalo de nuevo.',
+      error: 'ESCALA_CAMBIO',
+      details: { escala_id: escalaId },
+    });
+  }
+
+  /**
+   * Deshace la omisión: el tramo vuelve a pedir su llegada (push al piloto);
+   * si el vuelo estaba COMPLETADO regresa a EN_VUELO (espejo de clearTaco).
+   */
+  async deshacerOmisionTaco(
+    escalaId: string,
+    userId: string,
+  ): Promise<RespuestaOmisionTaco> {
+    const { row, vuelo } = await this.candadosOmision(escalaId);
+    if (!esTramoOmitido(row)) throw this.tacoNoOmitido(escalaId);
+    const quien = (await this.nombreUsuario(userId)) ?? 'oficina';
+    const previo = (row.revision_motivo as string | null) ?? null;
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update({
+        taco_omitido_at: null,
+        taco_omitido_por: null,
+        taco_omitido_motivo: null,
+        revision_motivo: `${PROCEDENCIA_PREFIX}${agregarProcedencia(
+          leerBitacora(previo),
+          lineaRegistroDeshacerOmision({ quien, cuando: new Date() }),
+        )}`,
+        updated_by: userId,
+      })
+      .eq('id', escalaId)
+      .not('taco_omitido_at', 'is', null)
+      .select(`${ESCALA_COLS}${colsTacoOmitido(true)}`)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw this.tacoNoOmitido(escalaId);
+
+    // Estado derivado (espejo de clearTaco): COMPLETADO exige las llegadas
+    // exigibles; si deshacer dejó un hueco, el vuelo regresa a EN_VUELO.
+    const estado = { ...vuelo };
+    if (
+      vuelo.estado === 'COMPLETADO' &&
+      this.faltanLlegadas(await this.escalasTaco(vuelo.id))
+    ) {
+      const { data: regreso, error: regErr } = await this.supabase.service
+        .from('vuelo')
+        .update({ estado: 'EN_VUELO', updated_by: userId })
+        .eq('id', vuelo.id)
+        .eq('estado', 'COMPLETADO')
+        .select('id')
+        .maybeSingle();
+      if (regErr) throw new Error(regErr.message);
+      if (regreso) estado.estado = 'EN_VUELO';
+      void this.calendar.syncFlight(vuelo.id);
+    }
+
+    // Aviso al piloto del tramo (o del vuelo): vuelve a tener algo que hacer.
+    const pilotoId = (row.piloto_id as string | null) ?? vuelo.piloto_id;
+    if (pilotoId) {
+      void this.notifications
+        .notifyUser(pilotoId, {
+          tipo: 'recordatorio_taco',
+          titulo: 'Vuelve a capturar el tacómetro',
+          cuerpo: `${row.origen_iata as string} → ${row.destino_iata as string}: la oficina deshizo la omisión del tacómetro; sube la lectura de llegada.`,
+          data: { escala_id: escalaId, vuelo_id: vuelo.id },
+          link: `/flights/${vuelo.id}`,
+        })
+        .catch(() => undefined);
+    }
+    return this.respuestaOmision(
+      data as unknown as Record<string, unknown>,
+      estado,
+      null,
+    );
+  }
+
+  private tacoNoOmitido(escalaId: string): ConflictException {
+    return new ConflictException({
+      message:
+        'Este tramo no tiene el tacómetro omitido: no hay nada que deshacer.',
+      error: 'TACO_NO_OMITIDO',
+      details: { escala_id: escalaId },
+    });
+  }
+
+  /** Respuesta 4.4 del contrato (ambas rutas). */
+  private async respuestaOmision(
+    escala: Record<string, unknown>,
+    vuelo: { id: string; folio: number; estado: string; es_externo: boolean },
+    nombreOmitio: string | null,
+  ): Promise<RespuestaOmisionTaco> {
+    const escalas = await this.escalasTaco(vuelo.id);
+    const resueltas = !this.faltanLlegadas(escalas);
+    return {
+      escala: {
+        ...escala,
+        taco_omitido_por_nombre: esTramoOmitido(escala) ? nombreOmitio : null,
+        revision_motivo: soloPendientes(
+          (escala.revision_motivo as string | null) ?? null,
+        ),
+        procedencia: leerBitacora(
+          (escala.revision_motivo as string | null) ?? null,
+        ),
+      },
+      vuelo: {
+        id: vuelo.id,
+        folio: vuelo.folio,
+        estado: vuelo.estado,
+        completable:
+          vuelo.estado === 'EN_VUELO' && !vuelo.es_externo && resueltas,
+        requiere_iniciar:
+          ESTADOS_INICIABLES.includes(vuelo.estado) && resueltas,
+        omitidos: escalas.filter(esTramoOmitido).length,
+      },
+    };
+  }
+
   async confirmTaco(escalaId: string, dto: ConfirmTacoDto, userId: string) {
+    // Tacómetro omitido (invariante 79): las columnas solo con la migración.
+    const omitidoOk = await this.tacoOmitidoOk();
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_salida_origen, taco_llegada, cancelada_at, revision_motivo',
+        `id, vuelo_id, orden, aeronave_id, fecha_salida_plan, taco_salida, taco_salida_origen, taco_llegada, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo)${colsTacoOmitido(omitidoOk)}` as 'id, vuelo_id, orden, aeronave_id, fecha_salida_plan, taco_salida, taco_salida_origen, taco_llegada, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo)',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -9088,12 +9563,29 @@ export class FlightsService {
     const corrige =
       (dto.taco_salida !== undefined && dto.taco_salida !== null) ||
       (dto.taco_llegada !== undefined && dto.taco_llegada !== null);
-    const bitacora = agregarProcedencia(
+    let bitacora = agregarProcedencia(
       leerBitacora((current.revision_motivo as string | null) ?? null),
       `${corrige ? 'corregida' : 'confirmada'} por ${quienConfirma} (oficina)${
         dto.nota?.trim() ? `: ${dto.nota.trim()}` : ''
       }`,
     );
+    // Una LLEGADA tecleada por oficina sobre un tramo con tacómetro OMITIDO
+    // retira la omisión en el MISMO update (CHECK, invariante 79).
+    const retiraOmision =
+      omitidoOk &&
+      esTramoOmitido(current as unknown as Record<string, unknown>) &&
+      dto.taco_llegada !== undefined &&
+      dto.taco_llegada !== null;
+    if (retiraOmision) {
+      bitacora = agregarProcedencia(
+        bitacora,
+        lineaRegistroOmisionRetirada({
+          cuando: new Date(),
+          como: 'ajustada',
+          quien: quienConfirma,
+        }),
+      );
+    }
     const patch: Record<string, unknown> = {
       revision_requerida: false,
       revision_motivo: `${PROCEDENCIA_PREFIX}${bitacora}`,
@@ -9101,6 +9593,11 @@ export class FlightsService {
       corregido_at: new Date().toISOString(),
       updated_by: userId,
     };
+    if (retiraOmision) {
+      patch.taco_omitido_at = null;
+      patch.taco_omitido_por = null;
+      patch.taco_omitido_motivo = null;
+    }
     // Igual que captureTaco: si la oficina captura solo la LLEGADA (caso
     // piloto externo) y el tramo no tiene salida, se llena sola con el último
     // taco del avión (DEDUCIDO) — sin esto el tramo queda sin horas (las
@@ -9112,14 +9609,34 @@ export class FlightsService {
     ) {
       // Avión con herencia: el tramo sin avión propio es del avión del vuelo
       // — con el null crudo el ancla/relleno se apagaba en silencio.
-      const ultimo = await this.ultimoTacoAeronave(
+      const avionEfectivo =
         (current.aeronave_id as string | null) ??
-          (await this.aeronaveDelVuelo(current.vuelo_id as string)),
-        null,
-      );
+        (await this.aeronaveDelVuelo(current.vuelo_id as string));
+      const ultimo = await this.ultimoTacoAeronave(avionEfectivo, null);
       if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
         patch.taco_salida = ultimo;
         patch.taco_salida_origen = 'DEDUCIDO';
+        // Sección 9 (invariante 79): la copia que cruza un tramo OMITIDO del
+        // mismo avión queda en ÁMBAR en el MISMO update.
+        const alertaCruce = await this.alertaSalidaCruzaOmitido(
+          avionEfectivo,
+          {
+            id: escalaId,
+            fecha:
+              (current.fecha_salida_plan as string | null) ??
+              (current.vuelo as { fecha_vuelo?: string | null } | null)
+                ?.fecha_vuelo ??
+              null,
+          },
+          ultimo,
+        );
+        if (alertaCruce) {
+          patch.revision_requerida = true;
+          patch.revision_motivo = motivoDirecto(
+            patch.revision_motivo as string,
+            alertaCruce,
+          );
+        }
       }
     } else if (
       dto.taco_llegada !== undefined &&
@@ -10171,10 +10688,14 @@ export class FlightsService {
   ) {
     const vuelo = await this.findById(vueloId);
     // Tramos cancelados fuera de TODA la cadena: ni propagan, ni reciben
-    // propagación, ni generan sugerencias/avisos de llegada vencida.
+    // propagación, ni generan sugerencias/avisos de llegada vencida. Los
+    // OMITIDOS (invariante 79) sí reciben la copia de salida (identidad
+    // física verdadera) pero NO generan sugerencias ni avisos.
     const { data: escalasData, error: escErr } = await this.supabase.service
       .from('escala')
-      .select(ESCALA_COLS)
+      .select(
+        `${ESCALA_COLS}${colsTacoOmitido(await this.tacoOmitidoOk())}` as typeof ESCALA_COLS,
+      )
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
       .order('orden', { ascending: true });
@@ -10204,6 +10725,8 @@ export class FlightsService {
       // Una llegada en AMARILLO (IA de sync offline sin confirmar) NO se
       // propaga: la política dice que la lectura IA no viaja sin confirmación.
       llegadaSinConfirmar: e.revision_requerida === true,
+      // Tacómetro omitido por la oficina (invariante 79): no se persigue.
+      omitido: esTramoOmitido(e as unknown as Record<string, unknown>),
       cambios: [] as string[],
       // Solo se escribe lo que RELLENÓ este proceso (estaba null al leer);
       // lo que ya tenía valor jamás se re-escribe (podría pisar una captura
@@ -10237,6 +10760,8 @@ export class FlightsService {
     const sugerencias: TacoSugerencia[] = [];
     for (const r of rows) {
       if (r.llegada !== null || r.salida === null) continue;
+      // Omitido: sin push `recordatorio_taco` ni resumen nocturno.
+      if (r.omitido) continue;
       const tramo = await this.getTramoPromedio(r.origen, r.destino);
       if (
         !tramo ||
@@ -10310,6 +10835,8 @@ export class FlightsService {
           taco_salida: r.salida,
           taco_llegada: r.llegada,
           cambios: r.cambios,
+          // ADITIVO (invariante 79): solo cuando el tramo está omitido.
+          ...(r.omitido ? { omitido: true } : {}),
         });
       }
     }
@@ -10339,11 +10866,13 @@ export class FlightsService {
     // Solapamiento con el día vía fecha_fin: un viaje multi-día aparece en
     // el tablero TODOS sus días (antes solo el día 1 y la oficina no podía
     // confirmar el tramo de regreso desde aquí).
+    // Tacómetro omitido (invariante 79): columnas solo con la migración.
+    const colsOmitido = colsTacoOmitido(await this.tacoOmitidoOk());
     const { data: vuelos, error } = await this.supabase.service
       .from('vuelo')
       .select(
         // grupo_* (4-sep-2026): el tablero agrupa los hijos por "G-12".
-        `id, folio, estado, fecha_vuelo, fecha_fin, grupo_id, grupo_posicion, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
+        `id, folio, estado, fecha_vuelo, fecha_fin, grupo_id, grupo_posicion, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS}${colsOmitido})` as `id, folio, estado, fecha_vuelo, fecha_fin, grupo_id, grupo_posicion, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${typeof ESCALA_COLS})`,
       )
       .neq('estado', 'CANCELADO')
       .eq('es_externo', false)
@@ -10367,6 +10896,7 @@ export class FlightsService {
         if (e.corregido_por) userIds.add(e.corregido_por as string);
         if (e.capturado_por) userIds.add(e.capturado_por as string);
         if (e.taco_obs_updated_by) userIds.add(e.taco_obs_updated_by as string);
+        if (e.taco_omitido_por) userIds.add(e.taco_omitido_por as string);
       }
     }
     // 8 h (1-oct-2026): el tablero de taco-live se queda abierto en la
@@ -10462,9 +10992,14 @@ export class FlightsService {
                 new Date(base).getTime() + (prom + 20) * 60_000,
               ).toISOString()
             : null;
+        // Tacómetro OMITIDO (invariante 79): sale de los «vencidos» como
+        // 'OK' + `omitido: true` — NUNCA un estado nuevo (el panel viejo hace
+        // `ESTADO_STYLE[estado].cls` y reventaría con uno desconocido).
+        const omitido = esTramoOmitido(e);
         // Estado de la escala para el tablero.
         let estado: string;
-        if (e.revision_requerida) estado = 'REVISAR';
+        if (omitido) estado = 'OK';
+        else if (e.revision_requerida) estado = 'REVISAR';
         else if (llegada != null) estado = 'OK';
         else if (esperadoFin && new Date(esperadoFin).getTime() < ahora)
           estado = 'VENCIDA';
@@ -10476,7 +11011,7 @@ export class FlightsService {
         // JAMÁS se persiste (política del cliente, 25 jul 2026). Oficina la
         // usa como referencia al Ajustar. Sin salida no hay estimación.
         const llegadaEstimada =
-          llegada == null && salida != null && prom != null
+          !omitido && llegada == null && salida != null && prom != null
             ? Math.round((salida + prom / 60) * 10) / 10
             : null;
         filas.push({
@@ -10502,7 +11037,7 @@ export class FlightsService {
           taco_llegada_origen: e.taco_llegada_origen ?? null,
           valor_ia_propuesto:
             e.valor_ia_propuesto == null ? null : Number(e.valor_ia_propuesto),
-          revision_requerida: Boolean(e.revision_requerida),
+          revision_requerida: !omitido && Boolean(e.revision_requerida),
           // Mismo corte que listEscalas: motivo = por qué revisar,
           // procedencia = cómo se registró la lectura.
           revision_motivo: soloPendientes(e.revision_motivo as string | null),
@@ -10531,6 +11066,15 @@ export class FlightsService {
           foto_llegada_url: e.foto_taco_llegada_url
             ? (signed[e.foto_taco_llegada_url as string] ?? null)
             : null,
+          // Tacómetro omitido (invariante 79, ADITIVOS al final): `omitido`
+          // siempre; el resto null cuando no aplica o sin migración.
+          omitido,
+          taco_omitido_at: omitido ? (e.taco_omitido_at ?? null) : null,
+          taco_omitido_motivo: omitido ? (e.taco_omitido_motivo ?? null) : null,
+          taco_omitido_por_nombre:
+            omitido && e.taco_omitido_por
+              ? (nombres.get(e.taco_omitido_por as string) ?? null)
+              : null,
         });
       }
       out.push({
@@ -10654,12 +11198,17 @@ export class FlightsService {
             .limit(1);
           if ((futuros ?? []).length > 0) continue;
           const escalas = await this.escalasTaco(v.id as string);
-          if (this.faltanLlegadas(escalas)) {
+          // LLEGADAS REALES (invariante 79): un tramo con tacómetro OMITIDO
+          // cuenta como faltante aquí — el vuelo NO se completa solo por una
+          // omisión; lo completa la oficina («Completar vuelo»).
+          if (faltanLlegadasReales(escalas)) {
             // CONFIRMADO con llegadas incompletas no es zombi: puede que
             // nunca haya volado (lo resuelve la oficina: capturar o cancelar).
             if (v.estado === 'EN_VUELO') {
               this.logger.warn(
-                `Vuelo zombi #${v.folio as number} sigue EN_VUELO con llegadas incompletas — requiere oficina`,
+                this.faltanLlegadas(escalas)
+                  ? `Vuelo zombi #${v.folio as number} sigue EN_VUELO con llegadas incompletas — requiere oficina`
+                  : `Vuelo zombi #${v.folio as number} sigue EN_VUELO con tramos con tacómetro omitido — lo completa la oficina`,
               );
             }
             continue;
@@ -10696,9 +11245,12 @@ export class FlightsService {
     aeronaveId: string | null,
     userId: string,
   ): Promise<void> {
+    const omitidoOk = await this.tacoOmitidoOk();
     const { data } = await this.supabase.service
       .from('escala')
-      .select('id, taco_salida, taco_llegada, aeronave_id')
+      .select(
+        `id, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)${colsTacoOmitido(omitidoOk)}` as 'id, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)',
+      )
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
       .order('orden', { ascending: true })
@@ -10713,44 +11265,185 @@ export class FlightsService {
     if (ultimo == null) return;
     // Nunca dejar salida > llegada (p. ej. si la llegada ya se capturó).
     if (data.taco_llegada != null && ultimo > Number(data.taco_llegada)) return;
-    await this.supabase.service
-      .from('escala')
-      .update({
-        taco_salida: roundTaco(ultimo),
-        taco_salida_origen: 'DEDUCIDO',
-        updated_by: userId,
-      })
-      .eq('id', data.id);
+    const patch: Record<string, unknown> = {
+      taco_salida: roundTaco(ultimo),
+      taco_salida_origen: 'DEDUCIDO',
+      updated_by: userId,
+    };
+    // Sección 9 (invariante 79): si entre el último taco real del avión y
+    // este tramo hay un tramo con tacómetro OMITIDO, la copia puede ser menor
+    // que la realidad — se escribe igual, pero en ÁMBAR (mismo update).
+    const vueloEmb = (
+      Array.isArray(data.vuelo) ? data.vuelo[0] : data.vuelo
+    ) as { fecha_vuelo?: string | null } | null | undefined;
+    // Un tramo 1 que ÉL MISMO está omitido no lleva el ámbar: no aporta horas
+    // (su llegada es null) y el ámbar lo metería en `tacos_en_revision`; si
+    // después llega su lectura real, captureTaco/confirmTaco retiran la
+    // omisión y la cadena se revisa como siempre.
+    const esteOmitido = esTramoOmitido(
+      data as unknown as Record<string, unknown>,
+    );
+    const alertaCruce = esteOmitido
+      ? null
+      : await this.alertaSalidaCruzaOmitido(
+          efectivo,
+          {
+            id: data.id as string,
+            fecha:
+              (data.fecha_salida_plan as string | null) ??
+              vueloEmb?.fecha_vuelo ??
+              null,
+          },
+          roundTaco(ultimo),
+        );
+    if (alertaCruce) {
+      patch.revision_requerida = true;
+      patch.revision_motivo = motivoDirecto(
+        (data.revision_motivo as string | null) ?? null,
+        alertaCruce,
+      );
+    }
+    await this.supabase.service.from('escala').update(patch).eq('id', data.id);
+  }
+
+  /**
+   * SECCIÓN 9 del contrato del tacómetro omitido (invariante 79): ¿hay un
+   * tramo VIVO con tacómetro OMITIDO del mismo avión (con herencia
+   * `escala.aeronave_id ?? vuelo.aeronave_id`, vuelo no CANCELADO) ENTRE el
+   * tramo de donde salió el último taco real (`ultimoTacoAeronaveDetalle`) y
+   * `escala`? Si lo hay, la copia DEDUCIDA de la salida de `escala` puede ser
+   * MENOR que la realidad (el avión sí voló el tramo omitido) y sus horas se
+   * cargarían en silencio al tramo siguiente.
+   *
+   * «Entre» = `fecha_salida_plan` (o `fecha_vuelo`) del omitido MENOR que la
+   * de `escala` y MAYOR que la de la lectura fuente. Además cuenta el propio
+   * tramo fuente cuando la lectura fuente es su SALIDA y él quedó omitido
+   * (el horómetro avanzó después de esa salida). Devuelve el omitido más
+   * reciente o null. Solo con la sonda en «sí»; un error de lectura sube.
+   */
+  private async salidaCruzaOmitido(
+    aeronaveId: string,
+    escala: { id: string; fecha: string | null },
+  ): Promise<{ folio: number | null; ruta: string | null } | null> {
+    const detalle = await this.ultimoTacoAeronaveDetalle(aeronaveId);
+    if (!detalle) return null;
+    type Row = {
+      id: string;
+      origen_iata: string | null;
+      destino_iata: string | null;
+      fecha_salida_plan: string | null;
+      vuelo: { folio: number | null; fecha_vuelo: string | null } | null;
+    };
+    const cols =
+      'id, origen_iata, destino_iata, fecha_salida_plan, vuelo!inner(id, folio, fecha_vuelo, estado, aeronave_id)';
+    const [propias, heredadas] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select(cols)
+        .eq('aeronave_id', aeronaveId)
+        .not('taco_omitido_at', 'is', null)
+        .is('cancelada_at', null)
+        .neq('vuelo.estado', 'CANCELADO'),
+      this.supabase.service
+        .from('escala')
+        .select(cols)
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aeronaveId)
+        .not('taco_omitido_at', 'is', null)
+        .is('cancelada_at', null)
+        .neq('vuelo.estado', 'CANCELADO'),
+    ]);
+    if (propias.error) throw new Error(propias.error.message);
+    if (heredadas.error) throw new Error(heredadas.error.message);
+    const ms = (iso: string | null | undefined): number =>
+      iso ? Date.parse(iso) : Number.NaN;
+    const fechaEste = Number.isNaN(ms(escala.fecha))
+      ? Date.now()
+      : ms(escala.fecha);
+    const fechaFuente = ms(detalle.fecha_vuelo);
+    let mejor: { f: number; fila: Row } | null = null;
+    for (const fila of [
+      ...((propias.data ?? []) as unknown as Row[]),
+      ...((heredadas.data ?? []) as unknown as Row[]),
+    ]) {
+      if (fila.id === escala.id) continue;
+      const vuelo = Array.isArray(fila.vuelo) ? fila.vuelo[0] : fila.vuelo;
+      const f = ms(fila.fecha_salida_plan ?? vuelo?.fecha_vuelo);
+      if (Number.isNaN(f) || f >= fechaEste) continue;
+      const cruza =
+        fila.id === detalle.escala_id
+          ? detalle.lado === 'SALIDA'
+          : Number.isNaN(fechaFuente) || f > fechaFuente;
+      if (!cruza) continue;
+      if (!mejor || f > mejor.f) mejor = { f, fila: { ...fila, vuelo } };
+    }
+    if (!mejor) return null;
+    const { fila } = mejor;
+    return {
+      folio: fila.vuelo?.folio ?? null,
+      ruta:
+        fila.origen_iata && fila.destino_iata
+          ? `${fila.origen_iata} → ${fila.destino_iata}`
+          : null,
+    };
+  }
+
+  /**
+   * Texto ámbar de la sección 9 o null (sin migración, sin avión, sin cruce o
+   * con la lectura caída: la copia se escribe como siempre y jamás bloquea la
+   * captura). Fuente única del texto: `textoSalidaCruzaOmitido`.
+   */
+  private async alertaSalidaCruzaOmitido(
+    aeronaveId: string | null,
+    escala: { id: string; fecha: string | null },
+    valor: number,
+  ): Promise<string | null> {
+    if (!aeronaveId || !(await this.tacoOmitidoOk())) return null;
+    try {
+      const cruce = await this.salidaCruzaOmitido(aeronaveId, escala);
+      return cruce
+        ? textoSalidaCruzaOmitido({
+            valor,
+            folio: cruce.folio,
+            ruta: cruce.ruta,
+          })
+        : null;
+    } catch (err) {
+      this.logger.warn(
+        `salidaCruzaOmitido(${escala.id}) falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   private async escalasTaco(vueloId: string): Promise<EscalaTaco[]> {
     // Tramos cancelados fuera: no exigen llegada ni cuentan para completar.
+    // `taco_omitido_at` solo con la migración (invariante 79): un tramo con
+    // tacómetro omitido no exige llegada.
+    const cols = `orden, taco_salida, taco_llegada${colsTacoOmitido(
+      await this.tacoOmitidoOk(),
+    )}`;
     const { data, error } = await this.supabase.service
       .from('escala')
-      .select('orden, taco_salida, taco_llegada')
+      .select(cols)
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
-    return data ?? [];
-  }
-
-  /** Falta alguna lectura de LLEGADA (la única que captura el piloto). */
-  private faltanLlegadas(escalas: EscalaTaco[]): boolean {
-    if (escalas.length === 0) return true;
-    return escalas.some((e) => e.taco_llegada == null);
-  }
-
-  /** Falta cualquier lectura (salida o llegada) en algún tramo, o no hay escalas. */
-  private faltaTacoCompleto(escalas: EscalaTaco[]): boolean {
-    if (escalas.length === 0) return true;
-    return escalas.some((e) => e.taco_salida == null || e.taco_llegada == null);
+    return (data ?? []) as unknown as EscalaTaco[];
   }
 
   /**
-   * Estado de captura de tacómetro por vuelo (para el badge en admin).
-   * `falta` = sin escalas, o algún tramo sin salida/llegada.
+   * Falta alguna LLEGADA EXIGIBLE (la única que captura el piloto): sin
+   * escalas, o un tramo sin llegada y SIN tacómetro omitido. Fuente única
+   * `common/taco-omitido.util#faltanLlegadas` (invariante 79). El cron zombi
+   * NO la usa: allí manda `faltanLlegadasReales` (el vuelo no se completa
+   * solo por una omisión).
    */
+  private faltanLlegadas(escalas: EscalaTaco[]): boolean {
+    return faltanLlegadasExigibles(escalas);
+  }
+
   /**
    * Total cobrado (USD) por vuelo, en lote, para el semáforo de cobro de las
    * tablas de vuelos/cotizaciones (mismo patrón que tacoStatus). Fuente
@@ -10813,31 +11506,37 @@ export class FlightsService {
     return out;
   }
 
-  async tacoStatus(ids: string[]): Promise<Record<string, { falta: boolean }>> {
-    const out: Record<string, { falta: boolean }> = {};
+  /**
+   * Estado de captura de tacómetro por vuelo (badge «Tacómetro incompleto»
+   * del panel). `falta` = sin tramos vivos, o algún tramo NO omitido sin
+   * salida/llegada; `omitido` (ADITIVO, invariante 79; `false` sin la
+   * migración) = algún tramo con tacómetro omitido. Fuente única
+   * `faltaTacoParaBadge`.
+   */
+  async tacoStatus(
+    ids: string[],
+  ): Promise<Record<string, { falta: boolean; omitido: boolean }>> {
+    const out: Record<string, { falta: boolean; omitido: boolean }> = {};
     if (ids.length === 0) return out;
+    const cols = `vuelo_id, taco_salida, taco_llegada${colsTacoOmitido(
+      await this.tacoOmitidoOk(),
+    )}`;
     const { data, error } = await this.supabase.service
       .from('escala')
-      .select('vuelo_id, taco_salida, taco_llegada')
+      .select(cols)
       .in('vuelo_id', ids)
       .is('cancelada_at', null);
     if (error) throw new Error(error.message);
 
-    const acc = new Map<
-      string,
-      { count: number; salida: boolean; llegada: boolean }
-    >();
-    for (const id of ids)
-      acc.set(id, { count: 0, salida: true, llegada: true });
-    for (const e of data ?? []) {
-      const s = acc.get(e.vuelo_id as string);
-      if (!s) continue;
-      s.count++;
-      if (e.taco_salida == null) s.salida = false;
-      if (e.taco_llegada == null) s.llegada = false;
+    const porVuelo = new Map<string, EscalaTaco[]>();
+    for (const id of ids) porVuelo.set(id, []);
+    for (const e of (data ?? []) as unknown as Array<
+      EscalaTaco & { vuelo_id: string }
+    >) {
+      porVuelo.get(e.vuelo_id)?.push(e);
     }
-    for (const [id, s] of acc) {
-      out[id] = { falta: s.count === 0 || !s.salida || !s.llegada };
+    for (const [id, filas] of porVuelo) {
+      out[id] = faltaTacoParaBadge(filas);
     }
     return out;
   }
@@ -11512,23 +12211,31 @@ export class FlightsService {
       });
     }
 
+    const patchCancelar: Record<string, unknown> = {
+      cancelada_at: new Date().toISOString(),
+      cancelada_motivo: motivo.trim(),
+      cancelada_por: userId,
+      // Los DEDUCIDO eran promesas provisionales de una operación que no
+      // ocurrió: se anulan para que las horas derivadas del tramo sean 0.
+      taco_salida: null,
+      taco_llegada: null,
+      taco_salida_origen: null,
+      taco_llegada_origen: null,
+      valor_ia_propuesto: null,
+      revision_requerida: false,
+      revision_motivo: null,
+      updated_by: userId,
+    };
+    // Un tramo que «no voló» no tiene lectura que omitir (invariante 79):
+    // la omisión cae con la cancelación (SOLO con la migración aplicada).
+    if (await this.tacoOmitidoOk()) {
+      patchCancelar.taco_omitido_at = null;
+      patchCancelar.taco_omitido_por = null;
+      patchCancelar.taco_omitido_motivo = null;
+    }
     const { data, error } = await this.supabase.service
       .from('escala')
-      .update({
-        cancelada_at: new Date().toISOString(),
-        cancelada_motivo: motivo.trim(),
-        cancelada_por: userId,
-        // Los DEDUCIDO eran promesas provisionales de una operación que no
-        // ocurrió: se anulan para que las horas derivadas del tramo sean 0.
-        taco_salida: null,
-        taco_llegada: null,
-        taco_salida_origen: null,
-        taco_llegada_origen: null,
-        valor_ia_propuesto: null,
-        revision_requerida: false,
-        revision_motivo: null,
-        updated_by: userId,
-      })
+      .update(patchCancelar)
       .eq('id', escalaId)
       .select(ESCALA_COLS)
       .maybeSingle();

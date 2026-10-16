@@ -532,6 +532,23 @@ export class ClearTacoDto {
   llegada?: boolean;
 }
 
+/** Omisión del tacómetro de UN tramo (solo oficina): motivo obligatorio y auditable. */
+export class OmitirTacoDto {
+  @ApiProperty({
+    description:
+      'Por qué no se pudo capturar el tacómetro (10–500 caracteres). Queda con quién y cuándo.',
+  })
+  @IsString({
+    message:
+      'Escribe el motivo por el que no se pudo capturar el tacómetro (de 10 a 500 caracteres).',
+  })
+  @Length(10, 500, {
+    message:
+      'Escribe el motivo por el que no se pudo capturar el tacómetro (de 10 a 500 caracteres).',
+  })
+  motivo!: string;
+}
+
 export class ConfirmTacoDto {
   @ApiPropertyOptional({
     description: 'Corrección de la lectura de salida (opcional)',

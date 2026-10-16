@@ -13,6 +13,7 @@ import {
   lineaRegistroOmisionRetirada,
   motivoParaBitacora,
   normalizarMotivoOmision,
+  textoSalidaCruzaOmitido,
   textoTacoOmitido,
   tramoExigeLlegada,
 } from './taco-omitido.util';
@@ -135,16 +136,19 @@ describe('taco-omitido.util (fuente única del tacómetro omitido, invariante 79
     expect(tramoExigeLlegada(OMITIDO)).toBe(false);
     expect(tramoExigeLlegada({ taco_llegada: null })).toBe(true);
     expect(tramoExigeLlegada({ taco_llegada: 4455.1 })).toBe(false);
-    expect(
-      tramoExigeLlegada({ taco_llegada: null, cancelada_at: AHORA }),
-    ).toBe(false);
+    expect(tramoExigeLlegada({ taco_llegada: null, cancelada_at: AHORA })).toBe(
+      false,
+    );
   });
 
   it('faltanLlegadas: [omitido] ⇒ false, [] ⇒ true, [omitido, sin llegada] ⇒ true', () => {
     expect(faltanLlegadas([OMITIDO])).toBe(false);
     expect(faltanLlegadas([])).toBe(true);
     expect(
-      faltanLlegadas([OMITIDO, { orden: 2, taco_salida: 1, taco_llegada: null }]),
+      faltanLlegadas([
+        OMITIDO,
+        { orden: 2, taco_salida: 1, taco_llegada: null },
+      ]),
     ).toBe(true);
     expect(
       faltanLlegadas([OMITIDO, { orden: 2, taco_salida: 1, taco_llegada: 2 }]),
@@ -168,9 +172,10 @@ describe('taco-omitido.util (fuente única del tacómetro omitido, invariante 79
       faltaTacoParaBadge([OMITIDO, { taco_salida: null, taco_llegada: 5 }]),
     ).toEqual({ falta: true, omitido: true });
     expect(faltaTacoParaBadge([])).toEqual({ falta: true, omitido: false });
-    expect(faltaTacoParaBadge([{ taco_salida: 1, taco_llegada: 2 }])).toEqual(
-      { falta: false, omitido: false },
-    );
+    expect(faltaTacoParaBadge([{ taco_salida: 1, taco_llegada: 2 }])).toEqual({
+      falta: false,
+      omitido: false,
+    });
     expect(
       faltaTacoParaBadge([{ taco_salida: 1, taco_llegada: null }]),
     ).toEqual({ falta: true, omitido: false });
@@ -197,5 +202,13 @@ describe('taco-omitido.util (fuente única del tacómetro omitido, invariante 79
       'taco_omitido_por',
       'taco_omitido_por_nombre',
     ]);
+  });
+
+  it('textoSalidaCruzaOmitido: texto exacto del ámbar (sección 9)', () => {
+    expect(
+      textoSalidaCruzaOmitido({ valor: 4455.1, folio: 300, ruta: 'CET → CUN' }),
+    ).toBe(
+      'La salida se copió del último tacómetro real del avión (4455.1), pero hay un tramo con tacómetro OMITIDO en medio (vuelo #300, CET → CUN): la lectura real puede ser mayor — confirmar contra la foto en oficina',
+    );
   });
 });
