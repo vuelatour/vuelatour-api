@@ -10488,6 +10488,18 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   comisión a $X y vincular» (PATCH con `corregir_comision: true`,
   confirmando) en vez del «Vincular» que rebota; con SOBRE_NO_CUADRA,
   ocultar «Vincular» y remitir al grupo.
+- **15-oct-2026 — 0.0.80, SIN migración** (caja chica; invariantes 82 y
+  83): (1) cada gasto del historial de un fondo trae `balance` (en qué
+  libro, hoja y mes vive; lector compartido
+  `common/ubicacion-balance-lector.ts`, el mismo de Conciliación); (2) en la
+  caja MADRE, el espejo trae `repuesto_a` (a quién se repuso, nombre vivo) y
+  el detalle `cajas_fondeadas` (cajas que fondea con su `por_reponer`); (3)
+  una reposición sin fecha se fecha con `hoyCancun()`, ya no con el
+  CURRENT_DATE UTC de la BD. Todo ADITIVO y best-effort: panel viejo lo
+  ignora; panel nuevo con API ≤ 0.0.79 degrada a lo de antes. Orden: API ⇒
+  panel. Push a `main` ⇒ `GET /v1/version` = `0.0.80`. El lote de
+  tacómetro/«Resolver»/pre-cierre que estaba planeado como 0.0.80 pasa a
+  0.0.81.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
