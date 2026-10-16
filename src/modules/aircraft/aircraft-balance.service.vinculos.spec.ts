@@ -533,3 +533,180 @@ describe('Balance — gasto_id y gasto_parte en las hojas ledger (invariante 72)
     });
   });
 });
+
+/**
+ * EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, invariante 88).
+ * Caso real #308 (CarlosMuciño, 10-sep-2026, T.C. 17): costo capturado
+ * 1,490.26 USD (= $25,334.42) Y el gasto NUCLEUM de $25,334.40 que ES su
+ * pago (conciliado y facturado) + la pista de $1,118.12. Antes la celda
+ * OPERACIONES sumaba los dos: $51,786.94. Ahora el costo se cuenta UNA vez,
+ * con el gasto real: $26,452.52, y Σ de los vínculos 'suma' == la celda.
+ */
+describe('Balance — el gasto real cubre el costo del operador externo (invariante 88)', () => {
+  const EXTERNO_308 = {
+    es_externo: true,
+    operador_externo: 'CarlosMuciño',
+    costo_externo_usd: '1490.26',
+    tc_usd_mxn: 17,
+  };
+  const NUCLEUM: Fila = {
+    ...gastoBase,
+    ...enVuelo,
+    id: 'g-nucleum',
+    categoria: 'OPERACIONES',
+    monto: '25334.40',
+    fecha_gasto: '2026-09-15',
+    created_at: '2026-09-15T19:31:58+00:00',
+    notas: 'VLO PTU 10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV',
+  };
+  const PISTA: Fila = {
+    ...gastoBase,
+    ...enVuelo,
+    id: 'g-pista',
+    categoria: 'OPERACIONES',
+    monto: '1118.12',
+    fecha_gasto: '2026-09-10',
+    notas: 'pago pista ptu xb-orn 10 sep',
+  };
+  const NOTA_CUBIERTO =
+    'Costo operador externo (CarlosMuciño) $25,334.42 — cubierto por el gasto «Operaciones · VLO PTU 10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV» de $25,334.40 (no se suma dos veces)';
+
+  it('#308: costo + gasto igual ⇒ OPERACIONES cuenta el gasto UNA vez; el costo queda como nota y los vínculos cuadran', async () => {
+    const { payload, fila } = await filaDe([PISTA, NUCLEUM], {
+      vuelo: EXTERNO_308,
+    });
+    expect(Number(fila.op_mxn)).toBeCloseTo(26452.52, 2);
+    expect(fila.op_detalle as string[]).toContain(NOTA_CUBIERTO);
+    expect(
+      (fila.op_detalle as string[]).some((l) =>
+        l.startsWith('Costo operador externo (CarlosMuciño) — $'),
+      ),
+    ).toBe(false);
+    // El gasto sigue en su celda con su vínculo; el costo no lleva vínculo.
+    expect(fila.op_vinculos).toEqual([
+      { id: 'g-pista', rol: 'suma', monto_mxn: 1118.12 },
+      { id: 'g-nucleum', rol: 'suma', monto_mxn: 25334.4 },
+    ]);
+    expect(sumaDe(fila.op_vinculos as Vinculo[])).toBe(Number(fila.op_mxn));
+    // Sin el aviso de «se resta doble» (la duda quedó resuelta).
+    expect(
+      payload.pendientes.some((p) =>
+        p.includes('ADEMÁS del costo del operador'),
+      ),
+    ).toBe(false);
+  });
+
+  it('#290: solo gasto, sin costo ⇒ igual que hoy (cuenta el gasto y pide el costo)', async () => {
+    const { payload, fila } = await filaDe(
+      [{ ...NUCLEUM, monto: '11046.60' }],
+      {
+        vuelo: {
+          ...EXTERNO_308,
+          costo_externo_usd: null,
+          tc_usd_mxn: 16.92166,
+        },
+      },
+    );
+    expect(Number(fila.op_mxn)).toBeCloseTo(11046.6, 2);
+    expect(
+      (fila.op_detalle as string[]).some((l) =>
+        l.startsWith('Costo operador externo'),
+      ),
+    ).toBe(false);
+    expect(
+      payload.pendientes.some((p) =>
+        p.includes(
+          'externo sin costo del operador capturado pero con 1 gasto(s) de operación',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('costo sin gasto que coincida ⇒ igual que hoy (suma el costo y avisa los gastos)', async () => {
+    const solo = await filaDe([], { vuelo: EXTERNO_308 });
+    expect(Number(solo.fila.op_mxn)).toBeCloseTo(25334.42, 2);
+    const conPista = await filaDe([PISTA], { vuelo: EXTERNO_308 });
+    expect(Number(conPista.fila.op_mxn)).toBeCloseTo(26452.54, 2);
+    expect(conPista.fila.op_detalle as string[]).toContain(
+      'Costo operador externo (CarlosMuciño) — $25,334.42',
+    );
+    expect(
+      conPista.payload.pendientes.some(
+        (p) =>
+          p.includes(
+            'externo con 1 gasto(s) capturado(s) por $1,118.12 ADEMÁS',
+          ) && !p.includes('coinciden con el costo'),
+      ),
+    ).toBe(true);
+  });
+
+  it('dos gastos coinciden ⇒ cubre el más cercano; el otro sigue sumando y se avisa como posible duplicado', async () => {
+    const otro: Fila = {
+      ...NUCLEUM,
+      id: 'g-otro-pago',
+      monto: '25400.00',
+      fecha_gasto: '2026-09-12',
+      notas: 'transferencia muciño',
+    };
+    const { payload, fila } = await filaDe([otro, NUCLEUM], {
+      vuelo: EXTERNO_308,
+    });
+    // Los DOS gastos están en la celda (el duplicado no se esconde); el
+    // costo capturado no se suma una tercera vez.
+    expect(Number(fila.op_mxn)).toBeCloseTo(50734.4, 2);
+    expect(fila.op_detalle as string[]).toContain(NOTA_CUBIERTO);
+    expect(sumaDe(fila.op_vinculos as Vinculo[])).toBe(Number(fila.op_mxn));
+    const aviso = payload.pendientes.find((p) =>
+      p.includes('posible pago duplicado'),
+    );
+    expect(aviso).toContain('1 gasto(s) más también coinciden');
+    expect(aviso).toContain('«Operaciones · transferencia muciño» $25,400.00');
+  });
+
+  it('gasto en USD vs costo en USD ⇒ cubre (prueba en USD nativo)', async () => {
+    const usd: Fila = {
+      ...NUCLEUM,
+      id: 'g-usd',
+      moneda: 'USD',
+      monto: 1000,
+      tc_gasto: 18,
+      notas: 'wire operador',
+    };
+    const { fila } = await filaDe([usd], {
+      vuelo: { ...EXTERNO_308, costo_externo_usd: 1000, tc_usd_mxn: 20 },
+    });
+    // El gasto: 1,000 USD × su T.C. 18 = 18,000; el costo (20,000) no suma.
+    expect(Number(fila.op_mxn)).toBeCloseTo(18000, 2);
+    expect(fila.op_detalle as string[]).toContain(
+      'Costo operador externo (CarlosMuciño) $20,000.00 — cubierto por el gasto «Operaciones · wire operador» de $18,000.00 (no se suma dos veces)',
+    );
+  });
+
+  it('CANCELADO ⇒ igual que hoy (el costo es solo nota y el gasto resta)', async () => {
+    const { fila } = await filaDe([NUCLEUM], {
+      vuelo: { ...EXTERNO_308, estado: 'CANCELADO' },
+    });
+    expect(Number(fila.op_mxn)).toBeCloseTo(25334.4, 2);
+    expect(
+      (fila.op_detalle as string[]).some((l) =>
+        l.includes('NO resta (vuelo cancelado'),
+      ),
+    ).toBe(true);
+    expect(
+      (fila.op_detalle as string[]).some((l) => l.includes('cubierto por')),
+    ).toBe(false);
+  });
+
+  it('libro EXTERNOS (sin avión, como #308 en prod): la misma regla', async () => {
+    const svc = armar([PISTA, NUCLEUM], {
+      vuelo: { ...EXTERNO_308, aeronave_id: null },
+    });
+    const payload = await priv(svc).buildPayload(null, DESDE, HASTA);
+    const fila = payload.vuelos.find(
+      (v) => String(v.folio) === '501',
+    ) as unknown as Record<string, unknown>;
+    expect(fila).toBeDefined();
+    expect(Number(fila.op_mxn)).toBeCloseTo(26452.52, 2);
+    expect(fila.op_detalle as string[]).toContain(NOTA_CUBIERTO);
+  });
+});

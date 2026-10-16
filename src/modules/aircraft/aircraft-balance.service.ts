@@ -39,6 +39,10 @@ import {
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
 import {
+  etiquetaGastoPagoOperador,
+  pagoOperadorExternoEnGastos,
+} from '../../common/costo-externo.util';
+import {
   contarPagosVendedor,
   motivoSinLineaComision,
   pagosVendedorDeVuelo,
@@ -393,6 +397,9 @@ interface GastoRow {
   tc_gasto: string | number | null;
   litros: string | number | null;
   fecha_gasto: string | null;
+  /** Alta del gasto: desempate «el más antiguo» del pago al operador
+   *  externo (invariante 88); solo lo trae la lectura por vuelo. */
+  created_at?: string | null;
   notas: string | null;
   /** Aeropuerto/lugar del gasto (IATA o texto libre): nota "Op CUN $x". */
   lugar?: string | null;
@@ -1959,7 +1966,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}, proveedor:proveedor_id(nombre)`,
+              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}, created_at, proveedor:proveedor_id(nombre)`,
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -3200,13 +3207,19 @@ export class AircraftBalanceService {
       }
       // ----- Costo del OPERADOR externo (regla 28-ago, tarde) -----
       // Vuelo cubierto por un operador ajeno (con o sin avión de referencia):
-      // lo que VuelaTour le paga vive en vuelo.costo_externo_usd, NO en
-      // `gasto` (misma fuente que el reporte por vuelo y el reparto). Suma a
-      // la columna OPERACIONES en MXN con el TC de VENTA (K) — sin K no se
-      // suma en falso: pendiente. Solo en la fila del principal (ahí vive la
-      // venta); la fila compartida no lo carga. Regla de captura: el pago al
-      // operador va en "Cubrir con externo → costo", NO como gasto del vuelo
-      // (si además se captura como gasto, restaría dos veces).
+      // lo pactado con él vive en vuelo.costo_externo_usd (misma fuente que
+      // el reporte por vuelo y el reparto). Suma a la columna OPERACIONES en
+      // MXN con el TC de VENTA (K) — sin K no se suma en falso: pendiente.
+      // Solo en la fila del principal (ahí vive la venta); la fila
+      // compartida no lo carga.
+      // Regla de captura (16-oct-2026, invariante 88 — antes «el pago al
+      // operador NO va como gasto»): la oficina SÍ captura el pago como
+      // gasto (lo concilia con el banco y lo factura, caso #308). Si un
+      // gasto de las columnas COINCIDE con el costo (±1 %, fuente única
+      // `pagoOperadorExternoEnGastos`), ESE gasto es el pago: ya restó
+      // arriba con lo REALMENTE pagado y el costo capturado queda como nota
+      // «— cubierto por el gasto «…» (no se suma dos veces)». Sin
+      // coincidencia, el costo suma como siempre y se avisa si hay gastos.
       // CANCELADO (verificación 28-ago, misma regla que el reparto): el costo
       // pactado con el operador NO se resta (el servicio no se prestó) ni se
       // reclama como "sin costo"; una penalización real del operador se
@@ -3225,24 +3238,55 @@ export class AircraftBalanceService {
         const costoOperadorUsd = pos(v.costo_externo_usd);
         const operadorTexto = operadorExterno ?? 'operador ¿?';
         // Gastos que SÍ restaron en las columnas de esta fila (el loop de
-        // arriba ya los sumó; TUAS/GAS/PERMISO/INDIRECTO no restan aquí).
-        // Verificación 28-ago: si la oficina capturó el pago al operador
-        // TAMBIÉN como gasto, el costo se resta DOS veces y el sistema no
-        // puede distinguirlo solo — se grita con la evidencia que hay.
-        const gastosColumna = vGastos.filter(
-          (g) =>
-            !['TUAS', 'GAS', 'PERMISO', 'INDIRECTO'].includes(g.categoria) &&
-            // 11-sep-2026: las categorías de EMPRESA tampoco restan en las
-            // columnas (viven en el general) — no pueden ser el "mismo pago"
-            // duplicado que este aviso busca. Ni el pago al vendedor (las
-            // dos categorías, 28-sep y 13-oct-2026).
-            !CAT_FUERA_DEL_AVION.has(g.categoria),
-        );
+        // arriba ya los sumó; TUAS/GAS/PERMISO/INDIRECTO no restan aquí, ni
+        // las categorías de EMPRESA —11-sep-2026— ni las dos del pago al
+        // vendedor —28-sep y 13-oct-2026—) y cuál de ellos ES el pago al
+        // operador: decisión ÚNICA en `pagoOperadorExternoEnGastos`.
+        const pagoOp = pagoOperadorExternoEnGastos({
+          esExterno,
+          cancelado,
+          costoUsd: costoOperadorUsd,
+          tcVenta: K,
+          gastos: vGastos,
+        });
+        const gastosColumna = pagoOp.candidatos;
         const gastosColumnaMxn = gastosColumna.reduce(
           (acc, g) => acc + (gastoMxn(g) ?? 0),
           0,
         );
-        if (costoOperadorUsd != null) {
+        // El gasto cubre SOLO si esta fila lo contó (un USD sin ningún T.C.
+        // quedó 'sin_tc', fuera de las columnas: ahí el costo sigue).
+        const cubre =
+          pagoOp.cubre != null && gastoMxn(pagoOp.cubre) != null
+            ? pagoOp.cubre
+            : null;
+        if (costoOperadorUsd != null && cubre != null) {
+          const costoTexto =
+            pagoOp.costoMxn != null
+              ? `$${fmtMonto(pagoOp.costoMxn)}`
+              : `$${costoOperadorUsd.toLocaleString('en-US')} USD`;
+          opDetalle.push(
+            `Costo operador externo (${operadorTexto}) ${costoTexto} — cubierto por el gasto «${etiquetaGastoPagoOperador(
+              cubre,
+            )}» de $${fmtMonto(gastoMxn(cubre) ?? 0)} (no se suma dos veces)`,
+          );
+          if (pagoOp.duplicados.length > 0) {
+            pendientes.push(
+              `${etiqueta}: el costo del operador externo (${operadorTexto}, $${costoOperadorUsd.toLocaleString(
+                'en-US',
+              )} USD) ya lo cubre el gasto «${etiquetaGastoPagoOperador(
+                cubre,
+              )}», pero ${pagoOp.duplicados.length} gasto(s) más también coinciden (${pagoOp.duplicados
+                .map(
+                  (g) =>
+                    `«${etiquetaGastoPagoOperador(g)}» $${fmtMonto(gastoMxn(g) ?? 0)}`,
+                )
+                .join(
+                  ', ',
+                )}) — posible pago duplicado: verifica y corrige en Gastos`,
+            );
+          }
+        } else if (costoOperadorUsd != null) {
           if (K != null) {
             const costoOperadorMxn = round2(costoOperadorUsd * K);
             opMxn = (opMxn ?? 0) + costoOperadorMxn;
@@ -3252,23 +3296,9 @@ export class AircraftBalanceService {
               )}`,
             );
             if (gastosColumna.length > 0) {
-              // Coincidencia ±1 % con el costo (en MXN por la misma cadena
-              // de TC de la fila, o en USD nativo si el gasto es USD y su
-              // tc_gasto difiere de K): casi seguro es el MISMO pago.
-              const coinciden = gastosColumna.filter((g) => {
-                const mxn = gastoMxn(g);
-                if (
-                  mxn != null &&
-                  Math.abs(mxn - costoOperadorMxn) <= costoOperadorMxn * 0.01
-                )
-                  return true;
-                const nativo = num(g.monto);
-                return (
-                  g.moneda !== 'MXN' &&
-                  nativo != null &&
-                  Math.abs(nativo - costoOperadorUsd) <= costoOperadorUsd * 0.01
-                );
-              }).length;
+              // Coinciden pero ninguno cubre (el más cercano quedó sin T.C.
+              // en esta fila): la evidencia, como siempre.
+              const coinciden = pagoOp.coinciden.length;
               pendientes.push(
                 `${etiqueta}: externo con ${gastosColumna.length} gasto(s) capturado(s) por $${fmtMonto(
                   gastosColumnaMxn,
