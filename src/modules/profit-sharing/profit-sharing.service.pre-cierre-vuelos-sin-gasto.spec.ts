@@ -347,9 +347,12 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
     expect(r.listo).toBe(true);
     expect(item).not.toHaveProperty('informativo');
 
-    // Junto a pistas_sin_gasto (el panel los pinta en ese orden).
+    // Justo después de cobros_bancarios_sin_conciliar (pistas_sin_gasto se
+    // retiró el 15-oct-2026).
     const claves = r.items.map((i) => i.clave);
-    expect(claves.indexOf(CLAVE)).toBe(claves.indexOf('pistas_sin_gasto') + 1);
+    expect(claves.indexOf(CLAVE)).toBe(
+      claves.indexOf('cobros_bancarios_sin_conciliar') + 1,
+    );
 
     // La consulta de gastos: por vuelo_id y SOLO pista/aterrizaje, SIN
     // filtro de fecha (la cuota se paga días después, a veces en otro mes).
@@ -538,7 +541,9 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
       ]);
       expect(String(item.detalle)).toContain('No se pudo verificar');
       // El resto del checklist sigue ahí y el aviso no bloquea.
-      expect(r.items.some((i) => i.clave === 'pistas_sin_gasto')).toBe(true);
+      expect(
+        r.items.some((i) => i.clave === 'cobros_bancarios_sin_conciliar'),
+      ).toBe(true);
       expect(r.listo).toBe(true);
     }
   });

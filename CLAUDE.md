@@ -4422,9 +4422,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     que el cierre quede en DOS señales: «Pendientes de conciliación» vacío y
     pre-cierre sin avisos.
     - **Item `vuelos_sin_gasto_operaciones`**, NO bloqueante (fuera de
-      `bloqueantes`, sin `informativo`), justo DESPUÉS de `pistas_sin_gasto`
-      (aquella mira el TRAMO fuera de CUN sin su cuota; esta, el VUELO sin
-      NINGUNA pista — incluye CUN→CUN). `count` = vuelos;
+      `bloqueantes`, sin `informativo`), justo DESPUÉS de
+      `cobros_bancarios_sin_conciliar` (hasta el 15-oct-2026 iba tras
+      `pistas_sin_gasto`, RETIRADO ese día —invariante 80— porque contaba por
+      `escala_id` y la oficina captura la cuota por `vuelo_id`: marcaba 96
+      con todo capturado). Mira el VUELO sin NINGUNA pista — incluye
+      CUN→CUN. `count` = vuelos;
       `vuelos[] {id, folio, fecha_vuelo, matricula}` por `fecha_vuelo`
       (empate por folio);
       `lectura_fallida: true` (count 0 y texto «No se pudo verificar…»)
@@ -6965,7 +6968,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`NOTA_TUA_CERO_OFICINA`, `tuaAnuladaPorOficina`) cuando la oficina
       anuló una TUA que la IA sí separaba; sin `tua_incluida`, texto
       byte-idéntico. El payload a pyservices NO cambia de forma.
-    - **Pre-cierre `tua_cobrada_sin_pagada`** (fuente PURA
+    - **RETIRADO el 15-oct-2026 (invariante 80): el renglón
+      `tua_cobrada_sin_pagada` se quitó a pedido textual del cliente («este
+      igual que desaparezca, porque el que nos importa es cuando no se
+      cotizó pero sí se pagó nosotros Operación los TUAS»); lo sustituye
+      `tua_pagada_sin_cobrar`. Lo que sigue queda como historia:**
+      **Pre-cierre `tua_cobrada_sin_pagada`** (fuente PURA
       `profit-sharing/tua-cobrada-sin-pagada.util.ts`): «Vuelos con TUA
       cobrada al cliente sin TUA pagada», NO bloqueante (fuera de
       `bloqueantes`, sin `informativo`), JUSTO después de
@@ -6992,7 +7000,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       OPERACIONES a «Otros movimientos» en el mes de ESE gasto — septiembre
       ya cerrado incluido (no existe candado de mes cerrado para gastos) —, y
       el reparto ya entregado puede moverse; (b) el primer pre-cierre
-      estrenará el renglón (estimado por SELECT del 13-oct: agosto #132,
+      estrenará el renglón (renglón retirado el 15-oct-2026) (estimado por SELECT del 13-oct: agosto #132,
       #169, #172, #198 y #118; septiembre #192, #210, #226, #293, #329;
       octubre #384, #417); algunos pueden ser TUA pagada en ventanilla sin
       factura (el aviso queda vivo); (c) un 0 de oficina manda sobre lecturas
@@ -9061,6 +9069,117 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       404, 503), `cargos-de-gasto.util.spec` (Gastos con las MISMAS llaves en
       el MISMO orden), `ligas-cobro.lector.spec` (`conAutor`) e
       `ingresos.util.spec` (`conceptoDeCobro`).
+
+80. **PRE-CIERRE: FUERA `pistas_sin_gasto` Y `tua_cobrada_sin_pagada`;
+    NACEN LOS RENGLONES INVERSOS (15-oct-2026, API 0.0.81, sin
+    migración).** Pedidos textuales del cliente con capturas del pre-cierre
+    de septiembre: (3) «Aterrizajes fuera de CUN sin gasto de pista · 96 …
+    al dar clic en Resolver también que nos lo arregle, porque me dicen que
+    ya están todos los de septiembre entonces debe aparecer en 0, yo creo
+    mejor quitamos esa opción para no confundirnos»; (4) «Vuelos con TUA
+    cobrada al cliente sin TUA pagada · 5 … este igual que desaparezca,
+    porque el que nos importa es cuando no se cotizó pero sí se pagó
+    nosotros Operación los TUAS. Igual con los transportes, porque pasa que
+    no se cotizó el transporte pero luego sí se pide, eso sí estaría bueno
+    tener esa alerta».
+    - **RETIRADO `pistas_sin_gasto`**: contaba cada `escala` con destino ≠
+      CUN sin gasto OPERACIONES/ATERRIZAJE ligado a ESA escala
+      (`gasto.escala_id`); la oficina captura la cuota por VUELO
+      (`vuelo_id`, sin `escala_id`), así que marcaba 96 con todo capturado.
+      Se fueron su consulta de `escala` del primer `Promise.all` y la de
+      `gasto.escala_id` (una consulta menos por pre-cierre).
+      `vuelos_sin_gasto_operaciones` (invariante 45) cubre el caso real y
+      ahora va justo después de `cobros_bancarios_sin_conciliar`. «Pistas
+      por pagar» de Gastos (`expenses.pistasPendientes`) NO cambia.
+      Prohibido reusar la clave.
+    - **RETIRADO `tua_cobrada_sin_pagada`** (invariante 66 queda como
+      historia): util `tua-cobrada-sin-pagada.util.ts`, su spec, el spec del
+      servicio (su BD en memoria se mudó al de los inversos), la consulta
+      `vuelosTuaCobradaSinPagada` y el item, borrados. Prohibido reusar la
+      clave (un panel viejo la pintaría con el link viejo).
+    - **`tua_pagada_sin_cobrar`** («Vuelos con TUA pagada por Operación sin
+      TUA cobrada al cliente», NO bloqueante, sin «descartar», sin
+      `informativo`, en la posición del retirado): universo
+      `candidatosPrecierreInversos` = COMPLETADO del periodo (cortes Cancún),
+      propios (`es_externo` ≠ true), con id, cliente NO interno
+      (`clientesInternos`, el mismo `Set` de `cobros_pendientes`), total > 0
+      (`particionIngresoVuelo(v).total_usd`; los de $0 ya viven en
+      `vuelos_sin_precio`; los de servicio no se cotizan ⇒ fuera por
+      construcción, sin leer `escala`); `aeronave_id` NO es obligatorio
+      (matrícula null). TUA cobrada = 0 por la FUENTE ÚNICA
+      `particionIngresoVuelo(v).tuas_usd` (las particiones `inconsistente`
+      con líneas TUAS cuentan como «cobró»); TUA pagada > 0 por la FUENTE
+      ÚNICA `trasladosPagadosDeGasto(g).tua` sobre los gastos con `vuelo_id`
+      de CUALQUIER fecha (gasto TUAS entero, TUA embebida leída por la IA
+      que CUADRA, o `tua_incluida` de oficina > 0; con 0 la oficina anuló).
+      `pase_abordar = true` ENTRA marcado (cobro doble o lectura mal
+      etiquetada: decide la oficina). Montos por moneda del gasto
+      (`vuelos[].tua_pagada_mxn`/`tua_pagada_usd`, IVA incluido; item
+      `monto_mxn`/`monto_usd`), JAMÁS sumadas entre sí; `gastos_n` = gastos
+      del vuelo que pagan TUA. `vuelos[] {id, folio, fecha_vuelo, matricula,
+      tua_pagada_mxn, tua_pagada_usd, pase_abordar, gastos_n}` por
+      `fecha_vuelo` (folio de desempate, sin fecha al final). Util PURO
+      `profit-sharing/tua-pagada-sin-cobrar.util.ts` (también
+      `extrasPactados` y el comparador `ordenPorFechaFolio`).
+    - **`transporte_pagado_sin_cotizar`** («Vuelos con transporte pagado sin
+      transporte cotizado», NO bloqueante, sin «descartar», justo después
+      del anterior): mismo universo; «pagado» = algún gasto del vuelo
+      (cualquier fecha, `monto > 0`) con `pareceTransporteDePasajeros`
+      (`common/transporte-pasajeros.util.ts`: categoría TAXI u OPERACIONES;
+      texto = lugar · proveedor IA · PRIMERA línea de notas; señales
+      FUERTES `traslad|transport|transfer|camioneta|van|shuttle` en las dos
+      categorías, DÉBILES `privad|turístic|tours` solo en TAXI; vetos de
+      tripulación `uber|didi|ado|estacionamiento|restaurante|hotel|fbo|
+      piloto|tren|ferry|apto|moto taxi|app de transporte/viajes|N km|
+      gasolina|boleto|transferencia|muelle`, con límite de palabra:
+      «Traslado» no dispara «ado»); «cotizado» =
+      `cotizoTransporte(extrasPactados(v))` (`calculo_snapshot.extras`, lo
+      pactado; respaldo `vuelo.extras` solo si el snapshot no trae arreglo;
+      concepto `transfer/tranfer/trasnfer|traslad|transport|camioneta|van|
+      shuttle`; «Tour» y «Comision transferencia» NO). Es una SEÑAL (el
+      `detalle` lo dice; lo manual es «Seguimiento de la cotización»,
+      invariante 32). `vuelos[] {id, folio, fecha_vuelo, matricula,
+      monto_mxn, monto_usd, gastos[] {id, texto ≤ 60 (`textoGastoTransporte`:
+      último segmento « · » de la 1.ª línea sin «Proveedor:»/«Matrícula:»,
+      59 + «…»), monto (el gasto entero), moneda}}`; montos por moneda.
+      Falsos negativos aceptados: «Servicio de taxi en Chetumal» (#167) sin
+      señal; un traslado de pasajeros a un «hotel» se veta.
+    - **Una sola lectura** (`inversosPrecierre`): gastos por `vuelo_id` en
+      lotes ≤ 200 PAGINADOS (`leerEnLotesPaginado`, anti-cap-1000, `order id
+      asc`), select `id, vuelo_id, categoria, monto, moneda, propina, lugar,
+      notas, valor_ia_extraido[, tua_incluida]` (la columna detrás de la
+      sonda, invariante 66), sin filtro de fecha ni de categoría (filtrar
+      enums arriesga 22P02); sin candidatos no hay consulta; cualquier fallo
+      ⇒ `null` + `warn` ⇒ los DOS renglones con `count 0`, montos 0,
+      `vuelos []`, `lectura_fallida: true` y su texto FALLIDA. El select de
+      completados suma `pase_abordar, extras` (aditivo).
+    - **Estreno en prod** (estimado por SELECT del 15-oct-2026 con la fuente
+      única): `tua_pagada_sin_cobrar` ⇒ jul #70 (2 facturas, $2,355.39 MXN),
+      ago #125 ($430.49) y #154 (pase de abordar, $756.48); sep/oct 0. FUERA
+      #45/#13 (factura capturada con `monto` sin la TUA ⇒ la tabla de la IA
+      no cuadra ⇒ Operación no la pagó: correcto no avisar), #37/#134/#167
+      (total $0), #11/#351/#383 (TUA cobrada) y #350 (interno).
+      `transporte_pagado_sin_cotizar` ⇒ jul #44, ago #190, sep #351, oct
+      #404; #104/#134 fuera por total $0, #350 por interno.
+    - **Skew**: panel viejo pinta los renglones nuevos con el renderer
+      genérico y no ve los retirados; panel nuevo con API viejo pinta los
+      retirados sin «Resolver →». Nada rompe. Sin rutas ni códigos de error
+      nuevos. PEDIDO 2: los dos traen `vuelos[]` con id ⇒ no llevan `ids`;
+      su «Resolver →» es la lista de Cotizaciones del periodo.
+    - **Specs**: `common/transporte-pasajeros.util.spec` (textos REALES de
+      prod: 8 positivos, #74 ×7, #124, #293, #350 ×3, #167, #40, #158,
+      #151, #42, #149, COMIDA; los 28 conceptos reales de extras; chips),
+      `profit-sharing/tua-pagada-sin-cobrar.util.spec` (filas REALES #70
+      formas a y b, #125, #154, #45 y #13 que no cuadran; TUAS entero,
+      oficina 0/300, OTRO fuera, USD aparte, interno, total 0, orden,
+      textos), `transporte-pagado-sin-cotizar.util.spec` y
+      `profit-sharing.service.pre-cierre-inversos.spec` (BD en memoria
+      max-rows 1000: posición, no bloquea, interno/total 0/externo/cancelado
+      fuera sin consulta, pase de abordar, 2 facturas, gasto de OTRO mes,
+      consulta ÚNICA con el select exacto, sin la migración, anti-cap,
+      lectura caída de los dos, respaldo `vuelo.extras`). Se adaptaron
+      `pre-cierre-vuelos-sin-gasto.spec` y `pre-cierre-vuelos-sin-factura.spec`
+      (ya no nombran `pistas_sin_gasto`).
 
 82. **CAJA CHICA: UBICACIÓN EN EL BALANCE DE CADA GASTO DEL FONDO
     (15-oct-2026, sin migración).** Pedido del cliente con la captura del
@@ -11746,9 +11865,11 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   que `facturaDeConcepto` no detecta (falso negativo aceptado).
 
 - **TUA sistémica (13-oct-2026, invariante 66) — decisiones del cliente**:
-  (a) el renglón del pre-cierre `tua_cobrada_sin_pagada` no tiene
-  «descartar»: una TUA pagada en ventanilla sin factura deja el aviso vivo
-  (marcarla exigiría una columna nueva, como `vuelos_sin_gasto_operaciones`);
+  (a) **RETIRADO el 15-oct-2026:** el renglón `tua_cobrada_sin_pagada` ya
+  no existe (PEDIDO 4). Su inverso `tua_pagada_sin_cobrar` TAMPOCO tiene
+  «descartar»: un vuelo con pase de abordar cuya factura de aeropuerto trae
+  TUA deja el aviso vivo (marcarlo exigiría una columna nueva; decisión del
+  cliente pendiente);
   (b) no existe candado de mes cerrado para gastos: capturar la TUA incluida
   (o reanalizar + guardar) en un gasto viejo mueve el balance y el reparto de
   ESE mes (septiembre incluido) — avisar antes de regenerar un cierre;

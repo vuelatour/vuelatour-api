@@ -716,7 +716,9 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         }),
       );
       // El resto del checklist sigue ahí.
-      expect(r.items.some((i) => i.clave === 'pistas_sin_gasto')).toBe(true);
+      expect(
+        r.items.some((i) => i.clave === 'cobros_bancarios_sin_conciliar'),
+      ).toBe(true);
       expect(r.items.some((i) => i.clave === 'externos_sin_honorario')).toBe(
         true,
       );

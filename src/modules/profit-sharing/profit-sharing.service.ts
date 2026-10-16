@@ -166,18 +166,27 @@ import {
   textoOmitidosPreCierre,
   type OmitidosPeriodo,
 } from '../conciliacion/omision.util';
+// Renglones INVERSOS del pre-cierre (15-oct-2026, PEDIDO 4): sustituyen a
+// `tua_cobrada_sin_pagada` (retirado).
 import {
-  CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
-  DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
-  DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA_FALLIDA,
-  TITULO_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
-  candidatosTuaCobrada,
-  vuelosConTuaCobradaSinPagada,
-  vuelosConTuaPagada,
-  type VueloTuaCobrada,
-  type VueloTuaCobradaRow,
-  type VueloTuaCobradaSinPagada,
-} from './tua-cobrada-sin-pagada.util';
+  CLAVE_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
+  DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
+  DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR_FALLIDA,
+  TITULO_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
+  candidatosPrecierreInversos,
+  vuelosConTuaPagadaSinCobrar,
+  type VueloCandidatoInverso,
+  type VueloInversoRow,
+  type VueloTuaPagadaSinCobrar,
+} from './tua-pagada-sin-cobrar.util';
+import {
+  CLAVE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR,
+  DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR,
+  DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA,
+  TITULO_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR,
+  vuelosConTransportePagadoSinCotizar,
+  type VueloTransporteSinCotizar,
+} from './transporte-pagado-sin-cotizar.util';
 
 /** Lecturas `in (…)` en lote: ids por consulta (URL acotada). */
 const LOTE_IDS = 200;
@@ -2333,7 +2342,6 @@ export class ProfitSharingService {
       gastosRes,
       movRes,
       revRes,
-      pistasRes,
       legsRes,
       sobresRes,
       gruposRes,
@@ -2366,7 +2374,9 @@ export class ProfitSharingService {
           // vuelos_sin_gasto_operaciones (solo vuelos PROPIOS con avión).
           // cotizacion_abierta (14-oct-2026, invariante 77): «Cobrado de más»
           // no avisa en una cotización abierta.
-          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, cotizacion_abierta, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+          // pase_abordar/extras (15-oct-2026): renglones inversos
+          // tua_pagada_sin_cobrar / transporte_pagado_sin_cotizar.
+          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, cotizacion_abierta, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot, pase_abordar, extras',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -2415,20 +2425,9 @@ export class ProfitSharingService {
         .neq('vuelo.estado', 'CANCELADO')
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
-      // Aterrizajes fuera de CUN del periodo (candidatos a cuota de pista).
-      // Externos fuera: sus pistas las paga el operador externo (mismo
-      // criterio que expenses.pistasPendientes, o los conteos no cuadran).
-      sb
-        .from('escala')
-        .select(
-          'id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado, es_externo)',
-        )
-        .neq('destino_iata', 'CUN')
-        .is('cancelada_at', null)
-        .neq('vuelo.estado', 'CANCELADO')
-        .eq('vuelo.es_externo', false)
-        .gte('vuelo.fecha_vuelo', desdeTs)
-        .lte('vuelo.fecha_vuelo', hastaTs),
+      // (15-oct-2026) La consulta de «Aterrizajes fuera de CUN» se retiró
+      // con el renglón `pistas_sin_gasto` (contaba por escala_id y la
+      // oficina captura la cuota por vuelo_id).
       // Fechas de tramos: detectar tramos que "salen" antes que el anterior.
       sb
         .from('escala')
@@ -2467,7 +2466,6 @@ export class ProfitSharingService {
       gastosRes,
       movRes,
       revRes,
-      pistasRes,
       legsRes,
       sobresRes,
       gruposRes,
@@ -2509,30 +2507,6 @@ export class ProfitSharingService {
       }
     }
     fechasFueraDeOrden.sort((a, b) => a.folio - b.folio);
-
-    // Aterrizajes sin su gasto de pista: la cuota de VIP SAESA se paga días
-    // después — si no se provisiona, el reparto sale inflado.
-    const escalasPista = (pistasRes.data ?? []) as Array<
-      Record<string, unknown>
-    >;
-    let pistasSinGasto = 0;
-    if (escalasPista.length > 0) {
-      const { data: gastosPista, error: gpErr } = await sb
-        .from('gasto')
-        .select('escala_id, categoria')
-        .in(
-          'escala_id',
-          escalasPista.map((e) => e.id as string),
-        )
-        .in('categoria', ['OPERACIONES', 'ATERRIZAJE']);
-      if (gpErr) throw new Error(gpErr.message);
-      const cubiertas = new Set(
-        (gastosPista ?? []).map((g) => g.escala_id as string),
-      );
-      pistasSinGasto = escalasPista.filter(
-        (e) => !cubiertas.has(e.id as string),
-      ).length;
-    }
 
     // Vuelos COMPLETADOS por piloto EXTERNO sin su honorario capturado: el
     // pago del freelance es gasto DIRECTO del vuelo — si falta, la utilidad
@@ -3277,40 +3251,40 @@ export class ProfitSharingService {
     // el pre-cierre (pendientes + completados + cancelados). Aviso NO
     // bloqueante y best-effort: lectura caída ⇒ `null` ⇒ lectura_fallida.
     //
-    // TUA COBRADA AL CLIENTE SIN TUA PAGADA (13-oct-2026, invariante 66):
-    // completados PROPIOS con TUA cobrada (partición única) sin ningún gasto
-    // del vuelo que la pague. Aviso NO bloqueante y best-effort: lectura
-    // caída ⇒ `null` ⇒ lectura_fallida.
-    const [
-      seguimiento,
-      itemsCuentasSocios,
-      sinGastoOps,
-      sinFactura,
-      tuaSinPagar,
-    ] = await Promise.all([
-      this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
-      mesCierre && veeCuentasSocios
-        ? this.itemsCuentasSocios(mesCierre)
-        : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
-      this.vuelosSinGastoOperaciones(
-        candidatosSinGastoOperaciones(
-          completados as VueloCompletadoSinGastoRow[],
+    // RENGLONES INVERSOS (15-oct-2026, PEDIDO 4): TUA pagada por Operación
+    // sin TUA cobrada y transporte pagado sin cotizar, sobre el universo
+    // común `candidatosPrecierreInversos` (propios, cliente no interno,
+    // total > 0) y UNA sola lectura de gastos. Avisos NO bloqueantes y
+    // best-effort: lectura caída ⇒ `null` ⇒ los DOS con lectura_fallida.
+    // (Sustituyen a `tua_cobrada_sin_pagada`, retirado ese día.)
+    const [seguimiento, itemsCuentasSocios, sinGastoOps, sinFactura, inversos] =
+      await Promise.all([
+        this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
+        mesCierre && veeCuentasSocios
+          ? this.itemsCuentasSocios(mesCierre)
+          : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
+        this.vuelosSinGastoOperaciones(
+          candidatosSinGastoOperaciones(
+            completados as VueloCompletadoSinGastoRow[],
+          ),
+          matriculaPorAvion,
         ),
-        matriculaPorAvion,
-      ),
-      this.vuelosCobradosSinFactura(
-        [
-          ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
-          ...(completados as VueloCobradoRow[]),
-          ...(cancelados as VueloCobradoRow[]),
-        ],
-        matriculaPorAvion,
-      ),
-      this.vuelosTuaCobradaSinPagada(
-        candidatosTuaCobrada(completados as VueloTuaCobradaRow[]),
-        matriculaPorAvion,
-      ),
-    ]);
+        this.vuelosCobradosSinFactura(
+          [
+            ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
+            ...(completados as VueloCobradoRow[]),
+            ...(cancelados as VueloCobradoRow[]),
+          ],
+          matriculaPorAvion,
+        ),
+        this.inversosPrecierre(
+          candidatosPrecierreInversos(
+            completados as VueloInversoRow[],
+            clientesInternos,
+          ),
+          matriculaPorAvion,
+        ),
+      ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
@@ -3516,16 +3490,10 @@ export class ProfitSharingService {
         parciales: cobrosSinBanco?.parciales ?? 0,
       },
       {
-        clave: 'pistas_sin_gasto',
-        titulo: 'Aterrizajes fuera de CUN sin gasto de pista',
-        detalle:
-          'La cuota de aeródromo (VIP SAESA) aún no está provisionada: genérala en Gastos → "Pistas por pagar" o el reparto saldrá inflado.',
-        count: pistasSinGasto,
-      },
-      {
-        // Junto a pistas_sin_gasto: aquella mira el TRAMO fuera de CUN sin su
-        // cuota; esta, el VUELO completado sin NINGÚN gasto de pista
-        // (incluye CUN→CUN y gastos de cualquier fecha). NO bloquea.
+        // VUELO completado sin NINGÚN gasto de pista (incluye CUN→CUN y
+        // gastos de cualquier fecha). Hasta el 15-oct-2026 iba junto a
+        // pistas_sin_gasto (por TRAMO), retirado: contaba por escala_id y la
+        // oficina captura la cuota por vuelo_id. NO bloquea.
         clave: CLAVE_PRECIERRE_VUELOS_SIN_GASTO,
         titulo: TITULO_PRECIERRE_VUELOS_SIN_GASTO,
         detalle: sinGastoOps
@@ -3538,22 +3506,47 @@ export class ProfitSharingService {
         lectura_fallida: sinGastoOps === null,
       },
       {
-        // TUA COBRADA SIN TUA PAGADA (13-oct-2026, invariante 66): justo
+        // TUA PAGADA POR OPERACIÓN SIN TUA COBRADA (15-oct-2026, PEDIDO 4):
+        // en la posición del retirado `tua_cobrada_sin_pagada`, justo
         // después de vuelos_sin_gasto_operaciones. NO bloquea.
-        clave: CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
-        titulo: TITULO_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
-        detalle: tuaSinPagar
-          ? DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA
-          : DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA_FALLIDA,
-        count: tuaSinPagar?.length ?? 0,
-        // Σ TUA cobrada (pre-IVA, USD) de los listados.
-        monto_usd: round2(
-          (tuaSinPagar ?? []).reduce((a, v) => a + v.tua_cobrada_usd, 0),
+        clave: CLAVE_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
+        titulo: TITULO_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
+        detalle: inversos
+          ? DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR
+          : DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR_FALLIDA,
+        count: inversos?.tua.length ?? 0,
+        // Σ TUA pagada (IVA incluido) POR MONEDA del gasto: nunca sumadas.
+        monto_mxn: round2(
+          (inversos?.tua ?? []).reduce((a, v) => a + v.tua_pagada_mxn, 0),
         ),
-        // {id, folio, fecha_vuelo, matricula, tua_cobrada_usd} por fecha.
-        vuelos: tuaSinPagar ?? [],
+        monto_usd: round2(
+          (inversos?.tua ?? []).reduce((a, v) => a + v.tua_pagada_usd, 0),
+        ),
+        // {id, folio, fecha_vuelo, matricula, tua_pagada_mxn/usd,
+        // pase_abordar, gastos_n} por fecha.
+        vuelos: inversos?.tua ?? [],
         // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
-        lectura_fallida: tuaSinPagar === null,
+        lectura_fallida: inversos === null,
+      },
+      {
+        // TRANSPORTE PAGADO SIN TRANSPORTE COTIZADO (15-oct-2026, PEDIDO 4):
+        // SEÑAL de texto, justo después del anterior. NO bloquea.
+        clave: CLAVE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR,
+        titulo: TITULO_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR,
+        detalle: inversos
+          ? DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR
+          : DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA,
+        count: inversos?.transporte.length ?? 0,
+        // Σ lo pagado POR MONEDA del gasto: nunca sumadas.
+        monto_mxn: round2(
+          (inversos?.transporte ?? []).reduce((a, v) => a + v.monto_mxn, 0),
+        ),
+        monto_usd: round2(
+          (inversos?.transporte ?? []).reduce((a, v) => a + v.monto_usd, 0),
+        ),
+        // {id, folio, fecha_vuelo, matricula, monto_mxn/usd, gastos[]}.
+        vuelos: inversos?.transporte ?? [],
+        lectura_fallida: inversos === null,
       },
       {
         clave: 'externos_sin_honorario',
@@ -3830,20 +3823,26 @@ export class ProfitSharingService {
   }
 
   /**
-   * Pre-cierre · TUA COBRADA AL CLIENTE SIN TUA PAGADA (13-oct-2026,
-   * invariante 66): de los `candidatos` (`candidatosTuaCobrada`) quita los
-   * vuelos con algún gasto que pague TUA (`vuelosConTuaPagada`: gasto TUAS
-   * o la TUA embebida con la de la oficina). Gastos de CUALQUIER fecha (la
-   * factura del aeropuerto llega días después) y SIN filtro de categoría (la
-   * regla vive en el util; filtrar enums en la consulta arriesga un 22P02).
-   * Lectura en lotes de ids y paginada (anti-cap-1000). Cualquier fallo ⇒
-   * `null` + `warn` (no tumba el pre-cierre).
+   * Pre-cierre · RENGLONES INVERSOS (15-oct-2026, PEDIDO 4): TUA pagada sin
+   * cobrar (`vuelosConTuaPagadaSinCobrar`) y transporte pagado sin cotizar
+   * (`vuelosConTransportePagadoSinCotizar`) sobre los MISMOS candidatos
+   * (`candidatosPrecierreInversos`). UNA lectura de gastos por `vuelo_id`
+   * (lotes ≤ 200, paginada anti-cap-1000, `order id asc`), de CUALQUIER
+   * fecha (la factura del aeropuerto llega días después) y SIN filtro de
+   * categoría (las reglas viven en los utils; filtrar enums en la consulta
+   * arriesga un 22P02). `moneda` y `lugar` solo se seleccionan; la columna
+   * `tua_incluida` va detrás de la sonda (invariante 66). Cualquier fallo ⇒
+   * `null` + `warn` (los DOS renglones salen «sin verificar»; no tumba el
+   * pre-cierre).
    */
-  private async vuelosTuaCobradaSinPagada(
-    candidatos: VueloTuaCobrada[],
+  private async inversosPrecierre(
+    candidatos: VueloCandidatoInverso[],
     matriculas: ReadonlyMap<string, string>,
-  ): Promise<VueloTuaCobradaSinPagada[] | null> {
-    if (candidatos.length === 0) return [];
+  ): Promise<{
+    tua: VueloTuaPagadaSinCobrar[];
+    transporte: VueloTransporteSinCotizar[];
+  } | null> {
+    if (candidatos.length === 0) return { tua: [], transporte: [] };
     try {
       const colTua = colTuaIncluida(
         await tuaIncluidaDisponible(this.supabase.service),
@@ -3854,20 +3853,23 @@ export class ProfitSharingService {
           this.supabase.service
             .from('gasto')
             .select(
-              `id, vuelo_id, categoria, monto, propina, notas, valor_ia_extraido${colTua}`,
+              `id, vuelo_id, categoria, monto, moneda, propina, lugar, notas, valor_ia_extraido${colTua}`,
             )
             .in('vuelo_id', lote)
             .order('id', { ascending: true })
             .range(desde, hasta),
       );
-      return vuelosConTuaCobradaSinPagada({
-        candidatos,
-        vuelosConTuaPagada: vuelosConTuaPagada(gastos),
-        matriculas,
-      });
+      return {
+        tua: vuelosConTuaPagadaSinCobrar({ candidatos, gastos, matriculas }),
+        transporte: vuelosConTransportePagadoSinCotizar({
+          candidatos,
+          gastos,
+          matriculas,
+        }),
+      };
     } catch (err) {
       this.logger.warn(
-        `pre-cierre: TUA cobrada sin pagada no disponible: ${err instanceof Error ? err.message : String(err)}`,
+        `pre-cierre: renglones inversos (TUA pagada / transporte) no disponibles: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }
