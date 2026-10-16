@@ -86,6 +86,9 @@ export function resumenTacosOmitidos(
       // El motivo del renglón es el de la OMISIÓN (no `revision_motivo`).
       motivo: motivoOmisionCorto(r.taco_omitido_motivo),
       piloto_nombre: pilotoId ? (nombres.get(pilotoId) ?? null) : null,
+      // Mismo `escala_id` que `tacos_en_revision` (invariante 81): el tramo
+      // exacto, null si la fila no trae id (jamás se inventa).
+      escala_id: texto(r.id),
       omitido_por_nombre: porId ? (nombres.get(porId) ?? null) : null,
       omitido_at: texto(r.taco_omitido_at),
     };
@@ -93,6 +96,13 @@ export function resumenTacosOmitidos(
   tramos.sort((a, b) => a.folio - b.folio || a.orden - b.orden);
   return { vuelos, tramos: tramos.slice(0, MAX_TRAMOS_EN_REVISION) };
 }
+
+/**
+ * Texto del renglón cuando la lectura de los omitidos FALLÓ (`lectura_fallida`,
+ * `count: 0`): nunca «Ningún tramo…», que sería afirmar algo no verificado.
+ */
+export const DETALLE_TACOS_OMITIDOS_FALLIDA =
+  'No se pudo leer qué tramos tienen el tacómetro omitido.';
 
 /**
  * Texto del renglón (singular/plural como `detalleTacosEnRevision`): dice

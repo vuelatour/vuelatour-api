@@ -133,6 +133,14 @@ import {
 } from './tacos-revision.util';
 import { idsPrecierre } from './pre-cierre-ids.util';
 import {
+  DETALLE_TACOS_OMITIDOS_FALLIDA,
+  detalleTacosOmitidos,
+  resumenTacosOmitidos,
+  usuariosDeTacosOmitidos,
+  type EscalaOmitidaRow,
+} from './tacos-omitidos.util';
+import { tacoOmitidoDisponible } from '../../common/taco-omitido-disponible.util';
+import {
   CATEGORIAS_GASTO_OPERACIONES,
   CLAVE_PRECIERRE_VUELOS_SIN_GASTO,
   DETALLE_PRECIERRE_VUELOS_SIN_GASTO,
@@ -2346,6 +2354,7 @@ export class ProfitSharingService {
       legsRes,
       sobresRes,
       gruposRes,
+      omitRes,
     ] = await Promise.all([
       // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
       sb
@@ -2459,6 +2468,10 @@ export class ProfitSharingService {
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs)
         .limit(500),
+      // TACÓMETROS OMITIDOS (15-oct-2026, invariante 79): renglón
+      // INFORMATIVO `tacometros_omitidos`. Detrás de la sonda y nunca lanza
+      // (null = lectura fallida): por eso NO entra al bucle de errores.
+      this.tacosOmitidosPrecierre(desdeTs, hastaTs),
     ]);
     for (const r of [
       pendRes,
@@ -3290,11 +3303,18 @@ export class ProfitSharingService {
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
     // alguno no resuelve, sale null (jamás un nombre inventado).
+    // Tacómetros OMITIDOS (15-oct-2026, invariante 79): sus nombres (piloto
+    // con herencia + quien omitió) van en la MISMA consulta a `usuario`.
     const tacosRows = (revRes.data ?? []) as EscalaEnRevisionRow[];
-    const tacos = resumenTacosEnRevision(
-      tacosRows,
-      await this.fetchNombres(pilotosDeTacosEnRevision(tacosRows)),
-    );
+    const omitRows = omitRes ?? [];
+    const nombresTacos = await this.fetchNombres([
+      ...new Set([
+        ...pilotosDeTacosEnRevision(tacosRows),
+        ...usuariosDeTacosOmitidos(omitRows),
+      ]),
+    ]);
+    const tacos = resumenTacosEnRevision(tacosRows, nombresTacos);
+    const tacosOmitidos = resumenTacosOmitidos(omitRows, nombresTacos);
 
     const ligasUsdTc = await ligasUsdTcPromesa;
     const items = [
@@ -3314,6 +3334,23 @@ export class ProfitSharingService {
         count: tacosRows.length,
         vuelos: tacos.vuelos,
         tramos: tacos.tramos,
+      },
+      // TACÓMETROS OMITIDOS (15-oct-2026, invariante 79): INFORMATIVO, fuera
+      // de `bloqueantes`, SIN `ids` (invariante 81: ya trae `vuelos[]` y
+      // `tramos[]`). count = TRAMOS, como `tacos_en_revision`. Sin la
+      // migración ⇒ count 0 (verdad: no puede haber omitidos); lectura
+      // fallida ⇒ count 0 + `lectura_fallida` (el panel dice «sin verificar»).
+      {
+        clave: 'tacometros_omitidos',
+        titulo: 'Tacómetros omitidos (sin lectura, con motivo)',
+        detalle: omitRes
+          ? detalleTacosOmitidos(omitRows.length, tacosOmitidos.vuelos.length)
+          : DETALLE_TACOS_OMITIDOS_FALLIDA,
+        count: omitRows.length,
+        vuelos: tacosOmitidos.vuelos,
+        tramos: tacosOmitidos.tramos,
+        informativo: true as const,
+        ...(omitRes ? {} : { lectura_fallida: true as const }),
       },
       {
         clave: 'fechas_tramos_incoherentes',
@@ -3721,6 +3758,40 @@ export class ProfitSharingService {
     } catch (err) {
       this.logger.warn(
         `pre-cierre: omitidos de la conciliación no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pre-cierre · TACÓMETROS OMITIDOS (15-oct-2026, invariante 79): tramos
+   * vivos de vuelos NO cancelados del periodo con `taco_omitido_at`. Detrás
+   * de la sonda (REGLA DURA: sin la migración no se nombra la columna ⇒ `[]`,
+   * que es la verdad). Best-effort: cualquier fallo ⇒ `null` + warn
+   * (`lectura_fallida`), nunca tumba el pre-cierre.
+   */
+  private async tacosOmitidosPrecierre(
+    desdeTs: string,
+    hastaTs: string,
+  ): Promise<EscalaOmitidaRow[] | null> {
+    try {
+      const sb = this.supabase.service;
+      if (!(await tacoOmitidoDisponible(sb))) return [];
+      const { data, error } = await sb
+        .from('escala')
+        .select(
+          'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, piloto_id, taco_omitido_at, taco_omitido_por, taco_omitido_motivo, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, estado, piloto_id)',
+        )
+        .not('taco_omitido_at', 'is', null)
+        .is('cancelada_at', null)
+        .neq('vuelo.estado', 'CANCELADO')
+        .gte('vuelo.fecha_vuelo', desdeTs)
+        .lte('vuelo.fecha_vuelo', hastaTs);
+      if (error) throw new Error(error.message);
+      return (data ?? []) as EscalaOmitidaRow[];
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: tacómetros omitidos no disponibles: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }

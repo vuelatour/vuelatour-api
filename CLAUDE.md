@@ -9109,7 +9109,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `tacometros_omitidos` después de `tacos_en_revision` (`vuelos[]`, `tramos[]` con
       `motivo`, `omitido_por_nombre`, `omitido_at`; sin `ids`). Fuente única pura del
       renglón: `profit-sharing/tacos-omitidos.util.ts` (`resumenTacosOmitidos`,
-      `detalleTacosOmitidos`, `usuariosDeTacosOmitidos`).
+      `detalleTacosOmitidos`, `usuariosDeTacosOmitidos`). Cableado en
+      `preCierre`: `tacosOmitidosPrecierre` corre DENTRO del mismo `Promise.all`,
+      detrás de la sonda y sin lanzar nunca (sin migración ⇒ `[]` ⇒ `count: 0`
+      sin `lectura_fallida`; error ⇒ `null` + warn ⇒ `count: 0`,
+      `lectura_fallida: true` y `DETALLE_TACOS_OMITIDOS_FALLIDA`, jamás «Ningún
+      tramo…»); los nombres (pilotos de los amarillos y de los omitidos con
+      herencia + quien omitió) salen en UNA sola llamada a `fetchNombres`; cada
+      tramo lleva también `escala_id` (la misma llave aditiva que la 81 le dio a
+      `tacos_en_revision`). No entra a `bloqueantes`: `listo` no cambia.
     - **Auditoría** en el bloque «Registro:» de `revision_motivo` con `motivoDirecto`/
       `agregarProcedencia`: «tacómetro omitido por Itzi (oficina) el 2026-10-15 10:40:
       Falló el tacómetro» (motivo recortado a 160 y con «;» → «,»: un «; » partiría el
@@ -9296,8 +9304,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `grupo_con_saldo` / `sobres_descuadrados` (`grupo_id`), los de socios
       (`socios[].socio.id`), los informativos (`cobros_en_cancelados`,
       `gastos_en_cancelados`, `gastos_tc_oficial`, `cobros_tc_oficial`,
-      `movimientos_omitidos`) y el futuro `tacometros_omitidos` (PEDIDO 1:
-      informativo, sin `ids`). Los retirados por la 80 no vuelven.
+      `movimientos_omitidos`) y `tacometros_omitidos` (PEDIDO 1, invariante 79:
+      informativo, sin `ids`; ya cableado). Los retirados por la 80 no vuelven.
     - **`tacos_en_revision.tramos[].escala_id`** (ADITIVO, última llave del
       tramo; `texto(r.id)` de la fila de `escala` que YA se leía, null si no
       trae id): Tacómetros en vivo puede resaltar el TRAMO exacto; el
@@ -10754,6 +10762,67 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   panel. Push a `main` ⇒ `GET /v1/version` = `0.0.80`. El lote de
   tacómetro/«Resolver»/pre-cierre que estaba planeado como 0.0.80 pasa a
   0.0.81.
+- **15-oct-2026 — ORDEN DE DESPLIEGUE 0.0.81 (UN solo despliegue: tacómetro
+  omitido —invariante 79, CON migración `20261015000001`—, pre-cierre sin
+  `pistas_sin_gasto`/`tua_cobrada_sin_pagada` y con los renglones inversos
+  —invariante 80, sin migración— e `ids` del pre-cierre para «Resolver →» en
+  ámbar —invariante 81, sin migración—; manda sobre el §15 del contrato del
+  tacómetro, el §10 del de pre-cierre y el §5 del de «Resolver»).** Base: API
+  sobre `e14f12cc` («Versión 0.0.80», en prod); rama `taco-omitido` con el
+  merge de `precierre-resolver` y el commit de integración (renglón
+  `tacometros_omitidos` cableado). pyservices NO cambia (no consume el
+  pre-cierre; el reporte por vuelo ignora las llaves extra del tramo). Cada
+  paso SOLO con el anterior verificado:
+  1. **Migración `20261015000001` por MCP** (prod = `bjesduasnzbzywofukbf`;
+     confirmar con un SELECT): dry-run = el bloque `do $dry$` de la cabecera
+     por `execute_sql` ⇒ `DRYRUN_OK 20261015000001 · A–C9` ⇒ comprobar 0
+     columnas `taco_omitido%` ⇒ `apply_migration` (name
+     `20261015000001_escala_taco_omitido`) con SOLO el cuerpo ⇒ postchecks
+     (3 columnas nullable, CHECK `escala_taco_omitido_chk` con `btrim` y
+     `taco_llegada IS NULL`, FK `escala_taco_omitido_por_fkey` ON DELETE SET
+     NULL, 0 tramos omitidos, 3 COMMENT) ⇒ `get_advisors` (nada nuevo
+     esperado). Si el MCP responde `declined` por «on delete set null»: SQL
+     Editor + `insert into supabase_migrations.schema_migrations (version,
+     name, statements)` y verificar por MCP sin palabras destructivas. **Sin
+     dependencia dura** (el 0.0.81 la sondea; sin ella: lecturas como el
+     0.0.80 con `taco_omitido_*` en null, `tacometros_omitidos` en 0 y
+     `POST`/`DELETE …/taco/omitir` ⇒ 503 `MIGRACION_PENDIENTE`); se aplica
+     ANTES para que el 0.0.81 nazca encendido (si va después, se enciende
+     sola en ≤ 10 min, sin reinicio).
+  2. **API 0.0.81** (push a `main`, Railway; el `package.json` lo sube la
+     integración con `main`): `GET
+     https://vuelatour-api-production.up.railway.app/v1/version` = `0.0.81`
+     (nunca un health).
+  3. **Panel** (push a `main`, Vercel) SIEMPRE después del API: con un API
+     previo, «Omitir tacómetro» rebota 404 ⇒ toast `ERROR_API_PREVIO_OMITIR`,
+     y los renglones de gasto/movimiento no resaltan en ámbar (sin `ids`).
+     Cualquier otro orden es inofensivo (todo ADITIVO; panel viejo + API
+     nuevo pinta los renglones nuevos genéricos, sin «Resolver →» para los
+     inversos).
+  4. **App 1.1.3+84**: commit local; el APK y el push los hace el usuario.
+  5. **Humo como ADMIN** (SOLO lecturas GET): pre-cierre de septiembre ⇒ sin
+     `pistas_sin_gasto` ni `tua_cobrada_sin_pagada`; `tacometros_omitidos`
+     justo después de `tacos_en_revision`, informativo y en 0 (sin
+     `lectura_fallida`); `gastos_sin_avion` con `ids.length === count` (o
+     500 + `ids_truncado`). Regenerar jul–oct y cotejar el estreno estimado
+     por SELECT: `tua_pagada_sin_cobrar` #70, #125, #154 (pase de abordar);
+     `transporte_pagado_sin_cotizar` #44, #190, #351, #404.
+  6. **QA manual con la oficina (#300)**: omitir con motivo ⇒ toast con
+     «Completar vuelo» ⇒ COMPLETADO ⇒ sale de «Vuelos del periodo sin
+     completar» y entra a «Tacómetros omitidos · 1»; reporte por vuelo con la
+     línea en `notas_horas`; balance de septiembre del N4142R con «… con
+     tacómetro omitido por …». Después decidir con la oficina #301, #279,
+     #314, #318 y #320 (¿volaron? ⇒ omitir + «Iniciar y completar»; si no ⇒
+     cancelar).
+  **Rollback**: API ⇒ 0.0.80 (reaparecen los dos renglones viejos; el panel
+  nuevo los pinta genéricos; el 0.0.80 no lee las omisiones y esos tramos
+  vuelven a pedir llegada, PERO el CHECK sigue vivo: una llegada que el 0.0.80
+  escriba sobre un tramo omitido rebota 23514, así que ANTES de bajar el API
+  se deshacen las omisiones vivas —`DELETE …/taco/omitir`— o se revierte la
+  migración); panel ⇒ versión
+  anterior; migración ⇒ SOLO SQL Editor con el pie comentado (exportar antes
+  las omisiones) y REINICIAR el API (la sonda memoriza el «sí»). Las claves
+  retiradas `pistas_sin_gasto` y `tua_cobrada_sin_pagada` no se reusan nunca.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera

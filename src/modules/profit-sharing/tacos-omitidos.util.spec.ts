@@ -1,4 +1,5 @@
 import {
+  DETALLE_TACOS_OMITIDOS_FALLIDA,
   detalleTacosOmitidos,
   motivoOmisionCorto,
   resumenTacosOmitidos,
@@ -80,6 +81,7 @@ describe('tacos-omitidos.util (pre-cierre: renglón INFORMATIVO tacometros_omiti
         fecha_salida_plan: '2026-09-12T20:00:00+00:00',
         motivo: 'Falló el tacómetro',
         piloto_nombre: 'Luis Pérez',
+        escala_id: 'e300',
         omitido_por_nombre: 'Itzi',
         omitido_at: '2026-10-15T15:40:00+00:00',
       },
@@ -120,6 +122,19 @@ describe('tacos-omitidos.util (pre-cierre: renglón INFORMATIVO tacometros_omiti
     );
     expect(resumenTacosOmitidos(rows).tramos).toHaveLength(
       MAX_TRAMOS_EN_REVISION,
+    );
+  });
+
+  it('escala_id (invariante 81) sale de la fila; sin id ⇒ null (jamás inventado)', () => {
+    const { tramos } = resumenTacosOmitidos([
+      fila({ id: undefined as unknown as string }),
+    ]);
+    expect(tramos[0]).toHaveProperty('escala_id', null);
+  });
+
+  it('DETALLE_TACOS_OMITIDOS_FALLIDA: lectura fallida nunca dice «Ningún tramo…»', () => {
+    expect(DETALLE_TACOS_OMITIDOS_FALLIDA).toBe(
+      'No se pudo leer qué tramos tienen el tacómetro omitido.',
     );
   });
 
