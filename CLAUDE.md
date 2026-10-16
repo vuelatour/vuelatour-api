@@ -10140,7 +10140,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`complete`, `cancel`, cambiar `fecha_vuelo` hacia un mes cerrado,
       `clearTaco` de un COMPLETADO) por el mes contable. NO se bloquea:
       conciliación bancaria, facturas, comprobantes, tacómetros, notas,
-      inventario, PATCH de solo clasificación ni el % de socios.
+      inventario (salvo SALIDA/DEVOLUCION con avión: crean o ajustan el
+      gasto REFACCION), PATCH de solo clasificación ni el % de socios.
     - **Aditivos**: reparto `cierre {disponible, periodo, estado,
       cerrado_at, cerrado_por_nombre, reabierto_at, reabierto_por_nombre,
       version, coincide_con_snapshot, diferidos_salen, diferidos_entran,
@@ -10177,6 +10178,29 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `candado-servicios.cierre-mes.spec` (caja chica, ingresos, entregas),
       `alarma-eje-contable.spec`; ajustes en `ubicacion-balance-gasto.util.spec`
       y `cambio-fecha-gasto.util.spec`.
+    - **Revisión adversaria (16-oct-2026, antes del deploy)**: (1)
+      `fecha_contable` es GENERATED ALWAYS ⇒ `CAMPOS_NO_CLONABLES`
+      (`flights/clon-vuelo.util`) la retira: con la migración, `select('*')`
+      la trae y el INSERT del clon de `reassignAircraft` reventaba (TODA
+      reasignación de avión); `periodo_contable` SÍ viaja. Cualquier spread
+      futuro de una fila de `vuelo` hacia un INSERT/UPDATE debe retirarla.
+      (2) Candado en los INSERT DIRECTOS que no pasan por los servicios:
+      `createReembolso` (cobro negativo; mes contable del vuelo; el
+      reintento con llave existente no rebota), `generarPistas` (por
+      renglón: `ok:false` con el texto del 409) e inventario
+      `createMovimiento` (SALIDA y DEVOLUCION con avión, por
+      `fecha_movimiento`, después del replay). (3) Pre-cierre: un DIFERIDO
+      que alguien regresó a EN_VUELO cuenta en `vuelos_sin_completar` de su
+      mes CONTABLE (bloquea), si no el mes se cerraba con el vuelo fuera de
+      todos los libros. (4) `flights.update` solo evalúa el candado si la
+      fecha CAMBIA de verdad, y en un diferido revisa el mes REAL de antes y
+      de después (sus horas mueven la reserva de overhaul del reparto); lo
+      mismo `quotes.revise`. (5) `CLAVES_BLOQUEANTES_PRECIERRE` vive en
+      `profit-sharing.service` (fuente única de `listo` y de la previa).
+      NO se bloquea a propósito (decisión del contrato): conciliación,
+      incluido el `tc_gasto` DERIVADO que escribe al ligar un gasto USD con
+      un cargo MXN (mueve la columna MXN del balance de un mes cerrado, no
+      el reparto en USD).
 
 ## Convenciones NestJS
 
