@@ -1016,13 +1016,16 @@ export class InvoicesService {
       .range(f.offset, f.offset + f.limit - 1);
     // Fechas planas se anclan a hora Cancún (invariante #4): 'YYYY-MM-DD' a
     // secas corta en UTC y mueve vuelos de día/mes en el listado de pendientes.
-    // INICIO OFICIAL (invariante 86): un `desde` anterior (o ninguno) sube
-    // al inicio.
+    // INICIO OFICIAL (invariante 86): un `desde` anterior sube al inicio.
+    // Sin `desde` (revisión 16-oct): piso que CONSERVA los vuelos sin
+    // `fecha_vuelo` (una cotización sin fecha ya cobrada salía hoy en la
+    // lista y no puede desaparecer), mismo criterio que cotizaciones.
     const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio && !f.desde) {
+      q = q.or(`fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`);
+    }
     const desdePend =
-      inicio && (!f.desde || esAntesDelInicio(f.desde, inicio))
-        ? inicio
-        : f.desde;
+      inicio && f.desde && esAntesDelInicio(f.desde, inicio) ? inicio : f.desde;
     if (desdePend) {
       q = q.gte(
         'fecha_vuelo',

@@ -36,17 +36,17 @@ function armar(inicio: string | null) {
 }
 
 describe('InvoicesService — inicio oficial', () => {
-  it('pendientes: sin desde ⇒ gte corte; desde anterior sube; null ⇒ sin gte', async () => {
+  it('pendientes: sin desde ⇒ piso que conserva los sin fecha (revisión); desde anterior sube; null ⇒ sin gte', async () => {
     const a = armar(INICIO);
     await a.svc.listPendientes({ limit: 50, offset: 0 });
     expect(
       a.lleva(
         a.de('vuelo')[0],
-        'gte',
-        'fecha_vuelo',
-        '2026-09-01T00:00:00-05:00',
+        'or',
+        'fecha_vuelo.is.null,fecha_vuelo.gte.2026-09-01T00:00:00-05:00',
       ),
     ).toBe(true);
+    expect(a.de('vuelo')[0].ops.some((o) => o.m === 'gte')).toBe(false);
     const b = armar(INICIO);
     await b.svc.listPendientes({ desde: '2026-08-01', limit: 50, offset: 0 });
     expect(
@@ -57,9 +57,11 @@ describe('InvoicesService — inicio oficial', () => {
         '2026-09-01T00:00:00-05:00',
       ),
     ).toBe(true);
+    expect(b.de('vuelo')[0].ops.filter((o) => o.m === 'or')).toHaveLength(1); // solo el de «pagados o facturables»
     const c = armar(null);
     await c.svc.listPendientes({ limit: 50, offset: 0 });
     expect(c.de('vuelo')[0].ops.some((o) => o.m === 'gte')).toBe(false);
+    expect(c.de('vuelo')[0].ops.filter((o) => o.m === 'or')).toHaveLength(1);
   });
 
   it('recibidas: conserva las de fecha_emision null', async () => {
