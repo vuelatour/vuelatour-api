@@ -578,6 +578,20 @@ export interface ItemPrecierreCuentasSocios {
   [extra: string]: unknown;
 }
 
+/**
+ * Renglones del pre-cierre que BLOQUEAN el cierre (`listo`): FUENTE ÚNICA
+ * (revisión 16-oct-2026) — la previa del cierre de mes
+ * (`CierresService`) los lista con esta MISMA constante.
+ */
+export const CLAVES_BLOQUEANTES_PRECIERRE = [
+  'vuelos_sin_completar',
+  'tacos_en_revision',
+  'gastos_sin_tc',
+  'cobros_sin_tc',
+  'combustible_sin_avion',
+  'permisos_sin_avion',
+] as const;
+
 @Injectable()
 export class ProfitSharingService {
   constructor(
@@ -3036,6 +3050,37 @@ export class ProfitSharingService {
     ]) {
       if (r.error) throw new Error(r.error.message);
     }
+    // REVISIÓN (16-oct-2026, invariante 89): un vuelo DIFERIDO a este mes
+    // que alguien regresó a EN_VUELO (borrar un tacómetro de un COMPLETADO
+    // en un mes contable abierto está permitido) VOLÓ en otro mes: la
+    // consulta por `fecha_vuelo` no lo ve, `compute` solo lee COMPLETADO y
+    // CANCELADO y `decisionDiferir` solo difiere COMPLETADO ⇒ sin esto el mes
+    // se cerraba con ese vuelo FUERA de todos los libros y su fecha contable
+    // quedaba en el mes cerrado (sin poder completarlo: 409 MES_CERRADO).
+    // También es «sin completar» de ESTE mes ⇒ bloquea el cierre.
+    const pendientesData = [
+      ...((pendRes.data ?? []) as Array<Record<string, unknown>>),
+    ];
+    if (contable) {
+      const { data: pendDif, error: pendDifErr } = await sb
+        .from('vuelo')
+        .select('id, folio, estado, fecha_vuelo, aeronave_id')
+        .in('estado', [
+          'SOLICITUD',
+          'COTIZADO',
+          'RESERVA',
+          'CONFIRMADO',
+          'EN_VUELO',
+        ])
+        .not('periodo_contable', 'is', null)
+        .gte('fecha_contable', desdeTs)
+        .lte('fecha_contable', hastaTs);
+      if (pendDifErr) throw new Error(pendDifErr.message);
+      const ya = new Set(pendientesData.map((v) => v.id));
+      for (const v of (pendDif ?? []) as Array<Record<string, unknown>>) {
+        if (!ya.has(v.id)) pendientesData.push(v);
+      }
+    }
 
     // Tramos fuera de orden cronológico (el "regreso" sale antes que la ida):
     // casi siempre es un dedazo al capturar la fecha (caso real: folio 10).
@@ -3274,7 +3319,7 @@ export class ProfitSharingService {
       gastosEnCanceladosCount = (gastosCancRes.data ?? []).length;
     }
 
-    const vuelosSinCompletar = (pendRes.data ?? []).map((v) => ({
+    const vuelosSinCompletar = pendientesData.map((v) => ({
       id: v.id as string,
       folio: v.folio as number,
       estado: v.estado as string,
@@ -3869,7 +3914,7 @@ export class ProfitSharingService {
         ),
         this.vuelosCobradosSinFactura(
           [
-            ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
+            ...(pendientesData as unknown as VueloCobradoRow[]),
             ...(completados as VueloCobradoRow[]),
             ...(cancelados as VueloCobradoRow[]),
           ],
@@ -4312,14 +4357,7 @@ export class ProfitSharingService {
     // combustible sin avión (el gas del mes es por avión) y —desde el 0.0.77
     // (14-oct-2026, invariante 62)— permisos sin avión (el permiso lo carga
     // el avión). El resto es aviso (cobranza/conciliación son procesos).
-    const bloqueantes = [
-      'vuelos_sin_completar',
-      'tacos_en_revision',
-      'gastos_sin_tc',
-      'cobros_sin_tc',
-      'combustible_sin_avion',
-      'permisos_sin_avion',
-    ];
+    const bloqueantes: readonly string[] = CLAVES_BLOQUEANTES_PRECIERRE;
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))
       .every((i) => i.count === 0);

@@ -27,7 +27,7 @@ describe('ALARMA DE PARIDAD — eje contable de los lectores de dinero', () => {
       ).split('\n');
       const sinMarca: string[] = [];
       lineas.forEach((l, i) => {
-        if (!/\.(gte|gt|lt)\('(vuelo\.)?fecha_vuelo'/.test(l)) return;
+        if (!/\.(gte|gt|lte|lt)\('(vuelo\.)?fecha_vuelo'/.test(l)) return;
         const previas = lineas.slice(Math.max(0, i - 3), i).join('\n');
         if (!previas.includes('eje REAL a propósito (invariante 89)')) {
           sinMarca.push(`${i + 1}: ${l.trim()}`);

@@ -39,6 +39,7 @@
  */
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
+import { diaCortoCancun } from '../../common/mes-contable.util';
 import { redondearA } from '../../common/redondeo.util';
 import {
   ETIQUETAS_METODO_PAGO_SOCIO,
@@ -847,36 +848,8 @@ export function sufijoCierre(
   u: Pick<UtilidadMesSocios, 'origen' | 'cerrado_at'>,
 ): string {
   if (u.origen !== 'SNAPSHOT_CIERRE') return '';
-  const dia = typeof u.cerrado_at === 'string' ? diaCortoDe(u.cerrado_at) : '';
+  const dia = diaCortoCancun(u.cerrado_at);
   return dia ? ` · cierre del ${dia}` : ' · cierre del mes';
-}
-
-const MESES_CORTOS_CIERRE = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-];
-
-/** '16-oct' (día Cancún) de un timestamptz; '' si no se puede leer. */
-function diaCortoDe(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const dia = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Cancun',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(d);
-  return `${Number(dia.slice(8, 10))}-${MESES_CORTOS_CIERRE[Number(dia.slice(5, 7)) - 1]}`;
 }
 
 export function conceptoUtilidad(

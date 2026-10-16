@@ -35,7 +35,10 @@ import {
   Optional,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
+import {
+  CLAVES_BLOQUEANTES_PRECIERRE,
+  ProfitSharingService,
+} from '../profit-sharing/profit-sharing.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
@@ -87,14 +90,7 @@ export const ROLES_CIERRAN_MES = [Rol.ADMIN, Rol.FACTURACION] as const;
 export const ROLES_REABREN_MES = [Rol.ADMIN] as const;
 
 /** Los 6 renglones del pre-cierre que bloquean (`listo`). */
-export const CLAVES_BLOQUEANTES_PRECIERRE = [
-  'vuelos_sin_completar',
-  'tacos_en_revision',
-  'gastos_sin_tc',
-  'cobros_sin_tc',
-  'combustible_sin_avion',
-  'permisos_sin_avion',
-] as const;
+export { CLAVES_BLOQUEANTES_PRECIERRE };
 
 /** Tope de meses que lista `GET /v1/cierres` (desde el inicio oficial). */
 const MAX_MESES_LISTA = 36;

@@ -598,3 +598,26 @@ describe('PRE-CIERRE con el cierre de mes', () => {
     expect('cierre' in pre).toBe(false);
   });
 });
+
+describe('REVISIÓN 16-oct-2026 — diferido que alguien regresó a EN_VUELO', () => {
+  it('octubre: el diferido (voló en septiembre) que ya no está COMPLETADO es «sin completar» de OCTUBRE y BLOQUEA su cierre; septiembre no lo cuenta', async () => {
+    const t = mundo();
+    const v2 = t.vuelo.find((v) => v.id === V2) as Fila;
+    v2.estado = 'EN_VUELO';
+    const ps = reparto(t);
+    ps.ahora = () => new Date('2026-11-03T17:00:00Z');
+    const pre = await ps.preCierre(OCT);
+    const items = pre.items as Array<Record<string, unknown>>;
+    const sinCompletar = items.find(
+      (i) => i.clave === 'vuelos_sin_completar',
+    ) as { count: number; vuelos?: Array<{ id: string }> };
+    expect(sinCompletar.count).toBe(1);
+    expect(pre.listo).toBe(false);
+    // Septiembre (su mes REAL) lo sigue viendo por fecha_vuelo, como antes.
+    const preSep = await ps.preCierre(SEP);
+    const sep = (preSep.items as Array<Record<string, unknown>>).find(
+      (i) => i.clave === 'vuelos_sin_completar',
+    ) as { count: number };
+    expect(sep.count).toBe(1);
+  });
+});
