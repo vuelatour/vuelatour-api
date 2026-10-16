@@ -268,6 +268,12 @@ export interface ReporteVueloTramoPayload {
   piloto?: string | null;
   copiloto?: string | null;
   apoyos?: string[];
+  // Tacómetro OMITIDO por la oficina (15-oct-2026, invariante 79, ADITIVOS
+  // al final; pyservices ignora llaves extra y `horas` sigue null).
+  taco_omitido?: boolean;
+  taco_omitido_motivo?: string | null;
+  taco_omitido_por_nombre?: string | null;
+  taco_omitido_at?: string | null;
 }
 // ===== Bitácoras de vuelo del avión (PDF): una TIRA (página) por libro —
 // planeador, motor, hélice — con las mismas filas y distinto tiempo

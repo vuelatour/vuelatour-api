@@ -4,6 +4,11 @@ import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
+  colsTacoOmitido,
+  tacoOmitidoDisponible,
+} from '../../common/taco-omitido-disponible.util';
+import { esTramoOmitido, faltanLlegadas } from '../../common/taco-omitido.util';
+import {
   MANT_HITO_COLS,
   NOTA_SERVICIO_AUTOMATICO,
   hitoYaTieneOrden,
@@ -200,10 +205,14 @@ export class AlertsService {
     // salida de estos tramos la llena el sistema (propagación), así que el
     // aviso es operativo y pide capturar la LLEGADA al aterrizar, nunca
     // foto de salida (invariante "una foto por escala").
+    // Tacómetro omitido (invariante 79): la columna solo con la migración.
+    const colsOmitido = colsTacoOmitido(
+      await tacoOmitidoDisponible(this.supabase.service),
+    );
     const { data: tramos, error: errTramos } = await this.supabase.service
       .from('escala')
       .select(
-        'id, orden, origen_iata, destino_iata, fecha_salida_plan, piloto_id, taco_llegada, vuelo:vuelo_id!inner(id, folio, piloto_id, fecha_vuelo, estado, es_externo)',
+        `id, orden, origen_iata, destino_iata, fecha_salida_plan, piloto_id, taco_llegada, vuelo:vuelo_id!inner(id, folio, piloto_id, fecha_vuelo, estado, es_externo)${colsOmitido}` as 'id, orden, origen_iata, destino_iata, fecha_salida_plan, piloto_id, taco_llegada, vuelo:vuelo_id!inner(id, folio, piloto_id, fecha_vuelo, estado, es_externo)',
       )
       .is('cancelada_at', null)
       .gt('orden', 1)
@@ -229,6 +238,8 @@ export class AlertsService {
         (t.piloto_id as string | null) ?? (vuelo.piloto_id as string | null);
       if (!pilotoId) continue;
       if (t.taco_llegada !== null) continue; // ese tramo ya voló
+      // Tacómetro OMITIDO por la oficina (invariante 79): no se persigue.
+      if (esTramoOmitido(t as unknown as Record<string, unknown>)) continue;
       // Fecha incoherente (tramo 2+ "antes" de la salida del vuelo, típico
       // dato viejo tras reagendar la ida): mejor callar que avisar mal.
       const salidaVuelo = vuelo.fecha_vuelo
@@ -1652,22 +1663,63 @@ export class AlertsService {
     if (enVuelo.error) throw new Error(enVuelo.error.message);
     if (preVuelo.error) throw new Error(preVuelo.error.message);
     const data = [...(enVuelo.data ?? []), ...(preVuelo.data ?? [])];
+    // EN_VUELO cuyas lecturas faltantes están OMITIDAS (invariante 79): el
+    // aviso no dice «faltan lecturas», dice que lo complete la oficina.
+    const soloOmitidos = await this.vuelosSoloConOmitidos(
+      (enVuelo.data ?? []).map((v) => v.id as string),
+    );
 
     const semana = this.isoWeek(new Date());
     for (const v of data ?? []) {
       const esEnVuelo = v.estado === 'EN_VUELO';
+      const porOmision = esEnVuelo && soloOmitidos.has(v.id as string);
       await this.dispatch(config, `zombi:${v.id as string}:${semana}`, {
         tipo: 'alerta_sistema',
         titulo: esEnVuelo
           ? `Vuelo #${v.folio as number} sigue EN VUELO (fecha pasada)`
           : `Vuelo #${v.folio as number} quedó ${v.estado as string} y su fecha ya pasó`,
-        cuerpo: esEnVuelo
-          ? `${v.origen_iata as string} → ${v.destino_iata as string}: faltan lecturas de llegada; complétalo o ajusta en Tacómetros en vivo. Sus horas no entran al cierre hasta completarse.`
-          : `${v.origen_iata as string} → ${v.destino_iata as string}: complétalo si voló, reagéndalo o cancélalo. Si queda así, no cuenta en el cierre.`,
+        cuerpo: porOmision
+          ? `${v.origen_iata as string} → ${v.destino_iata as string}: sus lecturas faltantes están OMITIDAS por la oficina (tacómetro omitido). Complétalo desde el detalle del vuelo para que entre al cierre.`
+          : esEnVuelo
+            ? `${v.origen_iata as string} → ${v.destino_iata as string}: faltan lecturas de llegada; complétalo o ajusta en Tacómetros en vivo. Sus horas no entran al cierre hasta completarse.`
+            : `${v.origen_iata as string} → ${v.destino_iata as string}: complétalo si voló, reagéndalo o cancélalo. Si queda así, no cuenta en el cierre.`,
         data: { vuelo_id: v.id, folio: v.folio, estado: v.estado },
         link: `/admin/flights/${v.id as string}`,
       });
     }
+  }
+
+  /**
+   * Vuelos (de `ids`) cuyos tramos vivos ya no exigen ninguna llegada porque
+   * lo que falta está con tacómetro OMITIDO (invariante 79): `faltanLlegadas`
+   * de la fuente única es false y hay al menos un omitido. UNA consulta en
+   * lote. Sin la migración, o si la lectura falla, conjunto vacío (el aviso
+   * sale con el texto de siempre: best-effort, nunca tumba la alerta).
+   */
+  private async vuelosSoloConOmitidos(ids: string[]): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (ids.length === 0) return out;
+    if (!(await tacoOmitidoDisponible(this.supabase.service))) return out;
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(`vuelo_id, orden, taco_llegada${colsTacoOmitido(true)}`)
+      .in('vuelo_id', ids)
+      .is('cancelada_at', null);
+    if (error) {
+      this.logger.warn(
+        `vuelo_estancado: no se pudieron leer los tramos omitidos (${error.message}); el aviso sale con el texto de siempre`,
+      );
+      return out;
+    }
+    const porVuelo = new Map<string, Array<Record<string, unknown>>>();
+    for (const e of (data ?? []) as unknown as Array<Record<string, unknown>>) {
+      const id = e.vuelo_id as string;
+      porVuelo.set(id, [...(porVuelo.get(id) ?? []), e]);
+    }
+    for (const [id, escalas] of porVuelo) {
+      if (!faltanLlegadas(escalas) && escalas.some(esTramoOmitido)) out.add(id);
+    }
+    return out;
   }
 
   /**

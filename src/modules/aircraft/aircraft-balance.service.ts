@@ -76,6 +76,15 @@ import {
 // CLAVE (lector único best-effort + fuente pura del texto); ningún número.
 import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
 import {
+  colsTacoOmitido,
+  tacoOmitidoDisponible,
+} from '../../common/taco-omitido-disponible.util';
+import {
+  esTramoOmitido,
+  idsOmitidoPor,
+  textoTacoOmitido,
+} from '../../common/taco-omitido.util';
+import {
   claveLibro,
   claveOtrosMovimientos,
 } from '../../common/clave-cliente.util';
@@ -319,6 +328,10 @@ interface EscalaRow {
   taco_llegada_obs: string | null;
   taco_obs_updated_by: string | null;
   taco_obs_updated_at: string | null;
+  /** Tacómetro OMITIDO por la oficina (invariante 79); ausentes sin migración. */
+  taco_omitido_at?: string | null;
+  taco_omitido_por?: string | null;
+  taco_omitido_motivo?: string | null;
 }
 
 interface CobroRow {
@@ -1879,6 +1892,8 @@ export class AircraftBalanceService {
     // TUA de oficina (13-oct-2026, invariante 66): SOLO la consulta de gastos
     // de vuelos la lee (es la única que separa TUA en la fila del vuelo).
     const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
+    // Tacómetro omitido (invariante 79): columnas solo con la migración.
+    const colsOmitido = colsTacoOmitido(await tacoOmitidoDisponible(sb));
     const vacio = { data: [], error: null } as const;
     const [
       escalasRes,
@@ -1894,7 +1909,7 @@ export class AircraftBalanceService {
         ? sb
             .from('escala')
             .select(
-              'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, cancelada_at, solo_operativa, es_ferry, fecha_salida_plan, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at',
+              `id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, cancelada_at, solo_operativa, es_ferry, fecha_salida_plan, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at${colsOmitido}` as 'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, cancelada_at, solo_operativa, es_ferry, fecha_salida_plan, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at',
             )
             .in('vuelo_id', vueloIds)
             // Tramos cancelados INCLUIDOS (verificación 28-ago): el mapa
@@ -2050,6 +2065,13 @@ export class AircraftBalanceService {
         }
       }
     }
+    // Quién omitió cada tacómetro (invariante 79): en lote y TOLERANTE
+    // (`fetchNombresUsuarios` nunca lanza: un nombre jamás tumba el libro).
+    // Sin omitidos ⇒ ninguna consulta.
+    const nombresOmitio = await fetchNombresUsuarios(
+      sb,
+      idsOmitidoPor(escalas.filter((e) => e.cancelada_at == null)),
+    );
     const cobros = (cobrosRes.data ?? []) as unknown as CobroRow[];
     const gastosVuelo = (gastosVueloRes.data ?? []) as unknown as GastoRow[];
     const gastosAvionCrudos = (gastosAvionRes.data ??
@@ -3741,7 +3763,35 @@ export class AircraftBalanceService {
       }
       // (El combustible ya no se vigila POR VUELO: la vigilancia es mensual
       // por avión — ver pendientes de la hoja "combustible".)
-      if (O == null && !esExterno && !cancelado && !soloGastosCancelado) {
+      // Tacómetro OMITIDO por la oficina (invariante 79): se DICE, nunca
+      // como «pendiente» de captura — una línea por tramo de ESTE avión.
+      if (!esExterno && !cancelado && !soloGastosCancelado) {
+        for (const e of escalasDelAvion) {
+          if (!esTramoOmitido(e)) continue;
+          const texto = textoTacoOmitido({
+            nombre: e.taco_omitido_por
+              ? (nombresOmitio.get(e.taco_omitido_por) ?? null)
+              : null,
+            at: e.taco_omitido_at ?? null,
+            motivo: e.taco_omitido_motivo ?? null,
+          });
+          pendientes.push(
+            `${etiqueta}: tramo ${e.origen_iata ?? '?'}→${e.destino_iata ?? '?'} con ${texto} — no suma horas`,
+          );
+        }
+      }
+      // «Sin tacómetros» SOLO si queda algún tramo del avión sin lecturas que
+      // NO esté omitido (sin tramos del avión: como siempre).
+      const quedaSinLecturaNoOmitido =
+        escalasDelAvion.length === 0 ||
+        escalasDelAvion.some((e) => !esTramoOmitido(e));
+      if (
+        O == null &&
+        quedaSinLecturaNoOmitido &&
+        !esExterno &&
+        !cancelado &&
+        !soloGastosCancelado
+      ) {
         pendientes.push(
           yaVolo
             ? `${etiqueta}: sin tacómetros — horas voladas vacías`

@@ -18,6 +18,14 @@ import {
 } from '../../common/categoria-gasto.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
+import {
+  colsTacoOmitido,
+  tacoOmitidoDisponible,
+} from '../../common/taco-omitido-disponible.util';
+import {
+  esTramoOmitido,
+  textoTacoOmitido,
+} from '../../common/taco-omitido.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
@@ -129,6 +137,8 @@ export class FlightReportService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!v) throw new NotFoundException(`Vuelo ${flightId} not found`);
+    // Tacómetro omitido (invariante 79): columnas solo con la migración.
+    const colsOmitido = colsTacoOmitido(await tacoOmitidoDisponible(sb));
 
     const [
       { data: cliente },
@@ -155,7 +165,7 @@ export class FlightReportService {
       sb
         .from('escala')
         .select(
-          'id, orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id, piloto_id, copiloto_id',
+          `id, orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id, piloto_id, copiloto_id${colsOmitido}` as 'id, orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id, piloto_id, copiloto_id',
         )
         .eq('vuelo_id', flightId)
         // Tramos cancelados fuera del reporte: no volaron (motivo visible en
@@ -211,8 +221,9 @@ export class FlightReportService {
     const userIds = [
       v.piloto_id,
       v.copiloto_id,
+      // + quien omitió el tacómetro (invariante 79), en el MISMO lote.
       ...((escalasRes.data ?? []) as Array<Record<string, unknown>>).flatMap(
-        (e) => [e.piloto_id, e.copiloto_id],
+        (e) => [e.piloto_id, e.copiloto_id, e.taco_omitido_por],
       ),
       ...apoyosRows.map((a) => a.usuario_id),
     ].filter(Boolean) as string[];
@@ -277,6 +288,18 @@ export class FlightReportService {
         piloto: nombreDe(e.piloto_id) ?? nombreDe(v.piloto_id),
         copiloto: nombreDe(e.copiloto_id) ?? nombreDe(v.copiloto_id),
         apoyos: [...apoyosVuelo, ...apoyosTramo],
+        // Tacómetro OMITIDO (invariante 79, ADITIVOS al final): se DICE,
+        // nunca «pendiente»; `horas` sigue null (aporta 0 h).
+        taco_omitido: esTramoOmitido(e),
+        taco_omitido_motivo: esTramoOmitido(e)
+          ? ((e.taco_omitido_motivo as string | null) ?? null)
+          : null,
+        taco_omitido_por_nombre: esTramoOmitido(e)
+          ? nombreDe(e.taco_omitido_por)
+          : null,
+        taco_omitido_at: esTramoOmitido(e)
+          ? ((e.taco_omitido_at as string | null) ?? null)
+          : null,
       };
     });
 
@@ -308,6 +331,18 @@ export class FlightReportService {
     if (ferries > 0) {
       notasHoras.push(
         `${ferries} tramo${ferries === 1 ? '' : 's'} ferry (sin pasajeros) dentro del itinerario operativo.`,
+      );
+    }
+    // Tramos con tacómetro OMITIDO (invariante 79): UNA línea por tramo con
+    // quién, cuándo y por qué — sus horas no se contaron (0 h).
+    for (const t of tramos) {
+      if (!t.taco_omitido) continue;
+      notasHoras.push(
+        `Tramo ${t.orden} (${t.ruta}): ${textoTacoOmitido({
+          nombre: t.taco_omitido_por_nombre,
+          at: t.taco_omitido_at,
+          motivo: t.taco_omitido_motivo,
+        })} — sus horas no se contaron.`,
       );
     }
     if (horasCotizadas != null && horasVoladas != null) {
