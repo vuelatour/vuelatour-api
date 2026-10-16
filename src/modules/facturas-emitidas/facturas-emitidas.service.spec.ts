@@ -2103,6 +2103,70 @@ describe('FacturasEmitidasService — cobro_ids (facturas por cobro, 16-oct-2026
     ).toBe('FACTURA_NO_VIGENTE');
   });
 
+  it('carrera (revisión 16-oct): un cobro marcado recibe OTRA factura entre la validación y el UPDATE ⇒ no se pisa; crear deshace todo con 409 COBRO_CON_OTRA_FACTURA y editar responde 409 COBROS_NO_ASIGNADOS con el id', async () => {
+    // El trigger A no mira si el cobro ya tenía factura: el UPDATE del
+    // service solo liga los que siguen en null y compara el conteo.
+    const simularCarrera = (svc: unknown, db: ReturnType<typeof fakeDb>) => {
+      const privado = svc as {
+        cobrosValidadosParaFactura: (p: unknown) => Promise<unknown>;
+      };
+      const original = privado.cobrosValidadosParaFactura.bind(privado);
+      jest
+        .spyOn(privado, 'cobrosValidadosParaFactura')
+        .mockImplementation(async (p: unknown) => {
+          const r = await original(p);
+          // Otra pestaña liga c3 a otra factura justo después de validar.
+          db.tablas.cobro_vuelo.find((c) => c.id === c3)!.factura_emitida_id =
+            'f-otra';
+          return r;
+        });
+    };
+    const alta = armar(mundo332());
+    simularCarrera(alta.svc, alta.db);
+    const e = await codigoDe(
+      alta.svc.crear(
+        segunda({ cobro_ids: [c2, c3, c4] }),
+        { pdf: [PDF()] },
+        actor,
+      ),
+    );
+    expect(e.status).toBe(409);
+    expect(e.code).toBe('COBRO_CON_OTRA_FACTURA');
+    expect(e.body.details).toEqual({ cobro_ids: [c3] });
+    // Se deshizo todo: la factura no existe, c2/c4 volvieron a null y c3 conserva la otra.
+    expect(
+      alta.db.tablas.factura_emitida.map((f) => f.folio as string),
+    ).toEqual(['0420']);
+    expect([c2, c3, c4].map((c) => facturaDe(alta.db, c))).toEqual([
+      null,
+      'f-otra',
+      null,
+    ]);
+
+    const edicion = armar(mundo332());
+    simularCarrera(edicion.svc, edicion.db);
+    const e2 = await codigoDe(
+      edicion.svc.editar(
+        F0420,
+        JSON.stringify({ cobro_ids: [c1, c2, c3], notas: 'guardada' }),
+        undefined,
+        actor,
+      ),
+    );
+    expect(e2.status).toBe(409);
+    expect(e2.code).toBe('COBROS_NO_ASIGNADOS');
+    expect(String(e2.body.message)).toBe(
+      'La factura se guardó, pero no se pudieron asignar los cobros: Uno de los cobros marcados acaba de recibir otra factura (o ya no existe). Vuelve a intentarlo desde Editar.',
+    );
+    expect(e2.body.details).toEqual({ factura_id: F0420, cobro_ids: [c3] });
+    expect(edicion.db.tablas.factura_emitida[0].notas).toBe('guardada');
+    expect([c1, c2, c3].map((c) => facturaDe(edicion.db, c))).toEqual([
+      F0420,
+      F0420,
+      'f-otra',
+    ]);
+  });
+
   it('quitar un vuelo suelta sus cobros y avisa COBROS_DESLIGADOS; cancelar y eliminar avisan con n; reactivar NO re-liga y avisa COBROS_SIN_FACTURA con el remate', async () => {
     const quita = armar(mundo332());
     const r = await quita.svc.editar(

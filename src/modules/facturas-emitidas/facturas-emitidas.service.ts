@@ -2841,14 +2841,38 @@ export class FacturasEmitidasService {
     // trigger A exige la liga del vuelo). Si rebota (carrera: un cobro se
     // acaba de ligar a otra factura, se reembolsó…) se deshace TODO como
     // cuando falla el puente (el borrado duro limpia la liga por FK).
+    // Revisión 16-oct: el trigger A no sabe si el cobro YA tenía otra factura
+    // (una liga concurrente entre la validación y este UPDATE la pisaría en
+    // silencio): solo se ligan los que siguen SIN factura y, si falta alguno,
+    // se deshace todo y responde el mismo 409 COBRO_CON_OTRA_FACTURA.
     if (cobroIds.length > 0) {
-      const { error: cobErr } = await this.sb
+      const { data: ligados, error: cobErr } = await this.sb
         .from('cobro_vuelo')
         .update({ factura_emitida_id: id })
-        .in('id', cobroIds);
-      if (cobErr) {
+        .is('factura_emitida_id', null)
+        .in('id', cobroIds)
+        .select('id');
+      const faltaron = cobErr
+        ? []
+        : cobroIds.filter(
+            (c) =>
+              !((ligados ?? []) as Array<{ id: string }>).some(
+                (l) => l.id === c,
+              ),
+          );
+      if (cobErr || faltaron.length > 0) {
         await this.sb.from('factura_emitida').delete().eq('id', id);
         await this.borrarRecienSubidos(subidos.map((s) => s.path));
+        if (!cobErr) {
+          throw new ConflictException({
+            message:
+              faltaron.length === 1
+                ? 'Uno de los cobros marcados acaba de recibir otra factura (o ya no existe). Recarga la página y vuelve a marcarlos.'
+                : `${faltaron.length} de los cobros marcados acaban de recibir otra factura (o ya no existen). Recarga la página y vuelve a marcarlos.`,
+            error: 'COBRO_CON_OTRA_FACTURA',
+            details: { cobro_ids: faltaron },
+          });
+        }
         const fallo = leerErrorCobroFactura(cobErr);
         if (fallo) throw errorCobroFactura(fallo, { etiqueta });
         throw new Error(
@@ -3188,25 +3212,42 @@ export class FacturasEmitidasService {
       }
     }
     if (cobrosEntran.length > 0) {
-      const { error } = await this.sb
+      // Revisión 16-oct: solo entran los que siguen SIN factura (una liga
+      // concurrente a otra factura no se pisa en silencio); si falta alguno,
+      // la factura ya quedó guardada y se responde 409 con los ids.
+      const { data: ligados, error } = await this.sb
         .from('cobro_vuelo')
         .update({ factura_emitida_id: id })
-        .in('id', cobrosEntran);
-      if (error) {
-        const fallo = leerErrorCobroFactura(error);
-        const motivo = fallo
-          ? (
-              errorCobroFactura(fallo, {
-                etiqueta: etiquetaFactura(actual.serie, actual.folio),
-              }).getResponse() as { message: string }
-            ).message
-          : error.message;
+        .is('factura_emitida_id', null)
+        .in('id', cobrosEntran)
+        .select('id');
+      const faltaron = error
+        ? []
+        : cobrosEntran.filter(
+            (c) =>
+              !((ligados ?? []) as Array<{ id: string }>).some(
+                (l) => l.id === c,
+              ),
+          );
+      if (error || faltaron.length > 0) {
+        const fallo = error ? leerErrorCobroFactura(error) : null;
+        const motivo = error
+          ? fallo
+            ? (
+                errorCobroFactura(fallo, {
+                  etiqueta: etiquetaFactura(actual.serie, actual.folio),
+                }).getResponse() as { message: string }
+              ).message
+            : error.message
+          : faltaron.length === 1
+            ? 'Uno de los cobros marcados acaba de recibir otra factura (o ya no existe).'
+            : `${faltaron.length} de los cobros marcados acaban de recibir otra factura (o ya no existen).`;
         throw new ConflictException({
           message: `La factura se guardó, pero no se pudieron asignar los cobros: ${motivo} Vuelve a intentarlo desde Editar.`,
           error: 'COBROS_NO_ASIGNADOS',
           details: {
             factura_id: id,
-            cobro_ids: cobrosEntran,
+            cobro_ids: error ? cobrosEntran : faltaron,
             ...fallo?.details,
           },
         });
