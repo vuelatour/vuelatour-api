@@ -11187,7 +11187,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   commit de la ruta + la revisión + el renumerado a 85/0.0.83. Push a `main`
   ⇒ `GET /v1/version` = `0.0.83`. Verificar el arranque (ciclo de módulos
   flights ↔ quotes con `forwardRef`) con ese GET.
-- **16-oct-2026 — 0.0.84, migración `20261016000002` PENDIENTE** (inicio
+- **16-oct-2026 — 0.0.84, migración `20261016000002` APLICADA (16-oct-2026 ~06:09 Cancún por MCP tras API 0.0.84 y panel dbf9cc1; dry-run DRYRUN_OK, historial `20261016110927`, advisors sin novedades)** (inicio
   oficial del sistema = 1-sep-2026, invariante 86; rama `inicio-oficial`
   sobre `6da2176c` = 0.0.83 en prod). La migración NO tiene DDL: siembra la
   fila `fecha_inicio_oficial` (`["2026-09-01"]`, activa) y ES EL
