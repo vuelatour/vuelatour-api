@@ -65,6 +65,7 @@ import type { FacturaDeGasto } from '../facturacion/gasto-facturas.util';
 import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
+import { gastoFacturasDisponible } from '../../common/gasto-facturas-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { LigaCargosAGasto } from '../conciliacion/conciliacion.service';
 import { errorCargosAGastoNoDisponible } from '../../common/omision-cargos-disponible.util';
@@ -943,13 +944,19 @@ export class ExpensesService {
    * oficina; ADITIVO, 16-oct-2026, invariante 87): `facturas` (principal
    * primero), `facturas_avisos` (Σ facturas vs monto, no bloqueante) y
    * `facturas_multiples` (la migración está aplicada ⇒ el panel AGREGA en
-   * vez de reemplazar). `null` si la lectura falla (el detalle no se cae).
+   * vez de reemplazar). Si la lectura falla, el detalle no se cae y lleva
+   * `facturas_error: true` + `facturas_multiples` (de la sonda) SIN
+   * `facturas`: así el panel distingue «falló la lectura» (ofrece Reintentar)
+   * de un API previo sin las llaves.
    */
-  async facturasDelGasto(gasto: Record<string, unknown>): Promise<{
-    facturas: FacturaDeGasto[];
-    facturas_avisos: string[];
-    facturas_multiples: boolean;
-  } | null> {
+  async facturasDelGasto(gasto: Record<string, unknown>): Promise<
+    | {
+        facturas: FacturaDeGasto[];
+        facturas_avisos: string[];
+        facturas_multiples: boolean;
+      }
+    | { facturas_error: true; facturas_multiples: boolean }
+  > {
     try {
       const det = await detalleFacturasDeGasto(this.supabase.service, {
         id: String(gasto.id),
@@ -967,7 +974,10 @@ export class ExpensesService {
       this.logger.warn(
         `No se pudieron leer las facturas del gasto ${String(gasto.id)}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
+      const multiples = await gastoFacturasDisponible(
+        this.supabase.service,
+      ).catch(() => false);
+      return { facturas_error: true, facturas_multiples: multiples };
     }
   }
 

@@ -58,7 +58,21 @@ describe('GET /v1/expenses/:id — facturas del gasto', () => {
     expect(svc.facturasDelGasto).not.toHaveBeenCalled();
   });
 
-  it('si la lectura de facturas falla (null) el detalle sale como antes', async () => {
+  it('si la lectura falla, el detalle lleva facturas_error + facturas_multiples sin `facturas`', async () => {
+    const { ctrl } = armar({ facturas_error: true, facturas_multiples: true });
+    const r = await ctrl.getOne(G, {
+      userId: 'u',
+      rol: Rol.ADMIN,
+    } as AuthenticatedUser);
+    expect(r).not.toHaveProperty('facturas');
+    expect(r).toMatchObject({
+      id: G,
+      facturas_error: true,
+      facturas_multiples: true,
+    });
+  });
+
+  it('si el servicio devolviera null el detalle sale como antes', async () => {
     const { ctrl } = armar(null);
     const r = await ctrl.getOne(G, {
       userId: 'u',
