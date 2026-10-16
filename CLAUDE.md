@@ -9181,6 +9181,68 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `pre-cierre-vuelos-sin-gasto.spec` y `pre-cierre-vuelos-sin-factura.spec`
       (ya no nombran `pistas_sin_gasto`).
 
+81. **PRE-CIERRE: `ids` POR RENGLÓN PARA «Resolver →» EN ÁMBAR (15-oct-2026,
+    API 0.0.81, PEDIDO 2, sin migración).** Pedido textual del cliente con
+    la captura de «Gastos sin avión asignado (bandeja) · 6 … Resolver →»:
+    «el botón de Resolver estaría genial que te marque bien lo que se debe
+    resolver en amarillo, para poder saber dónde atacar». El panel lleva
+    «Resolver →» a la pantalla de SIEMPRE (su filtro + su periodo) y resalta
+    en ámbar las filas cuyo id viaja; el API solo dice QUÉ registros cuenta.
+    NADA se resuelve solo (el foco es solo lectura).
+    - **Campo ADITIVO** `ids: string[]` (+ `ids_truncado: true` SOLO cuando
+      se cortó) en los 11 renglones que cuentan GASTOS o MOVIMIENTOS
+      bancarios y no traían ningún id: `gastos_sin_avion` (`sinAvion`),
+      `permisos_sin_avion`, `combustible_sin_avion`, `repartos_incoherentes`,
+      `fijos_con_avion`, `matricula_recibo_distinta`,
+      `duplicados_sin_resolver`, `gastos_bancarios_sin_conciliar`,
+      `gastos_sin_tc` (`sinTcSinOficial`), `gastos_sin_comprobante`
+      (`sinFacturar`) —ids de `gasto`— y `sin_conciliar` (`movs`, ids de
+      `movimiento_bancario`). `ids` = los MISMOS registros que suman en
+      `count`, en el orden de la lista (la lectura de `gasto` del pre-cierre
+      no lleva `order()`: el panel NO depende del orden), sin repetidos;
+      viaja SIEMPRE en esos 11 (también `[]` con `count: 0`) y
+      `ids.length === count` salvo el tope. Las dos llaves van como ÚLTIMAS
+      del objeto (`...idsPrecierre(lista)`).
+    - **Fuente única**: helper PURO `profit-sharing/pre-cierre-ids.util.ts`
+      (`idsPrecierre`, `MAX_IDS_PRECIERRE = 500`): toma `id` string no vacío
+      (salta lo demás, jamás inventa), dedupe conservando el primer lugar,
+      `slice(0, 500)`; `ids_truncado` solo si había MÁS de 500 únicos. Ni
+      una consulta nueva, ni un filtro, ni `count`, ni `titulo`, ni
+      `bloqueantes`/`listo` cambian; el controller tampoco.
+    - **NO llevan `ids`** (el panel deriva los ids de su propio arreglo):
+      los renglones con `vuelos[].id` (`vuelos_sin_completar`,
+      `tacos_en_revision`, `fechas_tramos_incoherentes`, `cobros_pendientes`,
+      `vuelos_cobrados_de_mas`, `vuelos_sin_precio`,
+      `seguimiento_cotizacion_pendiente`, `extras_sin_desglose`,
+      `cobros_sin_tc`, `vuelos_sin_gasto_operaciones`,
+      `externos_sin_honorario`, `vuelos_cobrados_sin_factura` y los dos
+      inversos `tua_pagada_sin_cobrar` / `transporte_pagado_sin_cotizar`,
+      cuyo «Resolver →» es la lista de Cotizaciones del periodo),
+      `cobros_bancarios_sin_conciliar` (`cobros[].id`),
+      `gastos_usd_tc_fuera_de_lugar` (`ligas[].movimiento_id`),
+      `grupo_con_saldo` / `sobres_descuadrados` (`grupo_id`), los de socios
+      (`socios[].socio.id`), los informativos (`cobros_en_cancelados`,
+      `gastos_en_cancelados`, `gastos_tc_oficial`, `cobros_tc_oficial`,
+      `movimientos_omitidos`) y el futuro `tacometros_omitidos` (PEDIDO 1:
+      informativo, sin `ids`). Los retirados por la 80 no vuelven.
+    - **`tacos_en_revision.tramos[].escala_id`** (ADITIVO, última llave del
+      tramo; `texto(r.id)` de la fila de `escala` que YA se leía, null si no
+      trae id): Tacómetros en vivo puede resaltar el TRAMO exacto; el
+      resaltado de fase 1 es por vuelo (`vuelos[].id`).
+    - **Skew**: panel viejo ignora `ids`/`escala_id`; panel nuevo con API
+      viejo pinta la franja «N por resolver» sin resaltar los 11 renglones
+      de gasto/movimiento (los de `vuelos[]` resaltan igual). Nada rompe.
+    - **Hueco PREEXISTENTE** (no es de este lote): la lectura de `gasto` del
+      pre-cierre no está paginada (PostgREST corta en 1000 sin avisar; prod
+      lleva ~430 gastos/mes). Si se corrige, `count` e `ids` lo heredan.
+    - **Specs**: `pre-cierre-ids.util.spec` (orden, dedupe, no-string, tope
+      500 exacto/501, `ids_truncado` solo al cortar, `[]` sin llave extra),
+      `profit-sharing.service.pre-cierre-ids.spec` (BD en memoria: los 11
+      con `ids` = los contados y última llave; BD vacía ⇒ `[]`; 501 gastos
+      sin avión ⇒ 500 ids + `ids_truncado` + `count` 501; los demás
+      renglones sin `ids`) y `tacos-revision.util.spec` (`escala_id`). Se
+      adaptó `pre-cierre-vuelos-sin-factura.spec` (permisos con `ids`).
+
 82. **CAJA CHICA: UBICACIÓN EN EL BALANCE DE CADA GASTO DEL FONDO
     (15-oct-2026, sin migración).** Pedido del cliente con la captura del
     fondo de Pablo Canales («Gasto en efectivo #436 · Taxi / estacionamiento

@@ -131,6 +131,7 @@ import {
   resumenTacosEnRevision,
   type EscalaEnRevisionRow,
 } from './tacos-revision.util';
+import { idsPrecierre } from './pre-cierre-ids.util';
 import {
   CATEGORIAS_GASTO_OPERACIONES,
   CLAVE_PRECIERRE_VUELOS_SIN_GASTO,
@@ -3400,6 +3401,8 @@ export class ProfitSharingService {
         monto_mxn: round2(
           gasSinAvion.reduce((acc, g) => acc + Number(g.monto ?? 0), 0),
         ),
+        // PEDIDO 2 (invariante 81): ids de los gastos contados, al final.
+        ...idsPrecierre(gasSinAvion),
       },
       {
         clave: 'permisos_sin_avion',
@@ -3410,6 +3413,7 @@ export class ProfitSharingService {
         monto_mxn: montoPermisosSinAvion('MXN'),
         // Solo si hay permisos en dólares (jamás se suman monedas).
         ...(permisosSinAvionUsd > 0 ? { monto_usd: permisosSinAvionUsd } : {}),
+        ...idsPrecierre(permisosSinAvion),
       },
       {
         clave: 'repartos_incoherentes',
@@ -3417,6 +3421,7 @@ export class ProfitSharingService {
         detalle:
           'Se editó el monto después de repartir: corrige el reparto en Otros gastos (restaría dinero inexistente).',
         count: repartosIncoherentes.length,
+        ...idsPrecierre(repartosIncoherentes),
       },
       {
         clave: 'gastos_sin_avion',
@@ -3424,6 +3429,7 @@ export class ProfitSharingService {
         detalle:
           'No se restan a ningún avión en el reparto. Meta: bandeja vacía.',
         count: sinAvion.length,
+        ...idsPrecierre(sinAvion),
       },
       {
         clave: 'fijos_con_avion',
@@ -3431,6 +3437,7 @@ export class ProfitSharingService {
         detalle:
           'Los FIJOS se prorratean entre TODA la flota aunque tengan avión: quítales el avión o cámbiales la categoría para que resten donde corresponde.',
         count: fijosConAvion.length,
+        ...idsPrecierre(fijosConAvion),
       },
       {
         clave: 'matricula_recibo_distinta',
@@ -3438,6 +3445,7 @@ export class ProfitSharingService {
         detalle:
           'La IA leyó en el recibo una matrícula distinta al avión asignado (típico en cambios de avión a media jornada): el costo puede estar restando en el avión equivocado. Corrige el avión del gasto en Gastos.',
         count: matriculaCruzada.length,
+        ...idsPrecierre(matriculaCruzada),
       },
       {
         clave: 'duplicados_sin_resolver',
@@ -3445,6 +3453,7 @@ export class ProfitSharingService {
         detalle:
           'Cada duplicado resta DOBLE al reparto. Revísalos en Gastos → pestaña Duplicados: borra el repetido o marca "No es duplicado".',
         count: duplicadosSinResolver.length,
+        ...idsPrecierre(duplicadosSinResolver),
       },
       {
         clave: 'gastos_bancarios_sin_conciliar',
@@ -3452,6 +3461,7 @@ export class ProfitSharingService {
         detalle:
           'Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
         count: bancariosSinConciliar.length,
+        ...idsPrecierre(bancariosSinConciliar),
       },
       // Junto a los bancarios sin conciliar (13-oct-2026, invariante 70):
       // las ligas USD ↔ pesos a más de ±2 % del oficial del día del cargo.
@@ -3624,6 +3634,7 @@ export class ProfitSharingService {
           'Sin TC capturado ni TC oficial de referencia disponible para su fecha: quedan FUERA del balance USD hasta capturarles TC.',
         count: sinTcSinOficial.length,
         monto_mxn: sumaMxn(sinTcSinOficial),
+        ...idsPrecierre(sinTcSinOficial),
       },
       {
         clave: 'cobros_sin_tc',
@@ -3642,6 +3653,7 @@ export class ProfitSharingService {
           'marcados "No requiere factura" ya NO cuentan aquí). El ' +
           'seguimiento arrancó en ago 2026: lo anterior nace "Pendiente".',
         count: sinFacturar.length,
+        ...idsPrecierre(sinFacturar),
       },
       {
         clave: 'sin_conciliar',
@@ -3649,6 +3661,8 @@ export class ProfitSharingService {
         detalle: 'El estado de cuenta no cuadra contra lo capturado.',
         count: movs.length,
         monto: round2(movs.reduce((acc, m) => acc + Number(m.monto), 0)),
+        // ids de MOVIMIENTO bancario (no de gasto): Conciliación → Pendientes.
+        ...idsPrecierre(movs),
       },
       // OMITIDOS (14-oct-2026, invariante 75): INFORMATIVO, fuera de
       // `bloqueantes`. Los omitidos ya no cuentan en «sin conciliar»: aquí

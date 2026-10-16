@@ -56,6 +56,12 @@ export interface PreCierreTacoTramo {
   /** Primera línea accionable de `revision_motivo` (sin la bitácora). */
   motivo: string | null;
   piloto_nombre: string | null;
+  /**
+   * ADITIVO (15-oct-2026, API 0.0.81, PEDIDO 2, invariante 81): id de la
+   * `escala` (el tramo), para que Tacómetros en vivo resalte el TRAMO exacto.
+   * null si la fila no trae id (jamás se inventa).
+   */
+  escala_id: string | null;
 }
 
 /**
@@ -134,6 +140,7 @@ export function resumenTacosEnRevision(
       fecha_salida_plan: texto(r.fecha_salida_plan),
       motivo: motivoCorto(r.revision_motivo),
       piloto_nombre: pilotoId ? (nombres.get(pilotoId) ?? null) : null,
+      escala_id: texto(r.id),
     });
     if (vueloId && !vuelos.has(vueloId)) {
       vuelos.set(vueloId, {
