@@ -1,3 +1,5 @@
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import { colPeriodoContable } from '../../common/filtro-periodo-contable.util';
 import {
   BadRequestException,
   Injectable,
@@ -136,10 +138,16 @@ export class AircraftService {
     const startYear = conPiso(startYearCalendario);
     // null = el año cuenta desde el 1-ene (como 0.0.84).
     const anioDesde = startYear !== startYearCalendario ? inicioFinanzas : null;
+    // CIERRE DE MES (16-oct-2026, invariante 89): el dinero del avión por
+    // periodo va por el mes CONTABLE del vuelo; sin la migración,
+    // `fecha_vuelo` (0.0.87).
+    const contable = await cierreMesDisponible(this.supabase.service);
     let cobrosQ = this.supabase.service
       .from('cobro_vuelo')
       .select(
-        'monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado, fecha_vuelo)',
+        contable
+          ? 'monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado, fecha_vuelo, fecha_contable)'
+          : 'monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado, fecha_vuelo)',
       )
       .eq('vuelo.aeronave_id', id)
       .neq('vuelo.estado', 'CANCELADO');
@@ -151,7 +159,10 @@ export class AircraftService {
       .select('monto, moneda, categoria')
       .eq('aeronave_id', id);
     if (inicioFinanzas) {
-      cobrosQ = cobrosQ.gte('vuelo.fecha_vuelo', corteTs(inicioFinanzas));
+      cobrosQ = cobrosQ.gte(
+        colPeriodoContable(contable, 'vuelo'),
+        corteTs(inicioFinanzas),
+      );
       gastosQ = gastosQ.gte('fecha_gasto', inicioFinanzas);
     }
 

@@ -42,11 +42,15 @@ import {
   categoriaEsPagoVendedor,
 } from './categoria-gasto.util';
 import { CATEGORIAS_REPARTIBLES } from './gasto-reparto.util';
-import { diaCancun, mesCalendarioDe } from './fecha-cancun.util';
+import { mesCalendarioDe } from './fecha-cancun.util';
+import { diaContableDeVuelo } from './fecha-contable.util';
 
 type EscalaEmb = { aeronave_id?: string | null };
 type VueloEmb = {
   fecha_vuelo?: string | null;
+  /** Cierre de mes (invariante 89): con la migración, el eje del dinero. */
+  periodo_contable?: string | null;
+  fecha_contable?: string | null;
   aeronave_id?: string | null;
   es_externo?: boolean | null;
 };
@@ -171,11 +175,11 @@ function ubicar(
       ? g.fecha_gasto.slice(0, 10)
       : null;
   const vuelo = vueloEmbebido(crudo);
-  const fechaVuelo =
-    vuelo && typeof vuelo.fecha_vuelo === 'string' && vuelo.fecha_vuelo
-      ? vuelo.fecha_vuelo
-      : null;
-  const diaVuelo = fechaVuelo ? diaCancun(fechaVuelo) : null;
+  // MES CONTABLE del vuelo (16-oct-2026, invariante 89): un vuelo DIFERIDO
+  // al cerrar un mes vive (con todos sus gastos de eje vuelo) en el mes
+  // destino — `fecha_contable` cuando el embed la trae; sin la migración,
+  // `fecha_vuelo` como siempre. Fuente única `diaContableDeVuelo`.
+  const diaVuelo = diaContableDeVuelo(vuelo);
 
   // R1: el gasto personal del dueño no es dinero de la empresa.
   if (cat === 'PERSONAL_DUENO') return null;

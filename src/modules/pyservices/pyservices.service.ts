@@ -1,3 +1,7 @@
+import type {
+  BalanceCierrePayload,
+  BalanceCierreResumenFilaPayload,
+} from '../aircraft/cierre-balance.util';
 import {
   BadGatewayException,
   Inject,
@@ -407,6 +411,10 @@ export interface DineroVueloFilaPayload {
    * llave, el libro sale byte a byte el de antes.
    */
   clave_cliente?: string;
+  /** CIERRE DE MES (invariante 89; ADITIVOS, solo con la migración). */
+  cierre_marca?: string | null;
+  diferido_de?: string | null;
+  diferido_a?: string | null;
 }
 export interface DineroOtroIngresoFilaPayload {
   clave: string;
@@ -547,6 +555,8 @@ export interface DineroXlsxPayload {
    * 9 de 'utilidades'). Un API previo no la manda.
    */
   comision_vendedor_solo_gasto_real?: true;
+  /** CIERRE DE MES (invariante 89; ADITIVO, solo con la migración). */
+  cierre?: BalanceCierrePayload;
 }
 
 export interface ReporteVueloPayload {
@@ -794,7 +804,7 @@ export interface BalanceAvionVueloPayload {
   fecha_fin: string | null;
   ruta: string;
   // Bloque VENTA
-  horas_cobradas: number;
+  horas_cobradas: number | null;
   tarifa_usd: number | null;
   iva_hr_usd: number | null;
   /**
@@ -883,7 +893,7 @@ export interface BalanceAvionVueloPayload {
    * (PROVISIÓN) como fórmula por fila. null = avión sin tarifa / EXTERNOS.
    */
   permiso_afac_usd_hr?: number | null;
-  costo_total_mxn: number;
+  costo_total_mxn: number | null;
   tc_costos: number | null;
   /** Desglose por celda (nota de Excel): una línea por gasto, p. ej.
    *  "Comida · Starbucks — $206.00". Vacío = sin nota. */
@@ -922,7 +932,7 @@ export interface BalanceAvionVueloPayload {
   cobros: BalanceAvionCobroPayload[];
   /** Lo cobrado que cuenta para el AVIÓN (cobrosEnUsd → cobradoParteAvion
    *  → parte multi-avión → × TC de venta). */
-  cobrado_mxn: number;
+  cobrado_mxn: number | null;
   /** Σ parcialidades REALES en MXN (sin prorratear entre avión/VuelaTour);
    *  en multi-avión, la parte de ESTA FILA del MXN real del vuelo
    *  (`parteFilaDeCobro`: parte del avión por tramo + la parte VuelaTour en
@@ -936,7 +946,7 @@ export interface BalanceAvionVueloPayload {
   /** total_mxn − cobrado_mxn TAL CUAL (semántica del libro): NEGATIVO =
    *  sobrecobro o cobros en un vuelo sin TC/sin precio — se muestra, no se
    *  topa en 0. */
-  por_cobrar_mxn: number;
+  por_cobrar_mxn: number | null;
   por_cobrar_usd: number | null;
   /**
    * Columna «FACTURA VUELATOUR» de la hoja PRINCIPAL (30-sep-2026, API
@@ -1009,6 +1019,19 @@ export interface BalanceAvionVueloPayload {
    * llave, el libro sale byte a byte el de antes.
    */
   clave_cliente?: string;
+  /**
+   * CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVOS, solo
+   * con la migración `20261016000004`): texto YA armado para la columna
+   * ESTADO («Pasa a octubre 2026 (pendiente de cobro: cobrado $0.00 de
+   * $36,632.89 MXN)» / «Viene de septiembre 2026» / «Pendiente de cobro:
+   * pasará a octubre 2026 al cerrar»), `fila_sombra` = fila del mes de
+   * ORIGEN de un diferido (horas reales, TODO el dinero en null) y los meses
+   * 'YYYY-MM' del diferimiento.
+   */
+  cierre_marca?: string | null;
+  fila_sombra?: boolean;
+  diferido_a?: string | null;
+  diferido_de?: string | null;
 }
 
 export interface BalanceAvionTotalesPayload {
@@ -1508,6 +1531,11 @@ export interface BalanceHojaInventarioPayload {
  * la hoja "balance" (los socios son por avión).
  */
 export type { LibroVista } from './libro-vista.types';
+export type {
+  BalanceCierrePayload,
+  BalanceCierreResumenFilaPayload,
+  BalanceCierreVueloPayload,
+} from '../aircraft/cierre-balance.util';
 
 export interface BalanceGeneralPayload {
   generado: string;
@@ -1555,6 +1583,13 @@ export interface BalanceGeneralPayload {
    * PRESENTACIÓN: ningún número del payload depende de la variante.
    */
   variante: VarianteBalanceGeneral;
+  /** CIERRE DE MES (invariante 89; ADITIVO, solo con la migración). */
+  cierre?: BalanceCierrePayload;
+  /** Por matrícula: cuántos vuelos pasan / vienen y sus montos MXN. */
+  resumen_cierre?: {
+    pasan: BalanceCierreResumenFilaPayload[];
+    vienen: BalanceCierreResumenFilaPayload[];
+  };
 }
 
 /**
@@ -1763,6 +1798,12 @@ export interface BalanceAvionPayload {
    * libro. Su presencia manda en pyservices (pestaña y línea de la cascada).
    */
   otros_ingresos_avion?: BalanceAvionHojaOtrosIngresosPayload;
+  /**
+   * CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVO, solo
+   * con la migración): estado del mes y las listas `pasan` / `vienen` /
+   * `pasarian` (`BalanceCierre` de pyservices).
+   */
+  cierre?: BalanceCierrePayload;
 }
 
 export interface GastoVueloSugerenciaPayload {

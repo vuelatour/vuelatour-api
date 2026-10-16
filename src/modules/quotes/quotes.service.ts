@@ -1,4 +1,12 @@
 import {
+  assertMesAbierto,
+  leerVueloMesContable,
+} from '../../common/cierre-mes.lector';
+import {
+  mesContableDeVuelo,
+  vueloDiferido,
+} from '../../common/fecha-contable.util';
+import {
   corteTs,
   esAntesDelInicio,
   inicioOficialDe,
@@ -2960,12 +2968,37 @@ export class QuotesService implements ConfirmadorCotizacion {
     // asigna a una cotización (quickAdjust queda cubierto: sin cotización
     // previa rechaza solo). Cubre el "Cotizar" de reservas y la revisión.
     await this.assertNoEsVueloDeServicio(vueloId);
+    // CIERRE DE MES (16-oct-2026, invariante 89): la cotización de un vuelo
+    // cuyo mes CONTABLE está cerrado no se toca (409 MES_CERRADO); un vuelo
+    // DIFERIDO a un mes abierto sí (su candado de cobros sigue abajo). Sin
+    // la migración: nada se lee y la ventana de siempre.
+    const vueloContable = await leerVueloMesContable(
+      this.supabase.service,
+      vueloId,
+    );
+    if (vueloContable) {
+      // Fecha NUEVA hacia un mes cerrado (un vuelo no diferido cuenta en el
+      // mes de su fecha): también 409.
+      const fechaNueva =
+        dto.fecha_vuelo && !vueloDiferido(vueloContable)
+          ? mesContableDeVuelo({ fecha_vuelo: dto.fecha_vuelo.toISOString() })
+          : null;
+      await assertMesAbierto(
+        this.supabase.service,
+        [mesContableDeVuelo(vueloContable), fechaNueva],
+        'cotizacion',
+      );
+    }
+    const fechaVentana =
+      vueloContable?.fecha_contable ?? (current.fecha_vuelo as string | null);
     // Ventana de edición (pedido del cliente, jul 2026): la cotización —aún
     // CONFIRMADA— solo se ajusta mientras el vuelo sea del MES CORRIENTE o el
     // ANTERIOR (hora Cancún). Más atrás ya pertenece a cierres pasados y sus
     // números no se tocan. Cubre también quickAdjust y "Cotizar" reservas
-    // viejas (ambos pasan por aquí). Cancún es UTC−5 fijo (sin DST).
-    if (current.fecha_vuelo) {
+    // viejas (ambos pasan por aquí). Cancún es UTC−5 fijo (sin DST). Con la
+    // migración del cierre se mide sobre el mes CONTABLE (un diferido que
+    // vino al mes corriente se ajusta).
+    if (fechaVentana) {
       const ahoraCancun = new Date(Date.now() - 5 * 3_600_000);
       const inicioMesAnterior =
         Date.UTC(
@@ -2974,9 +3007,7 @@ export class QuotesService implements ConfirmadorCotizacion {
           1,
         ) +
         5 * 3_600_000;
-      if (
-        new Date(current.fecha_vuelo as string).getTime() < inicioMesAnterior
-      ) {
+      if (new Date(fechaVentana).getTime() < inicioMesAnterior) {
         throw new ConflictException(
           'El vuelo es de un mes ya cerrado (anterior al mes pasado): la cotización ya no puede ajustarse.',
         );
@@ -4123,6 +4154,19 @@ export class QuotesService implements ConfirmadorCotizacion {
     if (current.estado === 'COMPLETADO' || current.estado === 'CANCELADO') {
       throw new ConflictException(
         `No se puede cancelar un vuelo en estado ${current.estado}`,
+      );
+    }
+    // CIERRE DE MES (invariante 89): un vuelo de un mes contable cerrado no
+    // cambia de estado (sin la migración no lee nada).
+    const vueloContable = await leerVueloMesContable(
+      this.supabase.service,
+      vueloId,
+    );
+    if (vueloContable) {
+      await assertMesAbierto(
+        this.supabase.service,
+        mesContableDeVuelo(vueloContable),
+        'vuelo',
       );
     }
     const { data, error } = await this.supabase.service

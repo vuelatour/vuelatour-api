@@ -46,6 +46,7 @@ import { ConciliacionModule } from './modules/conciliacion/conciliacion.module';
 import { DocumentTypesModule } from './modules/document-types/document-types.module';
 import { ExpirationsModule } from './modules/expirations/expirations.module';
 import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
+import { CierresModule } from './modules/cierres/cierres.module';
 import { DashboardsModule } from './modules/dashboards/dashboards.module';
 import { GroupsModule } from './modules/groups/groups.module';
 import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emitidas.module';
@@ -124,6 +125,7 @@ import { StorageModule } from './modules/storage/storage.module';
     DocumentTypesModule,
     ExpirationsModule,
     ProfitSharingModule,
+    CierresModule,
     DashboardsModule,
     MultasModule,
     TipoCambioModule,

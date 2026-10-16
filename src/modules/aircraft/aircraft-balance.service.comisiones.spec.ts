@@ -36,6 +36,16 @@ import {
   type Fila,
 } from './libros-pago-vendedor.fixture-spec';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65). Pedido del cliente:
  * «cuando hay una comisión de un banco, en la parte de total cobrado no
@@ -389,7 +399,7 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
     // Lo COBRADO AL AVIÓN no cambia de cálculo (bruto × factor) y un vuelo
     // pagado sigue dando su por cobrar de siempre.
     expect(f.cobrado_mxn).toBe(r2(r2(2000 * (2000 / 2230)) * 20));
-    expect(f.por_cobrar_mxn).toBe(r2(40000 - f.cobrado_mxn));
+    expect(f.por_cobrar_mxn).toBe(r2(40000 - (f.cobrado_mxn ?? 0)));
   });
 
   it('fila del #501 CON gasto real de $1,600 MXN — sellado a OTRO avión (el avión del gasto es solo referencia): COMISIONES = banco + EXACTAMENTE lo pagado, nota «gasto real», sin pendiente de captura; los totales llevan `comision_vendedor_real_mxn`', async () => {

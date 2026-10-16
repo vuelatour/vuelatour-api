@@ -1,3 +1,4 @@
+import { assertMesAbierto } from '../../common/cierre-mes.lector';
 import {
   BadRequestException,
   ConflictException,
@@ -407,6 +408,9 @@ export class RepartoPagoService {
     if (!dinero.ok) throw bad(dinero.codigo, dinero.mensaje);
     const fecha = validarFechaPago(dto.fecha_pago, this.cuentas.hoy());
     if (!fecha.ok) throw bad(fecha.codigo, fecha.mensaje);
+    // CIERRE DE MES (16-oct-2026, invariante 89): una entrega con fecha en
+    // un mes cerrado ⇒ 409 MES_CERRADO (después del replay).
+    await assertMesAbierto(this.sb, fecha.fecha.slice(0, 7), 'entrega_socio');
     const mes = dto.mes ?? null;
     if (mes != null) this.assertMes(mes);
     const entregadoPor = dto.entregado_por_id ?? actor.userId;
@@ -648,6 +652,23 @@ export class RepartoPagoService {
     if (dto.entregado_por_id !== undefined) {
       await this.assertUsuarioActivo(dto.entregado_por_id);
     }
+    // CIERRE DE MES (invariante 89): corregir el dinero o la fecha de una
+    // entrega de un mes cerrado (o llevarla a uno) ⇒ 409 MES_CERRADO.
+    if (
+      dto.monto !== undefined ||
+      dto.moneda !== undefined ||
+      dto.tc_usd_mxn !== undefined ||
+      dto.fecha_pago !== undefined
+    ) {
+      await assertMesAbierto(
+        this.sb,
+        [
+          String(actual.fecha_pago ?? '').slice(0, 7) || null,
+          dto.fecha_pago ? String(dto.fecha_pago).slice(0, 7) : null,
+        ],
+        'entrega_socio',
+      );
+    }
 
     const tcActual =
       actual.tc_usd_mxn == null ? null : Number(actual.tc_usd_mxn);
@@ -762,6 +783,13 @@ export class RepartoPagoService {
       throw bad('MOTIVO_INVALIDO', MENSAJE_MOTIVO_BAJA_PAGO);
     }
     const actual = await this.pagoVivo(id);
+    // CIERRE DE MES (invariante 89): dar de baja una entrega de un mes
+    // cerrado ⇒ 409 MES_CERRADO.
+    await assertMesAbierto(
+      this.sb,
+      String(actual.fecha_pago ?? '').slice(0, 7) || null,
+      'entrega_socio',
+    );
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
       .update({

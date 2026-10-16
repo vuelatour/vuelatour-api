@@ -16,6 +16,7 @@
  * llamador lo deja sin la llave); null en el mapa = no vive en ningún libro.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { cierreMesDisponible } from './cierre-mes-disponible.util';
 import { fetchRepartos, type GastoRepartoFila } from './gasto-reparto.util';
 import {
   necesitaTramosVivos,
@@ -33,6 +34,22 @@ import {
  */
 export const GASTO_UBICACION_COLS =
   'id, categoria, fecha_gasto, monto, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(fecha_vuelo, aeronave_id, es_externo)';
+
+/**
+ * CIERRE DE MES (16-oct-2026, invariante 89): con la migración
+ * `20261016000004` el embed del vuelo trae además `fecha_contable` (el mes
+ * contable: un vuelo diferido arrastra sus gastos de eje vuelo al mes
+ * destino). Sin ella, `GASTO_UBICACION_COLS` tal cual (0.0.87).
+ */
+export const GASTO_UBICACION_COLS_CONTABLE =
+  'id, categoria, fecha_gasto, monto, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(fecha_vuelo, aeronave_id, es_externo, periodo_contable, fecha_contable)';
+
+/** Columnas de la lectura según la sonda del cierre de mes. */
+export function gastoUbicacionCols(cierreDisponible: boolean): string {
+  return cierreDisponible
+    ? GASTO_UBICACION_COLS_CONTABLE
+    : GASTO_UBICACION_COLS;
+}
 
 /** Tamaño de lote de las lecturas `in (…)` (el de `leerPorLotes`). */
 export const LOTE_UBICACION_BALANCE = 200;
@@ -112,10 +129,9 @@ export async function leerUbicacionBalance(
   let gastos: GastoParaUbicacion[];
   let repartos: Map<string, GastoRepartoFila[]>;
   try {
+    const cols = gastoUbicacionCols(await cierreMesDisponible(sb));
     const [filasGasto, deReparto] = await Promise.all([
-      porLotes(ids, (lote) =>
-        sb.from('gasto').select(GASTO_UBICACION_COLS).in('id', lote),
-      ),
+      porLotes(ids, (lote) => sb.from('gasto').select(cols).in('id', lote)),
       fetchRepartos(sb, ids),
     ]);
     gastos = filasGasto as unknown as GastoParaUbicacion[];

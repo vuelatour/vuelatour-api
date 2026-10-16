@@ -416,6 +416,7 @@ import {
 } from '../expenses/estado-banco.util';
 import { candadoMesDelVuelo } from '../expenses/cambio-fecha-gasto.util';
 import { leerUbicacionBalance } from '../../common/ubicacion-balance-lector';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
 import {
   aCargoDeGasto,
   alertasConciliacionGasto,
@@ -1012,6 +1013,9 @@ export interface SugerenciaConciliacion {
       /** Día Cancún del vuelo (YYYY-MM-DD). */
       vuelo_dia: string;
       vuelo_folio: number | null;
+      /** ADITIVOS (invariante 89): solo en un vuelo DIFERIDO. */
+      mes_contable?: string;
+      meses?: string[];
     } | null;
   }>;
 }
@@ -1642,9 +1646,20 @@ export class ConciliacionService {
     );
   }
 
-  /** `GASTO_RICO_COLS` + las columnas del número de factura. */
+  /**
+   * `GASTO_RICO_COLS` + las columnas del número de factura. CIERRE DE MES
+   * (16-oct-2026, invariante 89): con la migración `20261016000004` el embed
+   * del vuelo trae su mes contable (`candado_mes_vuelo` de un vuelo
+   * DIFERIDO acepta su mes real y el contable, como el 409 de la ruta).
+   */
   private async gastoRicoCols(): Promise<string> {
-    return `${GASTO_RICO_COLS}, ${await this.embedFolio()}`;
+    const base = (await cierreMesDisponible(this.supabase.service))
+      ? GASTO_RICO_COLS.replace(
+          'vuelo:vuelo!vuelo_id(folio, fecha_vuelo)',
+          'vuelo:vuelo!vuelo_id(folio, fecha_vuelo, periodo_contable, fecha_contable)',
+        )
+      : GASTO_RICO_COLS;
+    return `${base}, ${await this.embedFolio()}`;
   }
 
   /**
@@ -14917,6 +14932,11 @@ export class ConciliacionService {
             candado_mes_vuelo: {
               vuelo_dia: candado.dia,
               vuelo_folio: candado.folio,
+              // ADITIVO (invariante 89): vuelo DIFERIDO al cerrar un mes ⇒
+              // su mes contable y los meses que acepta (real … contable).
+              ...(candado.mes_contable !== candado.mes
+                ? { mes_contable: candado.mes_contable, meses: candado.meses }
+                : {}),
             },
           }
         : {}),

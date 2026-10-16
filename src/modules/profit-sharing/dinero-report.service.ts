@@ -41,6 +41,38 @@ import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 // ID de vuelo por cliente (13-oct-2026, invariante 68): solo la ETIQUETA de
 // la CLAVE (lector único best-effort + fuente pura); ningún importe.
 import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import {
+  colPeriodoContable,
+  colsVueloContable,
+} from '../../common/filtro-periodo-contable.util';
+import {
+  decisionDiferir,
+  etiquetaMesMinuscula,
+  leyendaPasaA,
+  leyendaPasara,
+  leyendaVieneDe,
+  mesCalendarioDeRango,
+  mesContableDeVuelo,
+  mesRealDeVuelo,
+  mesSiguienteDe,
+  origenDeVuelo,
+  papelContableEnPeriodo,
+  rangoDelMes,
+  salidaDeVuelo,
+} from '../../common/mes-contable.util';
+import {
+  leerCierresMes,
+  leerDiferimientos,
+} from '../../common/cierre-mes.lector';
+import type {
+  BalanceCierrePayload,
+  BalanceCierreVueloPayload,
+} from '../aircraft/cierre-balance.util';
+
+/** Columnas de `vuelo` del Libro Dinero (las de siempre; 0.0.87). */
+const DINERO_VUELO_COLS =
+  'id, folio, cliente_id, aeronave_id, estado, es_externo, fecha_vuelo, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, iva_pct, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, calculo_snapshot, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, tuas_usd, extras_total_usd, viaticos_pernocta_usd';
 import { claveDinero } from '../../common/clave-cliente.util';
 import {
   ivaComisionVendedorUsd,
@@ -219,6 +251,12 @@ export class DineroReportService {
     const sb = this.supabase.service;
     const d1 = `${desde}T00:00:00-05:00`;
     const d2 = `${hasta}T23:59:59-05:00`;
+    // CIERRE DE MES (16-oct-2026, invariante 89): el Libro Dinero es de
+    // DINERO — con la migración los vuelos se leen por `fecha_contable` (un
+    // vuelo diferido aparece completo en el mes destino y NO en el de
+    // origen; ahí lo dice la lista `cierre.pasan`). Sin ella, `fecha_vuelo`.
+    const contable = await cierreMesDisponible(sb);
+    const colDinero = colPeriodoContable(contable);
 
     // Vuelos del periodo (todos los aviones). El libro manual solo registra
     // vuelos que ocurrieron o están en firme: las solicitudes/cotizaciones/
@@ -235,14 +273,14 @@ export class DineroReportService {
         // particionIngresoVuelo (venta del avión vs ingreso de VuelaTour).
         // comision_vendedor_nombre: etiqueta de la línea de comisión en la
         // hoja "otros ingresos" (Regla A).
-        'id, folio, cliente_id, aeronave_id, estado, es_externo, fecha_vuelo, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, iva_pct, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, calculo_snapshot, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, tuas_usd, extras_total_usd, viaticos_pernocta_usd',
+        `${DINERO_VUELO_COLS}${colsVueloContable(contable)}`,
       )
       .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO', 'CANCELADO'])
-      .gte('fecha_vuelo', d1)
-      .lte('fecha_vuelo', d2)
+      .gte(colDinero, d1)
+      .lte(colDinero, d2)
       .order('fecha_vuelo', { ascending: true });
     if (vuelosRes.error) throw new Error(vuelosRes.error.message);
-    const vuelosPeriodo = (vuelosRes.data ?? []) as Array<
+    const vuelosPeriodo = (vuelosRes.data ?? []) as unknown as Array<
       Record<string, unknown>
     >;
     const vueloIds = vuelosPeriodo.map((v) => v.id as string);
@@ -512,6 +550,18 @@ export class DineroReportService {
     // `utilidades_comision_vendedor_avion_mxn`): ya está dentro de
     // `comisionPagadaMxn` — la diferencia esperada con el Balance general.
     let comisionAvionMxn = 0;
+    // CIERRE DE MES (invariante 89): marcas por vuelo y bloque raíz `cierre`.
+    const cierreDinero = contable
+      ? await this.cierreLibroDinero({
+          desde,
+          hasta,
+          vuelos,
+          cobrosPorVuelo,
+          clientes,
+          aviones,
+          claveDe,
+        })
+      : null;
     for (const v of vuelos) {
       const vid = v.id as string;
       // REGLA B (28-ago-2026): participación de cada avión en la venta del
@@ -735,7 +785,9 @@ export class DineroReportService {
           color: avion?.color ?? null,
           fecha: (v.fecha_vuelo as string) ?? null,
           ruta,
-          tiempo: horasParte,
+          // Un vuelo que VIENE de otro mes (invariante 89) no trae horas: se
+          // quedaron en el mes en que se voló.
+          tiempo: cierreDinero?.venidos.has(vid) ? null : horasParte,
           venta_hr_usd: r2(tarifa),
           venta_hr_mxn: r2(tarifa != null && tc != null ? tarifa * tc : null),
           iva_hr_usd: r2(ivaHr),
@@ -770,6 +822,15 @@ export class DineroReportService {
           participacion: fa.factor,
           multi_avion: part.multi_avion,
           ...extraClaveCliente(v),
+          // CIERRE DE MES (invariante 89, ADITIVOS al final): solo con la
+          // migración.
+          ...(cierreDinero
+            ? (cierreDinero.marcas.get(vid) ?? {
+                cierre_marca: null,
+                diferido_de: null,
+                diferido_a: null,
+              })
+            : {}),
         });
       }
 
@@ -1620,6 +1681,240 @@ export class DineroReportService {
       // fila de comisión no lleva egreso y utilidades solo resta lo pagado.
       // pyservices cambia con ella solo leyendas. Viaja SIEMPRE.
       comision_vendedor_solo_gasto_real: true as const,
+      // CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVO al
+      // final, solo con la migración): mismo shape que el de los balances.
+      ...(cierreDinero ? { cierre: cierreDinero.bloque } : {}),
+    };
+  }
+
+  /**
+   * CIERRE DE MES del Libro Dinero (invariante 89): marcas por vuelo
+   * («Viene de septiembre 2026» / «Pendiente de cobro: pasará a … al
+   * cerrar»), los vuelos que VIENEN (sin horas), y el bloque `cierre` con
+   * los que PASAN (voló aquí, su dinero se fue: lectura aparte por
+   * `fecha_vuelo`), VIENEN y PASARÍAN (mes abierto). Cifras de los
+   * diferidos = bitácora del cierre (al corte).
+   */
+  private async cierreLibroDinero(ctx: {
+    desde: string;
+    hasta: string;
+    vuelos: Array<Record<string, unknown>>;
+    cobrosPorVuelo: Map<string, Array<Record<string, unknown>>>;
+    clientes: Map<string, string>;
+    aviones: Map<string, { matricula: string }>;
+    claveDe: (v: Record<string, unknown>) => string;
+  }): Promise<{
+    marcas: Map<
+      string,
+      {
+        cierre_marca: string;
+        diferido_de: string | null;
+        diferido_a: string | null;
+      }
+    >;
+    venidos: Set<string>;
+    bloque: BalanceCierrePayload;
+  }> {
+    const sb = this.supabase.service;
+    const mes = mesCalendarioDeRango(ctx.desde, ctx.hasta);
+    const fila = mes
+      ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
+      : null;
+    const estado = fila?.estado ?? 'ABIERTO';
+    type V = {
+      id: string;
+      fecha_vuelo?: string | null;
+      periodo_contable?: string | null;
+      fecha_contable?: string | null;
+    };
+    const comoV = (v: Record<string, unknown>) => v as unknown as V;
+    const venidosLista = ctx.vuelos.filter(
+      (v) => papelContableEnPeriodo(comoV(v), ctx.desde, ctx.hasta) === 'viene',
+    );
+    // Sombras: voló en el periodo, su dinero se fue a otro mes.
+    const { data: sombrasData, error: sErr } = await sb
+      .from('vuelo')
+      .select(`${DINERO_VUELO_COLS}${colsVueloContable(true)}`)
+      .not('periodo_contable', 'is', null)
+      // eje REAL a propósito (invariante 89): SOMBRAS: los que volaron aquí y se difirieron (lista `cierre.pasan`)
+      .gte('fecha_vuelo', `${ctx.desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${ctx.hasta}T23:59:59-05:00`);
+    if (sErr) throw new Error(sErr.message);
+    const enLibro = new Set(ctx.vuelos.map((v) => v.id as string));
+    const sombras = (
+      (sombrasData ?? []) as unknown as Array<Record<string, unknown>>
+    )
+      .filter((v) => !enLibro.has(v.id as string))
+      .filter(
+        (v) =>
+          papelContableEnPeriodo(comoV(v), ctx.desde, ctx.hasta) === 'sombra',
+      );
+    const bitacora = await leerDiferimientos(sb, [
+      ...venidosLista.map((v) => v.id as string),
+      ...sombras.map((v) => v.id as string),
+    ]);
+    const k = (v: Record<string, unknown>): number | null => {
+      const t = Number(v.tc_usd_mxn);
+      return Number.isFinite(t) && t > 0 ? t : null;
+    };
+    const mxn = (usd: number | null, v: Record<string, unknown>) => {
+      const t = k(v);
+      return usd != null && t != null ? Math.round(usd * t * 100) / 100 : null;
+    };
+    const item = (
+      v: Record<string, unknown>,
+      m: {
+        venta_usd: number;
+        cobrado_usd: number | null;
+        por_cobrar_usd: number | null;
+      },
+      extra: { destino?: string; origen?: string; leyenda: string },
+    ): BalanceCierreVueloPayload => ({
+      clave: ctx.claveDe(v),
+      vuelo_id: v.id as string,
+      folio:
+        typeof v.folio === 'number' || typeof v.folio === 'string'
+          ? String(v.folio)
+          : '',
+      cliente: ctx.clientes.get(v.cliente_id as string) ?? null,
+      matricula: v.aeronave_id
+        ? (ctx.aviones.get(v.aeronave_id as string)?.matricula ?? null)
+        : v.es_externo === true
+          ? 'EXTERNO'
+          : null,
+      fecha: (v.fecha_vuelo as string | null) ?? null,
+      venta_mxn: mxn(m.venta_usd, v),
+      venta_usd: m.venta_usd,
+      cobrado_mxn: mxn(m.cobrado_usd, v),
+      cobrado_usd: m.cobrado_usd,
+      por_cobrar_mxn: mxn(m.por_cobrar_usd, v),
+      por_cobrar_usd: m.por_cobrar_usd,
+      ...(extra.destino ? { destino: extra.destino } : {}),
+      ...(extra.origen ? { origen: extra.origen } : {}),
+      leyenda: extra.leyenda,
+    });
+    const marcas = new Map<
+      string,
+      {
+        cierre_marca: string;
+        diferido_de: string | null;
+        diferido_a: string | null;
+      }
+    >();
+    const pasan: BalanceCierreVueloPayload[] = [];
+    for (const v of sombras) {
+      const vv = comoV(v);
+      const real = mesRealDeVuelo(vv);
+      const sal = real ? salidaDeVuelo(vv.id, real, bitacora) : null;
+      const destino = sal?.destino ?? mesContableDeVuelo(vv) ?? '';
+      const montos = sal ?? {
+        venta_usd: Number(v.monto_total_usd) || 0,
+        cobrado_usd: 0,
+        por_cobrar_usd: Number(v.monto_total_usd) || 0,
+      };
+      pasan.push(
+        item(v, montos, {
+          destino,
+          leyenda: destino ? leyendaPasaA(destino, montos) : 'Pasa a otro mes',
+        }),
+      );
+    }
+    const vienen: BalanceCierreVueloPayload[] = [];
+    const venidos = new Set<string>();
+    for (const v of venidosLista) {
+      const vv = comoV(v);
+      const contableMes = mesContableDeVuelo(vv);
+      const origen =
+        (contableMes ? origenDeVuelo(vv, contableMes, bitacora) : null) ??
+        mesRealDeVuelo(vv) ??
+        '';
+      const b = bitacora.find(
+        (x) => x.vuelo_id === vv.id && x.destino === contableMes,
+      );
+      const leyenda = leyendaVieneDe(origen);
+      vienen.push(
+        item(
+          v,
+          {
+            venta_usd: b?.venta_usd ?? (Number(v.monto_total_usd) || 0),
+            cobrado_usd: b?.cobrado_usd ?? null,
+            por_cobrar_usd: b?.por_cobrar_usd ?? null,
+          },
+          { origen, leyenda },
+        ),
+      );
+      venidos.add(vv.id);
+      marcas.set(vv.id, {
+        cierre_marca: leyenda,
+        diferido_de: origen,
+        diferido_a: null,
+      });
+    }
+    const pasarian: BalanceCierreVueloPayload[] = [];
+    if (mes && estado !== 'CERRADO') {
+      const destino = mesSiguienteDe(mes);
+      const ultimo = rangoDelMes(mes).hasta;
+      const completados = ctx.vuelos.filter(
+        (v) => v.estado === 'COMPLETADO' && !venidos.has(v.id as string),
+      );
+      const internos = new Set<string>();
+      const ids = [
+        ...new Set(
+          completados
+            .map((v) => v.cliente_id as string | null)
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      if (ids.length > 0) {
+        const { data, error } = await sb
+          .from('cliente')
+          .select('id')
+          .in('id', ids)
+          .eq('es_interno', true);
+        if (error) throw new Error(error.message);
+        for (const c of data ?? []) internos.add(c.id as string);
+      }
+      for (const v of completados) {
+        const d = decisionDiferir(
+          {
+            estado: 'COMPLETADO',
+            monto_total_usd: v.monto_total_usd as string | number | null,
+            tc_usd_mxn: k(v),
+            cliente_interno: internos.has(v.cliente_id as string),
+          },
+          ctx.cobrosPorVuelo.get(v.id as string) ?? [],
+          ultimo,
+        );
+        if (!d) continue;
+        pasarian.push(
+          item(v, d, { destino, leyenda: leyendaPasara(destino, d) }),
+        );
+        marcas.set(v.id as string, {
+          cierre_marca: `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar`,
+          diferido_de: null,
+          diferido_a: destino,
+        });
+      }
+    }
+    const porFolio = (
+      a: BalanceCierreVueloPayload,
+      b: BalanceCierreVueloPayload,
+    ) => (Number(a.folio) || 0) - (Number(b.folio) || 0);
+    return {
+      marcas,
+      venidos,
+      bloque: {
+        disponible: true,
+        periodo: mes,
+        estado,
+        cerrado_at: fila?.cerrado_at ?? null,
+        cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
+        reabierto_at: fila?.reabierto_at ?? null,
+        reabierto_por_nombre: fila?.reabierto_por?.nombre ?? null,
+        pasan: pasan.sort(porFolio),
+        vienen: vienen.sort(porFolio),
+        pasarian: pasarian.sort(porFolio),
+      },
     };
   }
 }

@@ -1,3 +1,4 @@
+import { assertMesAbierto } from '../../common/cierre-mes.lector';
 import {
   BadRequestException,
   ConflictException,
@@ -391,6 +392,27 @@ export function traducirErrorIngreso(err: unknown): HttpException | null {
  *   ingreso» un abono que cuadra con un cobro libre exige confirmación.
  * - Sin la migración 20260924000004 todo responde 503 INGRESOS_NO_DISPONIBLE.
  */
+/**
+ * Campos de un ingreso que mueven dinero o de mes (candado MES_CERRADO,
+ * invariante 89).
+ */
+const CAMPOS_INGRESO_CANDADO_MES = [
+  'fecha',
+  'monto',
+  'comision_monto',
+  'moneda',
+  'tc_usd_mxn',
+  'categoria',
+  'aeronave_id',
+] as const;
+
+/** 'YYYY-MM' de la fecha (día) de un ingreso; null si no se puede leer. */
+function mesDeFechaIngreso(fecha: string | null | undefined): string | null {
+  return typeof fecha === 'string' && /^\d{4}-\d{2}/.test(fecha)
+    ? fecha.slice(0, 7)
+    : null;
+}
+
 @Injectable()
 export class IngresosService {
   private readonly logger = new Logger(IngresosService.name);
@@ -2303,6 +2325,13 @@ export class IngresosService {
       const ya = await this.ingresoPorLlave(dto.client_request_id);
       if (ya) return this.respuestaIdempotente(ya);
     }
+    // CIERRE DE MES (16-oct-2026, invariante 89): un ingreso cuenta por su
+    // `fecha` ⇒ 409 MES_CERRADO si ese mes está cerrado (después del replay).
+    await assertMesAbierto(
+      this.supabase.service,
+      mesDeFechaIngreso(dto.fecha),
+      'ingreso',
+    );
     // 2) ROL: conciliar con el banco = ADMIN y FACTURACION.
     const movId = dto.movimiento_bancario_id ?? null;
     if (movId && actor.rol !== Rol.ADMIN && actor.rol !== Rol.FACTURACION) {
@@ -2614,6 +2643,22 @@ export class IngresosService {
     };
     const cambios = this.estadoDeDto(dto, crudo);
     const fusion: EstadoIngreso = { ...actual, ...cambios };
+    // CIERRE DE MES (invariante 89): si cambia el dinero o la fecha, el mes
+    // de ANTES y el de DESPUÉS deben estar abiertos (409 MES_CERRADO).
+    if (
+      CAMPOS_INGRESO_CANDADO_MES.some(
+        (k) =>
+          k in cambios &&
+          (cambios as Record<string, unknown>)[k] !==
+            (actual as unknown as Record<string, unknown>)[k],
+      )
+    ) {
+      await assertMesAbierto(
+        this.supabase.service,
+        [mesDeFechaIngreso(actual.fecha), mesDeFechaIngreso(fusion.fecha)],
+        'ingreso',
+      );
+    }
     // ¿Qué cambió DE VERDAD? (valor nuevo vs VIGENTE, patrón
     // `cambiaDineroDelGasto`: el panel manda el formulario completo).
     const igual = (k: keyof EstadoIngreso, a: unknown, b: unknown): boolean => {
@@ -2809,6 +2854,13 @@ export class IngresosService {
         error: 'INGRESO_DADO_DE_BAJA',
       });
     }
+    // CIERRE DE MES (invariante 89): dar de baja un ingreso de un mes
+    // cerrado cambia ese mes ⇒ 409 MES_CERRADO.
+    await assertMesAbierto(
+      this.supabase.service,
+      mesDeFechaIngreso(vigente.fecha as string | null),
+      'ingreso',
+    );
     const mov = (await this.movimientosDeIngresos([id])).get(id);
     if (mov) {
       throw new ConflictException({

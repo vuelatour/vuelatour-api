@@ -66,6 +66,29 @@ describe('R6 — con vuelo: el libro del mes del VUELO', () => {
     });
   });
 
+  it('CIERRE DE MES (invariante 89): un vuelo DIFERIDO a octubre lleva sus gastos de eje vuelo a OCTUBRE (fecha_contable)', () => {
+    expect(
+      ubicacionBalanceDeGasto(
+        gasto({
+          vuelo: {
+            fecha_vuelo: '2026-09-25T15:00:00Z',
+            periodo_contable: '2026-10-01T05:00:00+00:00',
+            fecha_contable: '2026-10-01T05:00:00+00:00',
+            aeronave_id: N41,
+            es_externo: false,
+          },
+        }),
+      ),
+    ).toEqual({
+      periodo: OCT,
+      eje: 'vuelo',
+      aviones: [N41],
+      general: true,
+      hoja_avion: 'reporte_horas',
+      hoja_general: 'reporte_horas',
+    });
+  });
+
   it('las 22:30 del 30-sep en Cancún son SEPTIEMBRE', () => {
     expect(
       ubicacionBalanceDeGasto(
@@ -503,14 +526,17 @@ describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
     }
   };
 
-  it('vuelos del mes por fecha_vuelo (día Cancún) y EXTERNOS sin avión', () => {
-    tiene(".gte('fecha_vuelo', `${desde}T00:00:00-05:00`)");
+  it('vuelos del mes por su fecha CONTABLE (día Cancún; sin la migración, fecha_vuelo) y EXTERNOS sin avión', () => {
+    // CIERRE DE MES (16-oct-2026, invariante 89): el libro filtra por
+    // `colPeriodoContable(contable)` y el espejo usa `diaContableDeVuelo`.
+    tiene('const colDinero = colPeriodoContable(contable);');
+    tiene('.gte(colDinero, `${desde}T00:00:00-05:00`)');
     tiene("vuelosQuery.eq('es_externo', true).is('aeronave_id', null)");
     tiene(".eq('aeronave_id', aircraftId).is('cancelada_at', null)");
   });
 
   it('gastos de los vuelos, sin vuelo del avión y GAS (flota por fecha_gasto; externos sin filtro de fecha)', () => {
-    enOrden(".in('vuelo_id', vueloIds)", ".order('fecha_gasto'");
+    enOrden(".in('vuelo_id', vueloIdsDinero)", ".order('fecha_gasto'");
     enOrden(
       ".eq('aeronave_id', aircraftId)",
       ".is('vuelo_id', null)",
@@ -518,7 +544,7 @@ describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
     );
     enOrden(".eq('categoria', 'GAS')", ".gte('fecha_gasto', desde)");
     enOrden(
-      ".in('vuelo_id', vueloIds)",
+      ".in('vuelo_id', vueloIdsDinero)",
       ".is('aeronave_id', null)",
       ".eq('categoria', 'GAS')",
       '.order(',

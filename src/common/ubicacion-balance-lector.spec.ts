@@ -9,6 +9,16 @@ import {
   type GastoParaUbicacion,
 } from './ubicacion-balance-gasto.util';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('./cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    './cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * LECTOR COMPARTIDO de la ubicación en el balance (invariantes 72 y 82,
  * 15-oct-2026): la lectura en lote que antes vivía en

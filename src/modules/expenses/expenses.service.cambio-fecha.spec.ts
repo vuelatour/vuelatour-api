@@ -19,6 +19,16 @@ import type { CajaChicaService } from '../caja-chica/caja-chica.service';
 import type { ConciliacionService } from '../conciliacion/conciliacion.service';
 import { Rol } from '../../common/types/auth.types';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74):
  * `ExpensesService.cambiarFechaGasto` con el PostgREST falso de

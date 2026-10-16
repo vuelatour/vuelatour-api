@@ -11,6 +11,16 @@ import {
   type ErrorBd,
 } from './conciliacion-partes.fixture-spec';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * VÍNCULO GASTO → BALANCE en Conciliación (13-oct-2026, API 0.0.75,
  * invariante 72): `GET movimientos` pone en `gasto` y en cada `gastos[]` el

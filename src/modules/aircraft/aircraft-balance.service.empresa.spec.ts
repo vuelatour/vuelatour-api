@@ -17,6 +17,16 @@ import type {
   BalanceAvionPayload,
 } from '../pyservices/pyservices.service';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * REGLA DEL CLIENTE (11-sep-2026) — **la categoría de EMPRESA manda sobre el
  * vuelo**: OTRO, NOMINA, GASOLINA, FIJO y VISITA van SIEMPRE a la hoja

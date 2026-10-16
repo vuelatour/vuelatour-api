@@ -1,3 +1,4 @@
+import { assertMesAbierto } from '../../common/cierre-mes.lector';
 import {
   BadRequestException,
   ConflictException,
@@ -825,6 +826,13 @@ export class CajaChicaService {
         `El fondo maneja ${fondo.moneda}; registra el movimiento en esa moneda.`,
       );
     }
+    // CIERRE DE MES (16-oct-2026, invariante 89): un movimiento de caja
+    // chica con fecha en un mes cerrado ⇒ 409 MES_CERRADO.
+    await assertMesAbierto(
+      this.supabase.service,
+      (dto.fecha || hoyCancun()).slice(0, 7),
+      'caja_chica',
+    );
 
     const { data, error } = await this.supabase.service
       .from('caja_chica_movimiento')
@@ -1030,6 +1038,20 @@ export class CajaChicaService {
     }
     const tipo = dto.tipo ?? (mov.tipo as TipoMovimientoCaja);
     const monto = dto.monto ?? Number(mov.monto);
+    // CIERRE DE MES (invariante 89): corregir monto, tipo o fecha de un
+    // movimiento de un mes cerrado (o llevarlo a uno) ⇒ 409 MES_CERRADO.
+    if (
+      dto.monto !== undefined ||
+      dto.tipo !== undefined ||
+      dto.fecha !== undefined
+    ) {
+      const fechaAntes = (mov as { fecha?: string | null }).fecha ?? null;
+      await assertMesAbierto(
+        this.supabase.service,
+        [fechaAntes?.slice(0, 7), dto.fecha ? dto.fecha.slice(0, 7) : null],
+        'caja_chica',
+      );
+    }
     if (monto === 0)
       throw new BadRequestException('El monto no puede ser cero.');
     if (tipo !== TipoMovimientoCaja.AJUSTE && monto < 0) {
@@ -1112,11 +1134,17 @@ export class CajaChicaService {
   async removeMovimiento(id: string) {
     const { data: mov, error: readErr } = await this.supabase.service
       .from('caja_chica_movimiento')
-      .select('id, espejo_de_id')
+      .select('id, espejo_de_id, fecha')
       .eq('id', id)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    // CIERRE DE MES (invariante 89): borrar un movimiento de un mes cerrado.
+    await assertMesAbierto(
+      this.supabase.service,
+      typeof mov.fecha === 'string' ? mov.fecha.slice(0, 7) : null,
+      'caja_chica',
+    );
     if (mov.espejo_de_id) {
       throw new ConflictException(
         'Este movimiento es el espejo de un fondeo automático: elimina (o corrige) la reposición de la caja vinculada y el espejo se va con ella.',

@@ -141,6 +141,43 @@ import {
 } from '../pyservices/pyservices.service';
 import type { LibroVista } from '../pyservices/libro-vista.types';
 import { filasAfacOtrosMovimientos } from './afac-otros-movimientos.util';
+import {
+  cierreDelGeneral,
+  aplicarFilaSombra,
+  aplicarFilaViene,
+  itemCierreDeFila,
+  leyendaPasariaBalance,
+  leyendaSombraBalance,
+  marcarFilaNormal,
+  pendienteVuelosQuePasan,
+  type BalanceCierrePayload,
+  type BalanceCierreVueloPayload,
+} from './cierre-balance.util';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import {
+  colPeriodoContable,
+  colsVueloContable,
+} from '../../common/filtro-periodo-contable.util';
+import {
+  decisionDiferir,
+  leyendaPasara,
+  leyendaVieneDe,
+  mesCalendarioDeRango,
+  mesContableDeVuelo,
+  mesesPermitidosDelVuelo,
+  mesRealDeVuelo,
+  mesSiguienteDe,
+  origenDeVuelo,
+  papelContableEnPeriodo,
+  rangoDelMes,
+  salidaDeVuelo,
+  vueloDiferido,
+} from '../../common/mes-contable.util';
+import {
+  leerCierresMes,
+  leerDiferimientos,
+} from '../../common/cierre-mes.lector';
+
 import { InventoryService } from '../inventory/inventory.service';
 // Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
 // puro, con spec; el costo sale del util del inventario (fuente única).
@@ -271,6 +308,9 @@ interface VueloRow {
   id: string;
   folio: number | null;
   cliente_id: string | null;
+  /** CIERRE DE MES (invariante 89): solo con la migración. */
+  periodo_contable?: string | null;
+  fecha_contable?: string | null;
   aeronave_id: string | null;
   estado: string;
   tipo: string | null;
@@ -1017,7 +1057,10 @@ export class AircraftBalanceService {
       resumen.push({
         matricula: p.matricula,
         color: p.avion_color,
-        vuelos: p.vuelos.length,
+        // CIERRE DE MES (invariante 89): una fila SOMBRA (horas del mes de
+        // origen, sin dinero) no es un vuelo del mes; cuenta donde vive su
+        // dinero (sin la migración no hay sombras: el conteo de siempre).
+        vuelos: p.vuelos.filter((f) => f.fila_sombra !== true).length,
         horas: t.tiempo_vuelo,
         horas_cobradas: t.horas_cobradas,
         venta_mxn: t.total_mxn,
@@ -1031,7 +1074,10 @@ export class AircraftBalanceService {
       });
       // Dedupe por vuelo (regla B): la venta sí se suma libro a libro (cada
       // uno lleva SU parte, Σ == venta del vuelo), pero el vuelo es uno.
-      for (const f of p.vuelos) vuelosFlota.add(f.vuelo_id ?? f.clave);
+      for (const f of p.vuelos) {
+        if (f.fila_sombra === true) continue;
+        vuelosFlota.add(f.vuelo_id ?? f.clave);
+      }
       acc.vuelos = vuelosFlota.size;
       acc.horas += t.tiempo_vuelo ?? 0;
       acc.horasCobradas += t.horas_cobradas ?? 0;
@@ -1476,6 +1522,10 @@ export class AircraftBalanceService {
       // «Balance mensual» o «Balance general» (6-oct-2026, API 0.0.64): AL
       // FINAL (aditivo). Solo elige la presentación en pyservices.
       variante: modo,
+      // CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVOS al
+      // final, solo con la migración): las listas de TODOS los libros y el
+      // resumen por matrícula para el bloque «CIERRE DEL MES» del RESUMEN.
+      ...cierreDelGeneral(libros),
     };
     return { payload, desde: d, hasta: h, modo };
   }
@@ -1500,6 +1550,7 @@ export class AircraftBalanceService {
         .eq('aeronave_id', aircraftId)
         .is('cancelada_at', null)
         .not('taco_llegada', 'is', null)
+        // eje REAL a propósito (invariante 89): siembra de la cadena de tacómetros (horas)
         .lt('vuelo.fecha_vuelo', corte)
         .order('taco_llegada', { ascending: false })
         .limit(1),
@@ -1510,6 +1561,7 @@ export class AircraftBalanceService {
         .eq('vuelo.aeronave_id', aircraftId)
         .is('cancelada_at', null)
         .not('taco_llegada', 'is', null)
+        // eje REAL a propósito (invariante 89): siembra de la cadena de tacómetros (horas)
         .lt('vuelo.fecha_vuelo', corte)
         .order('taco_llegada', { ascending: false })
         .limit(1),
@@ -1752,6 +1804,223 @@ export class AircraftBalanceService {
    * vacías), cobros/facturas por vuelo_id y K = tc_usd_mxn ?? oficial como
    * cualquier vuelo. El costo del operador entra a OPERACIONES en la fila.
    */
+  /**
+   * FILAS SOMBRA del libro (invariante 89, solo con la migración): vuelos
+   * que VOLARON en el periodo (`fecha_vuelo`) —propios, compartidos (tramo
+   * vivo de este avión) o externos sin avión— pero que un cierre difirió
+   * FUERA del periodo (`fecha_contable` fuera). Se AGREGAN a `vuelos` y se
+   * devuelven sus ids.
+   */
+  private async vuelosSombraDelLibro(
+    aircraftId: string | null,
+    desde: string,
+    hasta: string,
+    vuelos: VueloRow[],
+  ): Promise<Set<string>> {
+    const sb = this.supabase.service;
+    const cols = `${VUELO_COLS}${colsVueloContable(true)}`;
+    const desdeTs = `${desde}T00:00:00-05:00`;
+    const hastaTs = `${hasta}T23:59:59-05:00`;
+    const base = sb
+      .from('vuelo')
+      .select(cols)
+      .not('periodo_contable', 'is', null)
+      // eje REAL a propósito (invariante 89): SOMBRAS: los que VOLARON en el periodo (solo horas)
+      .gte('fecha_vuelo', desdeTs)
+      .lte('fecha_vuelo', hastaTs);
+    const propiosRes = await (aircraftId == null
+      ? base.eq('es_externo', true).is('aeronave_id', null)
+      : base.eq('aeronave_id', aircraftId));
+    if (propiosRes.error) throw new Error(propiosRes.error.message);
+    const candidatos = (propiosRes.data ?? []) as unknown as VueloRow[];
+    if (aircraftId != null) {
+      const { data: esc, error: escErr } = await sb
+        .from('escala')
+        .select('vuelo_id, vuelo:vuelo_id!inner(fecha_vuelo, periodo_contable)')
+        .eq('aeronave_id', aircraftId)
+        .is('cancelada_at', null)
+        .not('vuelo.periodo_contable', 'is', null)
+        // eje REAL a propósito (invariante 89): SOMBRAS compartidas: tramo vivo de este avión (solo horas)
+        .gte('vuelo.fecha_vuelo', desdeTs)
+        .lte('vuelo.fecha_vuelo', hastaTs);
+      if (escErr) throw new Error(escErr.message);
+      const ya = new Set(candidatos.map((v) => v.id));
+      const ajenos = [
+        ...new Set(
+          ((esc ?? []) as Array<{ vuelo_id: string }>)
+            .map((e) => e.vuelo_id)
+            .filter((id) => !ya.has(id)),
+        ),
+      ];
+      if (ajenos.length > 0) {
+        const { data: comp, error: compErr } = await sb
+          .from('vuelo')
+          .select(cols)
+          .in('id', ajenos);
+        if (compErr) throw new Error(compErr.message);
+        candidatos.push(...((comp ?? []) as unknown as VueloRow[]));
+      }
+    }
+    const enLibro = new Set(vuelos.map((v) => v.id));
+    const ids = new Set<string>();
+    for (const v of candidatos) {
+      if (enLibro.has(v.id)) continue;
+      if (papelContableEnPeriodo(v, desde, hasta) !== 'sombra') continue;
+      vuelos.push(v);
+      enLibro.add(v.id);
+      ids.add(v.id);
+    }
+    return ids;
+  }
+
+  /**
+   * CIERRE DEL LIBRO (invariante 89): aplica las filas SOMBRA / QUE VIENEN
+   * (`cierre-balance.util`), marca en un mes ABIERTO los vuelos que
+   * `decisionDiferir` pasaría al cerrar y arma el bloque raíz `cierre`. Las
+   * cifras de los diferidos son las de la bitácora del cierre (al corte).
+   */
+  private async cierreDelLibro(ctx: {
+    desde: string;
+    hasta: string;
+    vuelos: VueloRow[];
+    sombraIds: ReadonlySet<string>;
+    filasVuelo: BalanceAvionVueloPayload[];
+    cobrosPorVuelo: Map<string, CobroRow[]>;
+    tcOficialPorVuelo: Map<string, TipoCambioDetalle>;
+    clientesInternos: ReadonlySet<string>;
+    matriculaLibro: string | null;
+  }): Promise<BalanceCierrePayload> {
+    const sb = this.supabase.service;
+    const mes = mesCalendarioDeRango(ctx.desde, ctx.hasta);
+    const fila = mes
+      ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
+      : null;
+    const estado = fila?.estado ?? 'ABIERTO';
+    const porId = new Map(ctx.vuelos.map((v) => [v.id, v]));
+    const papeles = new Map(
+      ctx.vuelos.map((v) => [
+        v.id,
+        ctx.sombraIds.has(v.id)
+          ? ('sombra' as const)
+          : papelContableEnPeriodo(v, ctx.desde, ctx.hasta),
+      ]),
+    );
+    const bitacora = await leerDiferimientos(
+      sb,
+      ctx.vuelos
+        .filter((v) => {
+          const p = papeles.get(v.id);
+          return p === 'sombra' || p === 'viene';
+        })
+        .map((v) => v.id),
+    );
+    const pasan: BalanceCierreVueloPayload[] = [];
+    const vienen: BalanceCierreVueloPayload[] = [];
+    const pasarian: BalanceCierreVueloPayload[] = [];
+    const ultimo = mes ? rangoDelMes(mes).hasta : null;
+    const destinoAbierto =
+      mes && estado !== 'CERRADO' ? mesSiguienteDe(mes) : null;
+    for (const f of ctx.filasVuelo) {
+      const v = f.vuelo_id ? porId.get(f.vuelo_id) : undefined;
+      if (!v) {
+        marcarFilaNormal(f);
+        continue;
+      }
+      const papel = papeles.get(v.id);
+      if (papel === 'sombra') {
+        const real = mesRealDeVuelo(v);
+        const sal = real ? salidaDeVuelo(v.id, real, bitacora) : null;
+        const destino = sal?.destino ?? mesContableDeVuelo(v) ?? '';
+        const ventaUsd =
+          sal?.venta_usd ?? round2(Number(v.monto_total_usd) || 0);
+        const cobradoUsd = sal?.cobrado_usd ?? 0;
+        const item = itemCierreDeFila(f, ctx.matriculaLibro, {
+          venta_usd: ventaUsd,
+          cobrado_usd: cobradoUsd,
+          por_cobrar_usd: sal?.por_cobrar_usd ?? round2(ventaUsd - cobradoUsd),
+          destino,
+          leyenda: '',
+        });
+        const leyenda = destino
+          ? leyendaSombraBalance(destino, item)
+          : 'Pasa a otro mes';
+        item.leyenda = leyenda;
+        pasan.push(item);
+        aplicarFilaSombra(f, destino, leyenda);
+        continue;
+      }
+      if (papel === 'viene') {
+        const contableMes = mesContableDeVuelo(v);
+        const origen =
+          (contableMes ? origenDeVuelo(v, contableMes, bitacora) : null) ??
+          mesRealDeVuelo(v) ??
+          '';
+        const b = bitacora.find(
+          (x) => x.vuelo_id === v.id && x.destino === contableMes,
+        );
+        vienen.push(
+          itemCierreDeFila(f, ctx.matriculaLibro, {
+            venta_usd: b?.venta_usd ?? round2(Number(v.monto_total_usd) || 0),
+            cobrado_usd: b?.cobrado_usd ?? null,
+            por_cobrar_usd: b?.por_cobrar_usd ?? null,
+            origen,
+            leyenda: leyendaVieneDe(origen),
+          }),
+        );
+        aplicarFilaViene(f, origen);
+        continue;
+      }
+      marcarFilaNormal(f);
+      // Mes ABIERTO: ¿pasaría al cerrar? (la MISMA decisión del cierre).
+      if (
+        destinoAbierto &&
+        ultimo &&
+        v.estado === 'COMPLETADO' &&
+        f.cancelado !== true &&
+        (f.participacion ?? 1) > 0
+      ) {
+        const d = decisionDiferir(
+          {
+            estado: v.estado,
+            monto_total_usd: v.monto_total_usd,
+            tc_usd_mxn:
+              pos(v.tc_usd_mxn) ?? ctx.tcOficialPorVuelo.get(v.id)?.tc ?? null,
+            cliente_interno: v.cliente_id
+              ? ctx.clientesInternos.has(v.cliente_id)
+              : false,
+          },
+          ctx.cobrosPorVuelo.get(v.id) ?? [],
+          ultimo,
+        );
+        if (d) {
+          f.cierre_marca = leyendaPasariaBalance(destinoAbierto);
+          f.diferido_a = destinoAbierto;
+          pasarian.push(
+            itemCierreDeFila(f, ctx.matriculaLibro, {
+              venta_usd: d.venta_usd,
+              cobrado_usd: d.cobrado_usd,
+              por_cobrar_usd: d.por_cobrar_usd,
+              destino: destinoAbierto,
+              leyenda: leyendaPasara(destinoAbierto, d),
+            }),
+          );
+        }
+      }
+    }
+    return {
+      disponible: true,
+      periodo: mes,
+      estado,
+      cerrado_at: fila?.cerrado_at ?? null,
+      cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
+      reabierto_at: fila?.reabierto_at ?? null,
+      reabierto_por_nombre: fila?.reabierto_por?.nombre ?? null,
+      pasan,
+      vienen,
+      pasarian,
+    };
+  }
+
   private async buildPayload(
     aircraftId: string | null,
     desde: string,
@@ -1773,6 +2042,18 @@ export class AircraftBalanceService {
     const sb = this.supabase.service;
     const modoExternos = aircraftId == null;
     const vigencia = vigenciaComisiones ?? (await this.vigenciaComisiones());
+    // CIERRE DE MES (16-oct-2026, invariante 89): con la migración los
+    // vuelos del DINERO se leen por `fecha_contable` (un vuelo diferido
+    // cuenta completo en el mes destino) y los que VOLARON aquí pero se
+    // difirieron fuera entran como FILA SOMBRA (horas reales, dinero null).
+    // Sin ella `contable = false` ⇒ `fecha_vuelo`, byte a byte 0.0.87.
+    const contable = await cierreMesDisponible(sb);
+    const colDinero = colPeriodoContable(contable);
+    const colDineroEmb = colPeriodoContable(contable, 'vuelo');
+    const vueloCols = `${VUELO_COLS}${colsVueloContable(contable)}`;
+    const embVuelo = contable
+      ? 'vuelo:vuelo_id!inner(fecha_vuelo, fecha_contable)'
+      : 'vuelo:vuelo_id!inner(fecha_vuelo)';
 
     interface AvionBalance {
       id: string | null;
@@ -1814,17 +2095,17 @@ export class AircraftBalanceService {
     // cancelados con costos ya incurridos (se marcan por estado).
     // Modo externos: es_externo = true AND aeronave_id IS NULL (los externos
     // CON avión de referencia viven en el libro de ese avión).
-    const vuelosQuery = sb.from('vuelo').select(VUELO_COLS);
+    const vuelosQuery = sb.from('vuelo').select(vueloCols);
     const vuelosRes = await (
       modoExternos
         ? vuelosQuery.eq('es_externo', true).is('aeronave_id', null)
         : vuelosQuery.eq('aeronave_id', aircraftId)
     )
-      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
-      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
+      .gte(colDinero, `${desde}T00:00:00-05:00`)
+      .lte(colDinero, `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
     if (vuelosRes.error) throw new Error(vuelosRes.error.message);
-    const vuelos = (vuelosRes.data ?? []) as VueloRow[];
+    const vuelos = (vuelosRes.data ?? []) as unknown as VueloRow[];
 
     // VUELOS COMPARTIDOS (multi-avión, 17-ago-2026): tramos volados por ESTE
     // avión dentro de vuelos cuyo avión principal es OTRO. El vuelo aparece
@@ -1842,11 +2123,11 @@ export class AircraftBalanceService {
           // !inner + filtro de fecha del vuelo: acotado al periodo desde la BD
           // (sin esto, el histórico completo del avión acabaría truncado por el
           // cap de 1000 filas de PostgREST y se perderían compartidos en silencio).
-          .select('vuelo_id, vuelo:vuelo_id!inner(fecha_vuelo)')
+          .select(`vuelo_id, ${embVuelo}`)
           .eq('aeronave_id', aircraftId)
           .is('cancelada_at', null)
-          .gte('vuelo.fecha_vuelo', `${desde}T00:00:00-05:00`)
-          .lte('vuelo.fecha_vuelo', `${hasta}T23:59:59-05:00`);
+          .gte(colDineroEmb, `${desde}T00:00:00-05:00`)
+          .lte(colDineroEmb, `${hasta}T23:59:59-05:00`);
     if (eaErr) throw new Error(eaErr.message);
     const idsCompartidos = [
       ...new Set(
@@ -1858,12 +2139,12 @@ export class AircraftBalanceService {
     if (idsCompartidos.length) {
       const { data: compartidos, error: compErr } = await sb
         .from('vuelo')
-        .select(VUELO_COLS)
+        .select(vueloCols)
         .in('id', idsCompartidos)
-        .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
-        .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
+        .gte(colDinero, `${desde}T00:00:00-05:00`)
+        .lte(colDinero, `${hasta}T23:59:59-05:00`);
       if (compErr) throw new Error(compErr.message);
-      vuelos.push(...((compartidos ?? []) as VueloRow[]));
+      vuelos.push(...((compartidos ?? []) as unknown as VueloRow[]));
       vuelos.sort((a, b) =>
         String(a.fecha_vuelo ?? '').localeCompare(String(b.fecha_vuelo ?? '')),
       );
@@ -1883,11 +2164,11 @@ export class AircraftBalanceService {
     if (!modoExternos) {
       const { data: escCanceladas, error: ecErr } = await sb
         .from('escala')
-        .select('id, vuelo_id, vuelo:vuelo_id!inner(fecha_vuelo)')
+        .select(`id, vuelo_id, ${embVuelo}`)
         .eq('aeronave_id', aircraftId)
         .not('cancelada_at', 'is', null)
-        .gte('vuelo.fecha_vuelo', `${desde}T00:00:00-05:00`)
-        .lte('vuelo.fecha_vuelo', `${hasta}T23:59:59-05:00`);
+        .gte(colDineroEmb, `${desde}T00:00:00-05:00`)
+        .lte(colDineroEmb, `${hasta}T23:59:59-05:00`);
       if (ecErr) throw new Error(ecErr.message);
       const yaEnLibro = new Set([...idsPropios, ...idsCompartidos]);
       const vueloDeEscala = new Map<string, string>();
@@ -1909,12 +2190,12 @@ export class AircraftBalanceService {
       if (vuelosSoloGastosCancelados.size > 0) {
         const { data: conGastos, error: cgErr } = await sb
           .from('vuelo')
-          .select(VUELO_COLS)
+          .select(vueloCols)
           .in('id', [...vuelosSoloGastosCancelados])
-          .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
-          .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
+          .gte(colDinero, `${desde}T00:00:00-05:00`)
+          .lte(colDinero, `${hasta}T23:59:59-05:00`);
         if (cgErr) throw new Error(cgErr.message);
-        vuelos.push(...((conGastos ?? []) as VueloRow[]));
+        vuelos.push(...((conGastos ?? []) as unknown as VueloRow[]));
         vuelos.sort((a, b) =>
           String(a.fecha_vuelo ?? '').localeCompare(
             String(b.fecha_vuelo ?? ''),
@@ -1922,7 +2203,14 @@ export class AircraftBalanceService {
         );
       }
     }
+    // FILAS SOMBRA (invariante 89): vuelos que VOLARON en el periodo (propios,
+    // compartidos o externos) pero un cierre difirió FUERA de él. Solo
+    // aportan horas: no se leen sus cobros, gastos ni factura.
+    const sombraIds = contable
+      ? await this.vuelosSombraDelLibro(aircraftId, desde, hasta, vuelos)
+      : new Set<string>();
     const vueloIds = vuelos.map((v) => v.id);
+    const vueloIdsDinero = vueloIds.filter((id) => !sombraIds.has(id));
 
     // TUA de oficina (13-oct-2026, invariante 66): SOLO la consulta de gastos
     // de vuelos la lee (es la única que separa TUA en la fila del vuelo).
@@ -1959,16 +2247,16 @@ export class AircraftBalanceService {
       // consulta; si PostgREST no resuelve el embed, `leerCobrosDelLibro`
       // repite SIN él y resuelve los nombres en lote: un nombre jamás tumba
       // el libro).
-      vueloIds.length
-        ? this.leerCobrosDelLibro(vueloIds, matricula)
+      vueloIdsDinero.length
+        ? this.leerCobrosDelLibro(vueloIdsDinero, matricula)
         : Promise.resolve(vacio),
-      vueloIds.length
+      vueloIdsDinero.length
         ? sb
             .from('gasto')
             .select(
               `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}, created_at, proveedor:proveedor_id(nombre)`,
             )
-            .in('vuelo_id', vueloIds)
+            .in('vuelo_id', vueloIdsDinero)
             .order('fecha_gasto', { ascending: true })
         : Promise.resolve(vacio),
       // Gastos del avión SIN vuelo en el periodo (fecha_gasto es DATE:
@@ -2020,13 +2308,13 @@ export class AircraftBalanceService {
             .gte('fecha_gasto', desde)
             .lte('fecha_gasto', hasta)
             .order('fecha_gasto', { ascending: true })
-        : vueloIds.length
+        : vueloIdsDinero.length
           ? sb
               .from('gasto')
               .select(
                 'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
               )
-              .in('vuelo_id', vueloIds)
+              .in('vuelo_id', vueloIdsDinero)
               .is('aeronave_id', null)
               .eq('categoria', 'GAS')
               .order('fecha_gasto', { ascending: true })
@@ -2048,7 +2336,7 @@ export class AircraftBalanceService {
       // sin cobros; invariante 60), en lote y con el memo del general. Un
       // fallo de lectura (también el de `cobro_vuelo`) tumba el libro como
       // cualquier otro: jamás un Excel con la columna vacía en silencio.
-      this.etiquetasFacturaMemo(vueloIds, memoFactura).catch(
+      this.etiquetasFacturaMemo(vueloIdsDinero, memoFactura).catch(
         (e: unknown): never => {
           throw new Error(
             `Balance ${matricula}: fallo al leer facturas: ${
@@ -2294,7 +2582,10 @@ export class AircraftBalanceService {
     // (fecha_solicitud; si no, el del vuelo). La fila queda MARCADA
     // (tc_venta_oficial + fuente + día del dato) y el Excel la pinta.
     // MISMA cadena que "Otros movimientos" del general (tcOficialPorVuelos).
-    const tcOficialPorVuelo = await this.tcOficialPorVuelos(vuelos, memoTc);
+    const tcOficialPorVuelo = await this.tcOficialPorVuelos(
+      vuelos.filter((v) => !sombraIds.has(v.id)),
+      memoTc,
+    );
 
     // ===== PASO 1: TC de costos (Z) por vuelo =====
     // Promedio simple de tc_gasto de los gastos MXN del vuelo con TC (el TC
@@ -2317,7 +2608,12 @@ export class AircraftBalanceService {
         : (pos(v.tc_usd_mxn) ?? tcOficialPorVuelo.get(v.id)?.tc ?? null);
       zPorVuelo.set(v.id, z);
     }
-    const zs = [...zPorVuelo.values()].filter((z): z is number => z != null);
+    // Las filas SOMBRA (invariante 89) no tienen dinero: su T.C. no entra al
+    // promedio de las hojas.
+    const zs = [...zPorVuelo.entries()]
+      .filter(([id]) => !sombraIds.has(id))
+      .map(([, z]) => z)
+      .filter((z): z is number => z != null);
     const tcPromedio = zs.length
       ? zs.reduce((a, b) => a + b, 0) / zs.length
       : null;
@@ -2388,6 +2684,18 @@ export class AircraftBalanceService {
       for (const e of list) escalaPorId.set(e.id, e);
 
     for (const v of vuelos) {
+      // FILA SOMBRA (invariante 89): se arma como cualquier fila (horas,
+      // tacos y ruta reales; sin cobros ni gastos leídos) y al final se le
+      // vacía el dinero; sus acumulados y pendientes de dinero se DESHACEN
+      // aquí (no aportan al libro del mes de origen).
+      const snapSombra = sombraIds.has(v.id)
+        ? {
+            an: anValues.length,
+            oi: otrosIngresosPeriodoUsd,
+            cu: comisionesUsdPeriodo,
+            pend: pendientes.length,
+          }
+        : null;
       // TODOS los tramos (cancelados incluidos): solo para la participación
       // (el util filtra) y para saber qué aviones tocó el vuelo (gastos).
       const vEscalasTodas = escalasPorVuelo.get(v.id) ?? [];
@@ -3867,6 +4175,13 @@ export class AircraftBalanceService {
       // año, verificación 26-ago): la fila lo incluye por pertenecer al
       // vuelo, pero el reparto, el Libro Dinero y la conciliación (eje
       // fecha_gasto) lo ponen en OTRO mes — los libros del cierre divergen.
+      const mesesOkDelVuelo =
+        contable && vueloDiferido(v)
+          ? mesesPermitidosDelVuelo(
+              mesRealDeVuelo(v) ?? desde.slice(0, 7),
+              mesContableDeVuelo(v),
+            )
+          : null;
       const fechasFuera = vGastos.filter(
         (g) =>
           // Categorías de EMPRESA (11-sep-2026): su eje YA es fecha_gasto (la
@@ -3878,7 +4193,11 @@ export class AircraftBalanceService {
           // mueve de mes en ninguno.
           !CAT_FUERA_DEL_AVION.has(g.categoria) &&
           g.fecha_gasto != null &&
-          (g.fecha_gasto < desde || g.fecha_gasto > hasta),
+          (g.fecha_gasto < desde || g.fecha_gasto > hasta) &&
+          // CIERRE DE MES (invariante 89): un vuelo DIFERIDO acepta gastos
+          // de su mes real y de su mes contable (el MISMO candado de
+          // `candadoMesDelVuelo`): no es «fuera del periodo».
+          !(mesesOkDelVuelo?.includes(g.fecha_gasto.slice(0, 7)) ?? false),
       );
       if (fechasFuera.length > 0) {
         pendientes.push(
@@ -4151,6 +4470,36 @@ export class AircraftBalanceService {
         // trae), solo ensancha la columna A. Sin ID la fila es byte-idéntica.
         ...(claveCli ? { clave_cliente: claveCli } : {}),
       });
+      if (snapSombra) {
+        anValues.length = snapSombra.an;
+        otrosIngresosPeriodoUsd = snapSombra.oi;
+        comisionesUsdPeriodo = snapSombra.cu;
+        pendientes.length = snapSombra.pend;
+      }
+    }
+
+    // ===== CIERRE DE MES (16-oct-2026, invariante 89) =====
+    // Filas SOMBRA (dinero null) y filas que VIENEN de otro mes (horas null),
+    // marcas «pasará al cerrar» del mes abierto y el bloque raíz `cierre`.
+    // ANTES de la cadena de tacómetros (una fila que viene ya no la corta) y
+    // de los totales (suman lo que entra). Sin la migración, nada.
+    const cierreLibro = contable
+      ? await this.cierreDelLibro({
+          desde,
+          hasta,
+          vuelos,
+          sombraIds,
+          filasVuelo,
+          cobrosPorVuelo,
+          tcOficialPorVuelo,
+          clientesInternos,
+          matriculaLibro: modoExternos ? null : matricula,
+        })
+      : null;
+    if (cierreLibro) {
+      pendientes.push(
+        ...pendienteVuelosQuePasan(etiquetaAvion, cierreLibro.pasan),
+      );
     }
 
     // ===== Saltos en la cadena de tacómetros (24-ago-2026) =====
@@ -4929,6 +5278,10 @@ export class AircraftBalanceService {
       // avión sin ingresos: `{filas: [], total_mxn: 0, usd: 0}`); con ella
       // pyservices pinta la pestaña y la línea «(+) OTROS INGRESOS USD».
       otros_ingresos_avion: hojaOtrosIngresos,
+      // CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVO, solo
+      // con la migración): estado del mes y los vuelos que pasan / vienen /
+      // pasarían. Sin la migración la llave no viaja (0.0.87).
+      ...(cierreLibro ? { cierre: cierreLibro } : {}),
     };
   }
 
@@ -5495,6 +5848,7 @@ export class AircraftBalanceService {
     ingresosEmpresa?: IngresoParaLibro[],
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
+    const colOm = colPeriodoContable(await cierreMesDisponible(sb));
     const { data: vuelosData, error: vErr } = await sb
       .from('vuelo')
       .select(
@@ -5509,8 +5863,10 @@ export class AircraftBalanceService {
       // EGRESOS (regla 28-ago tarde: su venta = cobros retenidos, sin
       // partición; ver abajo). Cada fila viaja con `estado` y pyservices lo
       // pinta (CANCELADO en rojo).
-      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
-      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
+      // CIERRE DE MES (invariante 89): por `fecha_contable` — los TUAs,
+      // extras y comisiones de un vuelo diferido siguen a su dinero.
+      .gte(colOm, `${desde}T00:00:00-05:00`)
+      .lte(colOm, `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
     if (vErr) throw new Error(vErr.message);
     const vuelos = (vuelosData ?? []) as Array<Record<string, unknown>>;

@@ -1,3 +1,5 @@
+import { assertCobroEnMesAbierto } from '../../common/cierre-mes.lector';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
 import {
   BadRequestException,
   ConflictException,
@@ -475,9 +477,19 @@ export class GroupsService {
   }
 
   async cargarHijos(grupoId: string): Promise<HijoRow[]> {
+    // CIERRE DE MES (invariante 89): con la migración, el mes CONTABLE del
+    // hijo (`hijoEnMesCerrado`).
+    const contable = await cierreMesDisponible(this.supabase.service);
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select(HIJO_COLS)
+      .select(
+        (contable
+          ? HIJO_COLS.replace(
+              'fecha_vuelo, fecha_fin,',
+              'fecha_vuelo, periodo_contable, fecha_contable, fecha_fin,',
+            )
+          : HIJO_COLS) as typeof HIJO_COLS,
+      )
       .eq('grupo_id', grupoId)
       .order('grupo_posicion', { ascending: true })
       .order('created_at', { ascending: true });
@@ -1726,12 +1738,17 @@ export class GroupsService {
    * ganan y ocultarían el mes cerrado.
    */
   private hijoEnMesCerrado(h: HijoRow): boolean {
-    if (!h.fecha_vuelo) return false;
+    // Mes CONTABLE (invariante 89): un hijo diferido a un mes abierto se
+    // edita; sin la migración, `fecha_vuelo` como siempre.
+    const fecha =
+      (h as HijoRow & { fecha_contable?: string | null }).fecha_contable ??
+      h.fecha_vuelo;
+    if (!fecha) return false;
     const ahoraCancun = new Date(Date.now() - 5 * 3_600_000);
     const inicioMesAnterior =
       Date.UTC(ahoraCancun.getUTCFullYear(), ahoraCancun.getUTCMonth() - 1, 1) +
       5 * 3_600_000;
-    return new Date(h.fecha_vuelo).getTime() < inicioMesAnterior;
+    return new Date(fecha).getTime() < inicioMesAnterior;
   }
 
   private async gastosPorHijo(ids: string[]) {
@@ -3671,6 +3688,12 @@ export class GroupsService {
     await this.aplicarComisionDefault(dto);
     const prep = await this.prepararSobre(cab, dto);
     const p = prep.particion;
+    // CIERRE DE MES (16-oct-2026, invariante 89): cada parte es un cobro del
+    // vuelo hijo ⇒ el candado se evalúa por el mes CONTABLE de cada hijo.
+    await assertCobroEnMesAbierto(
+      sb,
+      p.partes.map((x) => x.vuelo_id),
+    );
     // Ventana anti-duplicado de 90 s a nivel SOBRE (doble clic sin llave).
     if (!dto.client_request_id) {
       const { data: gemelos } = await sb
@@ -3782,6 +3805,11 @@ export class GroupsService {
       this.cargarHijos(cab.id),
     ]);
     this.assertPartesFueraDeMesCerrado(cab, hijos, partes, 'eliminar');
+    // CIERRE DE MES (invariante 89): las partes que se borran son cobros.
+    await assertCobroEnMesAbierto(
+      this.supabase.service,
+      partes.map((x) => x.vuelo_id),
+    );
     const vuelos = await this.borrarPartes(sobre.id);
     const { error } = await this.supabase.service
       .from('cobro_grupo')
@@ -3823,6 +3851,12 @@ export class GroupsService {
       this.cargarHijos(cab.id),
     ]);
     this.assertPartesFueraDeMesCerrado(cab, hijos, partesViejas, 're-partir');
+    // CIERRE DE MES (invariante 89): las partes viejas (se borran) y,
+    // abajo, las nuevas.
+    await assertCobroEnMesAbierto(
+      sb,
+      partesViejas.map((x) => x.vuelo_id),
+    );
     const prep = await this.prepararSobre(
       cab,
       {
@@ -3840,6 +3874,10 @@ export class GroupsService {
         modo: 'AUTO',
       },
       { excluirSobreId: sobre.id },
+    );
+    await assertCobroEnMesAbierto(
+      sb,
+      prep.particion.partes.map((x) => x.vuelo_id),
     );
     const vuelosViejos = await this.borrarPartes(sobre.id);
     try {

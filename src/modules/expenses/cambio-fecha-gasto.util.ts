@@ -36,6 +36,10 @@ import {
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
   categoriaEsPagoVendedor,
 } from '../../common/categoria-gasto.util';
+import { mesContableDeVuelo } from '../../common/fecha-contable.util';
+import { mesesPermitidosDelVuelo } from '../../common/mes-contable.util';
+
+export { mesesPermitidosDelVuelo };
 import {
   diaCancun,
   diasEntreDiasCancun,
@@ -109,10 +113,27 @@ export const CODIGO_CAMBIO_FECHA = {
 export const GASTO_CAMBIO_FECHA_COLS =
   'id, categoria, medio_pago, moneda, tc_gasto, monto, fecha_gasto, fecha_hora_carga, conciliado, updated_at, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo)';
 
+/**
+ * CIERRE DE MES (16-oct-2026, invariante 89): con la migración
+ * `20261016000004` el embed del vuelo trae además su mes contable
+ * (`periodo_contable`, `fecha_contable`). Sin ella, la de siempre.
+ */
+export function gastoCambioFechaCols(cierreDisponible: boolean): string {
+  return cierreDisponible
+    ? GASTO_CAMBIO_FECHA_COLS.replace(
+        'vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo)',
+        'vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo, periodo_contable, fecha_contable)',
+      )
+    : GASTO_CAMBIO_FECHA_COLS;
+}
+
 /** Vuelo embebido (`vuelo:vuelo_id(…)`), con el folio para los textos. */
 export interface VueloCambioFecha {
   folio?: number | null;
   fecha_vuelo?: string | null;
+  /** Cierre de mes (invariante 89), solo con la migración. */
+  periodo_contable?: string | null;
+  fecha_contable?: string | null;
   aeronave_id?: string | null;
   es_externo?: boolean | null;
 }
@@ -405,9 +426,20 @@ function diaCancunSeguro(iso: string): string | null {
 export interface VueloDeGastoFecha {
   /** Día Cancún de `fecha_vuelo` (YYYY-MM-DD). */
   dia: string;
-  /** YYYY-MM. */
+  /** YYYY-MM (mes REAL del vuelo). */
   mes: string;
   folio: number | null;
+  /**
+   * CIERRE DE MES (16-oct-2026, invariante 89): mes CONTABLE del vuelo
+   * (`fecha_contable`): = `mes` salvo en un vuelo DIFERIDO al cerrar un mes.
+   */
+  mes_contable: string;
+  /**
+   * Meses en los que un gasto del vuelo puede quedar sin «FUERA del
+   * periodo»: del mes real al contable (un diferido acepta los dos). Fuente
+   * única `mesesPermitidosDelVuelo`.
+   */
+  meses: string[];
 }
 
 /** El vuelo del gasto (`vuelo_id` + embed con `fecha_vuelo` legible) o null. */
@@ -420,10 +452,14 @@ function vueloDeGasto(g: {
   const dia =
     typeof v?.fecha_vuelo === 'string' ? diaCancunSeguro(v.fecha_vuelo) : null;
   if (!dia) return null;
+  const mes = dia.slice(0, 7);
+  const contable = mesContableDeVuelo(v) ?? mes;
   return {
     dia,
-    mes: dia.slice(0, 7),
+    mes,
     folio: typeof v?.folio === 'number' ? v.folio : null,
+    mes_contable: contable,
+    meses: mesesPermitidosDelVuelo(mes, contable),
   };
 }
 
@@ -517,7 +553,7 @@ export function decidirCambioFechaGasto(
   const mesVuelo = vuelo?.mes ?? null;
   const folio = vuelo?.folio ?? null;
   const candado = candadoMesDelVuelo(g);
-  if (candado && mesNuevo !== candado.mes && mesNuevo !== mesActual) {
+  if (candado && !candado.meses.includes(mesNuevo) && mesNuevo !== mesActual) {
     return {
       tipo: 'ERROR',
       error: {
@@ -528,12 +564,17 @@ export function decidirCambioFechaGasto(
           candado.dia,
           mesNuevo,
           candado.mes,
+          candado.mes_contable,
         ),
         details: {
           vuelo_folio: candado.folio,
           vuelo_dia: candado.dia,
           mes_vuelo: candado.mes,
           mes_nuevo: mesNuevo,
+          // ADITIVO (invariante 89): solo cuando el vuelo fue DIFERIDO.
+          ...(candado.mes_contable !== candado.mes
+            ? { mes_contable: candado.mes_contable, meses: candado.meses }
+            : {}),
         },
       },
     };
@@ -703,6 +744,12 @@ function textoFueraDelMesDelVuelo(
   diaVuelo: string,
   mesNuevo: string,
   mesVuelo: string,
+  mesContable: string = mesVuelo,
 ): string {
+  if (mesContable !== mesVuelo) {
+    // Vuelo DIFERIDO al cerrar un mes (invariante 89): cuenta en su mes
+    // contable; una fecha de su mes real también se acepta.
+    return `No se puede: este gasto es del vuelo ${folio != null ? `#${folio} ` : ''}(${diaTexto(diaVuelo)}), que pasó a ${etiquetaMes(mesContable)} al cerrar ${etiquetaMes(mesVuelo)} (el mes contable del vuelo es ${etiquetaMes(mesContable)}). Con fecha de ${etiquetaMes(mesNuevo)} quedaría fuera de los meses de su vuelo. Déjale una fecha entre ${etiquetaMes(mesVuelo)} y ${etiquetaMes(mesContable)}.`;
+  }
   return `No se puede: este gasto es del vuelo ${folio != null ? `#${folio} ` : ''}(${diaTexto(diaVuelo)}). Con fecha de ${etiquetaMes(mesNuevo)} quedaría en otro mes que su vuelo y el balance de ${etiquetaMes(mesVuelo)} lo marcaría como pendiente («fecha FUERA del periodo del libro»). Déjale una fecha de ${etiquetaMes(mesVuelo)}; para vincularlo no hace falta cambiarla.`;
 }

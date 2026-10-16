@@ -770,16 +770,21 @@ describe('sueltas de «otros movimientos»: el bloque VUELATOUR del Balance gene
 
 describe('candadoMesDelVuelo — la regla del 409 y de la ficha del candidato', () => {
   it('con vuelo de fecha legible y categoría del avión ⇒ día, mes y folio del vuelo (día Cancún)', () => {
+    // `mes_contable`/`meses` (invariante 89): sin diferir = el mes real.
     expect(candadoMesDelVuelo(caso92bd())).toEqual({
       dia: '2026-08-27',
       mes: '2026-08',
       folio: 201,
+      mes_contable: '2026-08',
+      meses: ['2026-08'],
     });
     // GAS con vuelo también (fechasFuera lo marca).
     expect(candadoMesDelVuelo(caso92bd({ categoria: 'GAS' }))).toEqual({
       dia: '2026-08-27',
       mes: '2026-08',
       folio: 201,
+      mes_contable: '2026-08',
+      meses: ['2026-08'],
     });
     // 22:30 Cancún del 31-oct (03:30Z del 1-nov) es de OCTUBRE.
     expect(
@@ -792,7 +797,58 @@ describe('candadoMesDelVuelo — la regla del 409 y de la ficha del candidato', 
           },
         }),
       ),
-    ).toEqual({ dia: '2026-10-31', mes: '2026-10', folio: 9 });
+    ).toEqual({
+      dia: '2026-10-31',
+      mes: '2026-10',
+      folio: 9,
+      mes_contable: '2026-10',
+      meses: ['2026-10'],
+    });
+  });
+
+  it('CIERRE DE MES (invariante 89): vuelo DIFERIDO de septiembre a octubre ⇒ acepta septiembre Y octubre; noviembre ⇒ 409 con el texto del mes contable', () => {
+    const vuelo = {
+      folio: 337,
+      fecha_vuelo: '2026-09-25T15:00:00Z',
+      periodo_contable: '2026-10-01T05:00:00+00:00',
+      fecha_contable: '2026-10-01T05:00:00+00:00',
+      aeronave_id: PEV,
+    };
+    expect(candadoMesDelVuelo(winjet({ vuelo }))).toEqual({
+      dia: '2026-09-25',
+      mes: '2026-09',
+      folio: 337,
+      mes_contable: '2026-10',
+      meses: ['2026-09', '2026-10'],
+    });
+  });
+
+  it('CIERRE DE MES: la decisión con un vuelo DIFERIDO — mover el gasto a octubre (su mes contable) se permite; a noviembre ⇒ 409 FUERA_DEL_MES_DEL_VUELO con mes_contable', () => {
+    const vuelo = {
+      folio: 337,
+      fecha_vuelo: '2026-09-25T15:00:00Z',
+      periodo_contable: '2026-10-01T05:00:00+00:00',
+      fecha_contable: '2026-10-01T05:00:00+00:00',
+      aeronave_id: PEV,
+    };
+    const g = winjet({ vuelo, fecha_gasto: '2026-09-28' });
+    const aOct = decidir(g, '2026-10-02', { confirmar: true });
+    expect(aOct.tipo).toBe('APLICAR');
+    const aNov = decidir(g, '2026-11-02', {
+      hoy: '2026-11-05',
+      confirmar: true,
+    });
+    expect(aNov.tipo).toBe('ERROR');
+    if (aNov.tipo !== 'ERROR') throw new Error('esperaba ERROR');
+    expect(aNov.error.code).toBe('FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO');
+    expect(aNov.error.details).toMatchObject({
+      mes_vuelo: '2026-09',
+      mes_contable: '2026-10',
+      meses: ['2026-09', '2026-10'],
+    });
+    expect(aNov.error.message).toContain(
+      'el mes contable del vuelo es octubre 2026',
+    );
   });
 
   it('sin candado: categorías de empresa y las dos del pago al vendedor, sin vuelo o con la fecha ilegible', () => {
@@ -1067,9 +1123,9 @@ describe('ALARMA DE PARIDAD con los libros que los textos imitan', () => {
     expect(reparto).toContain(
       sin('if (g.categoria !== FIJO || g.es_reparto_parcial) continue;'),
     );
-    const i = reparto.indexOf(
-      sin('private async fetchGastos(desde: string, hasta: string)'),
-    );
+    // Desde el 0.0.88 (invariante 89) `fetchGastos` recibe la sonda del
+    // cierre de mes como tercer argumento; la lectura por fecha_gasto sigue.
+    const i = reparto.indexOf(sin('private async fetchGastos('));
     expect(i).toBeGreaterThanOrEqual(0);
     const fetchGastos = reparto.slice(
       i,

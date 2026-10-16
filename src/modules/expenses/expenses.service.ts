@@ -1,4 +1,10 @@
 import {
+  assertGastoEnMesAbierto,
+  assertMesAbierto,
+  type GastoParaCandado,
+} from '../../common/cierre-mes.lector';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -49,6 +55,7 @@ import {
 // decisión y los textos de `PATCH /v1/expenses/:id/fecha` (PURO).
 import {
   GASTO_CAMBIO_FECHA_COLS,
+  gastoCambioFechaCols,
   avionesParaTextos,
   decidirCambioFechaGasto,
   errorDeFechasCambio,
@@ -291,6 +298,25 @@ interface TramoGastoRef {
   /** Etiqueta "CUN→MID" para mensajes. */
   tramo: string;
 }
+
+/**
+ * Campos de un PATCH de gasto que mueven dinero o de mes (candado
+ * MES_CERRADO, invariante 89). Lo demás es clasificación y no se bloquea.
+ */
+const CAMPOS_GASTO_CANDADO_MES = [
+  'monto',
+  'moneda',
+  'tc_gasto',
+  'fecha_gasto',
+  'vuelo_id',
+  'escala_id',
+  'aeronave_id',
+  'categoria',
+  'medio_pago',
+  'propina',
+  'tua_incluida',
+  'litros',
+] as const;
 
 @Injectable()
 export class ExpensesService {
@@ -2477,6 +2503,28 @@ export class ExpensesService {
       updated_by: userId,
     };
 
+    // CIERRE DE MES (16-oct-2026, invariante 89): 409 MES_CERRADO si el gasto
+    // CUENTA en un mes cerrado — eje vuelo ⇒ mes CONTABLE del vuelo (un
+    // gasto de un vuelo diferido a un mes abierto pasa aunque su fecha sea
+    // del mes cerrado); eje gasto ⇒ `fecha_gasto`. Un REPLAY (la misma
+    // llave ya creó el gasto) nunca rebota: devuelve el existente abajo.
+    await assertGastoEnMesAbierto(
+      this.supabase.service,
+      [
+        {
+          categoria: (payload.categoria as string | null) ?? null,
+          fecha_gasto: (payload.fecha_gasto as string | null) ?? null,
+          monto: (payload.monto as number | string | null) ?? null,
+          vuelo_id: (payload.vuelo_id as string | null) ?? null,
+          aeronave_id: (payload.aeronave_id as string | null) ?? null,
+          escala_id: (payload.escala_id as string | null) ?? null,
+        },
+      ],
+      dto.client_request_id
+        ? () => this.gastoConLlaveExiste(dto.client_request_id as string)
+        : undefined,
+    );
+
     // CANDADO por folio/remisión: el mismo ticket capturado dos veces trae
     // el mismo folio, sin importar quién ni cuántos días después. El pre-check
     // da el mensaje con detalle; el índice único de la BD cubre la carrera.
@@ -4338,6 +4386,15 @@ export class ExpensesService {
             : (actual?.notas ?? null);
       cols.notas = anexarSello(notasBase, lineaSello);
     }
+    // CIERRE DE MES (16-oct-2026, invariante 89): si el PATCH cambia algo
+    // que mueve dinero o de mes (monto, moneda, T.C., fecha, vuelo, tramo,
+    // avión, categoría, medio, propina, TUA, litros), el estado de ANTES y
+    // el de DESPUÉS deben caer en meses abiertos (409 MES_CERRADO). Solo
+    // clasificación (proveedor, notas, facturación, visto bueno) no se
+    // bloquea.
+    if (CAMPOS_GASTO_CANDADO_MES.some((k) => k in cols)) {
+      await this.candadoMesCerradoGasto(id, cols);
+    }
     // CAS (B1): con `if_updated_at` el UPDATE solo aplica si updated_at sigue
     // siendo el que leyó el cliente (ventana ±1 ms); 0 filas ⇒ releer y 409
     // CONFLICTO_VERSION con la fila viva (gana el servidor).
@@ -4403,6 +4460,54 @@ export class ExpensesService {
   }
 
   /**
+   * CIERRE DE MES (16-oct-2026, invariante 89): candado de UN gasto vivo —
+   * su estado de ANTES (leído) y, con `cambios`, el de DESPUÉS (fusionado)
+   * deben contar en meses abiertos. Sin la migración no lee nada.
+   */
+  private async candadoMesCerradoGasto(
+    id: string,
+    cambios: Record<string, unknown>,
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    if (!(await cierreMesDisponible(sb))) return;
+    const { data, error } = await sb
+      .from('gasto')
+      .select(
+        'id, categoria, fecha_gasto, monto, vuelo_id, aeronave_id, escala_id',
+      )
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return;
+    const antes = data as GastoParaCandado;
+    const despues: GastoParaCandado = { ...antes };
+    for (const k of [
+      'categoria',
+      'fecha_gasto',
+      'monto',
+      'vuelo_id',
+      'aeronave_id',
+      'escala_id',
+    ] as const) {
+      if (k in cambios) {
+        (despues as Record<string, unknown>)[k] = cambios[k] ?? null;
+      }
+    }
+    await assertGastoEnMesAbierto(sb, [antes, despues]);
+  }
+
+  /** ¿Ya existe un gasto con esa llave de idempotencia? (replay). */
+  private async gastoConLlaveExiste(llave: string): Promise<boolean> {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('id')
+      .eq('client_request_id', llave)
+      .maybeSingle();
+    if (error) return false;
+    return data != null;
+  }
+
+  /**
    * FECHA DEL PAGO DESDE CONCILIACIÓN (14-oct-2026, API 0.0.76, invariante
    * 74): `PATCH /v1/expenses/:id/fecha`, solo ADMIN y FACTURACION. Cambia
    * SOLO `fecha_gasto` (y `fecha_hora_carga` a la misma hora Cancún del día
@@ -4438,7 +4543,14 @@ export class ExpensesService {
     if (errFechas) throw excepcionCambioFecha(errFechas);
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select(GASTO_CAMBIO_FECHA_COLS)
+      // CIERRE DE MES (invariante 89): con la migración, el embed del vuelo
+      // trae su mes contable (el 409 FUERA_DEL_MES_DEL_VUELO acepta el real
+      // y el contable de un vuelo diferido).
+      .select(
+        gastoCambioFechaCols(
+          await cierreMesDisponible(this.supabase.service),
+        ) as typeof GASTO_CAMBIO_FECHA_COLS,
+      )
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -4670,6 +4782,9 @@ export class ExpensesService {
     // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
     // nada y la conciliación se sobreestimaría en silencio.
     const gasto = await this.findById(id);
+    // CIERRE DE MES (16-oct-2026, invariante 89): no se borra un gasto que
+    // cuenta en un mes cerrado (409 MES_CERRADO).
+    await this.candadoMesCerradoGasto(id, {});
     // Pagos PARCIALES (14-sep-2026): el candado mira los CARGOS ligados, no
     // solo la bandera — un gasto con un pago parcial no está `conciliado`
     // pero ya tiene banco detrás.
@@ -4923,6 +5038,15 @@ export class ExpensesService {
         'Solo los gastos generales (OTRO, FIJO, INDIRECTO, NOMINA, GASOLINA, VISITA) se reparten entre aviones.',
       );
     }
+    // CIERRE DE MES (invariante 89): el reparto manual cuenta por la
+    // `fecha_gasto` del padre (R4): un mes cerrado no se re-reparte.
+    await assertMesAbierto(
+      this.supabase.service,
+      typeof gasto.fecha_gasto === 'string'
+        ? gasto.fecha_gasto.slice(0, 7)
+        : null,
+      'gasto',
+    );
     const ids = items.map((i) => i.aeronave_id);
     if (new Set(ids).size !== ids.length) {
       throw new BadRequestException(
@@ -5064,7 +5188,9 @@ export class ExpensesService {
     const gastoIds = [...new Set(dto.gasto_ids)];
     const { data: gastosData, error: gErr } = await sb
       .from('gasto')
-      .select('id, vuelo_id, categoria, monto, moneda, aeronave_id')
+      .select(
+        'id, vuelo_id, categoria, monto, moneda, aeronave_id, fecha_gasto',
+      )
       .in('id', gastoIds);
     if (gErr) throw new Error(gErr.message);
     const porId = new Map(

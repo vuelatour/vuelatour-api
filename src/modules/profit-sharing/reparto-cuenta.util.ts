@@ -448,6 +448,15 @@ export interface UtilidadMesSocios {
   mes: string;
   /** Mes en curso: la cifra todavía se mueve (no se memoiza). */
   en_curso: boolean;
+  /**
+   * CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVO, solo
+   * con la migración): `SNAPSHOT_CIERRE` = utilidad CONGELADA al cerrar el
+   * mes (`cierre_mes.socios_snapshot`); `EN_VIVO` = compute de hoy.
+   * Ausente = API sin la migración (siempre en vivo, como 0.0.87).
+   */
+  origen?: 'SNAPSHOT_CIERRE' | 'EN_VIVO';
+  /** Con `SNAPSHOT_CIERRE`: cuándo se cerró el mes (timestamptz). */
+  cerrado_at?: string | null;
   aviones: Array<{
     aeronave: AeronaveCorta;
     /**
@@ -784,6 +793,15 @@ export function avisosDeCuenta(e: {
         utilidades: e.utilidades,
       }),
     );
+    // CIERRE DE MES (invariante 89): los meses CONGELADOS al cerrar.
+    for (const u of e.utilidades) {
+      if (u.origen !== 'SNAPSHOT_CIERRE' || u.mes < e.cuenta.cuenta_desde) {
+        continue;
+      }
+      avisos.push(
+        `La utilidad de ${etiquetaMes(u.mes)} se congeló al cerrar el mes; si cambian porcentajes o cobros, reabre el mes y ciérralo de nuevo.`,
+      );
+    }
   }
   return avisos;
 }
@@ -819,6 +837,46 @@ export interface MovimientoCuenta {
 /** «69 %» · «33.333 %» · «12.5 %». */
 export function fmtPorcentaje(p: number): string {
   return `${String(redondearA(num(p), 3))} %`;
+}
+
+/**
+ * « · cierre del 16-oct» cuando la utilidad del mes viene CONGELADA del
+ * cierre (invariante 89); '' en vivo (concepto de siempre).
+ */
+export function sufijoCierre(
+  u: Pick<UtilidadMesSocios, 'origen' | 'cerrado_at'>,
+): string {
+  if (u.origen !== 'SNAPSHOT_CIERRE') return '';
+  const dia = typeof u.cerrado_at === 'string' ? diaCortoDe(u.cerrado_at) : '';
+  return dia ? ` · cierre del ${dia}` : ' · cierre del mes';
+}
+
+const MESES_CORTOS_CIERRE = [
+  'ene',
+  'feb',
+  'mar',
+  'abr',
+  'may',
+  'jun',
+  'jul',
+  'ago',
+  'sep',
+  'oct',
+  'nov',
+  'dic',
+];
+
+/** '16-oct' (día Cancún) de un timestamptz; '' si no se puede leer. */
+function diaCortoDe(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const dia = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Cancun',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+  return `${Number(dia.slice(8, 10))}-${MESES_CORTOS_CIERRE[Number(dia.slice(5, 7)) - 1]}`;
 }
 
 export function conceptoUtilidad(
@@ -933,7 +991,9 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
         m: {
           fecha: ultimoDiaDeMes(u.mes),
           tipo: 'UTILIDAD',
-          concepto: conceptoUtilidad(u.mes, a.aeronave.matricula, a.porcentaje),
+          concepto:
+            conceptoUtilidad(u.mes, a.aeronave.matricula, a.porcentaje) +
+            sufijoCierre(u),
           mes: u.mes,
           aeronave: a.aeronave,
           porcentaje: a.porcentaje,
@@ -1173,6 +1233,8 @@ export interface PorMesCuenta {
   /** Σ utilidad del socio en el mes (0 antes del arranque). */
   utilidad_usd: number;
   en_curso: boolean;
+  /** ADITIVO (invariante 89): `SNAPSHOT_CIERRE` | `EN_VIVO` (con la migración). */
+  origen?: 'SNAPSHOT_CIERRE' | 'EN_VIVO';
   por_avion: UtilidadAvionSocio[];
   /** Σ entregas con `fecha_pago` en ese mes (flujo de dinero). */
   entregado_usd: number;
@@ -1256,6 +1318,8 @@ export function armarEstadoCuenta(e: {
       utilidad_usd:
         porAvion.reduce((acc, a) => acc + centavos(a.monto_usd), 0) / 100,
       en_curso: u?.en_curso ?? false,
+      // ADITIVO (invariante 89): solo cuando la utilidad trae su origen.
+      ...(u?.origen ? { origen: u.origen } : {}),
       por_avion: porAvion,
       entregado_usd:
         pagos

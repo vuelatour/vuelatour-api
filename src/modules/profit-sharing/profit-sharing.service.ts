@@ -130,6 +130,37 @@ import {
 } from './reparto-pago.util';
 import { UtilidadesMensualesSocios } from './reparto-utilidades.memo';
 import { hoyCancun } from '../../common/fecha-cancun.util';
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import {
+  colPeriodoContable,
+  colsVueloContable,
+} from '../../common/filtro-periodo-contable.util';
+import {
+  decisionDiferir,
+  diaContableDeGasto,
+  ejeContableDeGasto,
+  leyendaPasaA,
+  leyendaPasara,
+  leyendaPasaraAlCerrar as leyendaPasaraPrecierre,
+  leyendaVieneDe,
+  mesCalendarioDeRango,
+  motivoNoCerrable,
+  mesContableDeVuelo,
+  mesRealDeVuelo,
+  mesSiguienteDe,
+  origenDeVuelo,
+  papelContableEnPeriodo,
+  rangoDelMes,
+  salidaDeVuelo,
+  type DecisionDiferir,
+  type GastoParaMesContable,
+  type MotivoDiferir,
+} from '../../common/mes-contable.util';
+import {
+  leerCierresMes,
+  leerDiferimientos,
+  type CierreMesLeido,
+} from '../../common/cierre-mes.lector';
 import {
   exigirPeriodoDesdeInicio,
   inicioOficialDe,
@@ -208,6 +239,24 @@ import {
 
 /** Lecturas `in (…)` en lote: ids por consulta (URL acotada). */
 const LOTE_IDS = 200;
+
+/**
+ * Pre-cierre `cobros_pendientes.detalle` con la migración del cierre de mes
+ * (invariante 89): la regla de siempre + qué pasa al cerrar.
+ */
+const DETALLE_COBROS_PENDIENTES_CIERRE =
+  'Solo se reparte lo cobrado: la parte del avión de este saldo queda fuera del reparto (el resto —TUAS/extras/pernocta/comisión del vendedor— es ingreso de VuelaTour, tampoco cobrado). Al cerrar el mes, estos vuelos pasan completos al mes siguiente (venta, gastos y comisiones); se reparten cuando estén cobrados.';
+
+/** Columnas de `vuelo` del reparto (las de siempre; 0.0.87). */
+const VUELO_REPARTO_COLS =
+  'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, fecha_solicitud, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot';
+
+/**
+ * Embeds del gasto para decidir su EJE contable (invariante 89, solo con la
+ * migración): el vuelo con su mes contable y el avión del tramo.
+ */
+const GASTO_REPARTO_EMBED_CONTABLE =
+  ', escala:escala_id(aeronave_id), vuelo:vuelo_id(fecha_vuelo, periodo_contable, fecha_contable, aeronave_id, es_externo)';
 /** max-rows de PostgREST: una respuesta NUNCA trae más filas. */
 const PAGINA_POSTGREST = 1000;
 /** Tope de páginas por lote (200 vuelos × 20,000 filas ⇒ algo anda mal). */
@@ -303,6 +352,46 @@ function pctLabel(f: number): string {
 // CONTEOS de vuelos de un vuelo multi-avión es `avionQueReporta` (fuente
 // única, misma regla que el balance por avión y el Libro Dinero).
 
+/** Un vuelo de las listas del bloque `cierre` del reparto (invariante 89). */
+export interface CierreRepartoVuelo {
+  id: string;
+  folio: number | null;
+  cliente: string | null;
+  matricula: string | null;
+  venta_usd: number;
+  cobrado_usd: number;
+  por_cobrar_usd: number;
+  /** 'YYYY-MM' al que pasa (salen / pasarían). */
+  destino?: string;
+  /** 'YYYY-MM' del que viene (entran). */
+  origen?: string;
+  leyenda: string;
+  /** Datos del vuelo (los usa la previa del cierre). */
+  fecha_vuelo: string | null;
+  aeronave_id: string | null;
+  cliente_id: string | null;
+  /** Solo en los que la DECISIÓN manda (pasarían / excluidos). */
+  motivo?: MotivoDiferir;
+  cobrado_posterior_usd?: number;
+}
+
+/** Bloque ADITIVO `cierre` de `GET /v1/profit-sharing` (invariante 89). */
+export interface CierreRepartoBloque {
+  disponible: true;
+  /** 'YYYY-MM' solo si el rango es un mes calendario completo. */
+  periodo: string | null;
+  estado: 'ABIERTO' | 'CERRADO' | 'REABIERTO';
+  cerrado_at: string | null;
+  cerrado_por_nombre: string | null;
+  reabierto_at: string | null;
+  reabierto_por_nombre: string | null;
+  version: number | null;
+  coincide_con_snapshot: boolean | null;
+  diferidos_salen: CierreRepartoVuelo[];
+  diferidos_entran: CierreRepartoVuelo[];
+  pendientes_que_pasarian: CierreRepartoVuelo[];
+}
+
 interface AeronaveRow {
   id: string;
   matricula: string;
@@ -311,6 +400,9 @@ interface AeronaveRow {
 interface VueloRow {
   id: string;
   aeronave_id: string | null;
+  /** CIERRE DE MES (invariante 89): solo con la migración. */
+  periodo_contable?: string | null;
+  fecha_contable?: string | null;
   /** Cliente del vuelo (nombre resuelto aparte: detalle.vuelos / PDF). */
   cliente_id: string | null;
   /**
@@ -629,6 +721,15 @@ export class ProfitSharingService {
           participacion: v.participacion ?? 1,
           multi_avion: v.multi_avion ?? false,
           tramos_avion: v.tramos_ruta_avion ?? v.tramos_avion ?? null,
+          // CIERRE DE MES (16-oct-2026, invariante 89, ADITIVOS): solo con
+          // la migración (sin ella la línea es la de siempre).
+          ...(v.cierre_marca !== undefined
+            ? {
+                cierre_marca: v.cierre_marca,
+                diferido_de: v.diferido_de ?? null,
+                diferido_a: v.diferido_a ?? null,
+              }
+            : {}),
         })),
         // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): los ingresos
         // asignados a este avión. `saldo_usd` YA incluye
@@ -654,6 +755,10 @@ export class ProfitSharingService {
       // «Comisión del vendedor (avión)» (la «(VuelaTour)» la paga VuelaTour).
       // pyservices cambia con ella solo textos. Viaja SIEMPRE.
       comision_vendedor_solo_gasto_real: true as const,
+      // CIERRE DE MES (16-oct-2026, invariante 89, ADITIVO): estado del mes
+      // y las listas de diferidos (`RepartoCierre` de pyservices). Solo con
+      // la migración.
+      ...('cierre' in result && result.cierre ? { cierre: result.cierre } : {}),
     };
     return {
       payload,
@@ -684,7 +789,20 @@ export class ProfitSharingService {
    * `opts.sinPiso` SOLO para las utilidades por mes de la cuenta corriente
    * de los socios (saldo con su propio arranque, invariante 38: NO TOCAR).
    */
-  async compute(qPedido: ProfitSharingQuery, opts: { sinPiso?: boolean } = {}) {
+  async compute(
+    qPedido: ProfitSharingQuery,
+    opts: {
+      sinPiso?: boolean;
+      /**
+       * CIERRE DE MES (16-oct-2026, invariante 89), INTERNO: simula el mes
+       * ya cerrado — esos vuelos salen del dinero del periodo (con sus
+       * gastos de eje vuelo y comisiones) y sus HORAS se quedan. Lo usan la
+       * previa y el snapshot del cierre (`CierresService`). Sin él, byte a
+       * byte.
+       */
+      excluirVuelos?: ReadonlyArray<string>;
+    } = {},
+  ) {
     if (qPedido.desde > qPedido.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
@@ -734,16 +852,22 @@ export class ProfitSharingService {
       };
     }
 
+    // CIERRE DE MES (16-oct-2026, invariante 89): con la migración el eje
+    // del DINERO es `vuelo.fecha_contable` (un vuelo diferido al cerrar un
+    // mes cuenta completo en el mes destino) y las HORAS siguen por
+    // `fecha_vuelo`. Sin ella, `contable = false` ⇒ byte a byte 0.0.87.
+    const contable = await cierreMesDisponible(this.supabase.service);
+    const excluir = new Set(opts.excluirVuelos ?? []);
     const [
-      vuelos,
-      gastos,
+      leidos,
+      gastosPorFecha,
       socios,
       reservas,
       vigenciaComisiones,
       ingresosResultado,
     ] = await Promise.all([
-      this.fetchVuelos(q.desde, q.hasta),
-      this.fetchGastos(q.desde, q.hasta),
+      this.fetchVuelosPeriodo(q.desde, q.hasta, contable),
+      this.fetchGastos(q.desde, q.hasta, contable),
       this.fetchSocios(),
       this.fetchReservas(),
       // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura
@@ -755,6 +879,29 @@ export class ProfitSharingService {
       // devuelve [] sin consultar la tabla.
       leerIngresosDeResultado(this.supabase.service, q.desde, q.hasta),
     ]);
+    // Universo del DINERO (sin los excluidos de la simulación del cierre) y
+    // universo de las HORAS (vuelos que VOLARON en el periodo: los del
+    // dinero cuyo día real cae en él + las «sombras» diferidas fuera + los
+    // excluidos). Sin la migración los dos son el mismo (0.0.87).
+    const vuelos = leidos.dinero.filter((v) => !excluir.has(v.id));
+    const excluidos = leidos.dinero.filter((v) => excluir.has(v.id));
+    const vuelosHoras = contable
+      ? [...leidos.dinero, ...leidos.sombras].filter((v) => {
+          const dia = diaCancun(v.fecha_vuelo);
+          return dia != null && dia >= q.desde && dia <= q.hasta;
+        })
+      : vuelos;
+    const idsHoras = new Set(vuelosHoras.map((v) => v.id));
+    // Gastos: con la migración, eje de cada gasto (invariante 72) — eje
+    // VUELO ⇒ mes contable de su vuelo; eje GASTO ⇒ fecha_gasto.
+    const gastos = contable
+      ? await this.gastosDelPeriodoContable(
+          gastosPorFecha,
+          vuelos.map((v) => v.id),
+          q,
+          excluir,
+        )
+      : gastosPorFecha;
     // Partición ÚNICA (su avión XOR VuelaTour): aquí solo cuentan los de los
     // aviones de ESTE cómputo (activos; `q.aeronave_id` limita). Los de
     // VuelaTour no son de ningún reparto.
@@ -768,9 +915,16 @@ export class ProfitSharingService {
     const externosIds = new Set(
       vuelos.filter((v) => v.es_externo === true).map((v) => v.id),
     );
+    // Escalas: las del dinero (participación) + las de los vuelos que solo
+    // aportan HORAS (sombras y excluidos). Cobros: también los de los
+    // excluidos (la decisión de diferir los lee); computeAvion solo recorre
+    // `vuelos`, así que no cuentan dinero.
+    const idsSoloHoras = vuelosHoras
+      .map((v) => v.id)
+      .filter((id) => !vueloIds.includes(id));
     const [cobros, escalas, gastosDeVuelos] = await Promise.all([
-      this.fetchCobros(vueloIds),
-      this.fetchEscalasHoras(vueloIds),
+      this.fetchCobros([...vueloIds, ...excluidos.map((v) => v.id)]),
+      this.fetchEscalasHoras([...vueloIds, ...idsSoloHoras]),
       // PAGO REAL AL VENDEDOR por VUELO (13-oct-2026, API 0.0.74, invariante
       // 61): la «Comisión del vendedor (avión)» cuenta en el mes del VUELO
       // (los gastos de cada vuelo del periodo, de cualquier fecha_gasto) — la
@@ -857,7 +1011,7 @@ export class ProfitSharingService {
     // Las horas REALES de cada avión son SIEMPRE por escala (Regla B): no se
     // reparten con el factor del vuelo.
     const vueloAvion = new Map<string, string | null>(
-      vuelos.map((v) => [v.id, v.aeronave_id]),
+      [...vuelos, ...vuelosHoras].map((v) => [v.id, v.aeronave_id]),
     );
     const horasPorAvion = new Map<string, number>();
     const escalasPorVuelo = new Map<string, EscalaHorasRow[]>();
@@ -875,6 +1029,9 @@ export class ProfitSharingService {
       // operación que no ocurrió. Los tramos vivos de un vuelo CANCELADO sí
       // entran (avión que voló a recoger y regresó ferry: movió el horómetro).
       if (e.cancelada_at != null) continue;
+      // HORAS por fecha REAL (invariante 89): solo los vuelos que volaron en
+      // el periodo (un diferido que VIENE de otro mes no trae horas).
+      if (!idsHoras.has(e.vuelo_id)) continue;
       if (e.taco_salida == null || e.taco_llegada == null) continue;
       const h = Number(e.taco_llegada) - Number(e.taco_salida);
       if (!Number.isFinite(h) || h <= 0) continue;
@@ -1156,8 +1313,27 @@ export class ProfitSharingService {
       ),
     ].sort();
 
+    // CIERRE DE MES (16-oct-2026, invariante 89): bloque ADITIVO `cierre` y
+    // marcas por vuelo en `detalle.vuelos[]`. SOLO con la migración (sin
+    // ella las llaves no viajan: 0.0.87 byte a byte).
+    const cierre = contable
+      ? await this.bloqueCierreReparto({
+          q,
+          vuelos,
+          excluidos,
+          sombras: leidos.sombras,
+          cobrosPorVuelo,
+          tcVuelo: (v) =>
+            pos(v.tc_usd_mxn) ?? tcOficial.vuelo.get(v.id)?.tc ?? null,
+          clientes,
+          matriculas,
+          aviones,
+        })
+      : null;
+
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
+      ...(cierre ? { cierre } : {}),
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
       // ADITIVO (29-ago): FIJOS del pool convertidos con el TC oficial del
       // día del gasto (ya dentro de otros_prorrateados; NO están en
@@ -1236,9 +1412,296 @@ export class ProfitSharingService {
     mes: string,
     enCurso: boolean,
   ): Promise<UtilidadMesSocios> {
+    // CIERRE DE MES (16-oct-2026, invariante 89; decisión de fondo de la
+    // invariante 38 RESUELTA: congelar al cerrar): un mes CERRADO toma la
+    // utilidad por socio GUARDADA al cerrarlo (`socios_snapshot`), sin
+    // compute. Mes abierto (o sin la migración): en vivo, como siempre.
+    const contable = await cierreMesDisponible(this.supabase.service);
+    if (contable && !enCurso) {
+      const snap = await this.sociosSnapshotDeMes(mes);
+      if (snap) return snap;
+    }
     const { desde, hasta } = rangoDeMes(mes);
     const calculo = await this.compute({ desde, hasta }, { sinPiso: true });
-    return utilidadMesDesdeAviones(mes, calculo.aviones, enCurso);
+    const u = utilidadMesDesdeAviones(mes, calculo.aviones, enCurso);
+    return contable ? { ...u, origen: 'EN_VIVO' } : u;
+  }
+
+  /**
+   * `socios_snapshot` del mes si está CERRADO (null si no, o si el
+   * snapshot no tiene la forma esperada — entonces se calcula en vivo y se
+   * avisa en el log; jamás una cuenta con un snapshot roto).
+   */
+  private async sociosSnapshotDeMes(
+    mes: string,
+  ): Promise<UtilidadMesSocios | null> {
+    const { data, error } = await this.supabase.service
+      .from('cierre_mes')
+      .select('socios_snapshot, cerrado_at')
+      .eq('periodo', `${mes}-01`)
+      .eq('estado', 'CERRADO')
+      .maybeSingle();
+    if (error) throw new Error(`Cierre de ${mes}: ${error.message}`);
+    if (!data) return null;
+    const snap = (data as { socios_snapshot?: unknown }).socios_snapshot;
+    const aviones =
+      snap && typeof snap === 'object'
+        ? (snap as { aviones?: unknown }).aviones
+        : null;
+    if (!Array.isArray(aviones)) {
+      this.logger.warn(
+        `Cierre de ${mes}: socios_snapshot sin «aviones»; la cuenta de socios lo calcula en vivo`,
+      );
+      return null;
+    }
+    return {
+      mes,
+      en_curso: false,
+      aviones: aviones as UtilidadMesSocios['aviones'],
+      origen: 'SNAPSHOT_CIERRE',
+      cerrado_at: (data as { cerrado_at?: string | null }).cerrado_at ?? null,
+    };
+  }
+
+  /** Olvida la memoria de utilidades de los socios (cerrar / reabrir mes). */
+  olvidarUtilidadesSocios(): void {
+    this.utilidadesMes.olvidar();
+  }
+
+  /**
+   * CIERRE DE MES (16-oct-2026, invariante 89): bloque ADITIVO `cierre` del
+   * reparto y marcas por vuelo (`cierre_marca`, `diferido_de`, `diferido_a`
+   * en `aviones[].detalle.vuelos[]`). Solo informa: el DINERO ya lo decidió
+   * el universo por `fecha_contable`.
+   *  - `diferidos_salen`: los que VOLARON en el periodo y un cierre pasó
+   *    fuera (más los EXCLUIDOS de la simulación): no están en `aviones[]`.
+   *  - `diferidos_entran`: los que un cierre trajo a este periodo (suman).
+   *  - `pendientes_que_pasarian`: en un mes calendario NO cerrado, los que
+   *    `decisionDiferir` pasaría hoy al mes siguiente (siguen sumando).
+   *  - `coincide_con_snapshot`: mes CERRADO ⇒ saldo por avión de hoy vs el
+   *    guardado al cerrar (±0.01); false = cambió un % o un T.C. después.
+   * Montos de los diferidos = los de la bitácora del cierre (al corte).
+   */
+  private async bloqueCierreReparto(ctx: {
+    q: ProfitSharingQuery;
+    vuelos: VueloRow[];
+    excluidos: VueloRow[];
+    sombras: VueloRow[];
+    cobrosPorVuelo: Map<string, CobroRow[]>;
+    tcVuelo: (v: VueloRow) => number | null;
+    clientes: Map<string, string>;
+    matriculas: Map<string, string>;
+    aviones: Array<{
+      aeronave: { id: string; matricula: string };
+      saldo_disponible_usd: number;
+      detalle: { vuelos: Array<{ id: string }> };
+    }>;
+  }): Promise<CierreRepartoBloque> {
+    const sb = this.supabase.service;
+    const { q } = ctx;
+    const mes = mesCalendarioDeRango(q.desde, q.hasta);
+    const cierreFila: CierreMesLeido | null = mes
+      ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
+      : null;
+    const estado = cierreFila?.estado ?? 'ABIERTO';
+    const venidos = ctx.vuelos.filter(
+      (v) => papelContableEnPeriodo(v, q.desde, q.hasta) === 'viene',
+    );
+    const bitacora = await leerDiferimientos(sb, [
+      ...venidos.map((v) => v.id),
+      ...ctx.sombras.map((v) => v.id),
+    ]);
+    const matricula = (v: VueloRow): string | null =>
+      v.aeronave_id ? (ctx.matriculas.get(v.aeronave_id) ?? null) : null;
+    const cliente = (v: VueloRow): string | null =>
+      v.cliente_id ? (ctx.clientes.get(v.cliente_id) ?? null) : null;
+    const item = (
+      v: VueloRow,
+      d: Pick<DecisionDiferir, 'venta_usd' | 'cobrado_usd' | 'por_cobrar_usd'> &
+        Partial<Pick<DecisionDiferir, 'motivo' | 'cobrado_posterior_usd'>>,
+    ) => ({
+      id: v.id,
+      folio: v.folio ?? null,
+      cliente: cliente(v),
+      matricula: matricula(v),
+      venta_usd: d.venta_usd,
+      cobrado_usd: d.cobrado_usd,
+      por_cobrar_usd: d.por_cobrar_usd,
+      fecha_vuelo: v.fecha_vuelo ?? null,
+      aeronave_id: v.aeronave_id ?? null,
+      cliente_id: v.cliente_id ?? null,
+      ...(d.motivo
+        ? {
+            motivo: d.motivo,
+            cobrado_posterior_usd: d.cobrado_posterior_usd ?? 0,
+          }
+        : {}),
+    });
+    // Clientes internos (nada que cobrar) para la decisión de diferir.
+    const necesitaDecision =
+      ctx.excluidos.length > 0 || (mes != null && estado !== 'CERRADO');
+    const internos = necesitaDecision
+      ? await this.clientesInternosDe([
+          ...ctx.vuelos.map((v) => v.cliente_id),
+          ...ctx.excluidos.map((v) => v.cliente_id),
+        ])
+      : new Set<string>();
+    const decidir = (v: VueloRow, ultimoDia: string): DecisionDiferir | null =>
+      decisionDiferir(
+        {
+          estado: v.estado,
+          monto_total_usd: v.monto_total_usd,
+          tc_usd_mxn: ctx.tcVuelo(v),
+          cliente_interno: v.cliente_id ? internos.has(v.cliente_id) : false,
+        },
+        ctx.cobrosPorVuelo.get(v.id) ?? [],
+        ultimoDia,
+      );
+
+    const salen: CierreRepartoVuelo[] = [];
+    for (const v of ctx.sombras) {
+      const real = mesRealDeVuelo(v);
+      const sal = real ? salidaDeVuelo(v.id, real, bitacora) : null;
+      const destino = sal?.destino ?? mesContableDeVuelo(v) ?? '';
+      const montos = sal ?? {
+        venta_usd: round2(Number(v.monto_total_usd) || 0),
+        cobrado_usd: 0,
+        por_cobrar_usd: round2(Number(v.monto_total_usd) || 0),
+      };
+      salen.push({
+        ...item(v, montos),
+        destino,
+        leyenda: destino ? leyendaPasaA(destino, montos) : 'Pasa a otro mes',
+      });
+    }
+    for (const v of ctx.excluidos) {
+      const base = mes ?? mesRealDeVuelo(v);
+      if (!base) continue;
+      const d = decidir(v, rangoDelMes(base).hasta) ?? {
+        venta_usd: round2(Number(v.monto_total_usd) || 0),
+        cobrado_usd: 0,
+        por_cobrar_usd: round2(Number(v.monto_total_usd) || 0),
+      };
+      const destino = mesSiguienteDe(base);
+      salen.push({ ...item(v, d), destino, leyenda: leyendaPasaA(destino, d) });
+    }
+
+    const marcas = new Map<
+      string,
+      {
+        cierre_marca: string;
+        diferido_de: string | null;
+        diferido_a: string | null;
+      }
+    >();
+    const entran: CierreRepartoVuelo[] = [];
+    for (const v of venidos) {
+      const contableMes = mesContableDeVuelo(v);
+      const origen = contableMes
+        ? origenDeVuelo(v, contableMes, bitacora)
+        : null;
+      const fila = bitacora.find(
+        (b) => b.vuelo_id === v.id && b.destino === contableMes,
+      );
+      const montos = fila ?? {
+        venta_usd: round2(Number(v.monto_total_usd) || 0),
+        cobrado_usd: 0,
+        por_cobrar_usd: round2(Number(v.monto_total_usd) || 0),
+      };
+      const leyenda = origen ? leyendaVieneDe(origen) : 'Viene de otro mes';
+      entran.push({ ...item(v, montos), origen: origen ?? '', leyenda });
+      marcas.set(v.id, {
+        cierre_marca: leyenda,
+        diferido_de: origen,
+        diferido_a: null,
+      });
+    }
+
+    const pasarian: CierreRepartoVuelo[] = [];
+    if (mes != null && estado !== 'CERRADO') {
+      const ultimo = rangoDelMes(mes).hasta;
+      const destino = mesSiguienteDe(mes);
+      for (const v of ctx.vuelos) {
+        if (v.estado !== 'COMPLETADO') continue;
+        const d = decidir(v, ultimo);
+        if (!d) continue;
+        const leyenda = leyendaPasara(destino, d);
+        pasarian.push({ ...item(v, d), destino, leyenda });
+        if (!marcas.has(v.id)) {
+          marcas.set(v.id, {
+            cierre_marca: leyenda,
+            diferido_de: null,
+            diferido_a: destino,
+          });
+        }
+      }
+    }
+
+    // Marcas en el detalle de cada avión (todas las líneas llevan las llaves).
+    for (const a of ctx.aviones) {
+      for (const linea of a.detalle.vuelos) {
+        const m = marcas.get(linea.id);
+        Object.assign(linea, {
+          cierre_marca: m?.cierre_marca ?? null,
+          diferido_de: m?.diferido_de ?? null,
+          diferido_a: m?.diferido_a ?? null,
+        });
+      }
+    }
+
+    let coincide: boolean | null = null;
+    if (estado === 'CERRADO') {
+      const porAvion = Array.isArray(cierreFila?.totales?.por_avion)
+        ? (cierreFila?.totales?.por_avion as Array<Record<string, unknown>>)
+        : null;
+      if (porAvion) {
+        const guardado = new Map(
+          porAvion.map((p) => [String(p.aeronave_id), Number(p.saldo_usd)]),
+        );
+        coincide = ctx.aviones.every((a) => {
+          const g = guardado.get(a.aeronave.id);
+          return (
+            g != null &&
+            Number.isFinite(g) &&
+            Math.abs(round2(a.saldo_disponible_usd) - round2(g)) <= 0.01
+          );
+        });
+      }
+    }
+
+    const porFolio = (x: CierreRepartoVuelo, y: CierreRepartoVuelo) =>
+      (x.folio ?? 0) - (y.folio ?? 0);
+    return {
+      disponible: true,
+      periodo: mes,
+      estado,
+      cerrado_at: cierreFila?.cerrado_at ?? null,
+      cerrado_por_nombre: cierreFila?.cerrado_por?.nombre ?? null,
+      reabierto_at: cierreFila?.reabierto_at ?? null,
+      reabierto_por_nombre: cierreFila?.reabierto_por?.nombre ?? null,
+      version: cierreFila?.version ?? null,
+      coincide_con_snapshot: coincide,
+      diferidos_salen: salen.sort(porFolio),
+      diferidos_entran: entran.sort(porFolio),
+      pendientes_que_pasarian: pasarian.sort(porFolio),
+    };
+  }
+
+  /** Clientes INTERNOS (es_interno) de esos ids, en una consulta. */
+  private async clientesInternosDe(
+    ids: ReadonlyArray<string | null | undefined>,
+  ): Promise<Set<string>> {
+    const unicos = [...new Set(ids.filter((x): x is string => !!x))];
+    const out = new Set<string>();
+    if (unicos.length === 0) return out;
+    const { data, error } = await this.supabase.service
+      .from('cliente')
+      .select('id')
+      .in('id', unicos)
+      .eq('es_interno', true);
+    if (error) throw new Error(error.message);
+    for (const c of data ?? []) out.add(c.id as string);
+    return out;
   }
 
   private computeAvion(
@@ -1472,6 +1935,14 @@ export class ProfitSharingService {
       comision_banco_avion_usd?: number;
       comision_vendedor_prov_usd?: number;
       comision_vendedor_real_usd?: number;
+      /**
+       * ADITIVOS (16-oct-2026, API 0.0.88, invariante 89): solo con la
+       * migración del cierre de mes — «Viene de septiembre 2026» / «Pendiente
+       * de cobro: pasará a octubre 2026 al cerrar (…)»; 'YYYY-MM'.
+       */
+      cierre_marca?: string | null;
+      diferido_de?: string | null;
+      diferido_a?: string | null;
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -2411,6 +2882,13 @@ export class ProfitSharingService {
     const sb = this.supabase.service;
     const desdeTs = `${q.desde}T00:00:00-05:00`;
     const hastaTs = `${q.hasta}T23:59:59-05:00`;
+    // CIERRE DE MES (16-oct-2026, invariante 89): completados y cancelados
+    // (el DINERO del cierre: cobros pendientes, cobrados de más, sin gasto de
+    // operaciones, facturas, inversos) por `fecha_contable`; los vuelos SIN
+    // COMPLETAR y todo lo operativo (tacos, tramos, grupos) por
+    // `fecha_vuelo`. Sin la migración, todo por `fecha_vuelo` (0.0.87).
+    const contable = await cierreMesDisponible(sb);
+    const colDinero = colPeriodoContable(contable);
 
     const [
       pendRes,
@@ -2437,6 +2915,7 @@ export class ProfitSharingService {
           'CONFIRMADO',
           'EN_VUELO',
         ])
+        // eje REAL a propósito (invariante 89): vuelos SIN completar (operativo: el cierre los exige completos)
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs)
         .order('fecha_vuelo', { ascending: true }),
@@ -2454,22 +2933,22 @@ export class ProfitSharingService {
           // no avisa en una cotización abierta.
           // pase_abordar/extras (15-oct-2026): renglones inversos
           // tua_pagada_sin_cobrar / transporte_pagado_sin_cotizar.
-          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, cotizacion_abierta, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot, pase_abordar, extras',
+          `id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, cotizacion_abierta, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot, pase_abordar, extras${colsVueloContable(contable)}`,
         )
         .eq('estado', 'COMPLETADO')
-        .gte('fecha_vuelo', desdeTs)
-        .lte('fecha_vuelo', hastaTs),
+        .gte(colDinero, desdeTs)
+        .lte(colDinero, hastaTs),
       // Cancelados del periodo: pueden tener dinero real (cobros retenidos y
       // gastos) que YA cuenta en el reparto (regla 28-ago) — aquí solo se
       // enumeran para que la oficina confirme que ese dinero es de verdad.
       sb
         .from('vuelo')
         .select(
-          'id, folio, tc_usd_mxn, fecha_vuelo, fecha_solicitud, aeronave_id',
+          `id, folio, tc_usd_mxn, fecha_vuelo, fecha_solicitud, aeronave_id${colsVueloContable(contable)}`,
         )
         .eq('estado', 'CANCELADO')
-        .gte('fecha_vuelo', desdeTs)
-        .lte('fecha_vuelo', hastaTs),
+        .gte(colDinero, desdeTs)
+        .lte(colDinero, hastaTs),
       // Gastos del periodo con huecos de datos. El embed del vuelo solo
       // sirve para reconocer el GAS de un externo sin avión (abajo).
       sb
@@ -2501,6 +2980,7 @@ export class ProfitSharingService {
         .eq('revision_requerida', true)
         .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
+        // eje REAL a propósito (invariante 89): tacómetros en revisión (horas)
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
       // (15-oct-2026) La consulta de «Aterrizajes fuera de CUN» se retiró
@@ -2515,6 +2995,7 @@ export class ProfitSharingService {
         .not('fecha_salida_plan', 'is', null)
         .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
+        // eje REAL a propósito (invariante 89): fechas de los tramos (operativo)
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
       // SOBRES de cobro de GRUPO del periodo (Fase 2, 4-sep-2026): el
@@ -2533,6 +3014,7 @@ export class ProfitSharingService {
         .from('vuelo_grupo')
         .select('id, folio, nombre, cliente_id, fecha_vuelo')
         .is('cancelado_at', null)
+        // eje REAL a propósito (invariante 89): grupos por su fecha (vuelo_grupo.fecha_vuelo)
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs)
         .limit(500),
@@ -2596,7 +3078,7 @@ export class ProfitSharingService {
     let externosSinHonorario = 0;
     let externosSinHonorarioVuelos: Array<{ id: string; folio: number }> = [];
     {
-      const completadosRows = (completadosRes.data ?? []) as Array<
+      const completadosRows = (completadosRes.data ?? []) as unknown as Array<
         Record<string, unknown>
       >;
       // Pilotos EFECTIVOS del vuelo: nivel vuelo + rotaciones por TRAMO
@@ -2676,10 +3158,10 @@ export class ProfitSharingService {
     // corresponde a una operación que sí ocurrió (una pista provisionada de
     // un vuelo que jamás despegó se borra). NO se listan en cobros_pendientes:
     // un cancelado no tiene saldo por cobrar.
-    const cancelados = (canceladosRes.data ?? []) as Array<
+    const cancelados = (canceladosRes.data ?? []) as unknown as Array<
       Record<string, unknown>
     >;
-    const completados = (completadosRes.data ?? []) as Array<
+    const completados = (completadosRes.data ?? []) as unknown as Array<
       Record<string, unknown>
     >;
     const gruposPeriodo = (gruposRes.data ?? []) as Array<
@@ -2853,7 +3335,19 @@ export class ProfitSharingService {
       cobrado_usd: number;
       saldo_usd: number;
       grupo_folio: number | null;
+      /**
+       * ADITIVOS (16-oct-2026, invariante 89; solo con la migración y un
+       * mes calendario): a qué mes pasará al cerrar, la leyenda del API y lo
+       * cobrado con fecha ≤ último día del mes (`cobradoAlCorte`).
+       */
+      pasara_a?: string;
+      leyenda?: string;
+      cobrado_al_corte_usd?: number;
     }> = [];
+    // Mes del pre-cierre (solo un mes calendario) para la leyenda «pasará a».
+    const mesContablePre = contable
+      ? mesCalendarioDeRango(q.desde, q.hasta)
+      : null;
     // «VUELOS COBRADOS DE MÁS» (14-oct-2026, API 0.0.78, invariante 77,
     // D14): MISMO universo y MISMA cadena de T.C. que `cobros_pendientes`,
     // sin lecturas nuevas y sin la causa OTRO_VUELO_DEL_CLIENTE.
@@ -2870,6 +3364,21 @@ export class ProfitSharingService {
           ? (grupoFolioPorId.get(v.grupo_id) ?? null)
           : null;
       if (saldo > 1) {
+        // CIERRE DE MES (invariante 89): la MISMA decisión del cierre
+        // (`decisionDiferir`, cobros con fecha ≤ fin de mes).
+        const dif = mesContablePre
+          ? decisionDiferir(
+              {
+                estado: 'COMPLETADO',
+                monto_total_usd: v.monto_total_usd as string | number | null,
+                tc_usd_mxn: tcCadena(v),
+                cliente_interno: false,
+              },
+              cobrosPorVueloPre.get(v.id as string) ?? [],
+              rangoDelMes(mesContablePre).hasta,
+            )
+          : null;
+        const destino = mesContablePre ? mesSiguienteDe(mesContablePre) : null;
         cobrosPendientes.push({
           id: v.id as string,
           folio: v.folio as number,
@@ -2877,6 +3386,13 @@ export class ProfitSharingService {
           cobrado_usd: conv.total_usd,
           saldo_usd: saldo,
           grupo_folio: grupoFolio,
+          ...(dif && destino
+            ? {
+                pasara_a: destino,
+                leyenda: leyendaPasaraPrecierre(destino, dif),
+                cobrado_al_corte_usd: dif.cobrado_usd,
+              }
+            : {}),
         });
       }
       const cdm = cobradoDeMas(
@@ -3341,7 +3857,7 @@ export class ProfitSharingService {
     // (Sustituyen a `tua_cobrada_sin_pagada`, retirado ese día.)
     const [seguimiento, itemsCuentasSocios, sinGastoOps, sinFactura, inversos] =
       await Promise.all([
-        this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
+        this.seguimientoCotizacionPendiente(desdeTs, hastaTs, contable),
         mesCierre && veeCuentasSocios
           ? this.itemsCuentasSocios(mesCierre)
           : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
@@ -3385,6 +3901,15 @@ export class ProfitSharingService {
     const tacosOmitidos = resumenTacosOmitidos(omitRows, nombresTacos);
 
     const ligasUsdTc = await ligasUsdTcPromesa;
+    // VUELOS QUE VIENEN (invariante 89): diferidos a este periodo por un
+    // cierre anterior (informativo; solo con la migración).
+    const vuelosQueVienen = contable
+      ? await this.itemVuelosQueVienen(
+          [...completados, ...cancelados],
+          q.desde,
+          q.hasta,
+        )
+      : null;
     const items = [
       {
         clave: 'vuelos_sin_completar',
@@ -3438,7 +3963,14 @@ export class ProfitSharingService {
           cobrosPendientes.reduce((acc, c) => acc + c.saldo_usd, 0),
         ),
         vuelos: cobrosPendientes,
+        // CIERRE DE MES (invariante 89): con la migración, la regla del cierre.
+        ...(mesContablePre
+          ? { detalle: DETALLE_COBROS_PENDIENTES_CIERRE }
+          : {}),
       },
+      // VUELOS QUE VIENEN DE MESES ANTERIORES (16-oct-2026, invariante 89):
+      // INFORMATIVO, solo con la migración.
+      ...(vuelosQueVienen ? [vuelosQueVienen] : []),
       // «Vuelos cobrados de más» (0.0.78, invariante 77, D14): NO bloquea;
       // count = los que requieren revisión, los explicados aparte.
       renglonVuelosCobradosDeMas(cobradosDeMas),
@@ -3792,7 +4324,104 @@ export class ProfitSharingService {
       .filter((i) => bloqueantes.includes(i.clave))
       .every((i) => i.count === 0);
 
-    return { periodo: { desde: q.desde, hasta: q.hasta }, listo, items };
+    // CIERRE DE MES (invariante 89, ADITIVO): estado del mes y si se puede
+    // cerrar (orden y estado; el pre-cierre decide `listo`).
+    const cierre = contable
+      ? await this.cierrePrecierre(mesContablePre, listo)
+      : null;
+    return {
+      periodo: { desde: q.desde, hasta: q.hasta },
+      listo,
+      ...(cierre ? { cierre } : {}),
+      items,
+    };
+  }
+
+  /**
+   * Pre-cierre · VUELOS QUE VIENEN DE MESES ANTERIORES (16-oct-2026,
+   * invariante 89): los diferidos a este periodo por un cierre (suman aquí
+   * completos). INFORMATIVO, sin `ids` (trae `vuelos[]`).
+   */
+  private async itemVuelosQueVienen(
+    vuelos: Array<Record<string, unknown>>,
+    desde: string,
+    hasta: string,
+  ) {
+    const venidos = vuelos.filter(
+      (v) =>
+        papelContableEnPeriodo(
+          v as {
+            fecha_vuelo?: string | null;
+            periodo_contable?: string | null;
+          },
+          desde,
+          hasta,
+        ) === 'viene',
+    );
+    const bitacora = await leerDiferimientos(
+      this.supabase.service,
+      venidos.map((v) => v.id as string),
+    );
+    const lista = venidos
+      .map((v) => {
+        const vv = v as {
+          id: string;
+          fecha_vuelo?: string | null;
+          periodo_contable?: string | null;
+          fecha_contable?: string | null;
+        };
+        const mes = mesContableDeVuelo(vv);
+        const origen = mes ? origenDeVuelo(vv, mes, bitacora) : null;
+        return {
+          id: vv.id,
+          folio: Number(v.folio),
+          fecha_vuelo: (v.fecha_vuelo as string | null) ?? null,
+          origen,
+          leyenda: origen ? leyendaVieneDe(origen) : 'Viene de otro mes',
+        };
+      })
+      .sort((a, b) => a.folio - b.folio);
+    return {
+      clave: 'vuelos_que_vienen',
+      titulo: 'Vuelos que vienen de meses anteriores',
+      detalle:
+        'Se cerró su mes con el cobro pendiente: cuentan completos en este mes (venta, gastos y comisiones); sus horas se quedan en el mes en que volaron.',
+      count: lista.length,
+      vuelos: lista,
+      informativo: true as const,
+    };
+  }
+
+  /**
+   * Pre-cierre · bloque ADITIVO `cierre` (invariante 89): estado del mes,
+   * quién lo cerró y si ya se puede cerrar (orden + `listo`).
+   */
+  private async cierrePrecierre(mes: string | null, listo: boolean) {
+    const filas = await leerCierresMes(this.supabase.service);
+    const fila = mes ? (filas.find((f) => f.periodo === mes) ?? null) : null;
+    const cerrados = new Set(
+      filas.filter((f) => f.estado === 'CERRADO').map((f) => f.periodo),
+    );
+    const inicio = await inicioOficialDe(this.configuracion);
+    const motivo = mes
+      ? motivoNoCerrable({
+          mes,
+          mesEnCurso: hoyCancun(this.ahora()).slice(0, 7),
+          mesInicio: inicio ? inicio.slice(0, 7) : null,
+          cerrados,
+          listo,
+        })
+      : null;
+    return {
+      disponible: true as const,
+      periodo: mes,
+      estado: fila?.estado ?? ('ABIERTO' as const),
+      cerrado_at: fila?.cerrado_at ?? null,
+      cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
+      puede_cerrar: mes != null && motivo == null,
+      motivo_no_cerrable: motivo,
+      roles_cierran: ['ADMIN', 'FACTURACION'],
+    };
   }
 
   /**
@@ -3853,6 +4482,7 @@ export class ProfitSharingService {
         .not('taco_omitido_at', 'is', null)
         .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
+        // eje REAL a propósito (invariante 89): tacómetros omitidos (horas)
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs);
       if (error) throw new Error(error.message);
@@ -3885,7 +4515,11 @@ export class ProfitSharingService {
   private async seguimientoCotizacionPendiente(
     desdeTs: string,
     hastaTs: string,
+    contable = false,
   ): Promise<ReturnType<typeof resumenPrecierreSeguimiento> | null> {
+    // CIERRE DE MES (invariante 89): las notas siguen al DINERO del vuelo
+    // (mes contable); sin la migración, `fecha_vuelo`.
+    const colEmbed = colPeriodoContable(contable, 'vuelo');
     try {
       // PAGINADA (revisión adversaria 29-sep-2026): PostgREST corta en
       // max-rows = 1000 SIN avisar y el `.limit(5000)` no lo evita; con más
@@ -3908,8 +4542,8 @@ export class ProfitSharingService {
           .eq('estado', 'PENDIENTE')
           .eq('afecta_cotizacion', true)
           .is('deleted_at', null)
-          .gte('vuelo.fecha_vuelo', desdeTs)
-          .lte('vuelo.fecha_vuelo', hastaTs)
+          .gte(colEmbed, desdeTs)
+          .lte(colEmbed, hastaTs)
           .order('id', { ascending: true })
           .range(desde, desde + SEGUIMIENTO_PRECIERRE_PAGINA - 1);
         if (error) {
@@ -4295,19 +4929,56 @@ export class ProfitSharingService {
    * socios. Cortes en hora Cancún (UTC−5): un vuelo nocturno del día 31
    * pertenece a SU mes.
    */
-  private async fetchVuelos(desde: string, hasta: string): Promise<VueloRow[]> {
+  private async fetchVuelos(
+    desde: string,
+    hasta: string,
+    contable = false,
+  ): Promise<VueloRow[]> {
+    // CIERRE DE MES (invariante 89): con la migración el periodo del DINERO
+    // es `fecha_contable` (`colPeriodoContable`); sin ella, `fecha_vuelo`.
+    const col = colPeriodoContable(contable);
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
         // fecha_solicitud: día de la cotización para el TC oficial de
         // respaldo (29-ago) cuando la cotización no trae tc_usd_mxn.
-        'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, fecha_solicitud, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+        `${VUELO_REPARTO_COLS}${colsVueloContable(contable)}`,
       )
       .in('estado', ['COMPLETADO', 'CANCELADO'])
+      .gte(col, `${desde}T00:00:00-05:00`)
+      .lte(col, `${hasta}T23:59:59-05:00`);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as unknown as VueloRow[];
+  }
+
+  /**
+   * Vuelos del periodo para el reparto (16-oct-2026, invariante 89):
+   * `dinero` = por `fecha_contable` (sin la migración, `fecha_vuelo`: lo de
+   * siempre); `sombras` = los que VOLARON en el periodo (`fecha_vuelo`) pero
+   * un cierre DIFIRIÓ fuera de él — solo aportan HORAS. Sin la migración no
+   * hay sombras (ni consulta).
+   */
+  private async fetchVuelosPeriodo(
+    desde: string,
+    hasta: string,
+    contable: boolean,
+  ): Promise<{ dinero: VueloRow[]; sombras: VueloRow[] }> {
+    const dinero = await this.fetchVuelos(desde, hasta, contable);
+    if (!contable) return { dinero, sombras: [] };
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select(`${VUELO_REPARTO_COLS}${colsVueloContable(true)}`)
+      .in('estado', ['COMPLETADO', 'CANCELADO'])
+      .not('periodo_contable', 'is', null)
+      // eje REAL a propósito (invariante 89): SOMBRAS: los que VOLARON en el periodo (solo horas)
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
-    return data ?? [];
+    const yaEnDinero = new Set(dinero.map((v) => v.id));
+    const sombras = ((data ?? []) as unknown as VueloRow[]).filter(
+      (v) => !yaEnDinero.has(v.id),
+    );
+    return { dinero, sombras };
   }
 
   private async fetchCobros(vueloIds: string[]): Promise<CobroRow[]> {
@@ -4459,11 +5130,19 @@ export class ProfitSharingService {
     );
   }
 
-  private async fetchGastos(desde: string, hasta: string): Promise<GastoRow[]> {
+  private async fetchGastos(
+    desde: string,
+    hasta: string,
+    contable = false,
+  ): Promise<GastoRow[]> {
     // TUA de oficina (13-oct-2026, invariante 66): detrás de la sonda.
     const colTua = colTuaIncluida(
       await tuaIncluidaDisponible(this.supabase.service),
     );
+    // CIERRE DE MES (invariante 89): con la migración cada gasto trae su
+    // vuelo (mes contable) y su tramo para decidir su EJE
+    // (`diaContableDeGasto`, la regla de `ubicacionBalanceDeGasto`).
+    const embedContable = contable ? GASTO_REPARTO_EMBED_CONTABLE : '';
     const { data, error } = await this.supabase.service
       .from('gasto')
       // propina + valor_ia_extraido: para separar el TUA embebido en
@@ -4473,13 +5152,72 @@ export class ProfitSharingService {
       // fecha_gasto: día del TC oficial de respaldo (29-ago) en MXN sin TC.
       // tua_incluida (13-oct-2026): la TUA que fijó la oficina.
       .select(
-        `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}`,
+        `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${embedContable}`,
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
     // Select dinámico (con o sin `tua_incluida`): la fila se declara a mano.
     return (data ?? []) as unknown as GastoRow[];
+  }
+
+  /**
+   * GASTOS DEL PERIODO CONTABLE (16-oct-2026, invariante 89; afinación 2 del
+   * contrato): los gastos por `fecha_gasto` (como siempre) ∪ TODOS los de los
+   * vuelos del dinero del periodo (cualquier fecha), y se queda cada uno
+   * SOLO si el día en que CUENTA cae en el periodo — la MISMA regla del
+   * balance (`ubicacionBalanceDeGasto`, invariante 72): eje VUELO ⇒ día
+   * contable de su vuelo; eje GASTO (GAS, EMPRESA, sin vuelo) ⇒
+   * `fecha_gasto`; con reparto MANUAL ⇒ la `fecha_gasto` del padre (R4: sus
+   * parciales). Así un vuelo diferido se lleva sus gastos en los tres libros
+   * (balance = reparto = Libro Dinero) y un gasto con fecha fuera del mes de
+   * su vuelo cuenta con el vuelo (antes el reparto lo ponía en su
+   * fecha_gasto y el balance en el vuelo). Los de los vuelos EXCLUIDOS de la
+   * simulación del cierre (eje vuelo) salen.
+   */
+  private async gastosDelPeriodoContable(
+    porFecha: GastoRow[],
+    vueloIds: ReadonlyArray<string>,
+    q: ProfitSharingQuery,
+    excluir: ReadonlySet<string>,
+  ): Promise<GastoRow[]> {
+    const colTua = colTuaIncluida(
+      await tuaIncluidaDisponible(this.supabase.service),
+    );
+    const deVuelos = (await this.leerEnLotesPaginado(
+      vueloIds,
+      (lote, desde, hasta) =>
+        this.supabase.service
+          .from('gasto')
+          .select(
+            `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${GASTO_REPARTO_EMBED_CONTABLE}`,
+          )
+          .in('vuelo_id', lote)
+          .order('id', { ascending: true })
+          .range(desde, hasta),
+    )) as unknown as GastoRow[];
+    const porId = new Map<string, GastoRow>();
+    for (const g of [...porFecha, ...deVuelos]) {
+      if (g.id && !porId.has(g.id)) porId.set(g.id, g);
+    }
+    const todos = [...porId.values()];
+    const repartos = await fetchRepartos(
+      this.supabase.service,
+      todos.map((g) => g.id),
+    );
+    return todos.filter((g) => {
+      const conReparto = (repartos.get(g.id) ?? []).length > 0;
+      const crudo = g as unknown as GastoParaMesContable;
+      const eje = conReparto ? 'gasto' : ejeContableDeGasto(crudo);
+      if (eje === 'vuelo' && g.vuelo_id && excluir.has(g.vuelo_id)) {
+        return false;
+      }
+      const dia =
+        eje === 'gasto'
+          ? (g.fecha_gasto ?? '').slice(0, 10) || null
+          : diaContableDeGasto(crudo);
+      return dia != null && dia >= q.desde && dia <= q.hasta;
+    });
   }
 
   private async fetchSocios(): Promise<SocioRow[]> {

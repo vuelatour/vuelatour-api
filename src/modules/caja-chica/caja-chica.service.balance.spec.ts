@@ -3,6 +3,16 @@ import { CajaChicaService } from './caja-chica.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import { GASTO_UBICACION_COLS } from '../../common/ubicacion-balance-lector';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * CAJA CHICA: UBICACIÓN EN EL BALANCE DE CADA GASTO DEL FONDO (15-oct-2026,
  * invariante 82). Pedido del cliente con la captura del fondo de Pablo

@@ -1,3 +1,5 @@
+import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+import { colPeriodoContable } from '../../common/filtro-periodo-contable.util';
 import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 import {
   corteTs,
@@ -754,11 +756,17 @@ export class DashboardsService {
     desde: string,
     hasta: string,
   ): Promise<VueloPeriodoRow[]> {
+    // CIERRE DE MES (16-oct-2026, invariante 89): «ventas del periodo»
+    // por el mes CONTABLE (cuadra con el reparto); sin la migración,
+    // `fecha_vuelo` (0.0.87).
+    const col = colPeriodoContable(
+      await cierreMesDisponible(this.supabase.service),
+    );
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('estado, cliente_id, monto_total_usd')
-      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
-      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
+      .gte(col, `${desde}T00:00:00-05:00`)
+      .lte(col, `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return data ?? [];
   }
@@ -816,6 +824,7 @@ export class DashboardsService {
         'id, folio, estado, origen_iata, destino_iata, fecha_vuelo, piloto_id, aeronave_id',
       )
       .in('estado', ['CONFIRMADO', 'EN_VUELO'])
+      // eje REAL a propósito (invariante 89): próximos vuelos (operativo)
       .gte('fecha_vuelo', `${hoy}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
@@ -879,6 +888,7 @@ export class DashboardsService {
       .from('vuelo')
       .select('id, aeronave_id, piloto_id, monto_total_usd, cobrado')
       .eq('estado', 'COMPLETADO')
+      // eje REAL a propósito (invariante 89): horas voladas
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
@@ -895,6 +905,7 @@ export class DashboardsService {
       .from('vuelo')
       .select('id, piloto_id')
       .eq('estado', 'COMPLETADO')
+      // eje REAL a propósito (invariante 89): horas por piloto
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);

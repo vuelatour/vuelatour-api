@@ -3,6 +3,16 @@ import { CajaChicaService } from './caja-chica.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import { TipoMovimientoCaja } from './dto/caja-chica.dto';
 
+// CIERRE DE MES (16-oct-2026, invariante 89): este spec congela la conducta
+// SIN la migración 20261016000004 (0.0.87 byte a byte); la conducta con la
+// migración vive en los specs `*.cierre-mes.spec.ts`.
+jest.mock('../../common/cierre-mes-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/cierre-mes-disponible.util',
+  ),
+  cierreMesDisponible: jest.fn(() => Promise.resolve(false)),
+}));
+
 /**
  * CAJA CHICA MADRE: A QUIÉN SE REPUSO Y CAJAS QUE FONDEA (15-oct-2026,
  * invariante 83). Pedidos del cliente sobre la caja de Mary Cruz (la que

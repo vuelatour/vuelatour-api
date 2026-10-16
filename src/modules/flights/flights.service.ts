@@ -1,4 +1,16 @@
 import {
+  assertCobroEnMesAbierto,
+  assertMesAbierto,
+  cierreDeMes,
+  leerDiferimientos,
+  leerVueloMesContable,
+} from '../../common/cierre-mes.lector';
+import {
+  mesContableDeVuelo,
+  mesRealDeVuelo,
+  vueloDiferido,
+} from '../../common/fecha-contable.util';
+import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -703,6 +715,20 @@ interface FacturaDesligada {
   estatus: string;
   borrada: boolean;
 }
+
+/**
+ * Campos de un PATCH de cobro que mueven DINERO (candado MES_CERRADO,
+ * invariante 89). La factura, la cuenta, la referencia y las notas no.
+ */
+const CAMPOS_COBRO_CANDADO_MES = [
+  'monto',
+  'moneda',
+  'tc_usd_mxn',
+  'fecha_cobro',
+  'comision_banco_pct',
+  'comision_banco_monto',
+  'metodo_cobro',
+] as const;
 
 @Injectable()
 export class FlightsService {
@@ -2955,7 +2981,75 @@ export class FlightsService {
         filas,
       );
     }
-    return { ...vuelo, apoyos, mi_tripulacion, ...seguimiento };
+    // CIERRE DE MES (16-oct-2026, invariante 89; ADITIVO, solo con la
+    // migración): mes contable del vuelo y si su mes está cerrado — el panel
+    // pinta «Viene de septiembre 2026» / «Mes cerrado» y avisa ANTES de
+    // capturar un cobro o un gasto. Best-effort: un fallo no tumba el
+    // detalle (las llaves no viajan).
+    const cierre = await this.cierreDelVuelo(id).catch((e: unknown) => {
+      this.logger.warn(
+        `detalle ${id}: sin datos del cierre de mes: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    });
+    return {
+      ...vuelo,
+      apoyos,
+      mi_tripulacion,
+      ...seguimiento,
+      ...(cierre ?? {}),
+    };
+  }
+
+  /**
+   * Llaves ADITIVAS del cierre de mes para el detalle del vuelo (invariante
+   * 89): `periodo_contable` y `mes_contable` ('YYYY-MM') y `cierre` {
+   * diferido_de, diferido_a, mes_cerrado, cierre {periodo, cerrado_at,
+   * cerrado_por_nombre} | null }. Sin la migración ⇒ null (nada viaja).
+   */
+  private async cierreDelVuelo(id: string): Promise<{
+    periodo_contable: string | null;
+    mes_contable: string | null;
+    cierre: {
+      diferido_de: string | null;
+      diferido_a: string | null;
+      mes_cerrado: boolean;
+      cierre: {
+        periodo: string;
+        cerrado_at: string | null;
+        cerrado_por_nombre: string | null;
+      } | null;
+    };
+  } | null> {
+    const sb = this.supabase.service;
+    const v = await leerVueloMesContable(sb, id);
+    if (!v) return null;
+    const mes = mesContableDeVuelo(v);
+    const real = mesRealDeVuelo(v);
+    const diferido = vueloDiferido(v);
+    const [cierreMes, bitacora] = await Promise.all([
+      mes ? cierreDeMes(sb, mes) : Promise.resolve(null),
+      diferido ? leerDiferimientos(sb, [id]) : Promise.resolve([]),
+    ]);
+    const llegada = mes ? bitacora.find((b) => b.destino === mes) : undefined;
+    return {
+      periodo_contable: diferido ? mes : null,
+      mes_contable: mes,
+      cierre: {
+        diferido_de: diferido ? (llegada?.origen ?? real) : null,
+        // Un vuelo vivo cuyo mes REAL se cerró y pasó fuera: hoy no aplica
+        // (este vuelo ES el diferido); se deja por simetría del contrato.
+        diferido_a: null,
+        mes_cerrado: cierreMes != null,
+        cierre: cierreMes
+          ? {
+              periodo: cierreMes.periodo,
+              cerrado_at: cierreMes.cerrado_at,
+              cerrado_por_nombre: cierreMes.cerrado_por?.nombre ?? null,
+            }
+          : null,
+      },
+    };
   }
 
   /**
@@ -3835,6 +3929,18 @@ export class FlightsService {
     // Pre-check contra la fila leída: un cliente con versión vieja recibe
     // CONFLICTO_VERSION (con la fila viva) antes que cualquier otro rechazo.
     assertVersion({ entidad: 'vuelo', enviado: ifUpdatedAt, actual: current });
+    // CIERRE DE MES (invariante 89): mover la FECHA de un vuelo de un mes
+    // contable cerrado, o llevar un vuelo (no diferido) a un mes cerrado ⇒
+    // 409 MES_CERRADO.
+    if (dto.fecha_vuelo !== undefined && dto.fecha_vuelo !== null) {
+      // El mes ACTUAL solo importa si el vuelo ya tiene dinero del cierre
+      // (COMPLETADO o CANCELADO); una cotización viva sí sale de un mes
+      // cerrado, pero ningún vuelo ENTRA a uno.
+      await this.assertVueloEnMesAbierto(id, dto.fecha_vuelo.toISOString(), {
+        sinMesActual:
+          current.estado !== 'COMPLETADO' && current.estado !== 'CANCELADO',
+      });
+    }
     // El método de cobro pactado SOLO se edita aquí en vuelos externos sin
     // desglose canónico (los externos viejos nacían sin método y por eso no
     // salían en Facturas). En vuelos cotizados se cambia REVISANDO la
@@ -5972,6 +6078,9 @@ export class FlightsService {
         `Solo se completa vuelo desde EN_VUELO. Actual: ${current.estado}`,
       );
     }
+    // CIERRE DE MES (invariante 89): un vuelo de un mes contable cerrado no
+    // cambia de estado (no debería existir: el cierre exige todo completo).
+    await this.assertVueloEnMesAbierto(id);
     // Para completar solo se exigen las LLEGADAS (la única lectura que captura
     // el piloto). Las salidas son del sistema (último taco / propagación) y no
     // deben bloquear: si alguna falta, la oficina la ajusta en Tacómetros en vivo.
@@ -6052,6 +6161,9 @@ export class FlightsService {
         details: { estado: current.estado, folio: current.folio ?? null },
       });
     }
+    // CIERRE DE MES (invariante 89): un vuelo de un mes contable cerrado no
+    // cambia de estado.
+    await this.assertVueloEnMesAbierto(id);
     // Vuelo COMBINADO (28-ago): cancelarlo deja al otro colgando (su ferry
     // sigue cancelado y el avión que iba a cubrirlo ya no va). La liga se
     // rompe en ambos con sello y oficina recibe el aviso para restaurar el
@@ -9329,6 +9441,12 @@ export class FlightsService {
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+    // CIERRE DE MES (invariante 89): borrar un tacómetro de un vuelo
+    // COMPLETADO lo regresa a EN_VUELO — si su mes contable está cerrado,
+    // 409 MES_CERRADO (las lecturas de un vuelo abierto no se bloquean).
+    await this.assertVueloEnMesAbierto(current.vuelo_id as string, undefined, {
+      soloCompletado: true,
+    });
 
     const borrarSalida = dto.salida === true && current.taco_salida !== null;
     const borrarLlegada = dto.llegada === true && current.taco_llegada !== null;
@@ -13433,6 +13551,40 @@ export class FlightsService {
     return valor > 0 && valor < 100 ? valor : null;
   }
 
+  /**
+   * CIERRE DE MES (16-oct-2026, invariante 89): 409 MES_CERRADO si el mes
+   * CONTABLE del vuelo está cerrado o, con `fechaNueva`, si la fecha nueva
+   * cae en un mes cerrado (solo vuelos NO diferidos: el mes de un diferido
+   * es el de su cierre). `soloCompletado`: solo si el vuelo está COMPLETADO.
+   * Sin la migración no lee nada.
+   */
+  private async assertVueloEnMesAbierto(
+    vueloId: string,
+    fechaNueva?: string,
+    opts: { soloCompletado?: boolean; sinMesActual?: boolean } = {},
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    const v = await leerVueloMesContable(sb, vueloId);
+    if (!v) return;
+    if (opts.soloCompletado) {
+      const { data } = await sb
+        .from('vuelo')
+        .select('estado')
+        .eq('id', vueloId)
+        .maybeSingle();
+      if ((data as { estado?: string } | null)?.estado !== 'COMPLETADO') return;
+    }
+    const nuevo =
+      fechaNueva && !vueloDiferido(v)
+        ? mesContableDeVuelo({ fecha_vuelo: fechaNueva })
+        : null;
+    await assertMesAbierto(
+      sb,
+      [opts.sinMesActual ? null : mesContableDeVuelo(v), nuevo],
+      'vuelo',
+    );
+  }
+
   async createCobro(
     vueloId: string,
     dto: CreateCobroDto,
@@ -13468,6 +13620,12 @@ export class FlightsService {
         return { ...ya, idempotente: true as const };
       }
     }
+    // CIERRE DE MES (16-oct-2026, invariante 89): DESPUÉS del replay (un
+    // reintento jamás rebota). El mes que decide es el CONTABLE del vuelo
+    // (todos los libros leen los cobros por vuelo): un vuelo diferido a un
+    // mes abierto acepta cobros; uno que se quedó en un mes cerrado ⇒ 409
+    // MES_CERRADO.
+    await assertCobroEnMesAbierto(this.supabase.service, vueloId);
     // La factura que AMPARA el cobro (invariante 84; ADMIN/FACTURACION: el
     // controller descarta el campo a los demás). Sin la migración ⇒ 503
     // ANTES de escribir nada (y DESPUÉS del replay: un reintento devuelve el
@@ -14173,6 +14331,20 @@ export class FlightsService {
     const existing = existenteRaw as unknown as Record<string, unknown>;
     // Parte de un SOBRE de grupo: se corrige desde el grupo (409 COBRO_DE_GRUPO).
     await this.assertNoEsParteDeSobre(existing);
+    // CIERRE DE MES (16-oct-2026, invariante 89): corregir el DINERO de un
+    // cobro (monto, moneda, T.C., fecha, comisión, método) de un vuelo cuyo
+    // mes CONTABLE está cerrado ⇒ 409 MES_CERRADO. La factura, la cuenta,
+    // la referencia o las notas no mueven dinero: no se bloquean.
+    if (
+      CAMPOS_COBRO_CANDADO_MES.some(
+        (c) => (dto as Record<string, unknown>)[c] !== undefined,
+      )
+    ) {
+      await assertCobroEnMesAbierto(
+        this.supabase.service,
+        existing.vuelo_id as string,
+      );
+    }
     // FACTURAS POR COBRO (16-oct-2026, invariante 84): `undefined` = no
     // tocar; `null` = soltar; uuid = ligar. NO cuenta como dinero
     // (`cambiaDineroDelCobro` no mira el campo): un cobro conciliado y uno
@@ -14454,6 +14626,12 @@ export class FlightsService {
     // Parte de un SOBRE de grupo: se elimina desde el grupo (borra el sobre
     // completo o re-parte) — 409 COBRO_DE_GRUPO.
     await this.assertNoEsParteDeSobre(existing);
+    // CIERRE DE MES (invariante 89): borrar un cobro cambia el mes CONTABLE
+    // de su vuelo ⇒ 409 MES_CERRADO si está cerrado.
+    await assertCobroEnMesAbierto(
+      this.supabase.service,
+      existing.vuelo_id as string,
+    );
     // Mismo candado que expenses.remove: borrar un cobro conciliado dejaría
     // el movimiento bancario cuadrado contra nada (409 COBRO_CONCILIADO
     // estructurado desde el 0.0.78, también con un abono PARCIAL).
