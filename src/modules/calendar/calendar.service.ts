@@ -6,7 +6,10 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { nombresUnicos, textosDeJson } from '../../common/busqueda-vuelo.util';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
 import {
@@ -71,6 +74,9 @@ export class CalendarService {
     private readonly notifications: NotificationsService,
     private readonly calendarSync: CalendarSyncService,
     private readonly push: PushService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+    // agenda (app y panel) no arranca antes del inicio. @Optional y ÚLTIMO.
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   // ===== Columna opcional `client_request_id` (migración 20260909000003) =====
@@ -102,7 +108,15 @@ export class CalendarService {
 
   async listEvents(q: CalendarRangeQuery) {
     const now = new Date();
-    const from = q.from ?? now;
+    // INICIO OFICIAL (invariante 86, 0.0.85): `from = max(from, corte)`.
+    // Un rango entero anterior queda con `from > to` ⇒ ningún evento
+    // (vuelos, descansos, eventos y mantenimientos se recortan con el mismo
+    // `from`); los deltas conservan `eliminados` (los borrados SÍ viajan).
+    const inicio = await inicioOficialDe(this.configuracion);
+    const corte = inicio ? new Date(corteTs(inicio)) : null;
+    const fromPedido = q.from ?? now;
+    const from =
+      corte && fromPedido.getTime() < corte.getTime() ? corte : fromPedido;
     const to =
       q.to ??
       new Date(

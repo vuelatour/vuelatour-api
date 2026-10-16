@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Rol } from '../../common/types/auth.types';
 import { PushService, type DispositivoPush } from './push.service';
@@ -44,6 +46,10 @@ export class NotificationsService {
     private readonly supabase: SupabaseService,
     private readonly gateway: RealtimeGateway,
     private readonly push: PushService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+    // campana y su contador no muestran avisos anteriores al inicio.
+    // @Optional y ÚLTIMO (specs por posición).
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private pushPayload(n: NotificationInput) {
@@ -218,6 +224,9 @@ export class NotificationsService {
       .order('created_at', { ascending: false })
       .range(opts.offset, opts.offset + opts.limit - 1);
     if (opts.unreadOnly) q = q.eq('leida', false);
+    // INICIO OFICIAL (invariante 86): solo avisos desde el inicio (L).
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) q = q.gte('created_at', corteTs(inicio));
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -225,11 +234,15 @@ export class NotificationsService {
   }
 
   async unreadCount(usuarioId: string): Promise<number> {
-    const { count, error } = await this.supabase.service
+    let q = this.supabase.service
       .from('notificacion')
       .select('id', { count: 'exact', head: true })
       .eq('usuario_id', usuarioId)
       .eq('leida', false);
+    // Mismo piso que `list` (el badge no cuenta lo que la lista no muestra).
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) q = q.gte('created_at', corteTs(inicio));
+    const { count, error } = await q;
     if (error) throw new Error(error.message);
     return count ?? 0;
   }

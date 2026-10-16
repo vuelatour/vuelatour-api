@@ -5,8 +5,15 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import {
+  corteTs,
+  inicioOficialDe,
+  rangoConPiso,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   clientRequestIdDescanso,
   esColumnaInexistente,
@@ -67,6 +74,10 @@ export class PilotsService {
     private readonly calendar: CalendarService,
     private readonly users: UsersService,
     private readonly notifications: NotificationsService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): ficha
+    // del piloto (mes, recientes, honorarios) y descansos. @Optional y
+    // ÚLTIMO (specs por posición).
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /** Columnas del piloto: con `apodo` mientras la columna exista. */
@@ -106,24 +117,34 @@ export class PilotsService {
 
   /** Rango COMPLETO de un mes (YYYY-MM) en hora Cancún; inválido/ausente =
    *  mes corriente. Permite consultar estadísticas de meses pasados. */
-  private rangoMesCancun(mes?: string): {
+  private rangoMesCancun(
+    mes?: string,
+    inicio: string | null = null,
+  ): {
     ym: string;
     desdeTs: string;
     hastaTs: string;
     desdeFecha: string;
     hastaFecha: string;
   } {
-    const ym = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes ?? '')
+    const pedido = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes ?? '')
       ? (mes as string)
       : this.hoyCancun().slice(0, 7);
+    // INICIO OFICIAL (invariante 86, 0.0.85): un mes anterior al del inicio
+    // sube al mes del inicio (la respuesta trae el mes EFECTIVO en
+    // `stats.mes`); dentro del mes del inicio, el día arranca en el inicio.
+    const mesInicio = inicio ? inicio.slice(0, 7) : null;
+    const ym = mesInicio && pedido < mesInicio ? mesInicio : pedido;
     const [y, m] = ym.split('-').map(Number);
     const ultimoDia = new Date(Date.UTC(y, m, 0)).getUTCDate();
     const hastaFecha = `${ym}-${String(ultimoDia).padStart(2, '0')}`;
+    const desdeFecha =
+      inicio && `${ym}-01` < inicio && ym === mesInicio ? inicio : `${ym}-01`;
     return {
       ym,
-      desdeTs: `${ym}-01T00:00:00-05:00`,
+      desdeTs: corteTs(desdeFecha),
       hastaTs: `${hastaFecha}T23:59:59-05:00`,
-      desdeFecha: `${ym}-01`,
+      desdeFecha,
       hastaFecha,
     };
   }
@@ -342,8 +363,13 @@ export class PilotsService {
     // Las stats son DEL MES elegido (?mes=YYYY-MM; default mes corriente):
     // el expediente permite revisar meses pasados. Activos/próximos y las
     // listas de recientes no dependen del mes.
+    // INICIO OFICIAL (invariante 86, 0.0.85): mes con piso; las listas de
+    // recientes (vuelos, gastos, capturas) y los honorarios del externo no
+    // muestran nada anterior. Horas del mes: las del mes EFECTIVO.
+    const inicio = await inicioOficialDe(this.configuracion);
+    const corte = inicio ? corteTs(inicio) : null;
     const { ym, desdeTs, hastaTs, desdeFecha, hastaFecha } =
-      this.rangoMesCancun(mes);
+      this.rangoMesCancun(mes, inicio);
     const hoy = this.hoyCancun();
     const hoyTs = `${hoy}T00:00:00-05:00`;
     const { or: orRoles, ctx: rolCtx } = await this.orRolesPiloto(id);
@@ -378,13 +404,15 @@ export class PilotsService {
         .limit(5),
       // Historial visible (recientes SIN acotar al mes: el expediente antes
       // quedaba vacío el día 1). El corte de mes vive en los COUNTS.
-      this.supabase.service
-        .from('vuelo')
-        .select(VUELO_COLS)
-        .or(orRoles)
-        .eq('estado', 'COMPLETADO')
-        .order('fecha_vuelo', { ascending: false })
-        .limit(20),
+      (() => {
+        let q = this.supabase.service
+          .from('vuelo')
+          .select(VUELO_COLS)
+          .or(orRoles)
+          .eq('estado', 'COMPLETADO');
+        if (corte) q = q.gte('fecha_vuelo', corte);
+        return q.order('fecha_vuelo', { ascending: false }).limit(20);
+      })(),
       // Completados del MES para stats y cobrado (ids completos, no top-20).
       this.supabase.service
         .from('vuelo')
@@ -394,14 +422,16 @@ export class PilotsService {
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs)
         .limit(1000),
-      this.supabase.service
-        .from('gasto')
-        .select(
-          'id, categoria, monto, moneda, fecha_gasto, foto_url, vuelo_id, aeronave_id, created_at',
-        )
-        .eq('usuario_captura_id', id)
-        .order('created_at', { ascending: false })
-        .limit(10),
+      (() => {
+        let q = this.supabase.service
+          .from('gasto')
+          .select(
+            'id, categoria, monto, moneda, fecha_gasto, foto_url, vuelo_id, aeronave_id, created_at',
+          )
+          .eq('usuario_captura_id', id);
+        if (inicio) q = q.gte('fecha_gasto', inicio);
+        return q.order('created_at', { ascending: false }).limit(10);
+      })(),
       // Los COUNTS de stats van aparte con count exacto: derivarlos de las
       // listas recortadas topaba el mes en 10/10/20 y contradecía la lista.
       this.supabase.service
@@ -410,14 +440,18 @@ export class PilotsService {
         .eq('usuario_captura_id', id)
         .gte('fecha_gasto', desdeFecha)
         .lte('fecha_gasto', hastaFecha),
-      this.supabase.service
-        .from('escala')
-        .select(
-          'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, sincronizado_at, capturado_offline',
-        )
-        .eq('capturado_por', id)
-        .order('sincronizado_at', { ascending: false })
-        .limit(10),
+      (() => {
+        let q = this.supabase.service
+          .from('escala')
+          .select(
+            'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, sincronizado_at, capturado_offline',
+          )
+          .eq('capturado_por', id);
+        if (corte) {
+          q = q.or(`sincronizado_at.is.null,sincronizado_at.gte.${corte}`);
+        }
+        return q.order('sincronizado_at', { ascending: false }).limit(10);
+      })(),
       this.supabase.service
         .from('escala')
         .select('id', { count: 'exact', head: true })
@@ -495,6 +529,8 @@ export class PilotsService {
       mes_usd: number;
       sin_tc_mxn: number;
       recientes: unknown[];
+      /** ADITIVO (0.0.85): desde cuándo suma `total_usd` (null = de por vida). */
+      desde: string | null;
     } | null = null;
     if (esExterno) {
       const { data: vuelosTodos } = await this.supabase.service
@@ -510,11 +546,14 @@ export class PilotsService {
       );
       const ids = (vuelosTodos ?? []).map((v) => v.id as string);
       if (ids.length > 0) {
-        const { data: pagos, error: pagosErr } = await this.supabase.service
+        let pagosQ = this.supabase.service
           .from('gasto')
           .select('id, monto, moneda, tc_gasto, fecha_gasto, vuelo_id')
           .eq('categoria', 'PILOTO_EXTERNO')
-          .in('vuelo_id', ids)
+          .in('vuelo_id', ids);
+        // Inicio oficial: el histórico y los recientes, desde el inicio.
+        if (inicio) pagosQ = pagosQ.gte('fecha_gasto', inicio);
+        const { data: pagos, error: pagosErr } = await pagosQ
           .order('fecha_gasto', { ascending: false })
           .limit(1000);
         if (pagosErr) throw new Error(pagosErr.message);
@@ -544,9 +583,16 @@ export class PilotsService {
             ...p,
             folio: folios.get(p.vuelo_id as string) ?? null,
           })),
+          desde: inicio,
         };
       } else {
-        honorarios = { total_usd: 0, mes_usd: 0, sin_tc_mxn: 0, recientes: [] };
+        honorarios = {
+          total_usd: 0,
+          mes_usd: 0,
+          sin_tc_mxn: 0,
+          recientes: [],
+          desde: inicio,
+        };
       }
     }
 
@@ -754,6 +800,14 @@ export class PilotsService {
     ]
       .filter((s): s is string => s !== null)
       .join(', ');
+    // INICIO OFICIAL (invariante 86, 0.0.85): `desde = pisoDia(desde,
+    // inicio)` — /me/descansos (app) y /pilots/descansos (oficina). Un rango
+    // entero anterior ⇒ lista vacía (nunca 400).
+    const r = rangoConPiso(
+      { desde: q.desde, hasta: q.hasta },
+      await inicioOficialDe(this.configuracion),
+    );
+    if (r.vacio) return [];
     let query = this.supabase.service
       .from('piloto_descanso')
       .select(cols)
@@ -761,7 +815,7 @@ export class PilotsService {
     if (q.piloto_id) query = query.eq('piloto_id', q.piloto_id);
     // Solapamiento con el rango pedido: inicio <= hasta y fin >= desde.
     if (q.hasta) query = query.lte('fecha_inicio', q.hasta);
-    if (q.desde) query = query.gte('fecha_fin', q.desde);
+    if (r.desde) query = query.gte('fecha_fin', r.desde);
     const { data, error } = await query;
     if (error) throw new Error(error.message);
     return ((data ?? []) as unknown as DescansoListRow[]).map((d) => {

@@ -1,4 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import {
+  corteTs,
+  inicioOficialDe,
+  pisoDia,
+} from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { diaCancun, fechaCortaCancun } from '../../common/fecha-cancun.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -109,7 +115,13 @@ function detalleDe(...partes: Array<unknown>): string | null {
 
 @Injectable()
 export class MeCapturasService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
+    // historial de capturas de la app no muestra nada anterior al inicio.
+    // @Optional y ÚLTIMO (specs por posición).
+    @Optional() private readonly configuracion?: ConfiguracionService,
+  ) {}
 
   async capturas(
     userId: string,
@@ -126,8 +138,13 @@ export class MeCapturasService {
     // Para que el merge de 4 fuentes sea correcto con paginado, cada fuente
     // debe traer al menos offset + limit filas (top-N global).
     const tope = offset + limit;
+    // INICIO OFICIAL (invariante 86, 0.0.85): `desde = pisoDia(desde,
+    // inicio)` (captura) y, además, ticket/cobro ≥ inicio (abajo) — un
+    // ticket de agosto capturado en septiembre tampoco sale.
+    const inicio = await inicioOficialDe(this.configuracion);
+    const desdeDia = pisoDia(query.desde, inicio);
     // Corte de día SIEMPRE en hora Cancún (invariante del repo).
-    const desdeIso = query.desde ? `${query.desde}T00:00:00-05:00` : null;
+    const desdeIso = desdeDia ? corteTs(desdeDia) : null;
     const desdeMs = desdeIso ? new Date(desdeIso).getTime() : null;
 
     // ===== 4 fuentes en paralelo, cada una ya filtrada por el usuario =====
@@ -138,6 +155,7 @@ export class MeCapturasService {
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
+    if (inicio) gastosQ = gastosQ.gte('fecha_gasto', inicio);
 
     let cobrosQ = this.supabase.service
       .from('cobro_vuelo')
@@ -146,6 +164,7 @@ export class MeCapturasService {
       )
       .eq('registrado_por', userId);
     if (desdeIso) cobrosQ = cobrosQ.gte('created_at', desdeIso);
+    if (inicio) cobrosQ = cobrosQ.gte('fecha_cobro', corteTs(inicio));
 
     // Tacómetros: una escala = una captura. La fecha visible es
     // sincronizado_at ?? updated_at; updated_at >= sincronizado_at siempre
@@ -242,10 +261,12 @@ export class MeCapturasService {
         diaDe(i.fecha_gasto) ?? diaDe(i.fecha_cobro) ?? diaDe(i.fecha) ?? '';
     }
 
-    const conCorte =
-      desdeMs == null
-        ? items
-        : items.filter((i) => new Date(i.fecha).getTime() >= desdeMs);
+    const conCorte = items.filter(
+      (i) =>
+        (desdeMs == null || new Date(i.fecha).getTime() >= desdeMs) &&
+        // Día del registro (ticket/cobro/captura) anterior al inicio ⇒ fuera.
+        !(inicio && i.fecha_dia && i.fecha_dia < inicio),
+    );
     // Orden: día de agrupación desc y, dentro del día, captura más reciente
     // primero (misma lectura que "Mi caja chica").
     conCorte.sort(
