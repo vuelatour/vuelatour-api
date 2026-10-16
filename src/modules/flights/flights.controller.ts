@@ -55,6 +55,7 @@ import {
   CombinarVuelosDto,
   AssignFlightDto,
   CancelFlightDto,
+  ConfirmarVueloDto,
   CreateExternalFlightDto,
   CubrirExternoDto,
   CreateReservaDto,
@@ -613,6 +614,33 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.cancel(id, dto.motivo, c.userId);
+  }
+
+  @Post(':id/confirmar')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Confirma un vuelo desde su detalle (RESERVA, SOLICITUD o COTIZADO -> CONFIRMADO; 16-oct-2026). ' +
+      'COTIZADO delega en POST /quotes/:id/confirm (misma transición). Body vacío u opcional ' +
+      '{client_request_id, aceptar_discrepancia_alta}. Respuesta: el vuelo + avisos[] (taller, ámbar); ' +
+      'ya CONFIRMADO ⇒ 200 {idempotente: true}. 409 estructurados: VUELO_SIN_ASIGNAR (details.falta ' +
+      "['aeronave','piloto']), SQUAWK_ALTA_SIN_RESOLVER, VUELO_NO_CONFIRMABLE (EN_VUELO/COMPLETADO/CANCELADO).",
+  })
+  confirmar(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+    // Sin body (Express 5 ⇒ `req.body` undefined): se lee con `?.`.
+    @Body() dto?: ConfirmarVueloDto,
+  ) {
+    return this.flights.confirmar(
+      id,
+      {
+        aceptarDiscrepanciaAlta: dto?.aceptar_discrepancia_alta === true,
+        clientRequestId: dto?.client_request_id,
+      },
+      c.userId,
+    );
   }
 
   // ============ Escalas ============

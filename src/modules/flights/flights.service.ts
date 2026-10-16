@@ -212,6 +212,17 @@ import {
 // detalle de la cotización. `import type` = se borra al compilar (sin ciclo
 // flights ↔ quotes en runtime).
 import type { FichaAvionMin } from '../quotes/quotes.service';
+// Confirmar desde el detalle (16-oct-2026, invariante 84): el COTIZADO lo
+// confirma QuotesService, inyectado por TOKEN (sin importar la clase: el
+// ciclo flights ↔ quotes en runtime sigue sin existir).
+import {
+  CONFIRMADOR_COTIZACION,
+  errorConfirmacionNoDisponible,
+  errorVueloNoConfirmable,
+  errorVueloSinAsignar,
+  faltaAsignacion,
+  type ConfirmadorCotizacion,
+} from './confirmar-vuelo.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import { estadoVueloVolado } from '../quotes/aeronave-revision.util';
 import {
@@ -734,6 +745,16 @@ export class FlightsService {
     // las llaves se omiten.
     @Optional()
     private readonly seguimiento?: VueloSeguimientoService,
+    // CONFIRMAR desde el detalle (16-oct-2026, invariante 84): el COTIZADO
+    // sigue siendo la transición de `QuotesService.confirm` (tramos del
+    // REDONDO, correo, calendario, tripulación), que llega por el token
+    // `CONFIRMADOR_COTIZACION` (QuotesModule lo provee con `useExisting`;
+    // FlightsModule ↔ QuotesModule con forwardRef). @Optional: los specs
+    // construyen el servicio sin él y un COTIZADO responde 503, jamás se
+    // confirma a medias.
+    @Optional()
+    @Inject(CONFIRMADOR_COTIZACION)
+    private readonly confirmadorCotizacion?: ConfirmadorCotizacion,
   ) {}
 
   /**
@@ -5763,6 +5784,106 @@ export class FlightsService {
       void this.notifications.notifyRole(Rol.COORDINADOR, payload, user.userId);
     }
     return data;
+  }
+
+  /**
+   * CONFIRMAR desde el detalle del vuelo (app y panel, 16-oct-2026,
+   * invariante 84): `POST /v1/flights/:id/confirmar`, ADMIN/COORDINADOR.
+   * - COTIZADO ⇒ delega en `QuotesService.confirm` (la MISMA transición de
+   *   `POST /v1/quotes/:id/confirm`: tramos del REDONDO, correo al cliente,
+   *   calendario y aviso a la tripulación; nada se duplica aquí). Sin el
+   *   confirmador inyectado ⇒ 503 CONFIRMACION_NO_DISPONIBLE.
+   * - RESERVA / SOLICITUD ⇒ exige avión y piloto en un vuelo propio (409
+   *   VUELO_SIN_ASIGNAR, `details.falta`), pasa por el candado de siempre
+   *   (`validateAssignTargets`: squawk ALTA ⇒ 409 SQUAWK_ALTA_SIN_RESOLVER
+   *   salvo `aceptar_discrepancia_alta`; taller solo avisa) y escribe
+   *   CONFIRMADO + `fecha_confirmacion` con CAS por estado. Después:
+   *   calendario (el trigger `trg_vuelo_calendar_sync` encola por `estado`
+   *   y además `syncFlight`, como `cancel`/`start`), aviso al mecánico si se
+   *   aceptó el squawk y «queda en firme» a la tripulación, como
+   *   `quotes.confirm`.
+   * - Ya CONFIRMADO ⇒ 200 idempotente `{…vuelo, avisos: [], idempotente:
+   *   true}` (también cuando el CAS pierde contra otro camino que acaba de
+   *   confirmarlo). EN_VUELO / COMPLETADO / CANCELADO ⇒ 409
+   *   VUELO_NO_CONFIRMABLE.
+   * Respuesta: la fila del vuelo (VUELO_COLS) + `avisos[]` (hoy, el taller).
+   * `clientRequestId` es solo trazabilidad (bitácora): la ruta ya es
+   * idempotente por el estado.
+   */
+  async confirmar(
+    id: string,
+    dto: { aceptarDiscrepanciaAlta?: boolean; clientRequestId?: string },
+    userId: string,
+  ): Promise<Record<string, unknown>> {
+    const current = await this.findById(id);
+    const estado = current.estado as string;
+    if (dto.clientRequestId) {
+      this.logger.log(
+        `confirmar(${id}): llave del outbox ${dto.clientRequestId} (estado ${estado})`,
+      );
+    }
+    if (estado === 'CONFIRMADO') {
+      return { ...current, avisos: [], idempotente: true };
+    }
+    if (estado === 'COTIZADO') {
+      if (!this.confirmadorCotizacion) throw errorConfirmacionNoDisponible();
+      const data = await this.confirmadorCotizacion.confirm(id, userId);
+      // El aviso de taller es presentación y nunca lanza (`avisoTallerDe`).
+      const avisos = await this.avisoTallerDe(
+        data.aeronave_id as string | null | undefined,
+      );
+      return { ...data, avisos };
+    }
+    if (estado !== 'RESERVA' && estado !== 'SOLICITUD') {
+      throw errorVueloNoConfirmable(current);
+    }
+    const falta = faltaAsignacion(current);
+    if (falta.length > 0) throw errorVueloSinAsignar(current, falta);
+    // Candado de siempre: squawk ALTA rechaza (o se acepta a sabiendas y se
+    // avisa al mecánico tras el write); el taller solo viaja en `avisos`.
+    const { squawksAceptados, avisos } = await this.validateAssignTargets(
+      {
+        aeronaveId: current.aeronave_id as string | null,
+        pilotoId: current.piloto_id as string | null,
+      },
+      { aceptarDiscrepanciaAlta: dto.aceptarDiscrepanciaAlta === true },
+    );
+    // CAS por estado: el UPDATE solo aplica si el vuelo SIGUE en el estado
+    // leído; dos clics (o app + panel) no duplican calendario ni avisos.
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        estado: 'CONFIRMADO',
+        fecha_confirmacion: new Date().toISOString(),
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .eq('estado', estado)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      const relectura = await this.findById(id);
+      if (relectura.estado === 'CONFIRMADO') {
+        return { ...relectura, avisos: [], idempotente: true };
+      }
+      throw errorVueloNoConfirmable(relectura);
+    }
+    if (current.aeronave_id) {
+      this.notificarSquawkAceptado(
+        data,
+        current.aeronave_id as string,
+        squawksAceptados,
+      );
+    }
+    void this.calendar.syncFlight(id);
+    // Tripulación ya asignada: el vuelo queda EN FIRME (mismo aviso que
+    // `quotes.confirm`).
+    void this.notificarTripulacion(data, {
+      titulo: `Vuelo #${data.folio as number} confirmado`,
+      cuerpo: `${data.origen_iata as string} → ${data.destino_iata as string} del ${this.fechaCancunTxt(data.fecha_vuelo as string | null)} queda en firme.`,
+    });
+    return { ...data, avisos };
   }
 
   async start(id: string, updatedBy: string, actor?: AuthenticatedUser) {

@@ -34,4 +34,46 @@ describe('FlightsModule', () => {
       []) as unknown[];
     expect(imports).toEqual([]);
   });
+
+  /**
+   * CONFIRMAR desde el detalle (16-oct-2026, invariante 84): FlightsService
+   * recibe `QuotesService.confirm` por el token CONFIRMADOR_COTIZACION. Es un
+   * ciclo REAL de módulos (QuotesModule ya importaba FlightsModule), así que
+   * los DOS lados van con forwardRef y QuotesModule provee y exporta el
+   * token; `flights.service` sigue sin importar `quotes.service` en runtime.
+   */
+  describe('ciclo flights ↔ quotes para confirmar un COTIZADO', () => {
+    const fuenteQuotes = readFileSync(
+      path.resolve(__dirname, '../quotes/quotes.module.ts'),
+      'utf8',
+    );
+    const fuenteService = readFileSync(
+      path.resolve(__dirname, 'flights.service.ts'),
+      'utf8',
+    );
+
+    it('FlightsModule importa QuotesModule con forwardRef', () => {
+      expect(bloqueImports?.[1]).toMatch(
+        /^\s*forwardRef\(\(\) => QuotesModule\),$/m,
+      );
+    });
+
+    it('QuotesModule importa FlightsModule con forwardRef y provee/exporta CONFIRMADOR_COTIZACION', () => {
+      expect(fuenteQuotes).toMatch(/forwardRef\(\(\) => FlightsModule\),/);
+      expect(fuenteQuotes).toMatch(
+        /\{\s*provide:\s*CONFIRMADOR_COTIZACION,\s*useExisting:\s*QuotesService\s*\}/,
+      );
+      expect(fuenteQuotes).toMatch(
+        /exports:\s*\[QuotesService,\s*CONFIRMADOR_COTIZACION\]/,
+      );
+    });
+
+    it('flights.service NO importa quotes.service en runtime (solo `import type`)', () => {
+      const lineas = fuenteService
+        .split('\n')
+        .filter((l) => l.includes("from '../quotes/quotes.service'"));
+      expect(lineas.length).toBeGreaterThan(0);
+      for (const l of lineas) expect(l).toMatch(/^import type /);
+    });
+  });
 });

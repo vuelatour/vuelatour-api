@@ -315,6 +315,33 @@ export class CancelFlightDto {
   motivo!: string;
 }
 
+/**
+ * Confirmar desde el detalle (16-oct-2026): body vacío u opcional. RESERVA,
+ * SOLICITUD y COTIZADO → CONFIRMADO; ya CONFIRMADO ⇒ 200 `{idempotente: true}`.
+ */
+export class ConfirmarVueloDto {
+  @ApiPropertyOptional({
+    description:
+      'Llave de la captura en el outbox de la app (uuid). SOLO trazabilidad: ' +
+      'la confirmación ya es idempotente por estado (CONFIRMADO ⇒ 200 ' +
+      '{idempotente: true}).',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita: poner en firme AUNQUE el avión tenga una ' +
+      'discrepancia (squawk) ALTA sin resolver. Sin ella se rechaza con 409 ' +
+      'SQUAWK_ALTA_SIN_RESOLVER; al aceptar se avisa al mecánico. Solo aplica ' +
+      'a RESERVA/SOLICITUD (el COTIZADO ya pasó ese candado al asignar).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
+}
+
 /** Reasignación de aeronave de último minuto (clona el vuelo; el original queda cancelado con sus gastos). */
 export class ReassignAircraftDto {
   @ApiProperty({ description: 'Nueva aeronave que volará el servicio' })

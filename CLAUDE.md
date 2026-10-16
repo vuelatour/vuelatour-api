@@ -9555,11 +9555,69 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       («cobro_ids»), `profit-sharing/vuelos-sin-factura.util.spec`,
       `flights/factura-solicitud.util.spec` (mini y bloque).
 
+85. **CONFIRMAR DESDE EL DETALLE DEL VUELO (16-oct-2026, sin migración):
+    `POST /v1/flights/:id/confirmar`** (ADMIN, COORDINADOR; body vacío u
+    opcional `{client_request_id, aceptar_discrepancia_alta}`;
+    `ConfirmarVueloDto`). Hasta hoy solo `POST /v1/quotes/:id/confirm`
+    pasaba COTIZADO → CONFIRMADO y RESERVA/SOLICITUD no tenían camino (la
+    app los pinta «Programado» sin botón). Acepta RESERVA, SOLICITUD y
+    COTIZADO; responde la fila del vuelo (`VUELO_COLS`) + `avisos[]`.
+    - **COTIZADO ⇒ delega en `QuotesService.confirm`** (la MISMA
+      transición: tramos del REDONDO, correo al cliente, calendario, aviso a
+      la tripulación; cero réplicas). Llega a `FlightsService` por el token
+      **`CONFIRMADOR_COTIZACION`** (`flights/confirmar-vuelo.util.ts`;
+      `QuotesModule` lo provee con `useExisting: QuotesService` y lo
+      exporta; `QuotesService implements ConfirmadorCotizacion`). Es un
+      ciclo REAL de módulos (`QuotesModule` ya importaba `FlightsModule`):
+      `forwardRef` en los DOS lados; `flights.service` sigue SIN importar
+      `quotes.service` en runtime (solo `import type`, como la ficha de
+      avión). `@Optional`: sin el token (specs) un COTIZADO responde **503
+      `CONFIRMACION_NO_DISPONIBLE`**, jamás se confirma a medias.
+    - **RESERVA / SOLICITUD ⇒ `FlightsService.confirmar`**: vuelo propio sin
+      avión o sin piloto ⇒ **409 `VUELO_SIN_ASIGNAR`** con `details.falta`
+      en orden fijo `['aeronave','piloto']` (`faltaAsignacion`, puro; un
+      EXTERNO no lleva ninguno, como `start`); después el candado de
+      SIEMPRE `validateAssignTargets` (squawk ALTA ⇒ 409
+      `SQUAWK_ALTA_SIN_RESOLVER` salvo `aceptar_discrepancia_alta`, y
+      entonces `notificarSquawkAceptado` al mecánico tras el write; taller
+      SOLO avisa en `avisos[]`); escritura `estado = CONFIRMADO` +
+      `fecha_confirmacion` + `updated_by` con **CAS por estado**
+      (`.eq('estado', <leído>)`): 0 filas ⇒ relectura, CONFIRMADO ⇒
+      idempotente, otro ⇒ 409. Calendario: el trigger
+      `trg_vuelo_calendar_sync` (20260912000002) encola por `estado` y
+      además `calendar.syncFlight`, como `cancel`/`start`. Tripulación:
+      «Vuelo #N confirmado · CUN → HOL del … queda en firme.»
+      (`vuelo_asignado`, el mismo texto de `quotes.confirm`). NO crea
+      tramos (la reserva los trae desde su alta).
+    - **Ya CONFIRMADO ⇒ 200 `{…vuelo, avisos: [], idempotente: true}`**
+      (también si el CAS pierde contra otro camino). EN_VUELO / COMPLETADO /
+      CANCELADO ⇒ **409 `VUELO_NO_CONFIRMABLE`** `details {estado, folio}`.
+      404 `VUELO_NO_EXISTE` el de `findById`. `client_request_id` es solo
+      trazabilidad (log): la ruta ya es idempotente por el estado.
+    - Specs: `flights.service.confirmar.spec` (RESERVA y SOLICITUD con CAS,
+      llave del outbox, externo sin asignación, falta avión+piloto / solo
+      piloto, squawk rechaza / acepta y avisa a MECANICO, taller en
+      avisos[], idempotente sin escribir, 3 estados no confirmables, 404,
+      CAS perdido → idempotente o 409, COTIZADO delega sin escribir ni
+      sincronizar aquí, 409 del confirmador sube tal cual, sin confirmador
+      503), `flights.controller.confirmar.spec` (HTTP real: roles por
+      metadata, sin body / `{}` / banderas, 400 uuid y campo extra, 409 y
+      503 estructurados) y `flights.module.spec` (forwardRef en los dos
+      módulos, token provisto/exportado, `import type` en flights.service).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
   `pre-cierre`, `resumen`) se declaran ANTES de las rutas `':id'` del mismo
   segmento, o Nest las captura como id.
+- **Ciclo flights ↔ quotes (16-oct-2026, invariante 84)**: `QuotesModule`
+  importa `FlightsModule` (PDF interno) y `FlightsModule` importa
+  `QuotesModule` (confirmar un COTIZADO desde el detalle): `forwardRef` en
+  los DOS `imports`. Entre SERVICIOS no hay ciclo en runtime: `quotes.service`
+  inyecta `FlightsService` directo y `flights.service` recibe
+  `QuotesService.confirm` por el token `CONFIRMADOR_COTIZACION` (interfaz
+  `ConfirmadorCotizacion`, `flights/confirmar-vuelo.util.ts`) y solo trae
+  `import type` de `quotes.service`. No importar la clase desde flights.
 - Crones: aviso de tacos vencidos (push al piloto, sin escrituras)
   `*/10 * * * *`; resumen nocturno de tacos `45 4 * * *` UTC (23:45 Cancún);
   vuelos zombi `55 4 * * *`; alertas diarias `0 8 * * *` con

@@ -7,6 +7,7 @@ import { ExpirationsModule } from '../expirations/expirations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PilotsModule } from '../pilots/pilots.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
+import { QuotesModule } from '../quotes/quotes.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { VisionModule } from '../vision/vision.module';
@@ -33,6 +34,11 @@ import { VueloSeguimientoService } from './vuelo-seguimiento.service';
     // PilotsModule no importa flights.
     PilotsModule,
     PyservicesModule,
+    // Confirmar desde el detalle (16-oct-2026, invariante 84): el COTIZADO
+    // lo confirma QuotesService vía el token CONFIRMADOR_COTIZACION. Ciclo
+    // REAL de módulos (QuotesModule ya importa FlightsModule): forwardRef en
+    // los dos lados.
+    forwardRef(() => QuotesModule),
     RealtimeModule,
     // K de los libros en el reporte por vuelo (revisión del lote 2,
     // 14-oct-2026): el T.C. oficial del día de la cotización para el vuelo

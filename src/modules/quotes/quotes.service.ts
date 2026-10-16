@@ -8,6 +8,9 @@ import {
 } from '@nestjs/common';
 import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
 import { VueloSeguimientoService } from '../flights/vuelo-seguimiento.service';
+// Confirmar desde el detalle del vuelo (16-oct-2026, invariante 84): este
+// servicio ES el confirmador del COTIZADO que FlightsService recibe por token.
+import type { ConfirmadorCotizacion } from '../flights/confirmar-vuelo.util';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
@@ -426,7 +429,7 @@ export interface FichaAvionMin {
 }
 
 @Injectable()
-export class QuotesService {
+export class QuotesService implements ConfirmadorCotizacion {
   private readonly logger = new Logger(QuotesService.name);
 
   constructor(
