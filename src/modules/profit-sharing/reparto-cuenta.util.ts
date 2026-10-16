@@ -141,6 +141,31 @@ export const MENSAJE_RANGO_FECHAS_INVALIDO =
 export const MENSAJE_CUENTA_DESDE_FUTURA =
   'La cuenta no puede arrancar en un mes futuro: elige el mes en curso o uno anterior.';
 
+const MESES_LARGOS = [
+  'enero',
+  'febrero',
+  'marzo',
+  'abril',
+  'mayo',
+  'junio',
+  'julio',
+  'agosto',
+  'septiembre',
+  'octubre',
+  'noviembre',
+  'diciembre',
+];
+
+/**
+ * INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): «La cuenta
+ * no puede arrancar antes de septiembre de 2026 (inicio oficial).»
+ */
+export function mensajeCuentaAntesDelInicio(inicio: string): string {
+  const [y, m] = inicio.split('-');
+  const mes = MESES_LARGOS[Number(m) - 1] ?? m;
+  return `La cuenta no puede arrancar antes de ${mes} de ${y} (inicio oficial).`;
+}
+
 export const MENSAJE_CUENTA_DESDE_FUERA_DE_RANGO = `La cuenta puede arrancar como máximo ${MESES_CUENTA_MAX} meses atrás. Si hubo repartos antes, súmalos en el saldo inicial.`;
 
 export const MENSAJE_SALDO_INICIAL_INVALIDO =
@@ -306,10 +331,15 @@ export function saldoInicialValido(v: unknown): v is number {
   return Math.abs(Math.round(v * 100) - v * 100) < 1e-6;
 }
 
-/** `cuenta_desde` válido: mes real, no futuro y ≤ 36 meses atrás. */
+/**
+ * `cuenta_desde` válido: mes real, no futuro, ≤ 36 meses atrás y — con
+ * inicio oficial (invariante 86, 0.0.85) — no anterior al mes del inicio
+ * (`CUENTA_ANTES_DEL_INICIO`, `details.inicio`). `inicio` null ⇒ como hoy.
+ */
 export function validarCuentaDesde(
   mes: unknown,
   mesActual: string,
+  inicio: string | null = null,
 ):
   | { ok: true; mes: string }
   | {
@@ -317,8 +347,10 @@ export function validarCuentaDesde(
       codigo:
         | 'MES_INVALIDO'
         | 'CUENTA_DESDE_FUTURA'
-        | 'CUENTA_DESDE_FUERA_DE_RANGO';
+        | 'CUENTA_DESDE_FUERA_DE_RANGO'
+        | 'CUENTA_ANTES_DEL_INICIO';
       mensaje: string;
+      details?: { inicio: string };
     } {
   if (!esMes(mes)) {
     return {
@@ -332,6 +364,14 @@ export function validarCuentaDesde(
       ok: false,
       codigo: 'CUENTA_DESDE_FUTURA',
       mensaje: MENSAJE_CUENTA_DESDE_FUTURA,
+    };
+  }
+  if (inicio && mes < inicio.slice(0, 7)) {
+    return {
+      ok: false,
+      codigo: 'CUENTA_ANTES_DEL_INICIO',
+      mensaje: mensajeCuentaAntesDelInicio(inicio),
+      details: { inicio },
     };
   }
   if (mesesEntre(mes, mesActual).length > MESES_CUENTA_MAX) {

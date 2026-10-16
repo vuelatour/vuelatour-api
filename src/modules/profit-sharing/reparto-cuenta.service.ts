@@ -4,9 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { hoyCancun } from '../../common/fecha-cancun.util';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { Rol } from '../../common/types/auth.types';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { ConfigurarCuentaSocioDto } from './dto/reparto-cuenta.dto';
@@ -116,6 +119,10 @@ export class RepartoCuentaService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly profitSharing: ProfitSharingService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): mes de
+    // arranque y `desde` del estado de cuenta. @Optional y ÚLTIMO (specs
+    // por posición).
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private get sb() {
@@ -285,9 +292,20 @@ export class RepartoCuentaService {
       });
     }
     const mesActual = this.mesActual();
-    const desde = q.desde ?? base.cuenta.cuenta_desde;
+    let desde = q.desde ?? base.cuenta.cuenta_desde;
     let hasta = q.hasta ?? mesActual;
     if (hasta > mesActual) hasta = mesActual;
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): un
+    // `desde` anterior al mes del inicio sube a ese mes (la respuesta trae
+    // el mes EFECTIVO); un `hasta` que queda antes sube con él. Lo previo
+    // entra en el renglón SALDO_ANTERIOR de siempre (corrido intacto: las
+    // utilidades se siguen calculando desde `cuenta_desde`).
+    const inicio = await inicioOficialDe(this.configuracion);
+    const mesInicio = inicio ? inicio.slice(0, 7) : null;
+    if (mesInicio && desde < mesInicio) {
+      desde = mesInicio;
+      if (hasta < desde) hasta = desde;
+    }
     const meses = mesesEntre(desde, hasta);
     if (meses.length === 0 || meses.length > MESES_ESTADO_CUENTA_MAX) {
       throw bad('RANGO_INVALIDO', MENSAJE_RANGO_MESES_INVALIDO, {
@@ -380,8 +398,12 @@ export class RepartoCuentaService {
     actor: ActorCuenta,
   ): Promise<FilaCuentaSocio> {
     await this.assertDisponible();
-    const v = validarCuentaDesde(dto.cuenta_desde, this.mesActual());
-    if (!v.ok) throw bad(v.codigo, v.mensaje);
+    const v = validarCuentaDesde(
+      dto.cuenta_desde,
+      this.mesActual(),
+      await inicioOficialDe(this.configuracion),
+    );
+    if (!v.ok) throw bad(v.codigo, v.mensaje, v.details);
     if (!saldoInicialValido(dto.saldo_inicial_usd)) {
       throw bad('SALDO_INICIAL_INVALIDO', MENSAJE_SALDO_INICIAL_INVALIDO);
     }
