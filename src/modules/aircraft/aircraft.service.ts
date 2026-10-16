@@ -8,6 +8,7 @@ import {
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import {
   corteTs,
+  esAntesDelInicio,
   inicioOficialDe,
   pisoDia,
 } from '../../common/inicio-oficial.util';
@@ -115,14 +116,26 @@ export class AircraftService {
     // un vuelo de las 7–11pm Cancún del último día del mes caía al mes
     // siguiente. Se normaliza a ISO UTC para comparar contra timestamptz.
     const [yyyy, mm] = this.hoyCancun().split('-');
-    const startMonth = new Date(
-      `${yyyy}-${mm}-01T00:00:00-05:00`,
-    ).toISOString();
-    const startYear = new Date(`${yyyy}-01-01T00:00:00-05:00`).toISOString();
-    // INICIO OFICIAL (invariante 86): piso SOLO en `finanzas` (cobros por
-    // `vuelo.fecha_vuelo`, gastos por `fecha_gasto`). Horas, vuelos,
-    // motores y hélices NO (promesa «no toca horas»).
+    // INICIO OFICIAL (invariante 86): piso en `finanzas` (cobros por
+    // `vuelo.fecha_vuelo`, gastos por `fecha_gasto`) y — auditoría 16-oct
+    // (0.0.85) — en el arranque del AÑO/MES de la utilización:
+    // `startYear = max(1-ene, corte)` (aditivo `anio_desde`). `horas_total`,
+    // `vuelos_total`, el horómetro, motores y hélices NO (horas de vida).
     const inicioFinanzas = await inicioOficialDe(this.configuracion);
+    const corteInicio = inicioFinanzas
+      ? new Date(corteTs(inicioFinanzas)).toISOString()
+      : null;
+    const conPiso = (iso: string) =>
+      corteInicio && corteInicio > iso ? corteInicio : iso;
+    const startMonth = conPiso(
+      new Date(`${yyyy}-${mm}-01T00:00:00-05:00`).toISOString(),
+    );
+    const startYearCalendario = new Date(
+      `${yyyy}-01-01T00:00:00-05:00`,
+    ).toISOString();
+    const startYear = conPiso(startYearCalendario);
+    // null = el año cuenta desde el 1-ene (como 0.0.84).
+    const anioDesde = startYear !== startYearCalendario ? inicioFinanzas : null;
     let cobrosQ = this.supabase.service
       .from('cobro_vuelo')
       .select(
@@ -402,6 +415,9 @@ export class AircraftService {
       // ADITIVO (invariante 86): desde cuándo suman las finanzas (null = de
       // por vida, como 0.0.83).
       finanzas_desde: inicioFinanzas,
+      // ADITIVO (0.0.85): desde cuándo cuentan `horas_anio`/`vuelos_anio`
+      // («desde 1-sep-2026»); null = desde el 1-ene (año completo).
+      anio_desde: anioDesde,
     };
   }
 
@@ -524,6 +540,26 @@ export class AircraftService {
         return Number(b.taco_salida ?? 0) - Number(a.taco_salida ?? 0);
       });
 
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
+    // histórico NO lista filas anteriores al inicio. `horas_actuales`,
+    // componentes y próximo servicio salen del arreglo COMPLETO (arriba y
+    // abajo, sin cambio). El aditivo `saldo_inicial` = la ÚLTIMA fila previa
+    // en ESTE orden (la siguiente, más vieja, a la última visible): el panel
+    // pinta «Saldo inicial al 1-sep-2026» y valida el salto de cadena de la
+    // primera fila visible contra su `taco` (antes lo hacía contra esa fila).
+    const inicioHist = await inicioOficialDe(this.configuracion);
+    const previas = inicioHist
+      ? items.filter((it) => esAntesDelInicio(it.fecha, inicioHist))
+      : [];
+    const historialVisible =
+      previas.length > 0
+        ? items.filter((it) => !esAntesDelInicio(it.fecha, inicioHist))
+        : items;
+    const saldoInicialTaco =
+      inicioHist && previas.length > 0
+        ? { fecha: inicioHist, taco: previas[0].taco_llegada }
+        : null;
+
     const intervalos = ((aeronave.servicio_intervalos as unknown[]) ?? []).map(
       Number,
     );
@@ -608,7 +644,11 @@ export class AircraftService {
           }
         : null,
       componentes,
-      historial: items,
+      historial: historialVisible,
+      // ADITIVO (0.0.85): `{fecha: inicio, taco: taco_llegada de la última
+      // fila previa (null si no la capturaron)}`; null sin inicio o sin
+      // filas anteriores (sin renglón sintético).
+      saldo_inicial: saldoInicialTaco,
     };
   }
 
@@ -1343,7 +1383,7 @@ export class AircraftService {
    */
   async bitacoraTacoPdf(
     id: string,
-    desde?: string,
+    desdePedido?: string,
     hasta?: string,
     opts: {
       tiras?: readonly string[];
@@ -1351,8 +1391,19 @@ export class AircraftService {
       formato?: 'PLANEADOR' | 'MOTOR_HELICE';
       heliceBase?: number;
     } = {},
-  ): Promise<{ buffer: Buffer; matricula: string }> {
+  ): Promise<{ buffer: Buffer; matricula: string; desde: string | null }> {
     const aeronave = await this.findById(id);
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
+    // periodo arranca en el inicio (`desde` vacío ⇒ el inicio). SEGURO para
+    // los tiempos: el acumulado de cada renglón sale de la BASE de la ficha
+    // (avión/componente) + el tacómetro (`bitacora-tiras.util`), NO de sumar
+    // el rango; la hélice sin ficha usa `helice_base` = el tiempo que la
+    // oficina teclea para el PRIMER renglón impreso. El nombre del archivo
+    // lleva el `desde` efectivo (devuelto aquí).
+    const desde = pisoDia(
+      desdePedido,
+      await inicioOficialDe(this.configuracion),
+    );
     // Escalas + fichas de motores/hélices (horas ancladas a un tacómetro): de
     // ahí salen los tiempos de cada libro. Solo las columnas de la bitácora.
     const [rows, motoresRes, helicesRes] = await Promise.all([
@@ -1482,7 +1533,11 @@ export class AircraftService {
       generado: new Date().toISOString(),
       tiras,
     });
-    return { buffer, matricula: (aeronave.matricula as string) ?? 'avion' };
+    return {
+      buffer,
+      matricula: (aeronave.matricula as string) ?? 'avion',
+      desde: desde ?? null,
+    };
   }
 
   /**

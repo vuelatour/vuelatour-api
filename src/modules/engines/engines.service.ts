@@ -4,7 +4,10 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { resolverTsoBase } from '../../common/turm-componente.util';
@@ -31,6 +34,9 @@ export class EnginesService {
     // Eje de horas y aritmética de componentes: fuente ÚNICA en
     // aircraft.service (currentHobbs + componenteEstado) — no duplicar.
     private readonly aircraft: AircraftService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): SOLO
+    // la bitácora de eventos. @Optional y ÚLTIMO (specs por posición).
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /** Bitácora del componente (equivalente a la entrada de bitácora física). */
@@ -440,10 +446,16 @@ export class EnginesService {
 
   /** Bitácora completa del motor (instalaciones, traslados, overhauls, ajustes). */
   async listEventos(motorId: string) {
-    const { data, error } = await this.supabase.service
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85):
+    // eventos con `fecha` (date) desde el inicio. Las horas de vida del
+    // motor NO salen de aquí (ficha + tacómetro): no cambian.
+    const inicio = await inicioOficialDe(this.configuracion);
+    let q = this.supabase.service
       .from('componente_evento')
       .select(EVENTO_COLS)
-      .eq('motor_id', motorId)
+      .eq('motor_id', motorId);
+    if (inicio) q = q.gte('fecha', inicio);
+    const { data, error } = await q
       .order('fecha', { ascending: false })
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);

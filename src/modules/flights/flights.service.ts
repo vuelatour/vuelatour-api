@@ -7577,6 +7577,13 @@ export class FlightsService {
         ruta,
         fecha_vuelo: ant.fecha_vuelo as string | null,
         estado: ant.estado as string,
+        // ADITIVO (0.0.85, invariante 86): la liga se CONSERVA (cadena de
+        // tacómetros: la búsqueda NO lleva piso) y el panel pinta el chip
+        // «De antes del inicio oficial» cuando es true.
+        antes_del_inicio: esAntesDelInicio(
+          (ant.fecha_vuelo as string | null) ?? null,
+          await inicioOficialDe(this.configuracion),
+        ),
       },
     };
   }

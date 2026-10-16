@@ -115,10 +115,63 @@ describe('FlightsService — inicio oficial', () => {
     expect(cfg.inicioOficial).toHaveBeenCalledTimes(1);
   });
 
-  it('vueloAnterior / ultimoTacoDeVuelo (horas) no consultan el inicio', async () => {
+  it('ultimoTacoDeVuelo (horas) no consulta el inicio', async () => {
     const { svc, cfg } = armar('2026-09-01');
-    await svc.vueloAnterior('v1').catch(() => undefined);
     await svc.ultimoTacoDeVuelo('v1').catch(() => undefined);
     expect(cfg.inicioOficial).not.toHaveBeenCalled();
+  });
+
+  // Auditoría 16-oct-2026 (0.0.85): la liga «Vuelo anterior del avión» se
+  // CONSERVA (cadena de tacómetros, búsqueda sin piso) y gana el aditivo
+  // `antes_del_inicio` para el chip del panel.
+  it('vueloAnterior: misma búsqueda sin piso + antes_del_inicio', async () => {
+    const armarCon = (inicio: string | null) => {
+      const g = supabaseGrabador((tabla, ops) =>
+        tabla === 'vuelo' && ops.some((o) => o.m === 'lt')
+          ? {
+              data: [
+                {
+                  id: 'v-ago',
+                  folio: 125,
+                  origen_iata: 'CUN',
+                  destino_iata: 'CZM',
+                  fecha_vuelo: '2026-08-31T20:00:00Z',
+                  estado: 'COMPLETADO',
+                },
+              ],
+              error: null,
+            }
+          : undefined,
+      );
+      const svc = new FlightsService(
+        g.supabase,
+        {} as CalendarSyncService,
+        {} as EmailService,
+        {} as VisionService,
+        {} as NotificationsService,
+        {} as ExpirationsService,
+        {} as AirportsService,
+        cfgInicio(inicio) as unknown as ConfiguracionService,
+        {} as PilotsService,
+      );
+      Object.assign(svc as unknown as Record<string, unknown>, {
+        findById: jest.fn().mockResolvedValue({
+          id: 'v1',
+          aeronave_id: 'a1',
+          fecha_vuelo: '2026-09-02T15:00:00Z',
+        }),
+      });
+      return { svc, ...g };
+    };
+    const a = armarCon('2026-09-01');
+    const r = await a.svc.vueloAnterior('v1');
+    expect(r.anterior?.id).toBe('v-ago');
+    expect(r.anterior?.antes_del_inicio).toBe(true);
+    const busqueda = a.de('vuelo')[0];
+    expect(busqueda.ops.some((o) => o.m === 'gte' || o.m === 'or')).toBe(false);
+    const b = armarCon(null);
+    expect((await b.svc.vueloAnterior('v1')).anterior?.antes_del_inicio).toBe(
+      false,
+    );
   });
 });

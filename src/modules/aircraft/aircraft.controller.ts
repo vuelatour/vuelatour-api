@@ -218,14 +218,15 @@ export class AircraftController {
     @Param('id', ParseUUIDPipe) id: string,
     @Query() q: BitacoraTacoQuery,
   ): Promise<StreamableFile> {
-    const { buffer, matricula } = await this.aircraft.bitacoraTacoPdf(
+    const { buffer, matricula, desde } = await this.aircraft.bitacoraTacoPdf(
       id,
       q.desde,
       q.hasta,
       { tiras: q.tiras, formato: q.formato, heliceBase: q.helice_base },
     );
-    const rango =
-      q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    // `desde` EFECTIVO (inicio oficial, invariante 86): el nombre dice el
+    // periodo que de verdad trae el PDF.
+    const rango = desde || q.hasta ? `-${desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {
       type: 'application/pdf',
       disposition: `attachment; filename="bitacoras-${matricula}${rango}.pdf"`,

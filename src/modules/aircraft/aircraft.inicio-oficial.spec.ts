@@ -142,3 +142,140 @@ describe('Ficha del avión — inicio oficial', () => {
     expect(a.lleva(a.de('gasto')[0], 'gte', 'fecha_gasto', INICIO)).toBe(true);
   });
 });
+
+// ===== Auditoría 16-oct-2026 (API 0.0.85) =====
+
+/** Escala con tacos y su vuelo (shape de `escalasDelAvion`). */
+const esc = (
+  id: string,
+  fecha: string,
+  s: number,
+  l: number | null,
+  folio = 1,
+) => ({
+  id,
+  origen_iata: 'CUN',
+  destino_iata: 'CZM',
+  taco_salida: s,
+  taco_llegada: l,
+  fecha_salida_plan: fecha,
+  vuelo: { id: `v-${id}`, folio, fecha_vuelo: fecha, aeronave_id: AV },
+});
+
+function fichaCon(inicio: string | null, escalas: unknown[]) {
+  const a = ficha(inicio);
+  Object.assign(a.svc as unknown as Record<string, unknown>, {
+    escalasDelAvion: jest.fn().mockResolvedValue(escalas),
+    hoyCancun: () => '2026-10-16',
+    etapasDeServicio: jest.fn().mockResolvedValue([]),
+    avisoAutomaticoServicio: jest.fn().mockResolvedValue(null),
+  });
+  return a;
+}
+
+const ESCALAS = [
+  esc('e-ago', '2026-08-20T15:00:00Z', 100, 102),
+  esc('e-sep', '2026-09-10T15:00:00Z', 103, 105),
+];
+
+describe('Ficha del avión — horas del AÑO desde el inicio (0.0.85)', () => {
+  it('horas_anio/vuelos_anio desde el inicio con anio_desde; horas_total intacto', async () => {
+    const r = (await fichaCon(INICIO, ESCALAS).svc.aircraftMetrics(AV)) as {
+      utilizacion: Record<string, number>;
+      anio_desde: string | null;
+    };
+    expect(r.anio_desde).toBe(INICIO);
+    expect(r.utilizacion.horas_anio).toBe(2);
+    expect(r.utilizacion.vuelos_anio).toBe(1);
+    expect(r.utilizacion.horas_total).toBe(4);
+    expect(r.utilizacion.vuelos_total).toBe(2);
+
+    const r0 = (await fichaCon(null, ESCALAS).svc.aircraftMetrics(AV)) as {
+      utilizacion: Record<string, number>;
+      anio_desde: string | null;
+    };
+    expect(r0.anio_desde).toBeNull();
+    expect(r0.utilizacion.horas_anio).toBe(4);
+    expect(r0.utilizacion.horas_total).toBe(4);
+  });
+});
+
+describe('Tacómetros del avión — saldo inicial (0.0.85)', () => {
+  it('oculta filas anteriores, horas_actuales del arreglo completo y saldo_inicial', async () => {
+    const r = (await fichaCon(INICIO, ESCALAS).svc.tacometroHistorial(AV)) as {
+      historial: Array<{ escala_id: string }>;
+      horas_actuales: number;
+      saldo_inicial: { fecha: string; taco: number | null } | null;
+    };
+    expect(r.historial.map((h) => h.escala_id)).toEqual(['e-sep']);
+    expect(r.horas_actuales).toBe(105);
+    expect(r.saldo_inicial).toEqual({ fecha: INICIO, taco: 102 });
+  });
+
+  it('borde Cancún: 1-sep 04:59Z es 31-ago (fuera); inicio null ⇒ todo y null', async () => {
+    const borde = [esc('e-borde', '2026-09-01T04:59:00Z', 102, 103)];
+    const r = (await fichaCon(INICIO, borde).svc.tacometroHistorial(AV)) as {
+      historial: unknown[];
+      saldo_inicial: unknown;
+    };
+    expect(r.historial).toHaveLength(0);
+    expect(r.saldo_inicial).toEqual({ fecha: INICIO, taco: 103 });
+    const r0 = (await fichaCon(null, ESCALAS).svc.tacometroHistorial(AV)) as {
+      historial: unknown[];
+      saldo_inicial: unknown;
+    };
+    expect(r0.historial).toHaveLength(2);
+    expect(r0.saldo_inicial).toBeNull();
+  });
+});
+
+describe('Bitácora PDF — desde con piso (0.0.85)', () => {
+  function bit(inicio: string | null) {
+    const g = supabaseGrabador();
+    const generateBitacoraTacoPdf = jest
+      .fn()
+      .mockResolvedValue(Buffer.from('pdf'));
+    const svc = new AircraftService(
+      g.supabase,
+      {} as never,
+      { generateBitacoraTacoPdf } as never,
+      cfgInicio(inicio) as unknown as ConfiguracionService,
+    );
+    Object.assign(svc as unknown as Record<string, unknown>, {
+      findById: jest.fn().mockResolvedValue({ id: AV, matricula: 'N4142R' }),
+      escalasDelAvion: jest.fn().mockResolvedValue([
+        { ...esc('e-ago', '2026-08-20T15:00:00Z', 100, 102), orden: 1 },
+        { ...esc('e-sep', '2026-09-10T15:00:00Z', 103, 105), orden: 1 },
+      ]),
+    });
+    return { svc, generateBitacoraTacoPdf };
+  }
+
+  it('sin desde ⇒ el inicio; filas solo desde el inicio; devuelve el desde efectivo', async () => {
+    const b = bit(INICIO);
+    const r = await b.svc.bitacoraTacoPdf(AV);
+    expect(r.desde).toBe(INICIO);
+    const payload = (
+      b.generateBitacoraTacoPdf.mock.calls as unknown[][]
+    )[0][0] as {
+      desde: string;
+      tiras: Array<{ filas: Array<{ taco_inicial: number }> }>;
+    };
+    expect(payload.desde).toBe(INICIO);
+    for (const t of payload.tiras) {
+      expect(t.filas.map((f) => f.taco_inicial)).toEqual([103]);
+    }
+  });
+
+  it('inicio null ⇒ todo el histórico (desde null)', async () => {
+    const b = bit(null);
+    const r = await b.svc.bitacoraTacoPdf(AV);
+    expect(r.desde).toBeNull();
+    const payload = (
+      b.generateBitacoraTacoPdf.mock.calls as unknown[][]
+    )[0][0] as {
+      tiras: Array<{ filas: unknown[] }>;
+    };
+    expect(payload.tiras[0].filas).toHaveLength(2);
+  });
+});
