@@ -9843,6 +9843,98 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       aircraft, quotes, facturas-emitidas, dashboards, invoices,
       conciliacion y flights.
 
+87. **VARIAS FACTURAS RECIBIDAS POR GASTO (16-oct-2026, API 0.0.87,
+    migración `20261016000003` PENDIENTE).** Pedido del cliente: ASA entrega
+    5 CFDI por carga de combustible (producto, almacenamiento, expendio,
+    DUGAEAM, servicio administrativo) y «Subir factura» aceptaba 1 PDF + 1
+    XML: una segunda REEMPLAZABA a la primera sin desligarla y un PDF sin XML
+    no se deduplicaba (gasto `24b941d4…` del 29-sep: FCUN-1299718 dos veces,
+    `c83b149a…` huérfana y `7a301bfe…` principal). Modelo:
+    - **Tabla puente `gasto_factura_recibida`** (PK `(gasto_id,
+      factura_recibida_id)`, FK en cascada a ambos, `created_by` set null,
+      RLS sin policies) = la relación N:M CANÓNICA. **`gasto.factura_recibida_id`
+      SE QUEDA como la PRINCIPAL (la primera)**: el trigger
+      `gasto_sync_facturacion`, el folio de Conciliación/Excel
+      (`folio-comprobante.util`), la relectura de folio, el candado de
+      inventario y la conciliación por partes NO cambian. `factura_recibida.gasto_id`
+      (espejo legado) tampoco cambia de semántica. Es CLASIFICACIÓN, no
+      dinero: nada de conciliación, balance, reparto ni pre-cierre la lee.
+    - **INVARIANTE principal ⇒ fila en la puente**, garantizada por la BD:
+      trigger `trg_gasto_factura_principal_en_puente` (AFTER INSERT OR UPDATE
+      OF factura_recibida_id, solo INSERTA `on conflict do nothing`), así
+      que la cumple hasta un API viejo o un UPDATE a mano. Y en el API,
+      **ligas ⇒ principal**: quitar SIEMPRE mueve primero la principal (a la
+      liga más antigua restante, `siguientePrincipal`, CAS `eq
+      factura_recibida_id`) y DESPUÉS borra la fila; si en la carrera otra
+      petición promovió justo esa factura, la fila se repone y responde 409
+      `GASTO_FACTURAS_CAMBIARON`. Agregar = upsert de la fila + principal
+      SOLO si el gasto no tenía (CAS `is null`): **una segunda factura nunca
+      reemplaza**.
+    - **`factura_recibida.pdf_sha256`** (hex 64, CHECK de formato, índice
+      parcial, NO único) = huella del PDF. Dedupe: por UUID fiscal (como
+      siempre) y, para PDF sin XML, por la huella (mismo PDF ⇒ misma fila);
+      el mismo archivo dos veces en un envío ⇒ una factura
+      (`gasto-facturas.util#agruparArchivos`); las facturas viejas DEL MISMO
+      gasto sin huella se hashean al vuelo (descarga) y se guardan
+      (`asegurarHuellasDelGasto`). Un PDF sin XML ya subido que vuelve CON su
+      XML se COMPLETA (UUID, emisor, total, serie/folio; la nota «Factura en
+      PDF (sin XML)» se limpia) en vez de duplicarse. `ya_existia` con PDF:
+      si la factura del buzón no tenía PDF, **se guarda** (CAS `pdf_url is
+      null`; antes se descartaba en silencio) — también sin la migración.
+    - **Sonda** `common/gasto-facturas-disponible.util#gastoFacturasDisponible`
+      (columna `pdf_sha256`; la migración es atómica). REGLA DURA: todo lo
+      que nombre `pdf_sha256` o la puente va detrás. Sin la migración =
+      conducta 0.0.85 exacta (una factura; el shape viejo REEMPLAZA a la
+      principal) y `archivos[]` con más de un elemento ⇒ **503
+      `FACTURAS_GASTO_NO_DISPONIBLE`** antes de parsear o subir nada.
+    - **API**: `POST /invoices/recibidas/de-gasto` acepta además `archivos?:
+      [{xml_b64?, pdf_b64?, nombre?}]` (1–10, excluyente con el shape viejo
+      ⇒ 400) y responde lo de siempre (fila de la PRIMERA factura +
+      `ya_existia`) + `facturas: FacturaDeGasto[]`, `agregadas`,
+      `ya_existian`, `avisos` («Las facturas suman $X; el gasto es $Y.»: Σ
+      totales con XML en la moneda del gasto vs monto, ± 1.00, NO bloquea;
+      se omite si alguna factura ampara otros gastos — VIP SAESA), `detalle[]`
+      (`NUEVA`/`EXISTENTE`/`YA_EN_ESTE_GASTO`, `pdf_agregado`,
+      `xml_agregado`) y `facturas_multiples`. Todos los XML se parsean ANTES
+      de escribir; si Storage falla a la mitad, lo anterior queda y
+      REINTENTAR es seguro (dedupe). `DELETE /invoices/recibidas/:id/gastos/:gastoId`
+      (ADMIN, COORDINADOR, FACTURACION) quita la LIGA (404
+      `FACTURA_NO_LIGADA`), promueve o deja PENDIENTE, mueve el espejo a otro
+      gasto ligado o lo deja null + `SIN_CLASIFICAR` si no queda ninguno.
+      `amarrarGastos` / `updateRecibida(gasto_id)` con la puente:
+      «reemplazar» es sobre los GASTOS de esa factura, nunca sobre las otras
+      facturas de cada gasto (el que ya tenía principal la conserva; el que
+      sale promueve). `deleteRecibida` promueve la siguiente en cada gasto
+      donde era principal. `gastos` de las respuestas de recibidas (buzón,
+      «Ver factura», amarrar) incluye los gastos que ampara como ADICIONAL
+      (necesario: el buzón reenvía esa lista a `amarrar-gastos`).
+      `GET /expenses/:id` (solo ADMIN/COORDINADOR/FACTURACION) +
+      `facturas`, `facturas_avisos`, `facturas_multiples`; la lista +
+      `facturas_n` (best-effort: sin la llave si la lectura falla).
+      `POST recibidas/file-urls` abre a COORDINADOR solo paths
+      `recibidas/<archivo>`. Lector único `facturacion/gasto-facturas.lector`.
+    - **Backfill** (en la migración, solo insert): pares (g.id,
+      g.factura_recibida_id) ∪ (f.gasto_id, f.id); prod 16-oct = 123 (122 de
+      la principal + 1 solo del espejo: el `c83b149a…` duplicado del gasto
+      `24b941d4…`, que tras aplicar mostrará 2 facturas y la oficina quitará
+      la repetida).
+    - **Rollback del API con la migración puesta** (0.0.86 o anterior): sus
+      «reemplazos» dejan las dos facturas en la puente (el trigger inserta la
+      nueva) y sus desamarres (`amarrarGastos`, `updateRecibida`,
+      `deleteRecibida`) pueden dejar filas en la puente con la principal en
+      null. Detectarlas: `select p.* from gasto_factura_recibida p join gasto
+      g on g.id = p.gasto_id where g.factura_recibida_id is null`.
+    - Specs: `gasto-facturas.util.spec` (agrupación, aviso, orden),
+      `invoices.service.varias-facturas.spec` (BD en memoria con los dos
+      triggers y la cascada: ASA 5 CFDI, mismo PDF dos veces, caso Mary con
+      PDF sin huella, `ya_existia` guarda el PDF, la segunda no reemplaza,
+      quitar/promover/PENDIENTE, VIP SAESA, `updateRecibida`, `deleteRecibida`,
+      sin la tabla ⇒ 0.0.85, lector, file-urls por rol),
+      `invoices.controller.varias-facturas.spec` (DTO 1–10, rutas y roles),
+      `expenses.controller.facturas.spec`, `common/gasto-facturas-disponible.util.spec`;
+      `recibida-gasto.spec` y `recibida-folio.spec` congelan la conducta SIN
+      la migración.
+
 88. **EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, SIN
     migración; misma filosofía que la invariante 73).** Caso #308
     (CarlosMuciño, 10-sep-2026, T.C. 17): `costo_externo_monto` $25,334.40
@@ -11387,6 +11479,22 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   (`pagoOperadorExternoEnGastos`, `common/costo-externo.util.ts`). En prod
   solo cambia #308 (OPERACIONES sep $51,786.94 → $26,452.52). Solo
   lecturas; cualquier orden de deploy es seguro.
+- **16-oct-2026 — 0.0.87, migración `20261016000003` PENDIENTE** (varias
+  facturas recibidas por gasto, invariante 87; rama `facturas-gasto` rebasada
+  sobre `66a386cd` = 0.0.86 en prod). Orden: (1) API 0.0.87 (push a `main`,
+  `GET /v1/version` = `0.0.87`; sin la migración se comporta como 0.0.86 y
+  `archivos[]` > 1 responde 503 `FACTURAS_GASTO_NO_DISPONIBLE`); (2) panel;
+  (3) dry-run por `execute_sql` (bloque `do … raise exception 'DRYRUN_OK
+  20261016000003 …'`: cuerpo real + backfill = unión medida + T1–T10) ⇒
+  `apply_migration` (solo el CUERPO) ⇒ SELECT de conteos (pares = unión del
+  día; 0 gastos con principal fuera de la puente) ⇒ `get_advisors`. La sonda
+  se enciende sola en ≤ 10 min. Panel viejo contra 0.0.87 con la migración:
+  el shape viejo AGREGA en vez de reemplazar (el texto «será la que quede
+  amarrada» queda desfasado, pero no se pierde nada) y «Ver la factura» abre
+  la principal. Límite del cuerpo: `json({ limit: '25mb' })` ⇒ el panel parte
+  los envíos grandes (base64 ≈ ×1.34). Rollback: API ⇒ 0.0.86 (ver la nota
+  de rollback de la invariante 87); migración ⇒ SQL Editor con el pie del
+  archivo y REINICIAR el API.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
