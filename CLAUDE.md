@@ -2771,7 +2771,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       resta el pago cotizado de $Y USD).» —o la variante de CANCELADO— con una
       conversión PURA local, NUNCA con `gastoUsd`, que tiene el efecto lateral
       `gastosTcVueloCount += 1`; el aviso «Vuelo externo con N gasto(s)… ADEMÁS
-      del costo del operador» no la cuenta. **SUPERSEDIDO el 13-oct-2026
+      del costo del operador» no la cuenta (desde el 16-oct-2026, invariante
+      88, ese aviso solo sale cuando NINGÚN gasto coincide con el costo del
+      operador: si uno coincide ±1 %, ESE gasto es el pago al operador, el
+      costo se cuenta UNA vez con lo pagado y el capturado queda como nota
+      «— cubierto por el gasto «…» (no se suma dos veces)»; la regla «el
+      pago al operador NO va como gasto» quedó SUPERSEDIDA). **SUPERSEDIDO el 13-oct-2026
       (invariante 73)**: la ganancia resta el pago REAL de las dos categorías
       con esa misma conversión pura y, sin gasto, nada). **SIN cambio a propósito**: la
       hoja «otros gastos» (`gastosEmpresaYSueltos` / `.or` del Libro), los
@@ -7993,7 +7998,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       MXN; USD sin ningún T.C. ⇒ 'sin_tc' en la columna de su categoría. El
       costo del operador externo y el encabezado «Op CUN» NO llevan vínculo
       (no son gastos). Σ de los 'suma' de una lista == la celda (OPERACIONES
-      menos el costo del operador) ±0.01 por el redondeo de USD convertidos.
+      menos el costo del operador cuando SUMA; si un gasto lo cubre
+      —invariante 88— el costo no suma y Σ == la celda) ±0.01 por el
+      redondeo de USD convertidos.
       Las listas van JUSTO después de `otros_detalle` y ANTES de
       `permiso_afac_mxn` (comisiones.spec congela las últimas llaves). Cada
       fila de las hojas ledger (`buildHoja`) termina en `gasto_id` (en un
@@ -8157,7 +8164,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       $80 USD sin gasto real capturado; este reporte no resta pago al
       vendedor y el neto de VuelaTour es lo retenido.»). El aviso del externo
       («Vuelo externo con N gasto(s)… ADEMÁS del costo del operador») sigue
-      sin contarlos.
+      sin contarlos (y desde la invariante 88 solo sale si ningún gasto
+      coincide con el costo del operador).
     - **Consecuencia para el cliente**: los reportes por vuelo de comisiones
       cotizadas SIN pago capturado (#233, #237, #260, #317, #404, #417, #442
       al 13-oct) suben su ganancia por el cotizado hasta capturar el pago;
@@ -9834,6 +9842,86 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       inventario-saldo-inicial, reparto-cuenta; y las ampliaciones de
       aircraft, quotes, facturas-emitidas, dashboards, invoices,
       conciliacion y flights.
+
+88. **EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, SIN
+    migración; misma filosofía que la invariante 73).** Caso #308
+    (CarlosMuciño, 10-sep-2026, T.C. 17): `costo_externo_monto` $25,334.40
+    MXN (= 1,490.26 USD) Y un gasto OPERACIONES de $25,334.40 (NUCLEUM,
+    TRANSFERENCIA, conciliado con el banco y FACTURADO) que ES el pago de
+    ese mismo costo. La oficina NECESITA el gasto (conciliación y factura),
+    así que la regla «el pago al operador va en Cubrir con externo → costo,
+    NO como gasto» no se cumplía: el Balance general de septiembre sumaba
+    los dos en OPERACIONES ($51,786.94 = Op PTU $26,452.52 + «Costo
+    operador externo — $25,334.42») y solo lo AVISABA en `pendientes`.
+    - **Regla**: en un vuelo EXTERNO no cancelado con `costo_externo_usd`
+      capturado, si un gasto del vuelo que resta en las columnas (misma
+      exclusión que `gastosColumna`: no TUAS/GAS/PERMISO/INDIRECTO ni
+      `CAT_FUERA_DEL_AVION` —empresa y las dos del pago al vendedor—)
+      COINCIDE con el costo —±1 % en MXN (gasto en pesos, o USD × su
+      `tc_gasto` ?? K, contra costo USD × K) o ±1 % en USD nativo si el
+      gasto no es MXN— ESE gasto es el pago: el costo se cuenta UNA vez con
+      el GASTO REAL y el capturado queda como nota. Varios coinciden ⇒ cubre
+      UNO, el más cercano (empate ⇒ el más antiguo: `fecha_gasto`, luego
+      `created_at`, luego el orden de la lectura); los demás SIGUEN sumando
+      y se avisan como posible duplicado. Sin coincidencia ⇒ la conducta de
+      siempre (suma el costo y avisa si hay gastos). CANCELADO ⇒ como
+      siempre (nunca cubre). NO toca el gasto: sigue en su lista,
+      conciliado, facturado y con su vínculo a la celda (invariante 72).
+    - **Fuente única** `pagoOperadorExternoEnGastos` en
+      `common/costo-externo.util.ts` (PURA; con `gastoRestaEnColumnasDelVuelo`,
+      `usdDelPagoOperador` y `etiquetaGastoPagoOperador`). Ningún lector
+      repite la prueba. Cada lector deja cubrir SOLO si él cuenta ese
+      gasto (si su cadena de T.C. no lo pudo convertir, el costo capturado
+      sigue contando, una vez).
+    - **Lectores**: (i) Balance por avión / EXTERNOS / general
+      (`aircraft-balance.service`, bloque «Costo del OPERADOR externo»):
+      cubierto ⇒ no suma a `opMxn`; `op_detalle` lleva «Costo operador
+      externo (X) $25,334.42 — cubierto por el gasto «Operaciones · VLO PTU
+      10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV» de $25,334.40 (no
+      se suma dos veces)» (sin K: el costo en USD); el aviso «ADEMÁS del
+      costo del operador» ya no sale y, con duplicados, `pendientes` dice
+      «… ya lo cubre el gasto «…», pero N gasto(s) más también coinciden
+      (…) — posible pago duplicado: verifica y corrige en Gastos». La
+      lectura de gastos por vuelo trae `created_at` (desempate). (ii)
+      Reporte por vuelo (`flight-report.service`): cubierto ⇒ sin la línea
+      «Costo operador externo» ni su suma a `gastos_total_usd`; nota
+      «Costo operador externo (X) $1,490.26 USD — cubierto por el gasto «…»
+      (no se suma dos veces).», el gasto lleva en su detalle «pago al
+      operador externo — cubre el costo capturado (no se suma dos veces)» y
+      con duplicados «Vuelo externo con N gasto(s) más que también
+      coinciden con el costo del operador: posible pago duplicado —
+      verifica en Gastos (se contaría doble).»; el select del gasto suma
+      `id, created_at`. (iii) Reparto, bloque `externos`
+      (`profit-sharing.service`): nunca contó gastos del externo (no había
+      doble conteo); cubierto ⇒ `costo_usd` usa LO PAGADO
+      (`usdDelPagoOperador`: USD tal cual, MXN ÷ `tc_gasto` ?? K, K =
+      `kComisionesDeVuelo`) para dar el MISMO número que los otros dos. Los
+      gastos salen de la MISMA lectura por vuelo del pago al vendedor
+      (`leerGastosDeVuelos`; `fetchGastosVendedorDeVuelos` quedó como
+      envoltura, select intacto) y un externo sin T.C. en la cotización con
+      costo y gastos de columnas pide el K oficial del día de la cotización
+      en el mismo lote (rama (e) de `resolverTcOficial`, al mapa de (c)).
+      Ningún otro lector suma el costo del operador (dashboards, métricas,
+      Libro Dinero y grupos no lo leen).
+    - **Prod (16-oct-2026)**: solo cambia #308 (único externo con costo y un
+      gasto de columnas que coincide; #148 de agosto tiene un gasto OTRO —
+      empresa, no candidato— y #158 costo 0). Balance general de
+      septiembre: OPERACIONES de #308 $51,786.94 → $26,452.52
+      (−$25,334.42) y con ella el costo total de la fila/libro EXTERNOS;
+      octubre sin cambio (sin externos). Reporte por vuelo #308:
+      `gastos_total_usd` 3,046.29 → 1,556.03 (remanente −1,144.30 →
+      +345.96 sobre la venta de 1,901.99). Reparto de septiembre:
+      `externos.costo_usd` 1,490.26 → 1,490.26 (25,334.40 ÷ 17). #290 (solo
+      gasto, sin costo) y #224 no cambian.
+    - Specs: `costo-externo.util.spec` (#308, #290, sin gasto, borde ±1 %,
+      dos coinciden, empate, USD vs USD con y sin K, CANCELADO/no externo,
+      categorías excluidas, `usdDelPagoOperador`, etiqueta),
+      `aircraft-balance.service.vinculos.spec` (celda $26,452.52 y Σ
+      vínculos == celda, #290, costo sin gasto, dos coinciden, USD,
+      CANCELADO, libro EXTERNOS), `flight-report.service.pago-vendedor.spec`
+      (#308 1,556.03, #290, sin gasto, dos, USD, CANCELADO) y
+      `profit-sharing.service.comisiones.spec` (bloque `externos`: sin
+      coincidencia, 25,500 ÷ 17 = 1,500, K oficial, CANCELADO).
 
 ## Convenciones NestJS
 
