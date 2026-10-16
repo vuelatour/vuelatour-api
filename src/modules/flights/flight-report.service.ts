@@ -27,6 +27,10 @@ import {
   textoTacoOmitido,
 } from '../../common/taco-omitido.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import {
+  etiquetaGastoPagoOperador,
+  pagoOperadorExternoEnGastos,
+} from '../../common/costo-externo.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   pagoVendedorUsd,
@@ -182,7 +186,7 @@ export class FlightReportService {
       sb
         .from('gasto')
         .select(
-          'fecha_gasto, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
+          'id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
         )
         .eq('vuelo_id', flightId)
         .order('fecha_gasto', { ascending: true }),
@@ -428,6 +432,32 @@ export class FlightReportService {
       if (Array.isArray(p)) return p[0]?.nombre ?? null;
       return p?.nombre ?? null;
     };
+    // EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, invariante
+    // 88; fuente única `pagoOperadorExternoEnGastos`, la MISMA del balance y
+    // del reparto): si un gasto del vuelo coincide con el costo capturado
+    // (±1 %), ESE gasto es el pago — el costo se cuenta UNA vez con lo
+    // realmente pagado y el capturado queda como nota. Solo cubre si este
+    // reporte lo cuenta (con T.C. para pasarlo a USD; si no, sigue el
+    // costo capturado). CANCELADO: nunca cubre (conducta de siempre).
+    const pagoOp = pagoOperadorExternoEnGastos({
+      esExterno: v.es_externo === true,
+      cancelado: v.estado === 'CANCELADO',
+      costoUsd: v.costo_externo_usd as number | string | null,
+      tcVenta: tcVuelo,
+      gastos: gastosRows as Array<
+        Record<string, unknown> & {
+          categoria: string | null;
+          moneda: string | null;
+          monto: number | string | null;
+        }
+      >,
+    });
+    const cuentaEnUsd = (g: Record<string, unknown>): boolean =>
+      g.moneda === 'USD' ||
+      (g.tc_gasto != null && Number(g.tc_gasto) > 0) ||
+      tcVuelo != null;
+    const gastoPagoOperador =
+      pagoOp.cubre != null && cuentaEnUsd(pagoOp.cubre) ? pagoOp.cubre : null;
     const combustible: ReporteVueloLineaPayload[] = gastosRows
       .filter((g) => g.categoria === 'GAS')
       .map((g) => ({
@@ -469,6 +499,10 @@ export class FlightReportService {
             // gasto sería contarlo dos veces.
             categoriaEsPagoVendedor(g.categoria as string | null)
               ? 'pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)'
+              : null,
+            // Invariante 88: este gasto ES el pago al operador externo.
+            g === gastoPagoOperador
+              ? 'pago al operador externo — cubre el costo capturado (no se suma dos veces)'
               : null,
           ]
             .filter(Boolean)
@@ -565,11 +599,13 @@ export class FlightReportService {
       else gastosTotalUsd += usd;
     }
     // Vuelo cubierto por OPERADOR EXTERNO: lo que se le paga es el costo
-    // principal del vuelo y no vive en `gasto` — sin restarlo, el reporte
-    // pintaba el ingreso completo como ganancia. `costo_externo_usd` ya está
-    // en USD (no requiere TC). Se suma a los gastos del vuelo (así el balance
-    // Venta − Gasolina − Gastos = REMANENTE sigue cuadrando exacto) y se pinta
-    // como línea visible en la lista de gastos.
+    // principal del vuelo — sin restarlo, el reporte pintaba el ingreso
+    // completo como ganancia. `costo_externo_usd` ya está en USD (no
+    // requiere TC). Se suma a los gastos del vuelo (así el balance Venta −
+    // Gasolina − Gastos = REMANENTE sigue cuadrando exacto) y se pinta como
+    // línea visible en la lista de gastos — SALVO que un gasto del vuelo sea
+    // ese mismo pago (invariante 88, `gastoPagoOperador` arriba): entonces
+    // ya restó como gasto y el costo capturado queda solo como nota.
     const costoExternoUsd = v.es_externo === true ? n(v.costo_externo_usd) : 0;
     if (v.combinado_con_id) {
       const { data: otro } = await this.supabase.service
@@ -586,13 +622,26 @@ export class FlightReportService {
         'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
       );
     }
-    if (costoExternoUsd > 0) {
+    if (costoExternoUsd > 0 && gastoPagoOperador != null) {
+      // Invariante 88: el pago al operador YA está en los gastos (restó
+      // arriba con lo realmente pagado); el costo capturado es solo nota.
+      notasHoras.push(
+        `Costo operador externo${
+          v.operador_externo ? ` (${v.operador_externo as string})` : ''
+        } $${costoExternoUsd.toLocaleString('en-US')} USD — cubierto por el gasto «${etiquetaGastoPagoOperador(gastoPagoOperador)}» (no se suma dos veces).`,
+      );
+      if (pagoOp.duplicados.length > 0) {
+        notasHoras.push(
+          `Vuelo externo con ${pagoOp.duplicados.length} gasto(s) más que también coinciden con el costo del operador: posible pago duplicado — verifica en Gastos (se contaría doble).`,
+        );
+      }
+    } else if (costoExternoUsd > 0) {
       // Anti doble-conteo: si el pago al operador además se captura como
-      // gasto del vuelo (p. ej. para conciliar la transferencia), este
-      // reporte lo contaría dos veces. No hay categoría dedicada para
-      // detectarlo, así que se AVISA cuando el externo trae gastos capturados.
-      // El pago al vendedor (COMISION_VENDEDOR) no cuenta: no puede ser el
-      // pago al operador.
+      // gasto del vuelo y NO coincide con el costo (invariante 88: si
+      // coincide, el gasto lo cubre arriba), este reporte lo contaría dos
+      // veces. Se AVISA cuando el externo trae gastos capturados. El pago
+      // al vendedor (COMISION_VENDEDOR) no cuenta: no puede ser el pago al
+      // operador.
       const gastosAviso = gastosRows.filter(
         (g) =>
           g.categoria !== 'GAS' &&

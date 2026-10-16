@@ -428,3 +428,108 @@ describe('Reporte por vuelo — K de los libros (capturado ?? oficial del día d
     expect(r.notas_horas).not.toContain(NOTA_OFICIAL);
   });
 });
+
+/**
+ * EL PAGO AL OPERADOR EXTERNO ES EL GASTO REAL (16-oct-2026, invariante 88;
+ * misma filosofía que la 73). Caso real #308 (CarlosMuciño, T.C. 17): costo
+ * capturado 1,490.26 USD Y el gasto NUCLEUM de $25,334.40 que ES su pago.
+ * El reporte restaba los dos; ahora el costo se cuenta UNA vez, con el gasto.
+ */
+describe('Reporte por vuelo — el gasto real cubre el costo del operador externo (invariante 88)', () => {
+  const EXT = {
+    es_externo: true,
+    operador_externo: 'CarlosMuciño',
+    costo_externo_usd: '1490.26',
+    tc_usd_mxn: 17,
+    comision_vendedor_usd: 0,
+  };
+  const NUCLEUM = gasto('OPERACIONES', 25334.4, {
+    id: 'g-nucleum',
+    fecha_gasto: '2026-09-15',
+    notas: 'VLO PTU 10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV',
+  });
+  const PISTA = gasto('OPERACIONES', 1118.12, {
+    id: 'g-pista',
+    fecha_gasto: '2026-09-10',
+    notas: 'pago pista ptu',
+  });
+  const NOTA_CUBIERTO =
+    'Costo operador externo (CarlosMuciño) $1,490.26 USD — cubierto por el gasto «Operaciones · VLO PTU 10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV» (no se suma dos veces).';
+  const lineaCosto = (r: ReporteVueloPayload) =>
+    (r.gastos ?? []).filter((g) => g.concepto === 'Costo operador externo');
+
+  it('#308: costo + gasto igual ⇒ el costo del vuelo cuenta el gasto UNA vez', async () => {
+    const r = await reporte(vuelo(EXT), [PISTA, NUCLEUM]);
+    // (1,118.12 + 25,334.40) ÷ 17 = 1,556.03 (antes + 1,490.26 = 3,046.29).
+    expect(r.gastos_total_usd).toBe(1556.03);
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(NOTA_CUBIERTO);
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(/ADEMÁS del costo/);
+    const nuc = (r.gastos ?? []).find((g) =>
+      (g.detalle ?? '').includes('NUCLEUM'),
+    );
+    expect(nuc?.detalle).toContain(
+      'pago al operador externo — cubre el costo capturado (no se suma dos veces)',
+    );
+    expect(nuc?.monto).toBe(25334.4);
+  });
+
+  it('#290: solo gasto, sin costo ⇒ igual que hoy', async () => {
+    const r = await reporte(
+      vuelo({ ...EXT, costo_externo_usd: null, tc_usd_mxn: 16.92166 }),
+      [gasto('OPERACIONES', 11046.6)],
+    );
+    expect(r.gastos_total_usd).toBe(Number((11046.6 / 16.92166).toFixed(2)));
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(
+      'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
+    );
+  });
+
+  it('costo sin gasto que coincida ⇒ igual que hoy (línea del costo + aviso)', async () => {
+    const solo = await reporte(vuelo(EXT), []);
+    expect(solo.gastos_total_usd).toBe(1490.26);
+    expect(lineaCosto(solo)).toHaveLength(1);
+    const conPista = await reporte(vuelo(EXT), [PISTA]);
+    expect(conPista.gastos_total_usd).toBe(
+      Number((1118.12 / 17 + 1490.26).toFixed(2)),
+    );
+    expect(conPista.notas_horas).toContain(
+      'Vuelo externo con 1 gasto(s) capturado(s) ADEMÁS del costo del operador: verifica que el pago al operador no esté también capturado como gasto (se contaría doble).',
+    );
+  });
+
+  it('dos gastos coinciden ⇒ cubre el más cercano; el otro se avisa como posible duplicado', async () => {
+    const otro = gasto('OPERACIONES', 25400, {
+      id: 'g-otro',
+      fecha_gasto: '2026-09-12',
+      notas: 'transferencia muciño',
+    });
+    const r = await reporte(vuelo(EXT), [otro, NUCLEUM]);
+    expect(r.gastos_total_usd).toBe(
+      Number(((25400 + 25334.4) / 17).toFixed(2)),
+    );
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(NOTA_CUBIERTO);
+    expect(r.notas_horas).toContain(
+      'Vuelo externo con 1 gasto(s) más que también coinciden con el costo del operador: posible pago duplicado — verifica en Gastos (se contaría doble).',
+    );
+  });
+
+  it('gasto en USD vs costo en USD ⇒ cubre', async () => {
+    const r = await reporte(vuelo({ ...EXT, costo_externo_usd: 1000 }), [
+      gasto('OPERACIONES', 1000, { moneda: 'USD', notas: 'wire' }),
+    ]);
+    expect(r.gastos_total_usd).toBe(1000);
+    expect(lineaCosto(r)).toEqual([]);
+  });
+
+  it('CANCELADO ⇒ igual que hoy (el reporte no cambia)', async () => {
+    const r = await reporte(vuelo({ ...EXT, estado: 'CANCELADO' }), [NUCLEUM]);
+    expect(lineaCosto(r)).toHaveLength(1);
+    expect(r.gastos_total_usd).toBe(
+      Number((25334.4 / 17 + 1490.26).toFixed(2)),
+    );
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(/cubierto por/);
+  });
+});
