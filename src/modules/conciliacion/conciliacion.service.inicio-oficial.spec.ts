@@ -126,6 +126,32 @@ describe('ConciliacionService — inicio oficial', () => {
     expect(c.ops.some((o) => o.m === 'gte')).toBe(false);
   });
 
+  it('Revisión: «Emparejar devoluciones» (auto-reversos) — anclas con piso y desde devuelto subido', async () => {
+    const g = armar(INICIO);
+    const r = await g.svc.autoReversos({}, 'u');
+    expect(r.desde).toBe(INICIO);
+    expect(
+      g.lleva(
+        conOp(g, 'movimiento_bancario', 'gte', 'fecha')!,
+        'gte',
+        'fecha',
+        INICIO,
+      ),
+    ).toBe(true);
+  });
+
+  it('Revisión: auto-reversos con inicio null ⇒ hoy − 90 (como 0.0.83); rango de agosto ⇒ sin 400', async () => {
+    const g = armar(null);
+    const r = await g.svc.autoReversos({}, 'u');
+    expect(r.desde).toBe('2026-07-18');
+    const g2 = armar(INICIO);
+    const r2 = await g2.svc.autoReversos(
+      { desde: '2026-08-01', hasta: '2026-08-31' },
+      'u',
+    );
+    expect(r2.revisados).toBe(0);
+  });
+
   it('sugerir lote: anclas con piso', async () => {
     const g = armar(INICIO);
     await g.svc.sugerirLote({}, 'u').catch(() => undefined);

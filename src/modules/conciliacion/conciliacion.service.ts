@@ -10094,11 +10094,16 @@ export class ConciliacionService {
   async autoReversos(dto: AutoReversosDto, userId: string) {
     await this.assertReversos();
     const hasta = dto.hasta ?? hoyCancun();
-    const desde =
+    const desdePedido =
       dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
-    if (desde > hasta) {
+    if (desdePedido > hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // INICIO OFICIAL (invariante 86, revisión 16-oct): las ANCLAS (abonos
+    // pendientes) con piso, igual que el auto-cruce sin ids: «Emparejar
+    // devoluciones» no escribe sobre lo anterior al inicio, que ni se ve.
+    // Los CARGOS candidatos (60 días previos al abono) siguen sin piso.
+    const desde = await this.pisoDesde(desdePedido);
     const { filas, truncado } = await this.leerPaginado((a, b) => {
       let q = this.supabase.service
         .from('movimiento_bancario')
