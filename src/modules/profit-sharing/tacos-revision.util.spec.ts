@@ -111,7 +111,11 @@ describe('tacos-revision.util (pre-cierre: ¿cuáles son?)', () => {
       motivo: null,
       // Sin piloto en el tramo: hereda el del vuelo.
       piloto_nombre: 'Ana Ruiz',
+      // ADITIVO (PEDIDO 2): el id del tramo, al final.
+      escala_id: 'e3',
     });
+    expect(Object.keys(tramos[0]).at(-1)).toBe('escala_id');
+    expect(tramos.map((t) => t.escala_id)).toEqual(['e3', 'e1', 'e2']);
     expect(tramos[1].piloto_nombre).toBe('Luis Pérez');
     expect(tramos[1].motivo).toBe('Taco de llegada menor al de salida');
   });
@@ -119,6 +123,11 @@ describe('tacos-revision.util (pre-cierre: ¿cuáles son?)', () => {
   it('un piloto que no resuelve sale null, jamás un nombre inventado', () => {
     const { tramos } = resumenTacosEnRevision([fila()], new Map());
     expect(tramos[0].piloto_nombre).toBeNull();
+  });
+
+  it('una fila sin id de escala ⇒ `escala_id: null` (jamás se inventa)', () => {
+    const { tramos } = resumenTacosEnRevision([fila({ id: undefined })]);
+    expect(tramos[0].escala_id).toBeNull();
   });
 
   it('sin filas: listas vacías', () => {

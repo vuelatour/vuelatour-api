@@ -716,7 +716,9 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         }),
       );
       // El resto del checklist sigue ahí.
-      expect(r.items.some((i) => i.clave === 'pistas_sin_gasto')).toBe(true);
+      expect(
+        r.items.some((i) => i.clave === 'cobros_bancarios_sin_conciliar'),
+      ).toBe(true);
       expect(r.items.some((i) => i.clave === 'externos_sin_honorario')).toBe(
         true,
       );
@@ -895,6 +897,8 @@ describe('ProfitSharingService.preCierre — permisos sin avión (14-oct-2026, A
       count: 3,
       monto_mxn: 5518,
       monto_usd: 100,
+      // PEDIDO 2 (15-oct-2026, invariante 81): los permisos contados.
+      ids: ['p-mxn', 'p-mxn2', 'p-usd'],
     });
     // Justo después de `combustible_sin_avion`.
     const claves = r.items.map((i) => i.clave);

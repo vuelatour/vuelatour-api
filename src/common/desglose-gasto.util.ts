@@ -571,7 +571,8 @@ export function tuaEmbebidoDeGasto(g: GastoParaTuaEmbebido): number {
 /**
  * TRASLADOS PAGADOS por UN gasto del vuelo, en SU moneda (13-oct-2026,
  * FUENTE ÚNICA de las «tuas pagadas» de «Otros movimientos», del Libro
- * Dinero y del pre-cierre `tua_cobrada_sin_pagada`): categoría de EMPRESA ⇒
+ * Dinero y del pre-cierre `tua_pagada_sin_cobrar` (hasta el 15-oct-2026,
+ * `tua_cobrada_sin_pagada`)): categoría de EMPRESA ⇒
  * nada (viaja entera a «otros gastos»); `TUAS` ⇒ el gasto ENTERO es TUA; el
  * resto ⇒ la parte embebida (`trasladosEmbebidosDeGasto`, con la TUA de la
  * oficina). Sustituye el ternario `categoria === 'TUAS' ? … :
