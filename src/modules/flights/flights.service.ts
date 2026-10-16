@@ -1105,9 +1105,46 @@ export class FlightsService {
     ruta: string | null;
     escala_id: string | null;
   } | null> {
+    const fuente = await this.ultimoTacoAeronaveFuente(aeronaveId);
+    if (!fuente) return null;
+    // La respuesta de la app NO cambia: `orden` y `fecha_plan` son solo para
+    // la sección 9 (`salidaCruzaOmitido`).
+    return {
+      valor: fuente.valor,
+      lado: fuente.lado,
+      origen: fuente.origen,
+      vuelo_id: fuente.vuelo_id,
+      folio: fuente.folio,
+      fecha_vuelo: fuente.fecha_vuelo,
+      ruta: fuente.ruta,
+      escala_id: fuente.escala_id,
+    };
+  }
+
+  /**
+   * Igual que `ultimoTacoAeronaveDetalle` (misma lectura, mismo desempate)
+   * más dos datos internos del tramo fuente para la sección 9 del tacómetro
+   * omitido (revisión 0.0.81): su `orden` dentro del vuelo y su fecha
+   * PLANEADA (`fecha_salida_plan ?? vuelo.fecha_vuelo`). `fecha_vuelo` sigue
+   * siendo la hora REAL del lado elegido (lo que pinta la app) y NO se debe
+   * comparar contra la fecha planeada de otro tramo.
+   */
+  private async ultimoTacoAeronaveFuente(aeronaveId: string | null): Promise<{
+    valor: number;
+    lado: 'SALIDA' | 'LLEGADA';
+    origen: string | null;
+    vuelo_id: string | null;
+    folio: number | null;
+    fecha_vuelo: string | null;
+    ruta: string | null;
+    escala_id: string | null;
+    orden: number | null;
+    fecha_plan: string | null;
+  } | null> {
     if (!aeronaveId) return null;
     type Row = {
       id: string;
+      orden?: number | null;
       origen_iata: string | null;
       destino_iata: string | null;
       taco_salida: number | string | null;
@@ -1126,7 +1163,7 @@ export class FlightsService {
       } | null;
     };
     const cols =
-      'id, origen_iata, destino_iata, taco_salida, taco_llegada, ' +
+      'id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, ' +
       'taco_salida_origen, taco_llegada_origen, ' +
       'hora_salida, hora_llegada, fecha_salida_plan, ' +
       'vuelo!inner(id, folio, fecha_vuelo, estado, aeronave_id)';
@@ -1230,6 +1267,8 @@ export class FlightsService {
           ? `${f.origen_iata} → ${f.destino_iata}`
           : null,
       escala_id: f.id ?? null,
+      orden: typeof f.orden === 'number' ? f.orden : null,
+      fecha_plan: f.fecha_salida_plan ?? f.vuelo?.fecha_vuelo ?? null,
     };
   }
 
@@ -8546,6 +8585,8 @@ export class FlightsService {
               (current.vuelo as { fecha_vuelo?: string | null } | null)
                 ?.fecha_vuelo ??
               null,
+            vuelo_id: (current.vuelo_id as string | null) ?? null,
+            orden: (current.orden as number | null) ?? null,
           },
           ultimo,
         );
@@ -9626,6 +9667,8 @@ export class FlightsService {
               (current.vuelo as { fecha_vuelo?: string | null } | null)
                 ?.fecha_vuelo ??
               null,
+            vuelo_id: (current.vuelo_id as string | null) ?? null,
+            orden: (current.orden as number | null) ?? null,
           },
           ultimo,
         );
@@ -11248,7 +11291,7 @@ export class FlightsService {
     const { data } = await this.supabase.service
       .from('escala')
       .select(
-        `id, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)${colsTacoOmitido(omitidoOk)}` as 'id, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)',
+        `id, orden, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)${colsTacoOmitido(omitidoOk)}` as 'id, orden, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, revision_motivo, vuelo:vuelo_id(fecha_vuelo)',
       )
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
@@ -11290,6 +11333,8 @@ export class FlightsService {
               (data.fecha_salida_plan as string | null) ??
               vueloEmb?.fecha_vuelo ??
               null,
+            vuelo_id: vueloId,
+            orden: (data.orden as number | null) ?? null,
           },
           roundTaco(ultimo),
         );
@@ -11307,32 +11352,53 @@ export class FlightsService {
    * SECCIÓN 9 del contrato del tacómetro omitido (invariante 79): ¿hay un
    * tramo VIVO con tacómetro OMITIDO del mismo avión (con herencia
    * `escala.aeronave_id ?? vuelo.aeronave_id`, vuelo no CANCELADO) ENTRE el
-   * tramo de donde salió el último taco real (`ultimoTacoAeronaveDetalle`) y
+   * tramo de donde salió el último taco real (`ultimoTacoAeronaveFuente`) y
    * `escala`? Si lo hay, la copia DEDUCIDA de la salida de `escala` puede ser
    * MENOR que la realidad (el avión sí voló el tramo omitido) y sus horas se
    * cargarían en silencio al tramo siguiente.
    *
-   * «Entre» = `fecha_salida_plan` (o `fecha_vuelo`) del omitido MENOR que la
-   * de `escala` y MAYOR que la de la lectura fuente. Además cuenta el propio
-   * tramo fuente cuando la lectura fuente es su SALIDA y él quedó omitido
-   * (el horómetro avanzó después de esa salida). Devuelve el omitido más
-   * reciente o null. Solo con la sonda en «sí»; un error de lectura sube.
+   * «Entre» se decide por ORDEN FÍSICO, nunca comparando una hora REAL contra
+   * una PLANEADA (revisión 0.0.81: la fuente traía la hora real de llegada y
+   * el omitido su plan; con un retraso, o con un tramo intermedio sin
+   * `fecha_salida_plan` —el cotizador los deja en null—, el regreso omitido
+   * de un vuelo redondo NO cruzaba y la copia absorbía su ferry en verde):
+   * - DESPUÉS de la fuente: el propio tramo fuente si la lectura fuente es
+   *   su SALIDA; si no, un tramo del MISMO vuelo que la fuente con `orden`
+   *   mayor; si es de otro vuelo, su salida (copia) ≥ el valor fuente (arrancó
+   *   en esa lectura o después) o su fecha planeada MAYOR que la PLANEADA
+   *   del tramo fuente (`fecha_salida_plan ?? vuelo.fecha_vuelo`, plan contra
+   *   plan).
+   * - ANTES de `escala`: del mismo vuelo que `escala` ⇒ `orden` menor; de
+   *   otro vuelo ⇒ fecha planeada MENOR que la de `escala`.
+   * Devuelve el omitido más reciente o null. Solo con la sonda en «sí»; un
+   * error de lectura sube.
    */
   private async salidaCruzaOmitido(
     aeronaveId: string,
-    escala: { id: string; fecha: string | null },
+    escala: {
+      id: string;
+      fecha: string | null;
+      vuelo_id?: string | null;
+      orden?: number | null;
+    },
   ): Promise<{ folio: number | null; ruta: string | null } | null> {
-    const detalle = await this.ultimoTacoAeronaveDetalle(aeronaveId);
-    if (!detalle) return null;
+    const fuente = await this.ultimoTacoAeronaveFuente(aeronaveId);
+    if (!fuente) return null;
     type Row = {
       id: string;
+      orden: number | null;
       origen_iata: string | null;
       destino_iata: string | null;
       fecha_salida_plan: string | null;
-      vuelo: { folio: number | null; fecha_vuelo: string | null } | null;
+      taco_salida: number | string | null;
+      vuelo: {
+        id: string | null;
+        folio: number | null;
+        fecha_vuelo: string | null;
+      } | null;
     };
     const cols =
-      'id, origen_iata, destino_iata, fecha_salida_plan, vuelo!inner(id, folio, fecha_vuelo, estado, aeronave_id)';
+      'id, orden, origen_iata, destino_iata, fecha_salida_plan, taco_salida, vuelo!inner(id, folio, fecha_vuelo, estado, aeronave_id)';
     const [propias, heredadas] = await Promise.all([
       this.supabase.service
         .from('escala')
@@ -11354,11 +11420,13 @@ export class FlightsService {
     if (heredadas.error) throw new Error(heredadas.error.message);
     const ms = (iso: string | null | undefined): number =>
       iso ? Date.parse(iso) : Number.NaN;
+    const esOrden = (o: unknown): o is number =>
+      typeof o === 'number' && Number.isFinite(o);
     const fechaEste = Number.isNaN(ms(escala.fecha))
       ? Date.now()
       : ms(escala.fecha);
-    const fechaFuente = ms(detalle.fecha_vuelo);
-    let mejor: { f: number; fila: Row } | null = null;
+    const planFuente = ms(fuente.fecha_plan);
+    let mejor: { f: number; orden: number; fila: Row } | null = null;
     for (const fila of [
       ...((propias.data ?? []) as unknown as Row[]),
       ...((heredadas.data ?? []) as unknown as Row[]),
@@ -11368,14 +11436,47 @@ export class FlightsService {
       const vuelo = (
         Array.isArray(emb) ? (emb as unknown[])[0] : emb
       ) as Row['vuelo'];
+      const vueloId = vuelo?.id ?? null;
       const f = ms(fila.fecha_salida_plan ?? vuelo?.fecha_vuelo);
-      if (Number.isNaN(f) || f >= fechaEste) continue;
-      const cruza =
-        fila.id === detalle.escala_id
-          ? detalle.lado === 'SALIDA'
-          : Number.isNaN(fechaFuente) || f > fechaFuente;
-      if (!cruza) continue;
-      if (!mejor || f > mejor.f) mejor = { f, fila: { ...fila, vuelo } };
+      // ¿Antes de `escala`? Mismo vuelo ⇒ por orden; otro ⇒ plan contra plan.
+      const antesDeEste =
+        vueloId !== null &&
+        vueloId === (escala.vuelo_id ?? null) &&
+        esOrden(fila.orden) &&
+        esOrden(escala.orden)
+          ? fila.orden < escala.orden
+          : !Number.isNaN(f) && f < fechaEste;
+      if (!antesDeEste) continue;
+      // ¿Después de la lectura fuente?
+      let despuesDeFuente: boolean;
+      if (fila.id === fuente.escala_id) {
+        despuesDeFuente = fuente.lado === 'SALIDA';
+      } else if (
+        vueloId !== null &&
+        vueloId === fuente.vuelo_id &&
+        esOrden(fila.orden) &&
+        esOrden(fuente.orden)
+      ) {
+        despuesDeFuente = fila.orden > fuente.orden;
+      } else {
+        const salida =
+          fila.taco_salida === null || fila.taco_salida === undefined
+            ? Number.NaN
+            : Number(fila.taco_salida);
+        despuesDeFuente =
+          (!Number.isNaN(salida) && salida >= fuente.valor) ||
+          Number.isNaN(planFuente) ||
+          (!Number.isNaN(f) && f > planFuente);
+      }
+      if (!despuesDeFuente) continue;
+      const fOrden = Number.isNaN(f) ? Number.NEGATIVE_INFINITY : f;
+      const orden = esOrden(fila.orden) ? fila.orden : 0;
+      if (
+        !mejor ||
+        fOrden > mejor.f ||
+        (fOrden === mejor.f && orden > mejor.orden)
+      )
+        mejor = { f: fOrden, orden, fila: { ...fila, vuelo } };
     }
     if (!mejor) return null;
     const { fila } = mejor;
@@ -11395,7 +11496,12 @@ export class FlightsService {
    */
   private async alertaSalidaCruzaOmitido(
     aeronaveId: string | null,
-    escala: { id: string; fecha: string | null },
+    escala: {
+      id: string;
+      fecha: string | null;
+      vuelo_id?: string | null;
+      orden?: number | null;
+    },
     valor: number,
   ): Promise<string | null> {
     if (!aeronaveId || !(await this.tacoOmitidoOk())) return null;

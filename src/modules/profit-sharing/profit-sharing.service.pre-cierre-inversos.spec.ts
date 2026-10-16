@@ -525,6 +525,96 @@ describe('ProfitSharingService.preCierre — renglones inversos (15-oct-2026)', 
     }
   });
 
+  it('GRUPO: la camioneta cotizada con reparto ANCLA (cabecera) cubre el gasto ligado a OTRO hijo; sin grupos NO se lee vuelo_grupo', async () => {
+    // Revisión 0.0.81: el extra ANCLA solo se materializa en el hijo ancla
+    // (vA); el gasto de la camioneta se ligó al hijo vB.
+    const camionetas = [{ concepto: 'Camionetas', unitario: 150 }];
+    const { svc, llamadas } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo_grupo: [
+        {
+          id: 'g-1',
+          extras_grupo: [{ ...camionetas[0], reparto: 'ANCLA', moneda: 'USD' }],
+        },
+      ],
+      vuelo: [
+        vuelo('vA', 501, {
+          grupo_id: 'g-1',
+          calculo_snapshot: {
+            desglose: [{ clave: 'TIEMPO_VUELO', monto_usd: 1000 }],
+            extras: [{ concepto: 'Camionetas', monto_usd: 150 }],
+          },
+        }),
+        vuelo('vB', 502, { grupo_id: 'g-1', aeronave_id: 'av-990' }),
+        vuelo('vS', 503),
+      ],
+      gasto: [gasto('x-vB', 'vB', TAXI_190), gasto('x-vS', 'vS', TAXI_190)],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    expect(itemDe(r, CLAVE_TRANSPORTE)).toMatchObject({
+      count: 1,
+      lectura_fallida: false,
+    });
+    expect(
+      (itemDe(r, CLAVE_TRANSPORTE).vuelos as Fila[]).map((v) => v.folio),
+    ).toEqual([503]);
+    const qGrupo = llamadas.filter(
+      (l) =>
+        l.tabla === 'vuelo_grupo' &&
+        l.ops.some((o) => o[0] === 'select' && o[1][0] === 'id, extras_grupo'),
+    );
+    expect(qGrupo).toHaveLength(1);
+    expect(qGrupo[0].ops).toContainEqual(['in', ['id', ['g-1']]]);
+
+    // Sin hijos de grupo entre los candidatos ⇒ ni una consulta de más.
+    const sinGrupo = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [vuelo('vS', 503)],
+      gasto: [gasto('x-vS', 'vS', TAXI_190)],
+    });
+    await sinGrupo.svc.preCierre(PERIODO);
+    expect(
+      sinGrupo.llamadas.some(
+        (l) =>
+          l.tabla === 'vuelo_grupo' &&
+          l.ops.some(
+            (o) => o[0] === 'select' && o[1][0] === 'id, extras_grupo',
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  it('GRUPO: la lectura de vuelo_grupo caída ⇒ los DOS con lectura_fallida (jamás «sin cotizar» a ciegas)', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const { svc } = armar(
+      {
+        aeronave: AERONAVES,
+        cliente: CLIENTES,
+        vuelo_grupo: [{ id: 'g-1', extras_grupo: [] }],
+        vuelo: [vuelo('vB', 502, { grupo_id: 'g-1' })],
+        gasto: [gasto('x-vB', 'vB', TAXI_190)],
+      },
+      {
+        fallar: (tabla, ops) =>
+          tabla === 'vuelo_grupo' &&
+          ops.some((o) => o[0] === 'select' && o[1][0] === 'id, extras_grupo'),
+      },
+    );
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    warn.mockRestore();
+    for (const clave of [CLAVE_TUA, CLAVE_TRANSPORTE]) {
+      expect(itemDe(r, clave)).toMatchObject({
+        count: 0,
+        vuelos: [],
+        lectura_fallida: true,
+      });
+    }
+  });
+
   it('lectura caída ⇒ los DOS con count 0, montos 0, vuelos [], lectura_fallida y su detalle FALLIDA; pre-cierre vivo', async () => {
     const warn = jest
       .spyOn(Logger.prototype, 'warn')

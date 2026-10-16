@@ -372,6 +372,11 @@ describe('cotizoTransporte — conceptos reales de vuelo.extras (jul-oct)', () =
     'Transfer terminales',
     'transfer terrestre',
     'Trasnfer FBO-T',
+    // Revisión 0.0.81: «Taxi» cuenta (el gasto TAXI «Taxi privado…» dispara
+    // el renglón; la oficina lo cotiza con el mismo nombre).
+    'Taxi privado',
+    'TAXI',
+    'Taxis aeropuerto-hotel',
   ])('«%s» ⇒ true', (concepto) => {
     expect(cotizoTransporte([{ concepto }])).toBe(true);
   });

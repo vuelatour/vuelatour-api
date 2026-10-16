@@ -88,9 +88,14 @@ export function pareceTransporteDePasajeros(g: GastoTextoTransporte): boolean {
   return cat === 'TAXI' && RE_TRANSPORTE_DEBIL.test(texto);
 }
 
-/** Concepto de extra que es transporte (tolera «Tranfer», «Trasnfer»; «Comision transferencia» NO). */
+/**
+ * Concepto de extra que es transporte (tolera «Tranfer», «Trasnfer»;
+ * «Comision transferencia» NO). «Taxi» cuenta (revisión 0.0.81: el gasto TAXI
+ * «Taxi privado…» dispara el renglón y la oficina, siguiendo el detalle, lo
+ * cotiza como extra «Taxi privado»: sin esto el aviso no se apagaba nunca).
+ */
 export const RE_EXTRA_TRANSPORTE =
-  /\btra[ns]{1,2}fer(?:s|es)?\b|traslad|\btransport|camioneta|\bvans?\b|shuttle/i;
+  /\btra[ns]{1,2}fer(?:s|es)?\b|traslad|\btransport|camioneta|\bvans?\b|shuttle|\btaxis?\b/i;
 
 /**
  * ¿La cotización pactó un extra de transporte? `extras` es `unknown` a

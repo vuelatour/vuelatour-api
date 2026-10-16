@@ -11,6 +11,12 @@
  * lo PACTADO (`extrasPactados`: `calculo_snapshot.extras`, respaldo
  * `vuelo.extras`) no trae ningún extra de transporte (`cotizoTransporte`).
  *
+ * Hijo de GRUPO (`grupo_id`): cuenta también lo pactado en la CABECERA
+ * (`vuelo_grupo.extras_grupo`, argumento `extrasGrupo`). Un extra con
+ * reparto ANCLA se materializa solo en el hijo ancla (`materializarExtras`):
+ * sin esto, la camioneta del grupo ligada a OTRO hijo salía «sin cotizar»
+ * para siempre (revisión 0.0.81).
+ *
  * Es una SEÑAL, no una certeza: el `detalle` lo dice y nada se resuelve
  * solo; lo manual es «Seguimiento de la cotización» (invariante 32). Montos
  * = el gasto ENTERO (un taxi no se desglosa) por moneda, JAMÁS sumadas entre
@@ -35,7 +41,7 @@ export const TITULO_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR =
   'Vuelos con transporte pagado sin transporte cotizado';
 
 export const DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR =
-  'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.';
+  'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA =
@@ -72,6 +78,8 @@ export function vuelosConTransportePagadoSinCotizar(args: {
   candidatos: ReadonlyArray<VueloCandidatoInverso>;
   gastos: ReadonlyArray<Record<string, unknown>>;
   matriculas: ReadonlyMap<string, string>;
+  /** `vuelo_grupo.id` → `extras_grupo` (jsonb crudo) de los grupos de los candidatos. */
+  extrasGrupo?: ReadonlyMap<string, unknown>;
 }): VueloTransporteSinCotizar[] {
   const porVuelo = new Map<string, GastoTransportePrecierre[]>();
   for (const g of args.gastos) {
@@ -94,6 +102,8 @@ export function vuelosConTransportePagadoSinCotizar(args: {
     const gastos = porVuelo.get(v.id);
     if (!gastos || gastos.length === 0) continue;
     if (cotizoTransporte(v.extras)) continue;
+    if (v.grupo_id && cotizoTransporte(args.extrasGrupo?.get(v.grupo_id)))
+      continue;
     const ordenados = [...gastos].sort((a, b) =>
       a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
     );

@@ -3916,9 +3916,11 @@ export class ProfitSharingService {
    * fecha (la factura del aeropuerto llega días después) y SIN filtro de
    * categoría (las reglas viven en los utils; filtrar enums en la consulta
    * arriesga un 22P02). `moneda` y `lugar` solo se seleccionan; la columna
-   * `tua_incluida` va detrás de la sonda (invariante 66). Cualquier fallo ⇒
-   * `null` + `warn` (los DOS renglones salen «sin verificar»; no tumba el
-   * pre-cierre).
+   * `tua_incluida` va detrás de la sonda (invariante 66). Hijos de GRUPO:
+   * una lectura más de `vuelo_grupo.extras_grupo` (solo si hay candidatos
+   * con `grupo_id`): el extra de transporte con reparto ANCLA vive solo en
+   * el hijo ancla (revisión 0.0.81). Cualquier fallo ⇒ `null` + `warn` (los
+   * DOS renglones salen «sin verificar»; no tumba el pre-cierre).
    */
   private async inversosPrecierre(
     candidatos: VueloCandidatoInverso[],
@@ -3944,12 +3946,36 @@ export class ProfitSharingService {
             .order('id', { ascending: true })
             .range(desde, hasta),
       );
+      const grupoIds = [
+        ...new Set(
+          candidatos
+            .map((c) => c.grupo_id)
+            .filter((g): g is string => typeof g === 'string' && g !== ''),
+        ),
+      ];
+      const extrasGrupo = new Map<string, unknown>();
+      if (grupoIds.length > 0) {
+        const grupos = await this.leerEnLotesPaginado(
+          grupoIds,
+          (lote, desde, hasta) =>
+            this.supabase.service
+              .from('vuelo_grupo')
+              .select('id, extras_grupo')
+              .in('id', lote)
+              .order('id', { ascending: true })
+              .range(desde, hasta),
+        );
+        for (const g of grupos) {
+          if (typeof g.id === 'string') extrasGrupo.set(g.id, g.extras_grupo);
+        }
+      }
       return {
         tua: vuelosConTuaPagadaSinCobrar({ candidatos, gastos, matriculas }),
         transporte: vuelosConTransportePagadoSinCotizar({
           candidatos,
           gastos,
           matriculas,
+          extrasGrupo,
         }),
       };
     } catch (err) {

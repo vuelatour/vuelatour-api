@@ -18,7 +18,11 @@
  * no se cotizan ⇒ fuera por construcción, sin leer `escala`.
  *
  * TUA cobrada = 0 por la FUENTE ÚNICA `particionIngresoVuelo(v).tuas_usd`
- * (prohibido leer `vuelo.tuas_usd` o el snapshot a mano). TUA pagada > 0 por
+ * (prohibido leer `vuelo.tuas_usd` o el snapshot a mano) Y ningún extra
+ * PACTADO (`extrasPactados`) con concepto TUA (`cobraTuaComoExtra`, revisión
+ * 0.0.81: el #9 de prod cobró la TUA como extra «TUA» de $25, que la
+ * partición manda a `extras_usd`; sin esto el aviso no se apagaba nunca,
+ * aunque el propio detalle sugiere agregarla como extra). TUA pagada > 0 por
  * la FUENTE ÚNICA `trasladosPagadosDeGasto(g).tua` (gasto TUAS entero, TUA
  * embebida leída por la IA que CUADRA o `tua_incluida` de la oficina) sobre
  * los gastos con `vuelo_id` de CUALQUIER fecha. `pase_abordar = true` ENTRA
@@ -40,7 +44,7 @@ export const TITULO_PRECIERRE_TUA_PAGADA_SIN_COBRAR =
   'Vuelos con TUA pagada por Operación sin TUA cobrada al cliente';
 
 export const DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR =
-  'Vuelos completados del periodo cuya cotización NO cobra TUA (tarifa de uso de aeropuerto) y que sí tienen un gasto que la paga: un gasto «TUAS» o una factura de aeropuerto con la TUA separada (leída por la IA o capturada en «TUA incluida en este gasto»). Operación pagó una TUA que no se le cobró al cliente: abre la cotización y enciende «Se cobran TUAS» (o agrégala como extra). Si el pasajero compró su pase de abordar y pagó su propia TUA, revisa la factura en Gastos → «Verificar / editar» (una TUA ahí sería cobro doble o una lectura mal etiquetada). Montos: TUA pagada con IVA, en la moneda del gasto. No bloquea el cierre.';
+  'Vuelos completados del periodo cuya cotización NO cobra TUA (tarifa de uso de aeropuerto) y que sí tienen un gasto que la paga: un gasto «TUAS» o una factura de aeropuerto con la TUA separada (leída por la IA o capturada en «TUA incluida en este gasto»). Operación pagó una TUA que no se le cobró al cliente: abre la cotización y enciende «Se cobran TUAS» (o agrégala como extra con «TUA» en el concepto). Si el pasajero compró su pase de abordar y pagó su propia TUA, revisa la factura en Gastos → «Verificar / editar» (una TUA ahí sería cobro doble o una lectura mal etiquetada). Montos: TUA pagada con IVA, en la moneda del gasto. No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR_FALLIDA =
@@ -56,6 +60,7 @@ export interface VueloInversoRow extends VueloIngresoInput {
   cliente_id?: unknown;
   pase_abordar?: unknown;
   extras?: unknown;
+  grupo_id?: unknown;
 }
 
 /** Universo COMPARTIDO de los dos renglones inversos. */
@@ -70,6 +75,8 @@ export interface VueloCandidatoInverso {
   tua_cobrada_usd: number;
   /** `extrasPactados(v)`. */
   extras: unknown;
+  /** `vuelo.grupo_id` (solo si es hijo de un grupo; la llave falta si no). */
+  grupo_id?: string;
 }
 
 /** Chip del renglón `tua_pagada_sin_cobrar`. */
@@ -108,6 +115,40 @@ export function extrasPactados(v: {
 }
 
 /**
+ * Concepto de extra que es TUA: «TUA», «TUAS», «T.U.A.», «Tua CZM»… con
+ * límite de palabra («actual», «Tulum» o «Situación» NO).
+ */
+export const RE_EXTRA_TUA = /\bT\.?\s?U\.?\s?A\.?S?\b/i;
+
+/**
+ * ¿Lo PACTADO cobra la TUA como extra? `extras` es jsonb crudo: no arreglo
+ * ⇒ false; algún `concepto` string que cumpla `RE_EXTRA_TUA` ⇒ true,
+ * salvo que la línea diga explícitamente $0 (`monto_usd` numérico ≤ 0 y sin
+ * `unitario` > 0: un extra en $0 no cobró nada).
+ */
+export function cobraTuaComoExtra(extras: unknown): boolean {
+  if (!Array.isArray(extras)) return false;
+  const positivo = (x: unknown): boolean => {
+    const n = Number(x);
+    return x !== null && x !== '' && Number.isFinite(n) && n > 0;
+  };
+  const numerico = (x: unknown): boolean =>
+    x !== null && x !== undefined && x !== '' && Number.isFinite(Number(x));
+  return extras.some((e) => {
+    if (!e || typeof e !== 'object') return false;
+    const { concepto, monto_usd, unitario } = e as {
+      concepto?: unknown;
+      monto_usd?: unknown;
+      unitario?: unknown;
+    };
+    if (typeof concepto !== 'string' || !RE_EXTRA_TUA.test(concepto))
+      return false;
+    const enCero = numerico(monto_usd) && !positivo(monto_usd);
+    return !enCero || positivo(unitario);
+  });
+}
+
+/**
  * Universo de los renglones inversos: COMPLETADO (ya filtrado por la
  * consulta) propios, con id, cliente NO interno y total > 0.
  */
@@ -130,6 +171,9 @@ export function candidatosPrecierreInversos(
       pase_abordar: v.pase_abordar === true,
       tua_cobrada_usd: round2(particion.tuas_usd),
       extras: extrasPactados(v),
+      ...(typeof v.grupo_id === 'string' && v.grupo_id
+        ? { grupo_id: v.grupo_id }
+        : {}),
     });
   }
   return out;
@@ -169,8 +213,9 @@ export function ordenPorFechaFolio<
 }
 
 /**
- * Los candidatos SIN TUA cobrada y CON TUA pagada, con su matrícula (o
- * null), por `fecha_vuelo` (empate por folio; sin fecha, al final).
+ * Los candidatos SIN TUA cobrada (ni en la línea TUAS ni como extra «TUA»)
+ * y CON TUA pagada, con su matrícula (o null), por `fecha_vuelo` (empate
+ * por folio; sin fecha, al final).
  */
 export function vuelosConTuaPagadaSinCobrar(args: {
   candidatos: ReadonlyArray<VueloCandidatoInverso>;
@@ -180,7 +225,7 @@ export function vuelosConTuaPagadaSinCobrar(args: {
   const pagada = tuaPagadaPorVuelo(args.gastos);
   const out: VueloTuaPagadaSinCobrar[] = [];
   for (const v of args.candidatos) {
-    if (v.tua_cobrada_usd > 0) continue;
+    if (v.tua_cobrada_usd > 0 || cobraTuaComoExtra(v.extras)) continue;
     const p = pagada.get(v.id);
     if (!p || !(p.mxn > 0 || p.usd > 0)) continue;
     out.push({

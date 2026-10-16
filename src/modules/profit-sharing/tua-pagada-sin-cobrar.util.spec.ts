@@ -4,6 +4,7 @@ import {
   DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR_FALLIDA,
   TITULO_PRECIERRE_TUA_PAGADA_SIN_COBRAR,
   candidatosPrecierreInversos,
+  cobraTuaComoExtra,
   extrasPactados,
   tuaPagadaPorVuelo,
   vuelosConTuaPagadaSinCobrar,
@@ -456,6 +457,89 @@ describe('vuelosConTuaPagadaSinCobrar', () => {
     ).toEqual([]);
   });
 
+  it('TUA cobrada como EXTRA «TUA» (forma REAL del #9 de prod) ⇒ fuera aunque haya TUA pagada', () => {
+    // Revisión 0.0.81: la partición manda el extra a `extras_usd` (tuas_usd 0);
+    // sin reconocer el extra, el aviso no se apagaba nunca.
+    const extras = [{ concepto: 'TUA', monto_usd: 25, aplica_iva: true }];
+    const candidatos = candidatosPrecierreInversos(
+      [
+        vuelo({
+          id: 'v-9',
+          folio: 9,
+          fecha_vuelo: '2026-07-01T21:15:00+00:00',
+          monto_total_usd: '783.00',
+          tuas_usd: '0.00',
+          extras_total_usd: '25.00',
+          extras,
+          calculo_snapshot: {
+            desglose: [
+              {
+                clave: 'TIEMPO_VUELO',
+                concepto: 'Tiempo de vuelo',
+                monto_usd: 650,
+              },
+              { clave: 'EXTRA', concepto: 'TUA', monto_usd: 25 },
+              { clave: 'IVA', concepto: 'IVA 16%', monto_usd: 108 },
+            ],
+            extras,
+          },
+        }),
+      ],
+      SIN_INTERNOS,
+    );
+    expect(candidatos[0].tua_cobrada_usd).toBe(0);
+    expect(
+      vuelosConTuaPagadaSinCobrar({
+        candidatos,
+        gastos: [
+          {
+            id: 'g1',
+            vuelo_id: 'v-9',
+            categoria: 'TUAS',
+            monto: '450.00',
+            moneda: 'MXN',
+          },
+        ],
+        matriculas,
+      }),
+    ).toEqual([]);
+  });
+
+  it('un extra que NO es TUA (o una TUA en $0) no apaga el aviso', () => {
+    const tuas = {
+      vuelo_id: 'v-9',
+      categoria: 'TUAS',
+      monto: 450,
+      moneda: 'MXN',
+    };
+    for (const extras of [
+      [{ concepto: 'Handler', monto_usd: 25 }],
+      [{ concepto: 'TUA', monto_usd: 0 }],
+    ]) {
+      const candidatos = candidatosPrecierreInversos(
+        [
+          vuelo({
+            id: 'v-9',
+            folio: 9,
+            extras,
+            calculo_snapshot: {
+              desglose: [{ clave: 'TIEMPO_VUELO', monto_usd: 650 }],
+              extras,
+            },
+          }),
+        ],
+        SIN_INTERNOS,
+      );
+      expect(
+        vuelosConTuaPagadaSinCobrar({
+          candidatos,
+          gastos: [tuas],
+          matriculas,
+        }).map((v) => v.folio),
+      ).toEqual([9]);
+    }
+  });
+
   it('matrícula null si no resuelve; orden por fecha, folio y sin fecha al final', () => {
     const tuas = (id: string) => ({
       vuelo_id: id,
@@ -492,10 +576,46 @@ describe('vuelosConTuaPagadaSinCobrar', () => {
       'Vuelos con TUA pagada por Operación sin TUA cobrada al cliente',
     );
     expect(DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR).toBe(
-      'Vuelos completados del periodo cuya cotización NO cobra TUA (tarifa de uso de aeropuerto) y que sí tienen un gasto que la paga: un gasto «TUAS» o una factura de aeropuerto con la TUA separada (leída por la IA o capturada en «TUA incluida en este gasto»). Operación pagó una TUA que no se le cobró al cliente: abre la cotización y enciende «Se cobran TUAS» (o agrégala como extra). Si el pasajero compró su pase de abordar y pagó su propia TUA, revisa la factura en Gastos → «Verificar / editar» (una TUA ahí sería cobro doble o una lectura mal etiquetada). Montos: TUA pagada con IVA, en la moneda del gasto. No bloquea el cierre.',
+      'Vuelos completados del periodo cuya cotización NO cobra TUA (tarifa de uso de aeropuerto) y que sí tienen un gasto que la paga: un gasto «TUAS» o una factura de aeropuerto con la TUA separada (leída por la IA o capturada en «TUA incluida en este gasto»). Operación pagó una TUA que no se le cobró al cliente: abre la cotización y enciende «Se cobran TUAS» (o agrégala como extra con «TUA» en el concepto). Si el pasajero compró su pase de abordar y pagó su propia TUA, revisa la factura en Gastos → «Verificar / editar» (una TUA ahí sería cobro doble o una lectura mal etiquetada). Montos: TUA pagada con IVA, en la moneda del gasto. No bloquea el cierre.',
     );
     expect(DETALLE_PRECIERRE_TUA_PAGADA_SIN_COBRAR_FALLIDA).toBe(
       'No se pudo verificar la TUA pagada de los vuelos del periodo: revisa las facturas de aeropuerto en Gastos y las cotizaciones sin TUAS antes de cerrar.',
     );
+  });
+});
+
+describe('cobraTuaComoExtra (concepto de extra que es TUA)', () => {
+  it.each([
+    'TUA',
+    'TUAS',
+    'Tuas',
+    'T.U.A.',
+    'TUA CZM',
+    'Cobro de tua x 4 pax',
+    'T U A',
+  ])('«%s» ⇒ true', (concepto) => {
+    expect(cobraTuaComoExtra([{ concepto, monto_usd: 10 }])).toBe(true);
+  });
+
+  it.each([
+    'actual',
+    'Tulum',
+    'Situación',
+    'Handler',
+    'Espera',
+    'Transfer',
+    'TUAREG',
+  ])('«%s» ⇒ false', (concepto) => {
+    expect(cobraTuaComoExtra([{ concepto, monto_usd: 10 }])).toBe(false);
+  });
+
+  it('sin arreglo, sin concepto o en $0 ⇒ false; monto ausente o con unitario ⇒ true', () => {
+    expect(cobraTuaComoExtra(null)).toBe(false);
+    expect(cobraTuaComoExtra([{ monto_usd: 10 }])).toBe(false);
+    expect(cobraTuaComoExtra([{ concepto: 'TUA', monto_usd: 0 }])).toBe(false);
+    expect(cobraTuaComoExtra([{ concepto: 'TUA' }])).toBe(true);
+    expect(
+      cobraTuaComoExtra([{ concepto: 'TUA', monto_usd: 0, unitario: 12 }]),
+    ).toBe(true);
   });
 });

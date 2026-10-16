@@ -9135,8 +9135,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       absorbería en silencio la copia) en `start()`/`autoFillSalidaInicial`, `captureTaco`
       y `confirmTaco`, en el MISMO update y sobreviviendo al recálculo de
       `applyConsistencyFlag`. «Cruza» = omitido vivo del avión (con herencia, vuelo no
-      CANCELADO) con fecha entre la lectura fuente (`ultimoTacoAeronaveDetalle`) y el
-      tramo, o el propio tramo fuente cuando la fuente es su SALIDA. Un tramo 1 que
+      CANCELADO) ENTRE la lectura fuente (`ultimoTacoAeronaveFuente`, la misma lectura
+      que `ultimoTacoAeronaveDetalle` más `orden` y fecha PLANEADA del tramo fuente,
+      que NO viajan a la app) y el tramo, decidido por ORDEN FÍSICO y nunca hora REAL
+      contra PLANEADA (revisión 0.0.81: con la llegada real de T1 tarde respecto al
+      plan de T2, o con T2 sin `fecha_salida_plan` —el cotizador la deja null en los
+      intermedios—, el regreso OMITIDO de un vuelo redondo no cruzaba y la copia del
+      vuelo siguiente absorbía su ferry en VERDE). Después de la fuente: el propio
+      tramo fuente si la fuente es su SALIDA; del MISMO vuelo que la fuente ⇒ `orden`
+      mayor; de otro vuelo ⇒ su salida (copia) ≥ el valor fuente o su plan > el plan
+      de la fuente (`fecha_salida_plan ?? vuelo.fecha_vuelo`, plan contra plan). Antes
+      del tramo: mismo vuelo ⇒ `orden` menor; otro ⇒ plan menor. Un tramo 1 que
       ÉL MISMO está omitido no lleva el ámbar (no aporta horas y lo metería en
       `tacos_en_revision`). Lectura caída ⇒ warn y copia como siempre.
     - **Sonda única** `common/taco-omitido-disponible.util.ts`: todo select/update que
@@ -9150,6 +9159,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `flight-report.service.taco-omitido.spec`,
       `aircraft-balance.service.taco-omitido.spec`, `alerts.service.taco-omitido.spec`
       y `profit-sharing.service.pre-cierre-tacos-omitidos.spec` (cableado del renglón).
+      La sección 9 por orden físico la fijan en `flights.service.taco-omitido.spec`
+      el retraso (plan de T2 antes de la llegada real de T1), T2 sin plan, el omitido
+      ANTES de la fuente en su vuelo (sin ámbar) y el omitido del MISMO vuelo que el
+      tramo, ambos sin plan.
 
 80. **PRE-CIERRE: FUERA `pistas_sin_gasto` Y `tua_cobrada_sin_pagada`;
     NACEN LOS RENGLONES INVERSOS (15-oct-2026, API 0.0.81, sin
@@ -9189,7 +9202,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       construcción, sin leer `escala`); `aeronave_id` NO es obligatorio
       (matrícula null). TUA cobrada = 0 por la FUENTE ÚNICA
       `particionIngresoVuelo(v).tuas_usd` (las particiones `inconsistente`
-      con líneas TUAS cuentan como «cobró»); TUA pagada > 0 por la FUENTE
+      con líneas TUAS cuentan como «cobró») **y** ningún extra PACTADO
+      (`extrasPactados`) con concepto TUA (`cobraTuaComoExtra`,
+      `RE_EXTRA_TUA = /\bT\.?\s?U\.?\s?A\.?S?\b/i`; una línea en $0 explícito
+      no cuenta). Revisión 0.0.81: el #9 de prod cobró la TUA como extra
+      «TUA» de $25 (la partición lo manda a `extras_usd`) y el detalle mismo
+      sugiere «agrégala como extra»: sin esto el aviso no se apagaba nunca.
+      El detalle ahora dice «con «TUA» en el concepto». TUA pagada > 0 por la FUENTE
       ÚNICA `trasladosPagadosDeGasto(g).tua` sobre los gastos con `vuelo_id`
       de CUALQUIER fecha (gasto TUAS entero, TUA embebida leída por la IA
       que CUADRA, o `tua_incluida` de oficina > 0; con 0 la oficina anuló).
@@ -9217,7 +9236,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `cotizoTransporte(extrasPactados(v))` (`calculo_snapshot.extras`, lo
       pactado; respaldo `vuelo.extras` solo si el snapshot no trae arreglo;
       concepto `transfer/tranfer/trasnfer|traslad|transport|camioneta|van|
-      shuttle`; «Tour» y «Comision transferencia» NO). Es una SEÑAL (el
+      shuttle|taxi`; «Tour» y «Comision transferencia» NO). «Taxi» entró en
+      la revisión 0.0.81: el gasto TAXI «Taxi privado…» dispara el renglón y
+      la oficina lo cotiza con el mismo nombre; el `detalle` dice qué
+      palabras reconoce el extra («Transfer», «Traslado», «Transporte»,
+      «Camioneta», «Van», «Shuttle» o «Taxi»; un «Tour» solo no cuenta).
+      **Hijo de GRUPO** (`grupo_id`, que ahora viaja en el candidato solo
+      cuando existe): también cuenta lo pactado en la CABECERA
+      (`vuelo_grupo.extras_grupo`): un extra con reparto ANCLA se
+      materializa solo en el hijo ancla (`materializarExtras`) y la
+      camioneta del grupo ligada a OTRO hijo salía «sin cotizar» para
+      siempre. Es una SEÑAL (el
       `detalle` lo dice; lo manual es «Seguimiento de la cotización»,
       invariante 32). `vuelos[] {id, folio, fecha_vuelo, matricula,
       monto_mxn, monto_usd, gastos[] {id, texto ≤ 60 (`textoGastoTransporte`:
@@ -9230,7 +9259,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       asc`), select `id, vuelo_id, categoria, monto, moneda, propina, lugar,
       notas, valor_ia_extraido[, tua_incluida]` (la columna detrás de la
       sonda, invariante 66), sin filtro de fecha ni de categoría (filtrar
-      enums arriesga 22P02); sin candidatos no hay consulta; cualquier fallo
+      enums arriesga 22P02); sin candidatos no hay consulta; SOLO si hay
+      candidatos hijos de grupo, una lectura más `vuelo_grupo` (`id,
+      extras_grupo`, `in id`, lotes paginados, `order id`); cualquier fallo
       ⇒ `null` + `warn` ⇒ los DOS renglones con `count 0`, montos 0,
       `vuelos []`, `lectura_fallida: true` y su texto FALLIDA. El select de
       completados suma `pase_abordar, extras` (aditivo).
@@ -9258,7 +9289,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       max-rows 1000: posición, no bloquea, interno/total 0/externo/cancelado
       fuera sin consulta, pase de abordar, 2 facturas, gasto de OTRO mes,
       consulta ÚNICA con el select exacto, sin la migración, anti-cap,
-      lectura caída de los dos, respaldo `vuelo.extras`). Se adaptaron
+      lectura caída de los dos, respaldo `vuelo.extras`; revisión 0.0.81: la
+      camioneta ANCLA de la cabecera cubre al otro hijo, sin grupos no se lee
+      `vuelo_grupo`, su lectura caída ⇒ los dos `lectura_fallida`; en el util
+      el #9 con TUA como extra, «Taxi privado» como extra y el hijo de
+      grupo). Se adaptaron
       `pre-cierre-vuelos-sin-gasto.spec` y `pre-cierre-vuelos-sin-factura.spec`
       (ya no nombran `pistas_sin_gasto`).
 
@@ -10781,9 +10816,13 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      (3 columnas nullable, CHECK `escala_taco_omitido_chk` con `btrim` y
      `taco_llegada IS NULL`, FK `escala_taco_omitido_por_fkey` ON DELETE SET
      NULL, 0 tramos omitidos, 3 COMMENT) ⇒ `get_advisors` (nada nuevo
-     esperado). Si el MCP responde `declined` por «on delete set null»: SQL
-     Editor + `insert into supabase_migrations.schema_migrations (version,
-     name, statements)` y verificar por MCP sin palabras destructivas. **Sin
+     esperado). El cuerpo y el dry-run SÍ llevan la palabra (la cláusula
+     «on delete set null» de la FK, la única aparición tras la revisión
+     0.0.81). Si el MCP responde `declined`, NO reintentar: PLAN B de la
+     cabecera (B1 dry-run en el SQL Editor, B2 cuerpo + `insert into
+     supabase_migrations.schema_migrations (version, name, statements)` en
+     UNA corrida, B3 `do $post$` por MCP sin palabras destructivas ⇒
+     `POSTCHECK_OK 20261015000001 · omitidos=0`, B4 `get_advisors`). **Sin
      dependencia dura** (el 0.0.81 la sondea; sin ella: lecturas como el
      0.0.80 con `taco_omitido_*` en null, `tacometros_omitidos` en 0 y
      `POST`/`DELETE …/taco/omitir` ⇒ 503 `MIGRACION_PENDIENTE`); se aplica
@@ -11088,9 +11127,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `get_advisors`. Ensayada en una réplica local PostgreSQL 17 (cadena del repo
   hasta `20261014000003` + semilla del caso #300): `DRYRUN_OK` sin residuos,
   cuerpo aplicado y re-aplicado (1 CHECK, 1 FK), dry-run sobre la aplicada ⇒
-  `DRYRUN_FALLA A`. OJO: el cuerpo dice «on delete set null» (FK y COMMENT);
-  si el MCP lo tomara por destructivo («declined»), SQL Editor + registro en
-  `supabase_migrations.schema_migrations`. **Sin dependencia dura** (el API
+  `DRYRUN_FALLA A`. OJO: el cuerpo dice «on delete set null» (SOLO la FK
+  desde la revisión 0.0.81: COMMENT, mensajes y comentarios ya no repiten la
+  palabra; la cabecera decía que no había palabras destructivas y no era
+  cierto); si el MCP lo toma por destructivo («declined»), PLAN B de la
+  cabecera (SQL Editor + registro en `supabase_migrations.schema_migrations`
+  + `do $post$` por MCP). Re-ensayada tras la revisión en la misma réplica:
+  `DRYRUN_OK … A–C9`, cuerpo ×2 + el INSERT del PLAN B en una transacción ⇒
+  1 CHECK + 1 FK, COMMENT nuevo y `POSTCHECK_OK … omitidos=0`. **Sin dependencia dura** (el API
   0.0.81 la sondea); se recomienda ANTES del API. **REVERSA (SOLO SQL
   Editor)**: el pie comentado de la migración (exportar antes las omisiones y
   reiniciar el API después).

@@ -45,6 +45,64 @@ const T190 = {
 const matriculas = new Map([['av-pev', 'XB-PEV']]);
 
 describe('vuelosConTransportePagadoSinCotizar', () => {
+  it('revisión 0.0.81 (a): gasto TAXI «Taxi privado…» y extra «Taxi privado» ⇒ cotizado, fuera', () => {
+    const taxi = {
+      id: 'g-taxi',
+      vuelo_id: 'v-1',
+      categoria: 'TAXI',
+      monto: '900.00',
+      moneda: 'MXN',
+      lugar: null,
+      notas: 'Taxi privado pasajeros Tulum',
+      valor_ia_extraido: null,
+    };
+    expect(
+      vuelosConTransportePagadoSinCotizar({
+        candidatos: [cand('v-1', 1)],
+        gastos: [taxi],
+        matriculas,
+      }).map((v) => v.folio),
+    ).toEqual([1]);
+    expect(
+      vuelosConTransportePagadoSinCotizar({
+        candidatos: [
+          cand('v-1', 1, {
+            extras: [{ concepto: 'Taxi privado', monto_usd: 50 }],
+          }),
+        ],
+        gastos: [taxi],
+        matriculas,
+      }),
+    ).toEqual([]);
+  });
+
+  it('revisión 0.0.81 (b): hijo de GRUPO sin el extra (ANCLA en otro hijo) ⇒ cuenta lo pactado en la cabecera', () => {
+    const gB = { ...T190, vuelo_id: 'v-B' };
+    const hijoB = cand('v-B', 502, { grupo_id: 'g-1' });
+    const extrasGrupo = new Map<string, unknown>([
+      ['g-1', [{ concepto: 'Camionetas', unitario: 150, reparto: 'ANCLA' }]],
+    ]);
+    expect(
+      vuelosConTransportePagadoSinCotizar({
+        candidatos: [hijoB],
+        gastos: [gB],
+        matriculas,
+        extrasGrupo,
+      }),
+    ).toEqual([]);
+    // Control: sin la cabecera (o de OTRO grupo) sigue listado.
+    for (const eg of [undefined, new Map([['g-2', extrasGrupo.get('g-1')]])]) {
+      expect(
+        vuelosConTransportePagadoSinCotizar({
+          candidatos: [hijoB],
+          gastos: [gB],
+          matriculas,
+          extrasGrupo: eg,
+        }).map((v) => v.folio),
+      ).toEqual([502]);
+    }
+  });
+
   it('sin extras y gasto de transporte ⇒ dentro con gastos[] (texto ≤ 60, monto, moneda)', () => {
     expect(
       vuelosConTransportePagadoSinCotizar({
@@ -209,7 +267,7 @@ describe('vuelosConTransportePagadoSinCotizar', () => {
       'Vuelos con transporte pagado sin transporte cotizado',
     );
     expect(DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR).toBe(
-      'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.',
+      'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.',
     );
     expect(DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA).toBe(
       'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos «Taxi / estacionamiento» de cada vuelo contra su cotización antes de cerrar.',

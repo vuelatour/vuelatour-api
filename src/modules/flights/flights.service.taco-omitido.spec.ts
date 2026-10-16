@@ -896,3 +896,232 @@ describe('sección 9: salida DEDUCIDA que cruza un tramo omitido ⇒ ámbar', ()
     });
   });
 });
+
+/**
+ * Revisión 0.0.81 (hallazgo alto): «entre» se decidía comparando la hora REAL
+ * del lado fuente contra la PLANEADA del omitido. Vuelo redondo A (CUN→CZM→CUN)
+ * con el regreso OMITIDO: si T1 llegó tarde respecto al plan de T2, o T2 no
+ * tiene `fecha_salida_plan` (el cotizador la deja null en los intermedios), la
+ * copia de B/T1 absorbía el ferry de A/T2 en VERDE.
+ */
+describe('sección 9: el cruce se decide por orden físico, no hora real contra plan', () => {
+  const B = 'u-b';
+  const mundo = (opts: {
+    planT2?: string | null;
+    omitidoEs?: 'T1' | 'T2';
+    planB2?: string | null;
+  }): Tablas => {
+    const omitidoEs = opts.omitidoEs ?? 'T2';
+    const omision = {
+      taco_omitido_at: '2026-10-12T15:00:00Z',
+      taco_omitido_por: B,
+      taco_omitido_motivo: 'Falló el tacómetro',
+    };
+    const sinOmision = {
+      taco_omitido_at: null,
+      taco_omitido_por: null,
+      taco_omitido_motivo: null,
+    };
+    return {
+      usuario: [{ id: B, nombre: 'Luis' }],
+      vuelo: [
+        {
+          id: 'vA',
+          folio: 500,
+          estado: 'EN_VUELO',
+          es_externo: false,
+          aeronave_id: AVION,
+          fecha_vuelo: '2026-10-10T15:00:00Z',
+        },
+        {
+          id: 'vB',
+          folio: 501,
+          estado: 'EN_VUELO',
+          es_externo: false,
+          aeronave_id: AVION,
+          piloto_id: B,
+          fecha_vuelo: '2026-10-11T15:00:00Z',
+        },
+      ],
+      escala: [
+        omitidoEs === 'T1'
+          ? {
+              // A/T1 OMITIDO (antes de la fuente): NO cruza.
+              id: 'eA1',
+              vuelo_id: 'vA',
+              orden: 1,
+              origen_iata: 'CUN',
+              destino_iata: 'CZM',
+              aeronave_id: null,
+              fecha_salida_plan: '2026-10-10T15:00:00Z',
+              taco_salida: 999.0,
+              taco_llegada: null,
+              taco_salida_origen: 'PILOTO',
+              taco_llegada_origen: null,
+              revision_requerida: false,
+              revision_motivo: null,
+              cancelada_at: null,
+              ...omision,
+            }
+          : {
+              // A/T1: llegada REAL 1000.5 a las 16:10Z (retraso).
+              id: 'eA1',
+              vuelo_id: 'vA',
+              orden: 1,
+              origen_iata: 'CUN',
+              destino_iata: 'CZM',
+              aeronave_id: null,
+              fecha_salida_plan: '2026-10-10T15:00:00Z',
+              hora_llegada: '2026-10-10T16:10:00Z',
+              taco_salida: 1000.0,
+              taco_llegada: 1000.5,
+              taco_salida_origen: 'PILOTO',
+              taco_llegada_origen: 'PILOTO',
+              revision_requerida: false,
+              revision_motivo: null,
+              cancelada_at: null,
+              ...sinOmision,
+            },
+        omitidoEs === 'T1'
+          ? {
+              // A/T2: llegada REAL 1000.5 (la fuente).
+              id: 'eA2',
+              vuelo_id: 'vA',
+              orden: 2,
+              origen_iata: 'CZM',
+              destino_iata: 'CUN',
+              aeronave_id: null,
+              fecha_salida_plan: opts.planT2 ?? null,
+              hora_salida: '2026-10-10T17:00:00Z',
+              hora_llegada: '2026-10-10T17:40:00Z',
+              taco_salida: 1000.0,
+              taco_llegada: 1000.5,
+              taco_salida_origen: 'PILOTO',
+              taco_llegada_origen: 'PILOTO',
+              revision_requerida: false,
+              revision_motivo: null,
+              cancelada_at: null,
+              ...sinOmision,
+            }
+          : {
+              // A/T2 OMITIDO; su salida es la copia DEDUCIDA de T1.
+              id: 'eA2',
+              vuelo_id: 'vA',
+              orden: 2,
+              origen_iata: 'CZM',
+              destino_iata: 'CUN',
+              aeronave_id: null,
+              fecha_salida_plan: opts.planT2 ?? null,
+              taco_salida: 1000.5,
+              taco_llegada: null,
+              taco_salida_origen: 'DEDUCIDO',
+              taco_llegada_origen: null,
+              revision_requerida: false,
+              revision_motivo: null,
+              cancelada_at: null,
+              ...omision,
+            },
+        {
+          // B/T1: el piloto captura SOLO la llegada ⇒ la salida se copia.
+          id: 'eB1',
+          vuelo_id: 'vB',
+          orden: 1,
+          origen_iata: 'CUN',
+          destino_iata: 'CZM',
+          aeronave_id: null,
+          piloto_id: B,
+          fecha_salida_plan: '2026-10-11T15:00:00Z',
+          taco_salida: null,
+          taco_llegada: null,
+          taco_salida_origen: null,
+          taco_llegada_origen: null,
+          revision_requerida: false,
+          revision_motivo: null,
+          cancelada_at: null,
+          ...sinOmision,
+        },
+      ],
+    };
+  };
+  const TEXTO_A2 =
+    'La salida se copió del último tacómetro real del avión (1000.5), pero hay un tramo con tacómetro OMITIDO en medio (vuelo #500, CZM → CUN)';
+
+  it.each([
+    [
+      'plan de T2 (16:00Z) ANTES de la llegada real de T1 (16:10Z)',
+      '2026-10-10T16:00:00Z',
+    ],
+    ['T2 SIN fecha_salida_plan (tramo intermedio del cotizador)', null],
+    [
+      'control: plan de T2 (16:30Z) después de la llegada real de T1',
+      '2026-10-10T16:30:00Z',
+    ],
+  ])('regreso omitido del vuelo redondo — %s ⇒ ámbar', async (_n, planT2) => {
+    const t = mundo({ planT2 });
+    const { svc } = armar(t);
+    await svc.captureTaco('eB1', { taco_llegada: 1002.0 }, B);
+    const b1 = t.escala.find((e) => e.id === 'eB1')!;
+    expect(b1).toMatchObject({
+      taco_salida: 1000.5,
+      taco_salida_origen: 'DEDUCIDO',
+      revision_requerida: true,
+    });
+    expect(String(b1.revision_motivo)).toContain(TEXTO_A2);
+  });
+
+  it('omitido ANTES de la fuente en el mismo vuelo (A/T1 omitido, A/T2 real) ⇒ sin ámbar', async () => {
+    const t = mundo({ omitidoEs: 'T1', planT2: null });
+    const { svc } = armar(t);
+    await svc.captureTaco('eB1', { taco_llegada: 1002.0 }, B);
+    const b1 = t.escala.find((e) => e.id === 'eB1')!;
+    expect(b1.taco_salida).toBe(1000.5);
+    expect(b1.revision_requerida).toBe(false);
+  });
+
+  it('omitido en el MISMO vuelo que el tramo, antes de él, ambos sin plan ⇒ ámbar', async () => {
+    // Fuente: A/T1 llegada 1000.5 (A/T2 cancelado para que no estorbe).
+    // Vuelo B: T1 omitido (sin plan) → T2 captura solo la llegada.
+    const t = mundo({ planT2: null });
+    t.escala = t.escala.filter((e) => e.id !== 'eA2');
+    const b1 = t.escala.find((e) => e.id === 'eB1')!;
+    Object.assign(b1, {
+      fecha_salida_plan: null,
+      taco_salida: 1000.5,
+      taco_salida_origen: 'DEDUCIDO',
+      taco_omitido_at: '2026-10-12T15:00:00Z',
+      taco_omitido_por: B,
+      taco_omitido_motivo: 'Falló el tacómetro',
+    });
+    t.escala.push({
+      id: 'eB2',
+      vuelo_id: 'vB',
+      orden: 2,
+      origen_iata: 'CZM',
+      destino_iata: 'CUN',
+      aeronave_id: null,
+      piloto_id: B,
+      fecha_salida_plan: null,
+      taco_salida: null,
+      taco_llegada: null,
+      taco_salida_origen: null,
+      taco_llegada_origen: null,
+      revision_requerida: false,
+      revision_motivo: null,
+      cancelada_at: null,
+      taco_omitido_at: null,
+      taco_omitido_por: null,
+      taco_omitido_motivo: null,
+    });
+    const { svc } = armar(t);
+    await svc.captureTaco('eB2', { taco_llegada: 1002.0 }, B);
+    const b2 = t.escala.find((e) => e.id === 'eB2')!;
+    expect(b2).toMatchObject({
+      taco_salida: 1000.5,
+      taco_salida_origen: 'DEDUCIDO',
+      revision_requerida: true,
+    });
+    expect(String(b2.revision_motivo)).toContain(
+      'hay un tramo con tacómetro OMITIDO en medio (vuelo #501, CUN → CZM)',
+    );
+  });
+});

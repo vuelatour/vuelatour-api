@@ -5,14 +5,21 @@
 --
 -- QUÉ HACE (aditiva, idempotente, sin backfill, sin índice, sin enum):
 --  1) escala.taco_omitido_at timestamptz, escala.taco_omitido_por uuid (FK usuario,
---     on delete set null) y escala.taco_omitido_motivo text, los tres NULL.
+--     acción set null) y escala.taco_omitido_motivo text, los tres NULL.
 --  2) CHECK escala_taco_omitido_chk: at ⇔ motivo (10–500 tras btrim) y, si está
 --     omitido, taco_llegada IS NULL (una llegada real retira la omisión en el
 --     MISMO update: captureTaco / confirmTaco / resolverLecturaPendiente).
 --  3) COMMENT en las tres columnas.
 --  4) Verificación que aborta si algo no quedó.
--- El CUERPO no lleva palabras destructivas: el MCP lo acepta (solo el pie de
--- rollback, comentado, las lleva).
+-- PALABRAS (revisión 0.0.81: la versión anterior de esta cabecera afirmaba que
+-- el cuerpo no las llevaba, y no era cierto): la cláusula de la FK
+-- «on delete set null» es la ÚNICA aparición de la palabra en el CUERPO (una
+-- vez) y en el DRY-RUN (dos: el DDL y su re-aplicación); comentarios, COMMENT
+-- y mensajes ya no la repiten. NO es una sentencia destructiva, pero el MCP de
+-- Supabase desde VS Code responde {"status":"declined"} SIN diálogo a SQL que
+-- contenga drop/delete/revoke (CLAUDE.md del workspace) y nunca se probó con un
+-- `on delete` de FK. Por eso hay PLAN A (MCP) y PLAN B (SQL Editor), abajo; si
+-- el PLAN A vuelve «declined» NO se reintenta: se pasa al B.
 --
 -- DEPENDENCIA: NINGUNA dura. El API 0.0.81 es desplegable ANTES o DESPUÉS
 -- (sonda única common/taco-omitido-disponible.util: sin la columna todo como el
@@ -28,6 +35,47 @@
 --     y query = SOLO el cuerpo entre «>>> CUERPO» y «<<< CUERPO».
 --  c) get_advisors (esperado: nada nuevo) y
 --     select count(*) from public.escala where taco_omitido_at is not null; ⇒ 0
+--
+-- PLAN B (si a) o b) responden {"status":"declined"}), en el SQL Editor de
+-- Supabase del proyecto bjesduasnzbzywofukbf:
+--  B1) Pegar el DRY-RUN (sin el prefijo «-- ») y ejecutar: debe terminar en
+--      «DRYRUN_OK 20261015000001 …» (error esperado: todo se revierte).
+--  B2) Pegar y ejecutar, en UNA corrida:
+--        begin;
+--        <el CUERPO entre «>>> CUERPO» y «<<< CUERPO», tal cual>
+--        insert into supabase_migrations.schema_migrations (version, name, statements)
+--        values ('20261015000001', 'escala_taco_omitido',
+--                array['-- aplicada desde el SQL Editor: ver supabase/migrations/20261015000001_escala_taco_omitido.sql'])
+--        on conflict (version) do nothing;
+--        commit;
+--      (la verificación 4) del cuerpo aborta TODO, historial incluido, si algo
+--      no quedó).
+--  B3) POSTCHECK por MCP (execute_sql; sin palabras destructivas; termina
+--      SIEMPRE en raise, no escribe nada). Debe responder «POSTCHECK_OK …»:
+--      do $post$
+--      declare v_n int;
+--      begin
+--        select count(*) into v_n from information_schema.columns
+--         where table_schema = 'public' and table_name = 'escala'
+--           and column_name in ('taco_omitido_at','taco_omitido_por','taco_omitido_motivo')
+--           and is_nullable = 'YES' and column_default is null;
+--        if v_n <> 3 then raise exception 'POSTCHECK_FALLA: % columnas', v_n; end if;
+--        perform 1 from pg_constraint c
+--         where c.conrelid = 'public.escala'::regclass
+--           and c.conname = 'escala_taco_omitido_chk' and c.contype = 'c';
+--        if not found then raise exception 'POSTCHECK_FALLA: CHECK'; end if;
+--        perform 1 from pg_constraint c
+--         where c.conrelid = 'public.escala'::regclass
+--           and c.conname = 'escala_taco_omitido_por_fkey' and c.contype = 'f'
+--           and c.confdeltype = 'n';
+--        if not found then raise exception 'POSTCHECK_FALLA: FK (acción set null)'; end if;
+--        perform 1 from supabase_migrations.schema_migrations where version = '20261015000001';
+--        if not found then raise exception 'POSTCHECK_FALLA: historial'; end if;
+--        select count(*) into v_n from public.escala where taco_omitido_at is not null;
+--        raise exception 'POSTCHECK_OK 20261015000001 · omitidos=%', v_n;
+--      end
+--      $post$;
+--  B4) get_advisors (esperado: nada nuevo).
 --
 -- DRY-RUN (escrituras REALES; el DDL PRIMERO, su re-aplicación ANTES de cualquier
 -- fila de prueba; las filas de prueba DESPUÉS del DDL; termina SIEMPRE en raise ⇒
@@ -80,7 +128,7 @@
 --   comment on column public.escala.taco_omitido_at is
 --     'Tacómetro OMITIDO por la oficina (15-oct-2026): cuándo. NULL = el tramo pide su lectura de llegada como siempre. Omitido = no exige llegada para completar el vuelo, aporta 0 h (no se inventa ninguna lectura), sale de los avisos al piloto, del tablero de vencidos y del pre-cierre bloqueante; se DICE en reporte, balance y pre-cierre informativo. Una llegada real posterior lo pone en NULL en el mismo UPDATE (CHECK escala_taco_omitido_chk).';
 --   comment on column public.escala.taco_omitido_por is
---     'Usuario de oficina (ADMIN/COORDINADOR/FACTURACION) que omitió la lectura. ON DELETE SET NULL: el nombre sobrevive en el bloque «Registro:» de revision_motivo.';
+--     'Usuario de oficina (ADMIN/COORDINADOR/FACTURACION) que omitió la lectura. Si ese usuario se borra, queda en NULL (FK con acción set null): el nombre sobrevive en el bloque «Registro:» de revision_motivo.';
 --   comment on column public.escala.taco_omitido_motivo is
 --     'Por qué no se pudo capturar el tacómetro (obligatorio, 10–500 caracteres tras btrim), p. ej. «Falló el tacómetro». Solo lo escribe el API (POST /v1/flights/legs/:legId/taco/omitir).';
 --
@@ -127,7 +175,7 @@
 --   perform 1 from pg_constraint c
 --    where c.conrelid = 'public.escala'::regclass
 --      and c.conname = 'escala_taco_omitido_por_fkey' and c.contype = 'f' and c.confdeltype = 'n';
---   if not found then raise exception 'DRYRUN_FALLA C1: FK escala_taco_omitido_por_fkey (on delete set null)'; end if;
+--   if not found then raise exception 'DRYRUN_FALLA C1: FK escala_taco_omitido_por_fkey (acción set null)'; end if;
 --
 --   -- FILA DE PRUEBA (DESPUÉS del DDL): un tramo VIVO sin llegada de un vuelo
 --   -- propio EN_VUELO/CONFIRMADO (el caso del #300).
@@ -210,7 +258,7 @@
 --      and taco_omitido_por is null and taco_llegada is not null;
 --   if v_n <> 1 then raise exception 'DRYRUN_FALLA C8: la omisión no quedó retirada'; end if;
 --
---   -- C9) volver a omitir y DESHACER (DELETE de la ruta = tres NULL con CAS)
+--   -- C9) volver a omitir y DESHACER (la ruta de deshacer = tres NULL con CAS)
 --   update public.escala set taco_llegada = null, taco_llegada_origen = null where id = v_escala;
 --   update public.escala
 --      set taco_omitido_at = now(), taco_omitido_por = v_actor,
@@ -265,7 +313,7 @@ $chk$;
 comment on column public.escala.taco_omitido_at is
   'Tacómetro OMITIDO por la oficina (15-oct-2026): cuándo. NULL = el tramo pide su lectura de llegada como siempre. Omitido = no exige llegada para completar el vuelo, aporta 0 h (no se inventa ninguna lectura), sale de los avisos al piloto, del tablero de vencidos y del pre-cierre bloqueante; se DICE en reporte, balance y pre-cierre informativo. Una llegada real posterior lo pone en NULL en el mismo UPDATE (CHECK escala_taco_omitido_chk).';
 comment on column public.escala.taco_omitido_por is
-  'Usuario de oficina (ADMIN/COORDINADOR/FACTURACION) que omitió la lectura. ON DELETE SET NULL: el nombre sobrevive en el bloque «Registro:» de revision_motivo.';
+  'Usuario de oficina (ADMIN/COORDINADOR/FACTURACION) que omitió la lectura. Si ese usuario se borra, queda en NULL (FK con acción set null): el nombre sobrevive en el bloque «Registro:» de revision_motivo.';
 comment on column public.escala.taco_omitido_motivo is
   'Por qué no se pudo capturar el tacómetro (obligatorio, 10–500 caracteres tras btrim), p. ej. «Falló el tacómetro». Solo lo escribe el API (POST /v1/flights/legs/:legId/taco/omitir).';
 
@@ -306,7 +354,7 @@ begin
    where c.conrelid = 'public.escala'::regclass
      and c.conname = 'escala_taco_omitido_por_fkey' and c.contype = 'f' and c.confdeltype = 'n';
   if not found then
-    raise exception 'VERIFICACIÓN 20261015000001: falta la FK escala_taco_omitido_por_fkey (on delete set null)';
+    raise exception 'VERIFICACIÓN 20261015000001: falta la FK escala_taco_omitido_por_fkey (acción set null)';
   end if;
 end
 $ver$;
