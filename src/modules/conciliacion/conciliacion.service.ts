@@ -18,6 +18,7 @@ import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import {
+  esAntesDelInicio,
   exigirPeriodoDesdeInicio,
   inicioOficialDe,
   pisoDia,
@@ -2863,7 +2864,73 @@ export class ConciliacionService {
     if (cuentaBancariaId) q = q.eq('cuenta_bancaria_id', cuentaBancariaId);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    return { data: data ?? [] };
+    const archivos = (data ?? []) as unknown as Array<
+      Record<string, unknown> & { id: string; created_at: string }
+    >;
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (!inicio || archivos.length === 0) return { data: archivos };
+    const ocultos = await this.estadosCuentaAntesDelInicio(archivos, inicio);
+    return { data: archivos.filter((a) => !ocultos.has(a.id)) };
+  }
+
+  /**
+   * INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): archivos
+   * cuyo PERIODO termina antes del inicio. `estado_cuenta_archivo` no tiene
+   * columnas de periodo: se usa la fecha MÁXIMA de sus movimientos
+   * (`movimiento_bancario.estado_cuenta_id`). Sin movimientos (re-importe
+   * 100 % duplicado) decide su `created_at` (día Cancún). Prod 16-oct: salen
+   * 3 (27-jul, 18-ago ×2). La URL firmada por id NO lleva piso; importar y
+   * el dedupe tampoco. Best-effort: si la lectura falla, no se oculta nada.
+   */
+  private async estadosCuentaAntesDelInicio(
+    archivos: Array<{ id: string; created_at: string }>,
+    inicio: string,
+  ): Promise<Set<string>> {
+    const ids = archivos.map((a) => a.id);
+    try {
+      // (1) Archivos con ALGÚN movimiento anterior al inicio (el universo
+      // anterior es fijo y chico; no crece con la operación diaria).
+      const { data: previos, error: e1 } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select('estado_cuenta_id')
+        .in('estado_cuenta_id', ids)
+        .lt('fecha', inicio)
+        .limit(10000);
+      if (e1) throw new Error(e1.message);
+      const conPrevios = new Set(
+        (previos ?? []).map(
+          (r: { estado_cuenta_id: string }) => r.estado_cuenta_id,
+        ),
+      );
+      // Candidatos a ocultar: con movimientos previos, o importados antes
+      // del inicio (posiblemente sin movimientos).
+      const candidatos = archivos
+        .filter(
+          (a) => conPrevios.has(a.id) || esAntesDelInicio(a.created_at, inicio),
+        )
+        .map((a) => a.id);
+      if (candidatos.length === 0) return new Set();
+      // (2) De esos, los que también traen movimientos desde el inicio se
+      // quedan (el periodo termina después).
+      const { data: vigentes, error: e2 } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select('estado_cuenta_id')
+        .in('estado_cuenta_id', candidatos)
+        .gte('fecha', inicio)
+        .limit(10000);
+      if (e2) throw new Error(e2.message);
+      const terminanDespues = new Set(
+        (vigentes ?? []).map(
+          (r: { estado_cuenta_id: string }) => r.estado_cuenta_id,
+        ),
+      );
+      return new Set(candidatos.filter((id) => !terminanDespues.has(id)));
+    } catch (err) {
+      this.logger.warn(
+        `estados de cuenta: no se pudo aplicar el inicio oficial: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return new Set();
+    }
   }
 
   /** URL firmada (1 h) para descargar un estado de cuenta archivado. */
@@ -7145,10 +7212,32 @@ export class ConciliacionService {
     return p.desde === q.desde ? q : { ...q, desde: p.desde };
   }
 
+  /**
+   * INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+   * ventana de cobros (±`dias`) cruza contra el inicio para no perder
+   * candidatos legítimos, pero «Cobros sin Paywise» (`solo_sistema`) NO
+   * lista cobros cuyo día Cancún de `fecha_cobro` es anterior al inicio —
+   * se recorta DESPUÉS de cruzar (el cruce y sus conteos no cambian).
+   */
+  private async sinSoloSistemaAnterior(
+    r: ResultadoCrucePaywise,
+  ): Promise<ResultadoCrucePaywise> {
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (!inicio) return r;
+    return {
+      ...r,
+      solo_sistema: r.solo_sistema.filter(
+        (c) => !esAntesDelInicio(c.fecha_cobro, inicio),
+      ),
+    };
+  }
+
   async auditoriaPaywise(qPedido: PaywiseAuditoriaQuery) {
     const q = await this.periodoPaywise(qPedido);
     const u = await this.universoPaywise(q);
-    const r = cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias });
+    const r = await this.sinSoloSistemaAnterior(
+      cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias }),
+    );
     return this.armarSalidaAuditoria(
       q,
       u.cuentas,
@@ -7197,7 +7286,9 @@ export class ConciliacionService {
       }
     }
     const u2 = await this.universoPaywise(q);
-    const r2x = cruzarPaywise(u2.movimientos, u2.cobros, { dias: q.dias });
+    const r2x = await this.sinSoloSistemaAnterior(
+      cruzarPaywise(u2.movimientos, u2.cobros, { dias: q.dias }),
+    );
     return this.armarSalidaAuditoria(
       q,
       u2.cuentas,
@@ -11726,13 +11817,21 @@ export class ConciliacionService {
       .sort();
     if (fechas.length > 0) {
       try {
+        // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85):
+        // «también en otro pago» no apunta a movimientos anteriores al
+        // inicio (que no se listan): ventana desde max(ventana, inicio).
+        const desdeRepetida =
+          pisoDia(
+            ventanaDias(fechas[0], REPETIDA_DIAS).desde,
+            await inicioOficialDe(this.configuracion),
+          ) ?? ventanaDias(fechas[0], REPETIDA_DIAS).desde;
         const { data, error } = await this.supabase.service
           .from('movimiento_bancario')
           .select(
             'id, fecha, tipo, monto, descripcion, conciliado, cuenta:cuenta_bancaria(alias)',
           )
           .ilike('descripcion', '%fac%')
-          .gte('fecha', ventanaDias(fechas[0], REPETIDA_DIAS).desde)
+          .gte('fecha', desdeRepetida)
           .lte(
             'fecha',
             ventanaDias(fechas[fechas.length - 1], REPETIDA_DIAS).hasta,

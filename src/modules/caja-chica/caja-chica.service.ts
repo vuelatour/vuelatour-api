@@ -36,7 +36,7 @@ import {
   type BalanceDeGasto,
 } from '../../common/ubicacion-balance-lector';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
-import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { inicioOficialDe, pisoDia } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   CreateCajaMovimientoDto,
@@ -1158,11 +1158,26 @@ export class CajaChicaService {
       id: string;
       moneda: string;
     };
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): SOLO
+    // las LISTAS devueltas (movimientos recientes y gastos EFECTIVO) se
+    // recortan a fecha ≥ inicio. El SALDO y la lectura del fondo salen del
+    // libro COMPLETO (`allMovs` y `gastosRes`, sin piso).
+    const inicio = await inicioOficialDe(this.configuracion);
+    let movsRecientesQ = this.supabase.service
+      .from('caja_chica_movimiento')
+      .select(MOV_COLS)
+      .eq('fondo_id', fo.id);
+    if (inicio) movsRecientesQ = movsRecientesQ.gte('fecha', inicio);
+    let gastosListaQ = this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
+      )
+      .eq('medio_pago', 'EFECTIVO')
+      .eq('usuario_captura_id', userId);
+    if (inicio) gastosListaQ = gastosListaQ.gte('fecha_gasto', inicio);
     const [movsRes, gastosRes, gastosListaRes] = await Promise.all([
-      this.supabase.service
-        .from('caja_chica_movimiento')
-        .select(MOV_COLS)
-        .eq('fondo_id', fo.id)
+      movsRecientesQ
         .order('fecha', { ascending: false })
         .order('created_at', { ascending: false })
         .limit(20),
@@ -1176,13 +1191,7 @@ export class CajaChicaService {
       // el saldo, con concepto y folio del vuelo. Recientes primero.
       // `created_at` (aditivo, 1-sep-2026): la app gatea Corregir/Borrar por
       // fecha de CAPTURA (ventana de edición), no por fecha del ticket.
-      this.supabase.service
-        .from('gasto')
-        .select(
-          'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
-        )
-        .eq('medio_pago', 'EFECTIVO')
-        .eq('usuario_captura_id', userId)
+      gastosListaQ
         .order('fecha_gasto', { ascending: false })
         .order('created_at', { ascending: false })
         .limit(200),
@@ -1287,7 +1296,7 @@ export class CajaChicaService {
    */
   async getMyHistorial(userId: string, query: MiCajaHistorialQuery) {
     const limit = query.limit ?? MI_CAJA_HISTORIAL_LIMIT_DEFAULT;
-    const desde =
+    const desdePedido =
       query.desde ?? restarMeses(hoyCancun(), MI_CAJA_HISTORIAL_MESES_ATRAS);
     const hasta = query.hasta ?? null;
     // Fecha de pared REAL (Date.parse acepta '2026-02-31' y lo desborda a
@@ -1300,16 +1309,23 @@ export class CajaChicaService {
       );
       return !Number.isNaN(dt.getTime()) && dt.toISOString().slice(0, 10) === d;
     };
-    if (!valida(desde) || (hasta !== null && !valida(hasta))) {
+    if (!valida(desdePedido) || (hasta !== null && !valida(hasta))) {
       throw new BadRequestException(
         'desde/hasta deben ser fechas válidas YYYY-MM-DD.',
       );
     }
-    if (hasta !== null && hasta < desde) {
+    if (hasta !== null && hasta < desdePedido) {
       throw new BadRequestException(
         'hasta debe ser igual o posterior a desde.',
       );
     }
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+    // VENTANA sube al inicio (la validación de arriba usa lo pedido: un
+    // rango anterior sale vacío, nunca 400). El corrido (`saldo_despues`,
+    // `por_reponer_despues`) se sigue calculando con el libro COMPLETO.
+    const desde =
+      pisoDia(desdePedido, await inicioOficialDe(this.configuracion)) ??
+      desdePedido;
 
     const { data: fondo, error } = await this.supabase.service
       .from('caja_chica_fondo')

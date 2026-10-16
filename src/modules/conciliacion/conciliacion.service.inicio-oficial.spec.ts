@@ -222,3 +222,147 @@ describe('ConciliacionService — inicio oficial', () => {
     expect(g.cfg.inicioOficial).not.toHaveBeenCalled();
   });
 });
+
+// ===== Auditoría 16-oct-2026 (API 0.0.85) =====
+
+describe('ConciliacionService — inicio oficial, auditoría 16-oct (0.0.85)', () => {
+  const ARCH = (id: string, created_at: string) => ({
+    id,
+    cuenta_bancaria_id: 'c1',
+    filename: `${id}.pdf`,
+    formato: 'PDF',
+    movimientos_importados: 1,
+    created_at,
+  });
+  /** Archivos: julio (movs de julio), sep (movs de sep), vacío viejo,
+   *  vacío nuevo (re-importe 100 % duplicado). */
+  const archivos = [
+    ARCH('a-jul', '2026-07-27T18:00:00Z'),
+    ARCH('a-sep', '2026-09-08T18:00:00Z'),
+    ARCH('a-vacio-ago', '2026-08-18T18:00:00Z'),
+    ARCH('a-vacio-oct', '2026-10-12T18:00:00Z'),
+    ARCH('a-cruza', '2026-09-02T18:00:00Z'),
+  ];
+  const movsDe: Record<string, string[]> = {
+    'a-jul': ['2026-07-16', '2026-07-27'],
+    'a-sep': ['2026-09-01'],
+    'a-cruza': ['2026-08-28', '2026-09-01'],
+  };
+  function conArchivos(inicio: string | null) {
+    const g = supabaseGrabador((tabla, ops) => {
+      if (tabla === 'estado_cuenta_archivo') {
+        return { data: archivos, error: null };
+      }
+      if (tabla === 'movimiento_bancario') {
+        const ids = (ops.find((o) => o.m === 'in')?.args[1] ?? []) as string[];
+        const lt = ops.find((o) => o.m === 'lt')?.args[1] as string | undefined;
+        const gte = ops.find((o) => o.m === 'gte')?.args[1] as
+          | string
+          | undefined;
+        const data = ids.flatMap((id) =>
+          (movsDe[id] ?? [])
+            .filter((f) => (!lt || f < lt) && (!gte || f >= gte))
+            .map(() => ({ estado_cuenta_id: id })),
+        );
+        return { data, error: null };
+      }
+      return undefined;
+    });
+    const svc = new ConciliacionService(
+      { get: () => '' } as unknown as ConstructorParameters<
+        typeof ConciliacionService
+      >[0],
+      g.supabase,
+      {} as unknown as PyservicesService,
+      { registrar: jest.fn() } as unknown as IaUsoService,
+      cfgInicio(inicio, {
+        headersModeloIa: () => ({}),
+      }) as unknown as ConfiguracionService,
+    );
+    return { svc, ...g };
+  }
+
+  it('estados de cuenta: oculta los que TERMINAN antes del inicio (o vacíos importados antes)', async () => {
+    const r = await conArchivos(INICIO).svc.listEstadosCuenta();
+    expect(r.data.map((a) => (a as { id: string }).id)).toEqual([
+      'a-sep',
+      'a-vacio-oct',
+      'a-cruza',
+    ]);
+  });
+
+  it('estados de cuenta con inicio null ⇒ todos, sin leer movimientos', async () => {
+    const a = conArchivos(null);
+    const r = await a.svc.listEstadosCuenta();
+    expect(r.data).toHaveLength(5);
+    expect(a.de('movimiento_bancario')).toHaveLength(0);
+  });
+
+  it('Paywise: «Cobros sin Paywise» no lista cobros anteriores al inicio (día Cancún)', async () => {
+    type Priv = {
+      sinSoloSistemaAnterior(r: object): Promise<{
+        solo_sistema: Array<{ id: string }>;
+        coinciden: unknown[];
+      }>;
+    };
+    const cobro = (id: string, fecha_cobro: string) => ({
+      tipo: 'COBRO_VUELO',
+      id,
+      fecha_cobro,
+      monto: 1,
+      moneda: 'MXN',
+    });
+    const cruce = {
+      coinciden: [{ x: 1 }],
+      comision_distinta: [],
+      referencia_monto_distinto: [],
+      solo_paywise: [],
+      solo_sistema: [
+        cobro('c-ago', '2026-08-29T18:00:00Z'),
+        cobro('c-borde', '2026-09-01T04:30:00Z'),
+        cobro('c-sep', '2026-09-01T06:00:00Z'),
+      ],
+      ambiguos: [],
+      ya_conciliados_fuera: 0,
+    };
+    const r = await (
+      armar(INICIO).svc as unknown as Priv
+    ).sinSoloSistemaAnterior(cruce);
+    expect(r.solo_sistema.map((c) => c.id)).toEqual(['c-sep']);
+    expect(r.coinciden).toHaveLength(1);
+    const r0 = await (
+      armar(null).svc as unknown as Priv
+    ).sinSoloSistemaAnterior(cruce);
+    expect(r0.solo_sistema).toHaveLength(3);
+  });
+
+  it('«también en otro pago»: la ventana no baja del inicio', async () => {
+    type Priv = {
+      anotarFacturaConcepto(
+        filas: Array<Record<string, unknown>>,
+        folios: Map<string, unknown>,
+      ): Promise<void>;
+    };
+    const filas = () => [
+      {
+        id: 'm1',
+        fecha: '2026-09-10',
+        tipo: 'CARGO',
+        descripcion: 'PAGO Factura 7360',
+      },
+    ];
+    const a = armar(INICIO);
+    await (a.svc as unknown as Priv).anotarFacturaConcepto(filas(), new Map());
+    const q = a
+      .de('movimiento_bancario')
+      .find((c) => c.ops.some((o) => o.m === 'ilike'))!;
+    expect(a.lleva(q, 'gte', 'fecha', INICIO)).toBe(true);
+    const b = armar(null);
+    await (b.svc as unknown as Priv).anotarFacturaConcepto(filas(), new Map());
+    const q0 = b
+      .de('movimiento_bancario')
+      .find((c) => c.ops.some((o) => o.m === 'ilike'))!;
+    const gte0 = q0.ops.find((o) => o.m === 'gte')!.args[1] as string;
+    expect(gte0 < INICIO).toBe(true);
+  });
+});
