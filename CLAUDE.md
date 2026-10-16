@@ -9749,6 +9749,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       viendo gastos del 30-ago» —, ingresos, profit-sharing — septiembre ⇒
       MISMAS consultas que con null —, aircraft, dashboards,
       facturas-emitidas, invoices, alerts).
+    - **Ajustes de cierre (16-oct-2026)**: `GET /facturas-emitidas?vuelo_id=`
+      NO lleva piso (facturas de UN vuelo abierto por id, como
+      `GET /expenses?vuelo_id=`); y `leerUbicacionBalance(…, inicio)`
+      (Conciliación y Caja chica) devuelve `balance: null` para un gasto cuyo
+      libro es de un mes que termina antes del inicio, así el panel no
+      ofrece «Ver en balance…» hacia un reporte que respondería 400
+      PERIODO_ANTES_DEL_INICIO. Caja chica importa `ConfiguracionModule`
+      solo para eso (saldo, libro y orden no lo usan).
 
 ## Convenciones NestJS
 

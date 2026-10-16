@@ -91,12 +91,18 @@ async function porLotes(
  * Ubicación en el balance de cada gasto de `gastoIds`, en lote. Devuelve
  * null si falló una lectura PRINCIPAL (gastos o repartos; deja un warn
  * «`etiqueta` sin enlaces al balance …»); si no, el mapa id ⇒ `balance`.
+ *
+ * INICIO OFICIAL (invariante 86): con `inicio`, un gasto cuyo libro es de un
+ * mes que TERMINA antes del inicio sale con `balance: null` (no vive en un
+ * libro que se pueda abrir: el reporte de ese periodo responde 400
+ * PERIODO_ANTES_DEL_INICIO). Sin `inicio` ⇒ conducta de siempre.
  */
 export async function leerUbicacionBalance(
   sb: SupabaseClient,
   gastoIds: ReadonlyArray<string>,
   logger: LoggerUbicacionBalance,
   etiqueta = 'Conciliación',
+  inicio: string | null = null,
 ): Promise<Map<string, BalanceDeGasto | null> | null> {
   const ids = [
     ...new Set(gastoIds.filter((x) => typeof x === 'string' && x !== '')),
@@ -185,7 +191,8 @@ export async function leerUbicacionBalance(
       logger.warn(`Enlaces al balance sin matrículas: ${msgDe(err)}`);
     }
   }
-  for (const [id, u] of ubicacion) {
+  for (const [id, ubic] of ubicacion) {
+    const u = ubic && inicio && ubic.periodo.hasta < inicio ? null : ubic;
     out.set(
       id,
       u

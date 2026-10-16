@@ -227,6 +227,37 @@ describe('leerUbicacionBalance — lector compartido (invariantes 72 y 82)', () 
     expect(log.warn).not.toHaveBeenCalled();
   });
 
+  it('INICIO OFICIAL (invariante 86): libro de un mes que termina antes del inicio ⇒ null; el resto igual', async () => {
+    const sinPiso = await leerUbicacionBalance(
+      fakeSb(mundo()).sb,
+      IDS,
+      logger(),
+    );
+    const conPiso = await leerUbicacionBalance(
+      fakeSb(mundo()).sb,
+      IDS,
+      logger(),
+      'Conciliación',
+      '2026-10-01',
+    );
+    // g-otro vive en septiembre (termina el 30-sep < 1-oct): sin enlace.
+    expect(sinPiso!.get('g-otro')).not.toBeNull();
+    expect(conPiso!.has('g-otro')).toBe(true);
+    expect(conPiso!.get('g-otro')).toBeNull();
+    // Octubre no cambia.
+    expect(conPiso!.get('g-430')).toEqual(sinPiso!.get('g-430'));
+    expect(conPiso!.get('g-cramex')).toEqual(sinPiso!.get('g-cramex'));
+    // Inicio = primer día del mes del libro ⇒ el libro sí se abre.
+    const mismoMes = await leerUbicacionBalance(
+      fakeSb(mundo()).sb,
+      IDS,
+      logger(),
+      'Conciliación',
+      '2026-09-01',
+    );
+    expect(mismoMes!.get('g-otro')).toEqual(sinPiso!.get('g-otro'));
+  });
+
   it('cada ubicación sale de la REGLA pura (`ubicacionBalanceDeGasto`), sin reglas propias', async () => {
     const db = mundo();
     const { sb } = fakeSb(db);

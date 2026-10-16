@@ -11674,6 +11674,8 @@ export class ConciliacionService {
       this.supabase.service,
       destinos.map((d) => d.id as string),
       this.logger,
+      'Conciliación',
+      await inicioOficialDe(this.configuracion),
     );
     if (!ubicacion) return;
     for (const d of destinos) {

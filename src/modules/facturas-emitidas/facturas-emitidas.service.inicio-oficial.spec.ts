@@ -49,6 +49,14 @@ describe('FacturasEmitidasService — inicio oficial', () => {
     expect(priv.filtrosDe({}, null).desde).toBeUndefined();
   });
 
+  it('con vuelo_id NO hay piso (facturas de UN vuelo abierto por id)', () => {
+    const { priv } = armar(INICIO);
+    expect(priv.filtrosDe({ vuelo_id: 'v-201' }, INICIO).desde).toBeUndefined();
+    expect(
+      priv.filtrosDe({ vuelo_id: 'v-201', desde: '2026-08-01' }, INICIO).desde,
+    ).toBe('2026-08-01');
+  });
+
   it('vuelos con solicitud: con inicio lleva el or; sin él (candidatos) no', async () => {
     const { priv, de, lleva } = armar(INICIO);
     await priv.vuelosConSolicitud('id', INICIO);

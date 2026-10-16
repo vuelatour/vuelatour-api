@@ -1181,7 +1181,9 @@ export class FacturasEmitidasService {
    * INICIO OFICIAL (invariante 86): la lista y el Excel filtran
    * `fecha_emision ≥ inicio` (el `desde` sube). El `resumen` del registro
    * (conteos, huecos por serie) sigue sobre TODAS las facturas: los huecos
-   * de folio necesitan la serie completa.
+   * de folio necesitan la serie completa. Con `vuelo_id` NO hay piso: son
+   * las facturas de UN vuelo abierto por id («N canceladas» de la burbuja),
+   * igual que `GET /expenses?vuelo_id=`.
    */
   private filtrosDe(
     q: ExportFacturasEmitidasQuery,
@@ -1189,7 +1191,7 @@ export class FacturasEmitidasService {
   ): FiltrosFacturas {
     return {
       q: q.q,
-      desde: pisoDia(q.desde, inicio),
+      desde: q.vuelo_id ? q.desde : pisoDia(q.desde, inicio),
       hasta: q.hasta,
       cliente_id: q.cliente_id,
       emisora_id: q.emisora_id,

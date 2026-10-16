@@ -36,6 +36,8 @@ import {
   type BalanceDeGasto,
 } from '../../common/ubicacion-balance-lector';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   CreateCajaMovimientoDto,
   CreateFondoDto,
@@ -177,6 +179,9 @@ export class CajaChicaService {
     // Excel de la reposición (24-sep-2026). @Optional: los specs construyen
     // el servicio con un solo argumento posicional.
     @Optional() private readonly pyservices?: PyservicesService,
+    // Inicio oficial (invariante 86): SOLO para no ofrecer «Ver en balance…»
+    // de un libro anterior al inicio. Saldo, libro y orden no lo usan.
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /**
@@ -641,6 +646,7 @@ export class CajaChicaService {
         gastoIds,
         this.logger,
         'Caja chica',
+        await inicioOficialDe(this.configuracion),
       );
     } catch (err) {
       this.logger.warn(
