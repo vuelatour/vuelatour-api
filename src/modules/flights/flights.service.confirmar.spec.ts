@@ -326,6 +326,30 @@ describe('confirmar — RESERVA / SOLICITUD → CONFIRMADO', () => {
     );
     await esperarAvisos();
   });
+
+  it.each(['RESERVA', 'SOLICITUD'])(
+    'HIJO de grupo en %s ⇒ 409 VUELO_DE_GRUPO (se confirma desde el grupo) y NO escribe',
+    async (estado) => {
+      const w = armar({
+        vuelo: vueloRow({
+          estado,
+          grupo_id: 'aaaaaaaa-0000-4000-8000-00000000009a',
+          grupo_posicion: 2,
+          grupo: { id: 'g', folio: 12, nombre: null, pasajeros_total: 44 },
+        }),
+      });
+      const r = await rebote(w.service.confirmar(V1, {}, USER));
+      expect(r.status).toBe(409);
+      expect(r.code).toBe('VUELO_DE_GRUPO');
+      expect(r.message).toBe(
+        'No se puede confirmar el vuelo #118 por separado: es parte del grupo G-12 (avión 2). Confírmalo desde el grupo.',
+      );
+      expect(r.details).toMatchObject({ folio: 118, grupo_folio: 12, estado });
+      expect(w.updates).toHaveLength(0);
+      expect(w.syncFlight).not.toHaveBeenCalled();
+      expect(w.notifyUser).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('confirmar — candados de asignación', () => {
@@ -490,6 +514,22 @@ describe('confirmar — COTIZADO delega en QuotesService.confirm', () => {
       avisos: [avisoAeronaveEnTaller('XA-VGV')],
     });
     expect(out.idempotente).toBeUndefined();
+  });
+
+  it('el confirmador devuelve idempotente (perdió su CAS) ⇒ se pasa tal cual con avisos: [] y sin leer taller', async () => {
+    const confirm = jest.fn().mockResolvedValue({
+      ...vueloRow({ estado: 'CONFIRMADO', aeronave_id: AVION }),
+      idempotente: true,
+    });
+    const w = armar({
+      vuelo: vueloRow({ estado: 'COTIZADO' }),
+      enTaller: true,
+      confirmador: { confirm },
+    });
+    const out = await w.service.confirmar(V1, {}, USER);
+    expect(out).toMatchObject({ estado: 'CONFIRMADO', idempotente: true });
+    expect(out.avisos).toEqual([]);
+    expect(w.llamadas.some((l) => l.tabla === 'mantenimiento')).toBe(false);
   });
 
   it('el 409 del confirmador (cotización ya movida) sube tal cual', async () => {

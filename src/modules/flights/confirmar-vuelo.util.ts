@@ -62,6 +62,38 @@ export function errorVueloSinAsignar(
   });
 }
 
+/**
+ * 409 VUELO_DE_GRUPO (revisión 16-oct-2026): un HIJO de grupo en
+ * RESERVA/SOLICITUD se confirma SOLO desde el grupo (`POST
+ * /grupos/:id/confirm`), que primero lo promueve a COTIZADO (cierra la
+ * cotización abierta) y luego corre `quotes.confirm`; confirmarlo por
+ * separado lo dejaría CONFIRMADO sin pasar por ahí y el grupo ya no lo
+ * vería como «por confirmar». (Un hijo COTIZADO sí se confirma solo: es la
+ * misma transición que el panel permite con `POST /quotes/:id/confirm`.)
+ */
+export function errorVueloDeGrupo(vuelo: {
+  estado?: unknown;
+  folio?: unknown;
+  grupo_posicion?: unknown;
+  grupo?: unknown;
+}): ConflictException {
+  const g = (vuelo.grupo ?? null) as { folio?: unknown } | null;
+  const grupoFolio = g && typeof g === 'object' ? texto(g.folio) : '?';
+  const posicion =
+    typeof vuelo.grupo_posicion === 'number'
+      ? ` (avión ${vuelo.grupo_posicion})`
+      : '';
+  return new ConflictException({
+    message: `No se puede confirmar el vuelo #${texto(vuelo.folio)} por separado: es parte del grupo G-${grupoFolio}${posicion}. Confírmalo desde el grupo.`,
+    error: 'VUELO_DE_GRUPO',
+    details: {
+      estado: vuelo.estado ?? null,
+      folio: vuelo.folio ?? null,
+      grupo_folio: g && typeof g === 'object' ? (g.folio ?? null) : null,
+    },
+  });
+}
+
 /** 409 VUELO_NO_CONFIRMABLE: EN_VUELO, COMPLETADO o CANCELADO. */
 export function errorVueloNoConfirmable(vuelo: {
   estado?: unknown;

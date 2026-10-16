@@ -9594,6 +9594,22 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       CANCELADO ⇒ **409 `VUELO_NO_CONFIRMABLE`** `details {estado, folio}`.
       404 `VUELO_NO_EXISTE` el de `findById`. `client_request_id` es solo
       trazabilidad (log): la ruta ya es idempotente por el estado.
+    - **Revisión 16-oct-2026 (0.0.82)**: (1) un HIJO de grupo en
+      RESERVA/SOLICITUD ⇒ **409 `VUELO_DE_GRUPO`** `details {estado, folio,
+      grupo_folio}` («…es parte del grupo G-12 (avión 2). Confírmalo desde el
+      grupo.»): `POST /grupos/:id/confirm` lo promueve a COTIZADO (cierra
+      `cotizacion_abierta`) antes de `quotes.confirm`; confirmarlo suelto se
+      saltaba eso y el grupo dejaba de verlo «por confirmar». Un hijo
+      COTIZADO sí se confirma solo (mismo camino que `POST
+      /quotes/:id/confirm`). (2) **`QuotesService.confirm` lleva CAS por
+      estado** (`.eq('estado','COTIZADO')`): con la app y el panel
+      confirmando a la vez, el segundo ya no repite `ensureRedondoEscalas`
+      (4 tramos), correo ni avisos; si pierde y la relectura está
+      CONFIRMADO devuelve la fila con `idempotente: true` (ADITIVO; el
+      panel lo ignora) y `FlightsService.confirmar` lo pasa con `avisos:
+      []`; otro estado ⇒ el 409 de siempre con el estado vivo. Specs:
+      `quotes.service.confirmar.spec` y los dos casos nuevos de
+      `flights.service.confirmar.spec`.
     - Specs: `flights.service.confirmar.spec` (RESERVA y SOLICITUD con CAS,
       llave del outbox, externo sin asignación, falta avión+piloto / solo
       piloto, squawk rechaza / acepta y avisa a MECANICO, taller en
@@ -10940,6 +10956,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   panel. Push a `main` ⇒ `GET /v1/version` = `0.0.80`. El lote de
   tacómetro/«Resolver»/pre-cierre que estaba planeado como 0.0.80 pasa a
   0.0.81.
+- **16-oct-2026 — 0.0.82, SIN migración** (invariante 84): `POST
+  /v1/flights/:id/confirmar` (RESERVA/SOLICITUD/COTIZADO → CONFIRMADO desde
+  el detalle; la app 1.1.3+85 lo consume con «Confirmar vuelo» y lo encola
+  sin señal como `vuelo_confirmar`), 409 `VUELO_DE_GRUPO` para hijos de
+  grupo apartados y CAS por estado en `QuotesService.confirm`. Todo ADITIVO:
+  panel y app viejos no cambian (la app vieja no tiene el botón; el panel
+  sigue con `POST /quotes/:id/confirm`, que solo gana `idempotente: true`
+  en una carrera). Orden: **API primero, después el APK +85** (con el API
+  0.0.81 el botón de la app rebota con 404 de ruta → en línea «No se puede
+  confirmar»; en la cola, fallido visible). Rama `taco-omitido` sobre
+  `1654e16e` (= main 0.0.81): commits `92e91345` (ruta) + la revisión. Push
+  a `main` ⇒ `GET /v1/version` = `0.0.82`. Verificar el arranque (ciclo de
+  módulos flights ↔ quotes con `forwardRef`) con ese GET.
 - **15-oct-2026 — ORDEN DE DESPLIEGUE 0.0.81 (UN solo despliegue: tacómetro
   omitido —invariante 79, CON migración `20261015000001`—, pre-cierre sin
   `pistas_sin_gasto`/`tua_cobrada_sin_pagada` y con los renglones inversos

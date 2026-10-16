@@ -3954,6 +3954,15 @@ export class QuotesService implements ConfirmadorCotizacion {
     };
   }
 
+  /**
+   * COTIZADO → CONFIRMADO. Desde el 16-oct-2026 también lo llama
+   * `FlightsService.confirmar` (app, token `CONFIRMADOR_COTIZACION`), así que
+   * el UPDATE lleva **CAS por estado** (`.eq('estado', 'COTIZADO')`): dos
+   * clics (app + panel) ya no duplican tramos del REDONDO, correo ni avisos.
+   * Si el CAS pierde y la relectura ya está CONFIRMADO ⇒ la fila con
+   * `idempotente: true` (ADITIVO; el panel lo ignora); otro estado ⇒ el 409
+   * de siempre.
+   */
   async confirm(vueloId: string, userId: string) {
     const current = await this.findById(vueloId);
     if (current.estado !== 'COTIZADO') {
@@ -3969,19 +3978,30 @@ export class QuotesService implements ConfirmadorCotizacion {
         updated_by: userId,
       })
       .eq('id', vueloId)
+      .eq('estado', 'COTIZADO')
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    if (!data) {
+      // 0 filas: alguien movió el estado entre la lectura y el write.
+      const relectura = await this.findById(vueloId);
+      if (relectura.estado === 'CONFIRMADO') {
+        return { ...relectura, idempotente: true };
+      }
+      throw new ConflictException(
+        `Solo cotizaciones en estado COTIZADO pueden confirmarse. Estado actual: ${relectura.estado}`,
+      );
+    }
     // REDONDO: crea los 2 tramos (ida + regreso) para asignarlos por separado.
-    await this.ensureRedondoEscalas(data!, userId);
+    await this.ensureRedondoEscalas(data, userId);
     void this.calendar.syncFlight(vueloId);
-    void this.sendConfirmationEmail(data!);
+    void this.sendConfirmationEmail(data);
     // Tripulación ya asignada (21-ago): el vuelo queda EN FIRME.
-    void this.notificarTripulacion(data!, {
-      titulo: `Vuelo #${data!.folio as number} confirmado`,
-      cuerpo: `El cliente confirmó ${data!.origen_iata as string} → ${data!.destino_iata as string}${data!.fecha_vuelo ? ` del ${new Date(data!.fecha_vuelo as string).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Cancun' })}` : ''}: queda en firme.`,
+    void this.notificarTripulacion(data, {
+      titulo: `Vuelo #${data.folio as number} confirmado`,
+      cuerpo: `El cliente confirmó ${data.origen_iata as string} → ${data.destino_iata as string}${data.fecha_vuelo ? ` del ${new Date(data.fecha_vuelo as string).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Cancun' })}` : ''}: queda en firme.`,
     });
-    return data!;
+    return data;
   }
 
   /**

@@ -218,6 +218,7 @@ import type { FichaAvionMin } from '../quotes/quotes.service';
 import {
   CONFIRMADOR_COTIZACION,
   errorConfirmacionNoDisponible,
+  errorVueloDeGrupo,
   errorVueloNoConfirmable,
   errorVueloSinAsignar,
   faltaAsignacion,
@@ -5828,6 +5829,9 @@ export class FlightsService {
     if (estado === 'COTIZADO') {
       if (!this.confirmadorCotizacion) throw errorConfirmacionNoDisponible();
       const data = await this.confirmadorCotizacion.confirm(id, userId);
+      // El confirmador perdió su CAS contra otro camino que acababa de
+      // confirmarlo (app + panel a la vez): idempotente, sin avisos.
+      if (data.idempotente === true) return { ...data, avisos: [] };
       // El aviso de taller es presentación y nunca lanza (`avisoTallerDe`).
       const avisos = await this.avisoTallerDe(
         data.aeronave_id as string | null | undefined,
@@ -5837,6 +5841,10 @@ export class FlightsService {
     if (estado !== 'RESERVA' && estado !== 'SOLICITUD') {
       throw errorVueloNoConfirmable(current);
     }
+    // HIJO de grupo apartado/solicitado: se confirma desde el grupo (que lo
+    // promueve a COTIZADO y cierra la cotización abierta antes). Revisión
+    // 16-oct-2026.
+    if (current.grupo_id) throw errorVueloDeGrupo(current);
     const falta = faltaAsignacion(current);
     if (falta.length > 0) throw errorVueloSinAsignar(current, falta);
     // Candado de siempre: squawk ALTA rechaza (o se acepta a sabiendas y se
