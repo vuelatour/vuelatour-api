@@ -11379,6 +11379,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   panel viejo las ignora y se ve como hoy. Con la fila apagada
   (`activa = false`) todo es 0.0.84. Cualquier orden de deploy es seguro;
   verificar `GET /v1/version` = `0.0.85`. Rollback: volver a 0.0.84.
+- **16-oct-2026 — 0.0.86, SIN migración** (invariante 88: el pago al
+  operador externo es el gasto real; rama `externo-pago-unico` sobre
+  `50216cf2` = 0.0.85 en prod). Un vuelo externo con `costo_externo_usd`
+  y un gasto de columna que coincide (±1 %) ya no resta dos veces: el gasto
+  cubre el costo en Balance, reporte por vuelo y reparto
+  (`pagoOperadorExternoEnGastos`, `common/costo-externo.util.ts`). En prod
+  solo cambia #308 (OPERACIONES sep $51,786.94 → $26,452.52). Solo
+  lecturas; cualquier orden de deploy es seguro.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
