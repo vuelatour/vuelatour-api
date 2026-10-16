@@ -9062,6 +9062,79 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       el MISMO orden), `ligas-cobro.lector.spec` (`conAutor`) e
       `ingresos.util.spec` (`conceptoDeCobro`).
 
+79. **TACÓMETRO OMITIDO POR TRAMO (15-oct-2026, API 0.0.81, migración
+    `20261015000001_escala_taco_omitido.sql`, pedido del cliente con la captura del
+    #300: «necesito una opción para omitir la captura del tacómetro porque falló el
+    tacómetro … Debe tener el porqué se omitió el tacómetro y saber quién lo registró
+    así»).** Una marca POR TRAMO: `escala.taco_omitido_at / _por (FK usuario, set null)
+    / _motivo` con CHECK `escala_taco_omitido_chk` (at ⇔ motivo de 10–500 tras btrim y
+    `taco_llegada IS NULL`). Rutas `POST`/`DELETE /v1/flights/legs/:legId/taco/omitir`
+    (ADMIN, COORDINADOR, FACTURACION; motivo 10–500; errores estructurados es-MX:
+    503 `MIGRACION_PENDIENTE`, 404 `ESCALA_NO_EXISTE`, 409 `ESCALA_CANCELADA` /
+    `VUELO_EXTERNO` / `VUELO_CANCELADO` / `VUELO_COMPLETADO` (solo POST) /
+    `TACO_PRESENTE` / `TACO_YA_OMITIDO` (details `{por, nombre, at, motivo}`) /
+    `TACO_NO_OMITIDO`, 400 `MOTIVO_INVALIDO`). Respuesta `{escala (+
+    taco_omitido_por_nombre, revision_motivo solo pendientes, procedencia), vuelo:
+    {id, folio, estado, completable, requiere_iniciar, omitidos}}`. Reglas:
+    - El sistema sigue sin escribir lecturas (invariantes 1 y 5): un tramo omitido
+      aporta **0 h**, no exige llegada para `complete()` (`faltanLlegadas` de
+      `common/taco-omitido.util.ts`, fuente única), y sale de `fillTacoGaps.sugerencias`
+      (push `recordatorio_taco`, resumen nocturno), de los avisos de tramos 2+, de los
+      «vencidos» de taco-live (`omitido: true` + `estado: 'OK'`, nunca un valor nuevo:
+      el panel viejo revienta con uno desconocido), de `tacos_en_revision` (omitir pone
+      `revision_requerida = false`) y del badge «Tacómetro incompleto»
+      (`tacoStatus` ⇒ `{falta, omitido}`).
+    - **El vuelo NO se completa solo**: omitir no llama `complete`; el cron zombi usa
+      `faltanLlegadasReales` (omitido = faltante) y lo deja EN_VUELO con warn; lo
+      completa la oficina («Completar vuelo» / «Iniciar y completar» si nunca se inició:
+      omitir SÍ se permite en RESERVA/SOLICITUD/COTIZADO/CONFIRMADO y la respuesta dice
+      `requiere_iniciar`). Una captura REAL posterior en otro tramo sí completa por
+      `syncEstadoDesdeTacos`; `cancelEscala`/`restoreEscala`/`clearTaco` usan la
+      semántica nueva (acciones humanas sobre ESE vuelo). Deshacer sobre un COMPLETADO
+      lo regresa a EN_VUELO (CAS `.eq('estado','COMPLETADO')`, espejo de `clearTaco`)
+      y avisa al piloto del tramo (o del vuelo).
+    - **Se DICE, nunca «pendiente»**: reporte por vuelo (`tramos[].taco_omitido*`,
+      línea en `notas_horas`), balance (`… tramo X→Y con tacómetro omitido por N
+      (fecha): motivo — no suma horas`; la línea «sin tacómetros» solo si queda un
+      tramo NO omitido sin lecturas), «Vuelo #N sigue EN VUELO» (lo que falta está
+      OMITIDO: que lo complete la oficina) y pre-cierre: renglón INFORMATIVO
+      `tacometros_omitidos` después de `tacos_en_revision` (`vuelos[]`, `tramos[]` con
+      `motivo`, `omitido_por_nombre`, `omitido_at`; sin `ids`). Fuente única pura del
+      renglón: `profit-sharing/tacos-omitidos.util.ts` (`resumenTacosOmitidos`,
+      `detalleTacosOmitidos`, `usuariosDeTacosOmitidos`).
+    - **Auditoría** en el bloque «Registro:» de `revision_motivo` con `motivoDirecto`/
+      `agregarProcedencia`: «tacómetro omitido por Itzi (oficina) el 2026-10-15 10:40:
+      Falló el tacómetro» (motivo recortado a 160 y con «;» → «,»: un «; » partiría el
+      bloque y su resto saldría como PENDIENTE falso), «omisión del tacómetro deshecha
+      por …», «omisión del tacómetro retirada el …: llegada capturada|ajustada|leída
+      con IA por …».
+    - **Una llegada REAL la retira sola** en el MISMO UPDATE (CHECK): `captureTaco`,
+      `confirmTaco` y `resolverLecturaPendiente` (sin esto el CHECK tiraba el update de
+      la IA y la lectura se perdía en silencio). Una salida sola no la retira.
+      `cancelEscala` la borra (un tramo que no voló no tiene lectura que omitir).
+      Omitir usa CAS (`is taco_omitido_at null` + `is taco_llegada null`): 0 filas o
+      23514 ⇒ relectura ⇒ 409 `TACO_YA_OMITIDO`/`TACO_PRESENTE` (nunca 500).
+    - **La salida DEDUCIDA que cruza un tramo omitido del mismo avión se marca en ámbar**
+      (`salidaCruzaOmitido` + `textoSalidaCruzaOmitido`: las horas del omitido las
+      absorbería en silencio la copia) en `start()`/`autoFillSalidaInicial`, `captureTaco`
+      y `confirmTaco`, en el MISMO update y sobreviviendo al recálculo de
+      `applyConsistencyFlag`. «Cruza» = omitido vivo del avión (con herencia, vuelo no
+      CANCELADO) con fecha entre la lectura fuente (`ultimoTacoAeronaveDetalle`) y el
+      tramo, o el propio tramo fuente cuando la fuente es su SALIDA. Un tramo 1 que
+      ÉL MISMO está omitido no lleva el ámbar (no aporta horas y lo metería en
+      `tacos_en_revision`). Lectura caída ⇒ warn y copia como siempre.
+    - **Sonda única** `common/taco-omitido-disponible.util.ts`: todo select/update que
+      nombre `taco_omitido_*` va detrás de ella; sin migración, lecturas como 0.0.80 con
+      las llaves en `null` y las escrituras nuevas ⇒ 503 `MIGRACION_PENDIENTE`. Tras un
+      rollback, reiniciar el API.
+    - Specs: `taco-omitido.util.spec`, `flights.service.taco-omitido.spec` (PostgREST
+      falso compartido `flights/taco-omitido.fixture-spec`: sonda ESTRICTA —nombrar la
+      columna sin migración es 42703/PGRST204— y CHECK emulado),
+      `flights.controller.taco-omitido.spec`, `tacos-omitidos.util.spec`,
+      `flight-report.service.taco-omitido.spec`,
+      `aircraft-balance.service.taco-omitido.spec`, `alerts.service.taco-omitido.spec`
+      y `profit-sharing.service.pre-cierre-tacos-omitidos.spec` (cableado del renglón).
+
 82. **CAJA CHICA: UBICACIÓN EN EL BALANCE DE CADA GASTO DEL FONDO
     (15-oct-2026, sin migración).** Pedido del cliente con la captura del
     fondo de Pablo Canales («Gasto en efectivo #436 · Taxi / estacionamiento
@@ -10749,6 +10822,28 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la rechaza)**: `alter table public.ingreso drop constraint if exists
   ingreso_aeronave_chk;` (y registrar la reversa en el historial si se
   aplica).
+- **PENDIENTE (15-oct-2026) — `20261015000001_escala_taco_omitido.sql`**
+  (invariante 79, tacómetro omitido por tramo; la aplica el orquestador).
+  ADITIVA e idempotente: `escala.taco_omitido_at timestamptz`,
+  `taco_omitido_por uuid` (FK `usuario`, on delete set null) y
+  `taco_omitido_motivo text` + CHECK `escala_taco_omitido_chk` + COMMENT +
+  verificación `do $ver$`. Dry-run de su cabecera (UN bloque `do $dry$`: A
+  contexto, B cuerpo, C0 re-aplicar = no-op ANTES de cualquier fila, C1
+  estructura, C2–C9 UPDATE REALES sobre un tramo vivo sin llegada de un vuelo
+  EN_VUELO/CONFIRMADO: omitir con CAS sin encolar calendario, doble CAS = 0,
+  CHECK 23514 por llegada sin retirar / motivo corto / at sin motivo, FK 23503,
+  llegada que retira, re-omitir y deshacer) ⇒ `DRYRUN_OK 20261015000001 ·
+  A–C9` ⇒ comprobar 0 columnas ⇒ `apply_migration` con SOLO el cuerpo ⇒
+  postchecks (3 columnas, CHECK con `taco_llegada IS NULL`, 0 omitidos) ⇒
+  `get_advisors`. Ensayada en una réplica local PostgreSQL 17 (cadena del repo
+  hasta `20261014000003` + semilla del caso #300): `DRYRUN_OK` sin residuos,
+  cuerpo aplicado y re-aplicado (1 CHECK, 1 FK), dry-run sobre la aplicada ⇒
+  `DRYRUN_FALLA A`. OJO: el cuerpo dice «on delete set null» (FK y COMMENT);
+  si el MCP lo tomara por destructivo («declined»), SQL Editor + registro en
+  `supabase_migrations.schema_migrations`. **Sin dependencia dura** (el API
+  0.0.81 la sondea); se recomienda ANTES del API. **REVERSA (SOLO SQL
+  Editor)**: el pie comentado de la migración (exportar antes las omisiones y
+  reiniciar el API después).
 - **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000008_gasto_tua_incluida.sql`**
   (invariante 66, TUA sistémica; era la 000003 del diseño, renumerada: la
   000003 es la categoría COMISION_VENDEDOR_AVION; NO aplicada: la aplica el
