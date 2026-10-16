@@ -9470,6 +9470,91 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de mandar la fecha). `caja-chica.service.spec` y `.balance.spec` siguen verdes
       sin tocarse.
 
+84. **FACTURAS POR COBRO: UN VUELO, VARIAS FACTURAS; CADA COBRO CON LA SUYA
+    (16-oct-2026, API 0.0.82, migración `20261016000001` PENDIENTE).** Pedido
+    del cliente con la card de #332 (4 cobros conciliados y UNA «Factura
+    A-0420» de 68,208 que solo cubre el cobro de 68,208): «necesitamos poder
+    cargar en un vuelo varias facturas y poder vincularlas». Modelo:
+    **`cobro_vuelo.factura_emitida_id uuid null`** (FK `factura_emitida` ON
+    DELETE SET NULL) = la factura que AMPARA el cobro. Es **CLASIFICACIÓN,
+    no dinero**: no entra a `cobrosEnUsd`, al reparto, al balance, al
+    candado de conciliación ni a `vuelo.cobrado`; `cambiaDineroDelCobro` no
+    la mira (un conciliado PARCIAL y un cobro de anticipo SÍ cambian de
+    factura). Regla dura en la BD (trigger A `trg_cobro_vuelo_factura_coherente`,
+    espejo PURO `flights/cobro-factura.util#validarFacturaParaCobro`, mismos
+    códigos en el mismo orden): `REEMBOLSO_SIN_FACTURA` (400) →
+    `COBRO_DE_GRUPO` (409) → `FACTURA_NO_VIGENTE` (409) →
+    `FACTURA_NO_LIGADA_AL_VUELO` (409: la factura debe estar ligada por el
+    puente al MISMO vuelo del cobro, **sin excepción de hermano de grupo**;
+    para amparar cobros de un hermano se agrega ese vuelo con `vuelo_ids`).
+    Trigger B `trg_factura_emitida_suelta_cobros`: al CANCELAR o dar de BAJA
+    la factura sus cobros quedan en null (aviso `COBROS_DESLIGADOS`);
+    **reactivar NO re-liga** (aviso `COBROS_SIN_FACTURA` con el remate). El
+    backfill de la migración liga por regla pura (Σ cobros = total ± 1.00, o
+    UN cobro exacto): A-0420 → el 68,208 de #332, FA-A-0434 → el 38,589 de
+    #364; los postchecks se recalculan el día del apply.
+    - **Sonda** `common/cobro-factura-disponible.util#cobroFacturaDisponible`
+      (patrón `columnaOpcional` sobre `cobro_vuelo.factura_emitida_id`):
+      TODO select/insert/update que nombre la columna va detrás de ella. En
+      `flights.service` los 7 selects de `cobro_vuelo` pasan por
+      `cobroCols(disponible)` (el spec cuenta 0 `.select(COBRO_COLS)` y 7
+      `.select(cobroCols(`); `facturasDeVuelos` suma la columna (y
+      `fecha_cobro`, `cobro_grupo_id`) con la sonda. Ligar sin ella ⇒ **503
+      `COBRO_FACTURA_NO_DISPONIBLE`** ANTES de escribir (en `createCobro`
+      DESPUÉS del replay idempotente); las lecturas salen sin la llave.
+    - **Dónde se liga**: (a) `POST :id/payments` / `PATCH cobros/:cobroId`
+      con `factura_emitida_id` (`undefined` no toca, `null` suelta; el
+      controller DESCARTA el campo a todo rol que no sea ADMIN/FACTURACION,
+      patrón `delete dto.tua_incluida`, invariante 66); (b)
+      `POST/PATCH /facturas-emitidas` con `cobro_ids` (**ausente ≠ `[]`**:
+      ausente no toca ligas ni avisa; `[]` = el operador vio las casillas y
+      no marcó ninguna; en PATCH REEMPLAZA el conjunto, orden: ligas de
+      vuelos que entran → cobros de vuelos que salen (+ `COBROS_DESLIGADOS`)
+      → cobros que salen → cobros que entran en UN UPDATE; si rebota, 409
+      `COBROS_NO_ASIGNADOS` «La factura se guardó, pero…»). Validación PURA
+      `facturas-emitidas.util#validarCobrosParaFactura`: `COBROS_NO_EXISTEN`
+      / `COBROS_DE_OTRO_VUELO` (400), `REEMBOLSO_SIN_FACTURA` (400),
+      `COBRO_DE_GRUPO` / `COBRO_CON_OTRA_FACTURA` (409: nunca se pisa en
+      silencio). La carrera (23514 del trigger A) vuelve como el MISMO
+      400/409 (`leerErrorCobroFactura`), nunca 500.
+    - **Lecturas ADITIVAS**: `FlightCobro.factura_emitida {id, etiqueta} |
+      null` (chokepoint `adjuntarSobres`, ≤ 200 ids por `.in`, omitida para
+      roles de campo y sin sonda; el POST/PATCH responden la fila cruda con
+      `factura_emitida_id`); `FacturaEmitidaMini.es_parcial / cobros_n /
+      cobros_monto`; `FacturaServicioBloque.cobros_sin_factura /
+      cobros_sin_factura_exigen / asignacion_disponible` (la sonda: el panel
+      ofrece selector/casillas SOLO con `true`); `FacturaEmitida.cobros[]` +
+      `alertas_detalle[]`; `VueloDeFactura.cobros_n / cobros_sin_factura`;
+      `VueloCandidatoFactura.cobros?[]` (solo con la sonda); Excel del
+      registro con la columna final «Cobros que ampara».
+    - **`DUPLICADO_VUELO` cambia de regla** (`calcularAlertas(facturas,
+      ligas, ctx?)`, PURA; `es_parcial` se conserva pero ya NO decide):
+      vuelo con ≥ 2 VIGENTES **y** (`SUMA_SUPERA`: Σ de las de un solo vuelo
+      en la moneda M > max(cotizado, Σ cobros) + `max(1.00, 1 %)`) **o**
+      (`SIN_COBRO_ASIGNADO`, solo con la sonda, POR VUELO: una vigente
+      ampara 0 cobros del vuelo mientras otra ampara ≥ 1). Rótulo único
+      «Facturas que no cuadran» (`ROTULO_ALERTA_DUPLICADO_VUELO`, chip y
+      Excel); `vuelos_con_varias` conserva nombre. Avisos nuevos:
+      `TOTAL_DISTINTO_COBROS` (sustituye a `TOTAL_DISTINTO_VUELO` cuando la
+      factura amparó cobros), `COBROS_SIN_FACTURA` (UN aviso agregado, ≤ 5
+      vuelos y «y N vuelos más»), `COBROS_DESLIGADOS`;
+      `VUELO_CON_OTRA_FACTURA` se omite en los vuelos a los que esta factura
+      amparó cobros y cambia de texto.
+    - **Pre-cierre** (`vuelos-sin-factura.util#entraAlPrecierreSinFactura`):
+      `EXIGE && (registrada == null || (facturas_con_cobro > 0 &&
+      cobros_exigen_sin_factura > 0))`; un vuelo con factura global y 0
+      ligas se comporta como hoy (endurecerlo es decisión del cliente). El
+      chip gana `registrada` y `cobros_sin_factura`. «Por facturar», la
+      solicitud automática y la columna «FACTURA VUELATOUR» siguen por vuelo.
+    - Specs: `common/cobro-factura-disponible.util.spec`,
+      `flights/cobro-factura.util.spec` (paridad con el trigger A),
+      `flights/flights.service.cobros-factura.spec` (BD en memoria: 503,
+      replay, 400/409, parcial sin `COBRO_CONCILIADO`, controller, chokepoint,
+      carrera, los 7 selects), `facturas-emitidas.util.spec` («DUPLICADO_VUELO
+      por suma y por cobros», avisos, validación), `facturas-emitidas.service.spec`
+      («cobro_ids»), `profit-sharing/vuelos-sin-factura.util.spec`,
+      `flights/factura-solicitud.util.spec` (mini y bloque).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -10862,6 +10947,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   anterior; migración ⇒ SOLO SQL Editor con el pie comentado (exportar antes
   las omisiones) y REINICIAR el API (la sonda memoriza el «sí»). Las claves
   retiradas `pistas_sin_gasto` y `tua_cobrada_sin_pagada` no se reusan nunca.
+- **16-oct-2026 — 0.0.82, migración `20261016000001` PENDIENTE** (facturas
+  por cobro, invariante 84; rama `facturas-por-cobro` sobre `1654e16e` =
+  0.0.81 en prod). Orden: (1) migración `20261016000001_cobro_factura_emitida`
+  por MCP con dry-run `begin … rollback` (C1–C9 de su cabecera) ⇒
+  `apply_migration` ⇒ postchecks con el MISMO SELECT de la regla del
+  backfill corrido ese día (el 16-oct daba 37 facturas / 44 cobros; A-0420 →
+  el cobro de 68,208 de #332, FA-A-0434 → el de 38,589 de #364) ⇒
+  `get_advisors`; (2) API 0.0.82 (push a `main`, `GET /v1/version` =
+  `0.0.82`); (3) panel. **Sin dependencia dura**: el API sondea la columna;
+  sin ella ligar responde 503 `COBRO_FACTURA_NO_DISPONIBLE`, las lecturas
+  salen sin la liga y `asignacion_disponible: false` apaga los controles del
+  panel; se enciende sola en ≤ 10 min al aplicarla. Panel viejo contra
+  0.0.82: ignora las llaves nuevas y nunca manda `factura_emitida_id` ni
+  `cobro_ids` (byte-igual). Rollback: API ⇒ 0.0.81 (la columna sobra, nada
+  la lee); migración ⇒ SQL Editor con el pie comentado y REINICIAR el API.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
