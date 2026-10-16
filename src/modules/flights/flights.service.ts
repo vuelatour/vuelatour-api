@@ -3932,7 +3932,17 @@ export class FlightsService {
     // CIERRE DE MES (invariante 89): mover la FECHA de un vuelo de un mes
     // contable cerrado, o llevar un vuelo (no diferido) a un mes cerrado ⇒
     // 409 MES_CERRADO.
-    if (dto.fecha_vuelo !== undefined && dto.fecha_vuelo !== null) {
+    // REVISIÓN (16-oct-2026): solo si la fecha CAMBIA de verdad — un
+    // formulario que re-envía la misma fecha no debe rebotar por editar las
+    // notas de un vuelo de un mes cerrado.
+    if (
+      dto.fecha_vuelo !== undefined &&
+      dto.fecha_vuelo !== null &&
+      dto.fecha_vuelo.getTime() !==
+        (current.fecha_vuelo
+          ? new Date(current.fecha_vuelo as string).getTime()
+          : NaN)
+    ) {
       // El mes ACTUAL solo importa si el vuelo ya tiene dinero del cierre
       // (COMPLETADO o CANCELADO); una cotización viva sí sale de un mes
       // cerrado, pero ningún vuelo ENTRA a uno.
@@ -13578,9 +13588,21 @@ export class FlightsService {
       fechaNueva && !vueloDiferido(v)
         ? mesContableDeVuelo({ fecha_vuelo: fechaNueva })
         : null;
+    // REVISIÓN (16-oct-2026): un vuelo DIFERIDO cuyo mes REAL cambia mueve
+    // sus HORAS (y la reserva de overhaul por horas del reparto) fuera o
+    // dentro de un mes: el mes real de antes y el de después deben estar
+    // abiertos (el de origen de un diferido lo está cerrado ⇒ 409).
+    const realNuevo =
+      fechaNueva && vueloDiferido(v)
+        ? mesRealDeVuelo({ fecha_vuelo: fechaNueva })
+        : null;
+    const reales =
+      realNuevo && realNuevo !== mesRealDeVuelo(v)
+        ? [mesRealDeVuelo(v), realNuevo]
+        : [];
     await assertMesAbierto(
       sb,
-      [opts.sinMesActual ? null : mesContableDeVuelo(v), nuevo],
+      [opts.sinMesActual ? null : mesContableDeVuelo(v), nuevo, ...reales],
       'vuelo',
     );
   }
@@ -13953,6 +13975,25 @@ export class FlightsService {
     sobre?: CobroParteDeSobreOpts,
   ) {
     const vuelo = await this.findById(vueloId);
+    // CIERRE DE MES (revisión 16-oct-2026, invariante 89): un reembolso es
+    // un cobro NEGATIVO que `cobrosEnUsd` RESTA en todos los libros ⇒ mismo
+    // candado que `createCobro` (mes CONTABLE del vuelo). Sin esto, un
+    // reembolso a un vuelo de un mes cerrado cambiaba su reparto en
+    // silencio. Un REINTENTO con la misma llave no rebota: lo resuelve el
+    // 23505 idempotente de abajo.
+    await assertCobroEnMesAbierto(this.supabase.service, vueloId).catch(
+      async (e: unknown) => {
+        if (dto.client_request_id) {
+          const { data: ya } = await this.supabase.service
+            .from('cobro_vuelo')
+            .select('id')
+            .eq('client_request_id', dto.client_request_id)
+            .maybeSingle();
+          if (ya) return;
+        }
+        throw e;
+      },
+    );
     // Un reembolso nunca lleva factura (invariante 84): la sonda solo decide
     // las columnas de la relectura (la fila responde con la llave en null).
     const conFacturaReembolso = await cobroFacturaDisponible(

@@ -162,3 +162,65 @@ describe('ExpensesService — candado MES_CERRADO', () => {
     );
   });
 });
+
+describe('REVISIÓN 16-oct-2026 — gastos de PISTA (INSERT directo)', () => {
+  function conEscalas() {
+    const t = mundo();
+    t.escala = [
+      {
+        id: 'e-318',
+        vuelo_id: V318,
+        destino_iata: 'MID',
+        hora_llegada: '2026-09-20T17:00:00Z',
+        fecha_salida_plan: null,
+        aeronave_id: 'av-1',
+        vuelo: { aeronave_id: 'av-1' },
+      },
+      {
+        id: 'e-337',
+        vuelo_id: V337,
+        destino_iata: 'MID',
+        hora_llegada: '2026-09-25T17:00:00Z',
+        fecha_salida_plan: null,
+        aeronave_id: 'av-1',
+        vuelo: { aeronave_id: 'av-1' },
+      },
+    ];
+    t.proveedor = [];
+    const f = fakeCierre(t);
+    const nada = {} as never;
+    const service = new ExpensesService(
+      f.supabase as unknown as SupabaseService,
+      { notifyRole: jest.fn(), notifyUser: jest.fn() } as never,
+      nada,
+      nada,
+      { numero: jest.fn().mockResolvedValue(1) } as never,
+      { fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null) } as never,
+      nada,
+      {
+        intentarCruzarGasto: jest.fn().mockResolvedValue({ ligado: false }),
+      } as never,
+    );
+    return { service, f };
+  }
+
+  it('la pista de #318 (septiembre cerrado) NO se crea y el renglón dice por qué; la de #337 (diferido a octubre) pasa el candado', async () => {
+    const { service, f } = conEscalas();
+    const r = await service.generarPistas(
+      {
+        items: [
+          { escala_id: 'e-318', monto: 500, categoria: 'ATERRIZAJE' },
+          { escala_id: 'e-337', monto: 500, categoria: 'ATERRIZAJE' },
+        ],
+      } as never,
+      ALE,
+    );
+    const r318 = r.resultados.find((x) => x.escala_id === 'e-318');
+    expect(r318).toMatchObject({ ok: false });
+    expect(r318?.error).toContain('Septiembre 2026 ya está cerrado');
+    const insertados = f.escrituras.filter(
+      (e) => e.tabla === 'gasto' && e.op === 'insert',
+    );
+    expect(insertados.map((e) => e.valores.escala_id)).toEqual(['e-337']);
+  });
+});

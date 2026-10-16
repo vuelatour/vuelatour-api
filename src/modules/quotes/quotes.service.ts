@@ -4,6 +4,7 @@ import {
 } from '../../common/cierre-mes.lector';
 import {
   mesContableDeVuelo,
+  mesRealDeVuelo,
   vueloDiferido,
 } from '../../common/fecha-contable.util';
 import {
@@ -2983,9 +2984,20 @@ export class QuotesService implements ConfirmadorCotizacion {
         dto.fecha_vuelo && !vueloDiferido(vueloContable)
           ? mesContableDeVuelo({ fecha_vuelo: dto.fecha_vuelo.toISOString() })
           : null;
+      // REVISIÓN (16-oct-2026): un DIFERIDO cuyo mes REAL cambia mueve sus
+      // horas (reserva de overhaul del reparto) entre meses: el real de
+      // antes y el de después deben estar abiertos.
+      const realNuevo =
+        dto.fecha_vuelo && vueloDiferido(vueloContable)
+          ? mesRealDeVuelo({ fecha_vuelo: dto.fecha_vuelo.toISOString() })
+          : null;
+      const reales =
+        realNuevo && realNuevo !== mesRealDeVuelo(vueloContable)
+          ? [mesRealDeVuelo(vueloContable), realNuevo]
+          : [];
       await assertMesAbierto(
         this.supabase.service,
-        [mesContableDeVuelo(vueloContable), fechaNueva],
+        [mesContableDeVuelo(vueloContable), fechaNueva, ...reales],
         'cotizacion',
       );
     }

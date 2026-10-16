@@ -68,6 +68,7 @@ import {
 import { esFuncionInexistente } from '../../common/updated-at-trigger.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
+import { assertMesAbierto } from '../../common/cierre-mes.lector';
 import { capturadoAhora } from '../../common/capturado-en.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
@@ -2883,6 +2884,23 @@ export class InventoryService {
       precio_venta?: number | string | null;
       precio_venta_moneda?: 'MXN' | 'USD' | null;
     }; // 404 si no existe
+
+    // CIERRE DE MES (revisión 16-oct-2026, invariante 89): la SALIDA genera
+    // el gasto REFACCION del avión (y la DEVOLUCION con avión lo ajusta) con
+    // INSERT/UPDATE DIRECTO a `gasto` (no pasa por expenses.create) y fecha
+    // = fecha del movimiento ⇒ el candado MES_CERRADO va aquí, ANTES de
+    // escribir el cardex (después del replay idempotente: un reintento del
+    // outbox nunca rebota). Las ENTRADAS no tocan dinero del cierre.
+    if (
+      dto.tipo === TipoMovimientoInventario.SALIDA ||
+      (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id)
+    ) {
+      await assertMesAbierto(
+        this.supabase.service,
+        String(dto.fecha_movimiento ?? hoyCancun()).slice(0, 7),
+        'gasto',
+      );
+    }
 
     // Captura POR EMPAQUE (caja): la cantidad del cardex SIEMPRE va en
     // UNIDADES = cantidad_empaques × factor (fuente única de la existencia y

@@ -1565,6 +1565,33 @@ export class ExpensesService {
       const fechaIso = (esc.hora_llegada ?? esc.fecha_salida_plan) as
         | string
         | null;
+      const fechaGastoPista = fechaIso
+        ? this.cancunDate(fechaIso)
+        : this.cancunDate(new Date().toISOString());
+      // CIERRE DE MES (revisión 16-oct-2026, invariante 89): este INSERT va
+      // DIRECTO a la tabla (no pasa por create()) ⇒ el candado MES_CERRADO
+      // se evalúa aquí, por renglón (eje VUELO: mes contable del vuelo).
+      try {
+        await assertGastoEnMesAbierto(this.supabase.service, [
+          {
+            categoria,
+            fecha_gasto: fechaGastoPista,
+            monto: item.monto,
+            vuelo_id: (esc.vuelo_id as string | null) ?? null,
+            escala_id: esc.id as string,
+            aeronave_id:
+              (esc.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null,
+          },
+        ]);
+      } catch (e) {
+        if (!(e instanceof ConflictException)) throw e;
+        resultados.push({
+          escala_id: item.escala_id,
+          ok: false,
+          error: e.message,
+        });
+        continue;
+      }
       const { data: gasto, error } = await this.supabase.service
         .from('gasto')
         .insert({
@@ -1573,9 +1600,7 @@ export class ExpensesService {
           categoria,
           monto: item.monto,
           moneda: item.moneda ?? 'MXN',
-          fecha_gasto: fechaIso
-            ? this.cancunDate(fechaIso)
-            : this.cancunDate(new Date().toISOString()),
+          fecha_gasto: fechaGastoPista,
           medio_pago: item.medio_pago ?? 'TRANSFERENCIA',
           vuelo_id: esc.vuelo_id,
           escala_id: esc.id,

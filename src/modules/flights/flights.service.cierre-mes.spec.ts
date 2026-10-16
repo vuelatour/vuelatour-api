@@ -14,7 +14,7 @@ import { FlightsService } from './flights.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import { Moneda } from '../bank-accounts/dto/bank-accounts.dto';
 import { MetodoPago } from '../quotes/dto/calculate-quote.dto';
-import type { CreateCobroDto } from './dto/cobros.dto';
+import type { CreateCobroDto, CreateReembolsoDto } from './dto/cobros.dto';
 import { fakeCierre, type Fila } from '../../common/cierre-mes.fixture-spec';
 
 /**
@@ -154,6 +154,103 @@ describe('FlightsService — candado MES_CERRADO de cobros', () => {
     expect(await codigo(service.deleteCobro('c-318', ALE))).toBe('MES_CERRADO');
     expect(
       await codigo(service.updateCobro('c-318', { referencia: 'SPEI 1' }, ALE)),
+    ).not.toBe('MES_CERRADO');
+  });
+});
+
+describe('REVISIÓN 16-oct-2026 — huecos del candado', () => {
+  const reembolso = (
+    extra: Partial<CreateReembolsoDto> = {},
+  ): CreateReembolsoDto => ({
+    monto: 100,
+    moneda: Moneda.USD,
+    metodo_cobro: MetodoPago.TRANSFERENCIA,
+    motivo: 'Devolución parcial al cliente',
+    ...extra,
+  });
+
+  it('REEMBOLSO (cobro negativo) en #318 (septiembre cerrado) ⇒ 409 MES_CERRADO, sin insert', async () => {
+    const { service, f } = armar();
+    expect(await codigo(service.createReembolso(V318, reembolso(), ALE))).toBe(
+      'MES_CERRADO',
+    );
+    expect(f.escrituras.filter((e) => e.tabla === 'cobro_vuelo')).toHaveLength(
+      0,
+    );
+  });
+
+  it('REEMBOLSO: el reintento con una llave que ya existe no rebota en el candado', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(
+        service.createReembolso(
+          V318,
+          reembolso({ client_request_id: 'llave-1' }),
+          ALE,
+        ),
+      ),
+    ).not.toBe('MES_CERRADO');
+  });
+
+  it('REEMBOLSO en #337 (diferido a octubre, abierto) ⇒ el candado no lo frena', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(service.createReembolso(V337, reembolso(), ALE)),
+    ).not.toBe('MES_CERRADO');
+  });
+
+  it('PATCH del vuelo que RE-ENVÍA la misma fecha (#318, mes cerrado) no rebota por el cierre', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(
+        service.update(
+          V318,
+          {
+            fecha_vuelo: new Date('2026-09-20T15:00:00Z'),
+            notas: 'solo nota',
+          },
+          ALE,
+        ),
+      ),
+    ).not.toBe('MES_CERRADO');
+  });
+
+  it('mover la fecha de #318 (COMPLETADO de septiembre cerrado) ⇒ 409 MES_CERRADO', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(
+        service.update(
+          V318,
+          { fecha_vuelo: new Date('2026-09-22T15:00:00Z') },
+          ALE,
+        ),
+      ),
+    ).toBe('MES_CERRADO');
+  });
+
+  it('mover a OCTUBRE la fecha real de #337 (diferido): sus horas saldrían de septiembre cerrado ⇒ 409 MES_CERRADO', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(
+        service.update(
+          V337,
+          { fecha_vuelo: new Date('2026-10-05T15:00:00Z') },
+          ALE,
+        ),
+      ),
+    ).toBe('MES_CERRADO');
+  });
+
+  it('mover la fecha de #337 DENTRO de septiembre (sus horas no cambian de mes) no rebota por el cierre', async () => {
+    const { service } = armar();
+    expect(
+      await codigo(
+        service.update(
+          V337,
+          { fecha_vuelo: new Date('2026-09-26T15:00:00Z') },
+          ALE,
+        ),
+      ),
     ).not.toBe('MES_CERRADO');
   });
 });

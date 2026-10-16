@@ -240,6 +240,19 @@ export function fakeCierre(
         filtrar((f) => arr.some((a) => igual(valorEn(f, c), a))),
       or: (cond: string) =>
         filtrar((f) => partirOr(cond).some((c) => cumple(f, c))),
+      ilike: (c: string, patron: string) => {
+        const re = new RegExp(
+          `^${patron
+            .split('%')
+            .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+            .join('.*')}$`,
+          'i',
+        );
+        return filtrar((f) => {
+          const v = valorEn(f, c);
+          return typeof v === 'string' && re.test(v);
+        });
+      },
       gte: (c: string, v: unknown) =>
         filtrar((f) => cmp(valorEn(f, c), v) >= 0),
       lte: (c: string, v: unknown) =>

@@ -9,6 +9,9 @@ jest.mock('../tipo-cambio/tipo-cambio.service', () => ({
 jest.mock('../pyservices/pyservices.service', () => ({
   PyservicesService: class {},
 }));
+jest.mock('../realtime/notifications.service', () => ({
+  NotificationsService: class {},
+}));
 jest.mock('../profit-sharing/reparto-cuenta.service', () => ({
   RepartoCuentaService: class {},
 }));
@@ -17,6 +20,8 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import { CajaChicaService } from '../caja-chica/caja-chica.service';
 import { IngresosService } from '../ingresos/ingresos.service';
 import { RepartoPagoService } from '../profit-sharing/reparto-pago.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { TipoMovimientoInventario } from '../inventory/dto/inventory.dto';
 import { Rol } from '../../common/types/auth.types';
 import { fakeCierre, type Fila } from '../../common/cierre-mes.fixture-spec';
 
@@ -172,5 +177,57 @@ describe('Entregas a socios', () => {
     ).toBe('MES_CERRADO');
     expect(contextoSocio).not.toHaveBeenCalled();
     expect(f.escrituras).toHaveLength(0);
+  });
+});
+
+describe('Inventario (REVISIÓN 16-oct-2026: la SALIDA crea el gasto REFACCION directo)', () => {
+  const armar = () => {
+    const t = mundo();
+    t.inventario_item = [{ id: 'it-1', nombre: 'Filtro de aceite' }];
+    t.inventario_movimiento = [];
+    const f = fakeCierre(t);
+    return {
+      f,
+      svc: new InventoryService(
+        f.supabase as unknown as SupabaseService,
+        {} as never,
+      ),
+    };
+  };
+
+  it('SALIDA con fecha en septiembre cerrado ⇒ 409 MES_CERRADO sin tocar el cardex ni crear gasto', async () => {
+    const { f, svc } = armar();
+    expect(
+      await codigo(
+        svc.createMovimiento(
+          'it-1',
+          {
+            tipo: TipoMovimientoInventario.SALIDA,
+            cantidad: 1,
+            aeronave_id: 'av-1',
+            fecha_movimiento: '2026-09-28',
+          },
+          ALE,
+        ),
+      ),
+    ).toBe('MES_CERRADO');
+    expect(f.escrituras).toHaveLength(0);
+  });
+
+  it('una ENTRADA con fecha de septiembre no toca dinero del cierre: el candado no la frena', async () => {
+    const { svc } = armar();
+    expect(
+      await codigo(
+        svc.createMovimiento(
+          'it-1',
+          {
+            tipo: TipoMovimientoInventario.ENTRADA,
+            cantidad: 1,
+            fecha_movimiento: '2026-09-28',
+          },
+          ALE,
+        ),
+      ),
+    ).not.toBe('MES_CERRADO');
   });
 });
