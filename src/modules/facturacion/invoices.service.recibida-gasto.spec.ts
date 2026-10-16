@@ -83,6 +83,18 @@ function armar(m: Mundo = {}) {
       const esInsert = () => ops.some((o) => o.m === 'insert');
       const resolver = () => {
         if (tabla === 'factura_recibida') {
+          // Este spec congela la conducta SIN la migración 20261016000003
+          // (una factura por gasto): la sonda de `pdf_sha256` responde 42703.
+          // Con la puente: invoices.service.varias-facturas.spec.ts.
+          if (cols().includes('pdf_sha256')) {
+            return {
+              data: null,
+              error: {
+                code: '42703',
+                message: 'column factura_recibida.pdf_sha256 does not exist',
+              },
+            };
+          }
           if (!m.conPdf && cols().includes('pdf_url') && !esInsert()) {
             return {
               data: null,

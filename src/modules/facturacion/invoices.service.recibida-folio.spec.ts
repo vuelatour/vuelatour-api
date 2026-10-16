@@ -68,6 +68,17 @@ function armar(m: Mundo = {}) {
         }
         const ins = op('insert');
         const upd = op('update');
+        // Sin la migración 20261016000003 (una factura por gasto; la puente
+        // se prueba en invoices.service.varias-facturas.spec.ts).
+        if (/pdf_sha256/.test(sel())) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column factura_recibida.pdf_sha256 does not exist',
+            },
+          };
+        }
         if (
           !m.conSerie &&
           (/\bserie\b/.test(sel()) ||

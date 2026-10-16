@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -16,6 +18,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 export class ListPendientesQuery {
@@ -228,6 +231,31 @@ export class CrearRecibidaDto {
 }
 
 /**
+ * Un elemento de `archivos[]` en «Subir facturas» de un gasto (16-oct-2026):
+ * UNA factura = su XML y/o su PDF (al menos uno).
+ */
+export class ArchivoFacturaGastoDto {
+  @ApiPropertyOptional({ description: 'XML del CFDI en base64.' })
+  @IsOptional()
+  @IsString()
+  xml_b64?: string;
+
+  @ApiPropertyOptional({ description: 'PDF de la factura en base64.' })
+  @IsOptional()
+  @IsString()
+  pdf_b64?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Nombre original del archivo (queda en las notas de un PDF sin XML).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  nombre?: string;
+}
+
+/**
  * «Subir la factura de ESTE gasto» desde la fila de Gastos (22-sep-2026,
  * palabras del cliente). Crea la factura recibida Y la amarra al gasto en
  * UNA llamada: antes eran dos (`POST recibidas` + `amarrar-gastos`) y no
@@ -261,6 +289,19 @@ export class CrearRecibidaDeGastoDto {
   @IsString()
   @MaxLength(200)
   pdf_nombre?: string;
+
+  @ApiPropertyOptional({
+    type: () => [ArchivoFacturaGastoDto],
+    description:
+      'VARIAS facturas en una llamada (16-oct-2026, API 0.0.87): 1–10 elementos, cada uno = UNA factura (su XML y/o su PDF). Excluyente con xml_b64/pdf_b64/pdf_nombre (el shape viejo equivale a un solo elemento). Se AGREGAN a las que el gasto ya tenga (nunca reemplazan); el mismo archivo dos veces ⇒ una sola factura. Sin la migración 20261016000003, más de un elemento ⇒ 503 FACTURAS_GASTO_NO_DISPONIBLE.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => ArchivoFacturaGastoDto)
+  archivos?: ArchivoFacturaGastoDto[];
 }
 
 export class ListRecibidasQuery {

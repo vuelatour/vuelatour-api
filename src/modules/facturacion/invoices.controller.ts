@@ -216,19 +216,51 @@ export class InvoicesController {
     return this.invoices.amarrarGastos(id, dto.gasto_ids, c.userId);
   }
 
+  // «Quitar de este gasto» (16-oct-2026, invariante 87): quita la LIGA, no
+  // la factura. Declarada ANTES de `recibidas/:id` por convención (aunque
+  // el número de segmentos ya las distingue).
+  @Delete('recibidas/:id/gastos/:gastoId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Quita la factura de ESE gasto (no la borra del buzón). Si era la principal, el gasto pasa a la siguiente factura (la más antigua) o queda sin factura (PENDIENTE). Responde las facturas que le quedan al gasto.',
+  })
+  quitarFacturaDeGasto(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('gastoId', ParseUUIDPipe) gastoId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.quitarFacturaDeGasto(id, gastoId, c.userId);
+  }
+
   @Delete('recibidas/:id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Elimina una factura recibida del buzón.' })
-  deleteRecibida(@Param('id', ParseUUIDPipe) id: string) {
-    return this.invoices.deleteRecibida(id);
+  deleteRecibida(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.deleteRecibida(id, c.userId);
   }
 
   @Post('recibidas/file-urls')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Firma URLs de los XML recibidos (bucket privado).',
+    summary:
+      'Firma URLs de los XML/PDF recibidos (bucket privado). COORDINADOR (16-oct-2026: «Ver» las facturas de un gasto) solo firma paths `recibidas/…`.',
   })
-  recibidaFileUrls(@Body() dto: RecibidaFileUrlsDto) {
-    return this.invoices.signFacturaFiles(dto.paths);
+  recibidaFileUrls(
+    @Body() dto: RecibidaFileUrlsDto,
+    @CurrentUser() c?: AuthenticatedUser,
+  ) {
+    const paths =
+      c?.rol === Rol.COORDINADOR
+        ? dto.paths.filter(
+            (p) => typeof p === 'string' && /^recibidas\/[^/]+$/.test(p),
+          )
+        : dto.paths;
+    return this.invoices.signFacturaFiles(paths);
   }
 }

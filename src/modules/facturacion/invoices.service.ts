@@ -31,6 +31,24 @@ import {
 } from './facturacion.client';
 import type { UpdateRecibidaDto } from './dto/invoices.dto';
 import {
+  errorFacturasGastoNoDisponible,
+  gastoFacturasDisponible,
+} from '../../common/gasto-facturas-disponible.util';
+import {
+  agruparArchivos,
+  notaPdfSinXml,
+  PREFIJO_NOTA_PDF_SIN_XML,
+  sha256Hex,
+  siguientePrincipal,
+  type ArchivoLeido,
+  type GrupoFactura,
+} from './gasto-facturas.util';
+import {
+  detalleFacturasDeGasto,
+  ligasDeFacturas,
+  ligasDeGastos,
+} from './gasto-facturas.lector';
+import {
   camposSerieFolioInsert,
   clasificarFalloRelectura,
   cortarRelecturaPorPyservices,
@@ -190,6 +208,28 @@ export interface ResumenRelecturaFolio {
   ilegibles: number;
   /** NO selladas: pyservices/Storage caído o pyservices viejo. */
   reintentar: number;
+}
+
+/** Tope de facturas por envío en «Subir facturas» de un gasto. */
+const MAX_ARCHIVOS_GASTO = 10;
+
+/** Qué pasó con cada factura de un envío de «Subir facturas». */
+export interface DetalleFacturaSubida {
+  /** Posiciones (0-based) de `archivos[]` que resultaron ser ESTA factura. */
+  archivos: number[];
+  factura_id: string;
+  /**
+   * NUEVA = se creó en el buzón y se ligó; EXISTENTE = ya estaba en el buzón
+   * (mismo UUID o mismo PDF) y se ligó a este gasto; YA_EN_ESTE_GASTO = ya
+   * estaba ligada a este gasto (no cambió nada salvo lo de abajo).
+   */
+  resultado: 'NUEVA' | 'EXISTENTE' | 'YA_EN_ESTE_GASTO';
+  /** Se guardó el PDF que le faltaba a una factura que ya existía. */
+  pdf_agregado: boolean;
+  /** Un PDF sin XML ya subido se COMPLETÓ con su XML (datos del CFDI). */
+  xml_agregado: boolean;
+  /** `true` salvo en NUEVA (mismo sentido que el `ya_existia` de siempre). */
+  ya_existia: boolean;
 }
 
 /** El embed de gastos amarrados, igual en todas las respuestas de recibidas. */
@@ -395,6 +435,10 @@ export class InvoicesService {
     }
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
+    // Gastos que ampara como factura ADICIONAL (puente, 16-oct-2026).
+    await this.anexarGastosDeLaPuente(
+      (data ?? []) as unknown as Array<Record<string, unknown>>,
+    );
     return {
       data: data ?? [],
       count: count ?? 0,
@@ -422,6 +466,19 @@ export class InvoicesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
+
+    // VARIAS FACTURAS POR GASTO (16-oct-2026, invariante 87): con la puente,
+    // «reasignar el gasto» de ESTA factura = sus ligas quedan en exactamente
+    // ese gasto (o en ninguno), promoviendo otra principal en los gastos que
+    // la pierden y SIN reemplazar la principal del gasto que la recibe.
+    if (dto.gasto_id !== undefined && (await this.conVariasFacturas())) {
+      await this.sincronizarGastosDeFactura(
+        id,
+        dto.gasto_id ? [dto.gasto_id] : [],
+        userId,
+      );
+      return data;
+    }
 
     // Al reasignar/quitar el gasto, desamarra los anteriores (misma lógica
     // que amarrarGastos). El estatus_comprobante NO se toca: registra qué
@@ -464,6 +521,11 @@ export class InvoicesService {
    * qué papel entregó quien capturó, y desde el 14-sep-2026 solo se lee como
    * «con / sin comprobante» (`src/common/comprobante.util.ts`). Lista vacía =
    * desamarrar todo.
+   *
+   * Con la puente (16-oct-2026, invariante 87) «reemplaza» se refiere a los
+   * GASTOS de esta factura, nunca a las OTRAS facturas de cada gasto: un
+   * gasto que ya tenía otra principal la conserva y esta se le AGREGA; un
+   * gasto que sale y tenía más facturas promueve la siguiente.
    */
   async amarrarGastos(recibidaId: string, gastoIds: string[], userId: string) {
     const { data: recibida, error: rErr } = await this.supabase.service
@@ -475,32 +537,36 @@ export class InvoicesService {
     if (!recibida)
       throw new NotFoundException(`Factura recibida ${recibidaId} not found`);
 
-    // Desamarra los gastos que ya no están en la lista. estatus_comprobante
-    // NO se toca (es el registro de qué entregó el piloto); el trigger de la
-    // BD regresa estatus_facturacion a PENDIENTE al quitar el amarre.
-    let unlink = this.supabase.service
-      .from('gasto')
-      .update({
-        factura_recibida_id: null,
-        updated_by: userId,
-      })
-      .eq('factura_recibida_id', recibidaId);
-    if (gastoIds.length > 0) {
-      unlink = unlink.not('id', 'in', `(${gastoIds.join(',')})`);
-    }
-    const { error: uErr } = await unlink;
-    if (uErr) throw new Error(uErr.message);
-
-    if (gastoIds.length > 0) {
-      // El trigger marca FACTURADA los gastos que reciben el amarre.
-      const { error: lErr } = await this.supabase.service
+    if (await this.conVariasFacturas()) {
+      await this.sincronizarGastosDeFactura(recibidaId, gastoIds, userId);
+    } else {
+      // Desamarra los gastos que ya no están en la lista. estatus_comprobante
+      // NO se toca (es el registro de qué entregó el piloto); el trigger de la
+      // BD regresa estatus_facturacion a PENDIENTE al quitar el amarre.
+      let unlink = this.supabase.service
         .from('gasto')
         .update({
-          factura_recibida_id: recibidaId,
+          factura_recibida_id: null,
           updated_by: userId,
         })
-        .in('id', gastoIds);
-      if (lErr) throw new Error(lErr.message);
+        .eq('factura_recibida_id', recibidaId);
+      if (gastoIds.length > 0) {
+        unlink = unlink.not('id', 'in', `(${gastoIds.join(',')})`);
+      }
+      const { error: uErr } = await unlink;
+      if (uErr) throw new Error(uErr.message);
+
+      if (gastoIds.length > 0) {
+        // El trigger marca FACTURADA los gastos que reciben el amarre.
+        const { error: lErr } = await this.supabase.service
+          .from('gasto')
+          .update({
+            factura_recibida_id: recibidaId,
+            updated_by: userId,
+          })
+          .in('id', gastoIds);
+        if (lErr) throw new Error(lErr.message);
+      }
     }
 
     const { data, error } = await this.supabase.service
@@ -514,7 +580,242 @@ export class InvoicesService {
       .select(`${await this.colsRecibida()}, ${RECIBIDA_EMBED_GASTOS}`)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    await this.anexarGastosDeLaPuente(
+      data ? [data as unknown as Record<string, unknown>] : [],
+    );
     return data!;
+  }
+
+  // ======= Varias facturas por gasto (16-oct-2026, invariante 87) =======
+
+  /** ¿Está aplicada la migración 20261016000003? (sonda memorizada). */
+  private conVariasFacturas(): Promise<boolean> {
+    return gastoFacturasDisponible(this.supabase.service);
+  }
+
+  /** Gastos ligados HOY a una factura: puente ∪ principal (red). */
+  private async gastosDeFactura(facturaId: string): Promise<string[]> {
+    const ids = new Set(
+      (await ligasDeFacturas(this.supabase.service, [facturaId])).map(
+        (l) => l.gasto_id,
+      ),
+    );
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('id')
+      .eq('factura_recibida_id', facturaId);
+    if (error) throw new Error(error.message);
+    for (const g of (data ?? []) as Array<{ id: string }>) ids.add(g.id);
+    return [...ids];
+  }
+
+  /**
+   * SUELTA una factura de UN gasto (con la puente). Orden que sostiene la
+   * invariante «principal ⇒ fila en la puente» en TODO momento: (1) si era
+   * la principal, el gasto pasa a la siguiente liga más antigua (o a null ⇒
+   * el trigger lo regresa a PENDIENTE), con CAS sobre la principal; (2)
+   * DESPUÉS se quita la fila de la puente. Devuelve la principal que quedó.
+   */
+  private async soltarFacturaDeGasto(
+    facturaId: string,
+    gastoId: string,
+    userId: string,
+  ): Promise<{ principal: string | null }> {
+    const { data: g, error: gErr } = await this.supabase.service
+      .from('gasto')
+      .select('id, factura_recibida_id')
+      .eq('id', gastoId)
+      .maybeSingle();
+    if (gErr) throw new Error(gErr.message);
+    if (!g) return { principal: null };
+    let principal = (g.factura_recibida_id as string | null) ?? null;
+    if (principal === facturaId) {
+      const ligas = await ligasDeGastos(this.supabase.service, [gastoId]);
+      const siguiente = siguientePrincipal(ligas, facturaId);
+      const { data: upd, error: uErr } = await this.supabase.service
+        .from('gasto')
+        .update({ factura_recibida_id: siguiente, updated_by: userId })
+        .eq('id', gastoId)
+        .eq('factura_recibida_id', facturaId)
+        .select('id');
+      if (uErr) throw new Error(uErr.message);
+      if (((upd ?? []) as unknown[]).length === 0) {
+        throw new ConflictException({
+          message:
+            'Las facturas de este gasto cambiaron mientras tanto. Recarga y vuelve a intentarlo.',
+          error: 'GASTO_FACTURAS_CAMBIARON',
+        });
+      }
+      principal = siguiente;
+    }
+    const { error: dErr } = await this.supabase.service
+      .from('gasto_factura_recibida')
+      .delete()
+      .eq('gasto_id', gastoId)
+      .eq('factura_recibida_id', facturaId);
+    if (dErr) throw new Error(dErr.message);
+    // Carrera (dos personas quitando facturas del MISMO gasto a la vez): si
+    // entretanto otra petición PROMOVIÓ justo esta factura a principal, la
+    // fila se repone (la invariante no se rompe) y se avisa con 409.
+    const { data: g2, error: g2Err } = await this.supabase.service
+      .from('gasto')
+      .select('factura_recibida_id')
+      .eq('id', gastoId)
+      .maybeSingle();
+    if (g2Err) throw new Error(g2Err.message);
+    if (g2?.factura_recibida_id === facturaId) {
+      await this.ligarFacturaAGasto(facturaId, gastoId, userId);
+      throw new ConflictException({
+        message:
+          'Las facturas de este gasto cambiaron mientras tanto. Recarga y vuelve a intentarlo.',
+        error: 'GASTO_FACTURAS_CAMBIARON',
+      });
+    }
+    return { principal };
+  }
+
+  /**
+   * LIGA una factura a UN gasto (con la puente), ADITIVO: la fila de la
+   * puente y, SOLO si el gasto no tiene principal, la principal (CAS
+   * `is null`: dos subidas simultáneas no se pisan). El trigger
+   * `gasto_sync_facturacion` lo deja FACTURADA al recibir la principal.
+   */
+  private async ligarFacturaAGasto(
+    facturaId: string,
+    gastoId: string,
+    userId: string,
+  ): Promise<void> {
+    const { error: iErr } = await this.supabase.service
+      .from('gasto_factura_recibida')
+      .upsert(
+        {
+          gasto_id: gastoId,
+          factura_recibida_id: facturaId,
+          created_by: userId,
+        },
+        { onConflict: 'gasto_id,factura_recibida_id', ignoreDuplicates: true },
+      );
+    if (iErr) throw new Error(iErr.message);
+    const { error: pErr } = await this.supabase.service
+      .from('gasto')
+      .update({ factura_recibida_id: facturaId, updated_by: userId })
+      .eq('id', gastoId)
+      .is('factura_recibida_id', null);
+    if (pErr) throw new Error(pErr.message);
+  }
+
+  /**
+   * Deja la factura ligada EXACTAMENTE a `gastoIds` (con la puente): suelta
+   * los que salen (promoviendo otra principal donde haga falta) y liga los
+   * que entran sin tocar la principal que ya tuvieran. Ids de gastos que no
+   * existen se ignoran (como el `update … in` de siempre).
+   */
+  private async sincronizarGastosDeFactura(
+    facturaId: string,
+    gastoIds: string[],
+    userId: string,
+  ): Promise<void> {
+    const quedan = new Set(gastoIds);
+    for (const gid of await this.gastosDeFactura(facturaId)) {
+      if (!quedan.has(gid)) {
+        await this.soltarFacturaDeGasto(facturaId, gid, userId);
+      }
+    }
+    if (gastoIds.length === 0) return;
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('id')
+      .in('id', [...quedan]);
+    if (error) throw new Error(error.message);
+    for (const g of (data ?? []) as Array<{ id: string }>) {
+      await this.ligarFacturaAGasto(facturaId, g.id, userId);
+    }
+  }
+
+  /**
+   * `gastos` de las respuestas de recibidas (buzón, «Ver factura», amarrar)
+   * con la puente: además de los gastos donde es la PRINCIPAL (el embed de
+   * siempre), los que ampara como factura adicional. Mismo shape por
+   * elemento; sin la migración no hace nada.
+   */
+  private async anexarGastosDeLaPuente(
+    filas: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    if (filas.length === 0 || !(await this.conVariasFacturas())) return;
+    const ligas = await ligasDeFacturas(
+      this.supabase.service,
+      filas.map((f) => String(f.id)),
+    );
+    const faltan = new Map<string, Set<string>>();
+    for (const f of filas) {
+      const ya = new Set(
+        ((f.gastos as Array<{ id: string }> | null) ?? []).map((g) => g.id),
+      );
+      for (const l of ligas) {
+        if (l.factura_recibida_id !== f.id || ya.has(l.gasto_id)) continue;
+        const s = faltan.get(String(f.id)) ?? new Set<string>();
+        s.add(l.gasto_id);
+        faltan.set(String(f.id), s);
+      }
+    }
+    const ids = [...new Set([...faltan.values()].flatMap((s) => [...s]))];
+    if (ids.length === 0) return;
+    const gastos = new Map<string, Record<string, unknown>>();
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await this.supabase.service
+        .from('gasto')
+        .select('id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar')
+        .in('id', ids.slice(i, i + 200));
+      if (error) throw new Error(error.message);
+      for (const g of (data ?? []) as Array<Record<string, unknown>>)
+        gastos.set(String(g.id), g);
+    }
+    for (const f of filas) {
+      const extra = [...(faltan.get(String(f.id)) ?? [])]
+        .map((id) => gastos.get(id))
+        .filter((g): g is Record<string, unknown> => !!g);
+      if (extra.length === 0) continue;
+      f.gastos = [
+        ...((f.gastos as Array<Record<string, unknown>> | null) ?? []),
+        ...extra,
+      ];
+    }
+  }
+
+  /**
+   * Huellas de los PDF que ya tiene ESTE gasto y se subieron antes de la
+   * migración (pdf_sha256 null): se calculan descargando el PDF y se
+   * GUARDAN (best-effort; un fallo de Storage no tumba la subida). Así «el
+   * mismo PDF otra vez» se reconoce también contra las facturas viejas del
+   * gasto (caso FCUN-1299718 de Mary).
+   */
+  private async asegurarHuellasDelGasto(facturaIds: string[]): Promise<void> {
+    if (facturaIds.length === 0) return;
+    const { data, error } = await this.supabase.service
+      .from('factura_recibida')
+      .select('id, pdf_url, pdf_sha256')
+      .in('id', facturaIds)
+      .is('pdf_sha256', null)
+      .not('pdf_url', 'is', null);
+    if (error) throw new Error(error.message);
+    for (const f of (data ?? []) as Array<{ id: string; pdf_url: string }>) {
+      try {
+        const { data: blob, error: dErr } = await this.supabase.service.storage
+          .from('facturas')
+          .download(f.pdf_url);
+        if (dErr || !blob) continue;
+        const sha = sha256Hex(Buffer.from(await blob.arrayBuffer()));
+        await this.supabase.service
+          .from('factura_recibida')
+          .update({ pdf_sha256: sha })
+          .eq('id', f.id)
+          .is('pdf_sha256', null);
+      } catch (e) {
+        this.logger.warn(
+          `No se pudo calcular la huella del PDF de la factura ${f.id}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -537,7 +838,18 @@ export class InvoicesService {
    *     admite varios nulos) y sirve igual para marcar el gasto FACTURADA.
    *  3. **Un UUID ya registrado NO es un error**: es la MISMA factura
    *     amparando otro gasto. Se reutiliza la fila existente y se responde
-   *     `ya_existia: true` (antes: 409 y callejón sin salida).
+   *     `ya_existia: true` (antes: 409 y callejón sin salida). Si esa fila no
+   *     tenía PDF y ahora llega, el PDF SE GUARDA (16-oct-2026).
+   *
+   * VARIAS FACTURAS (16-oct-2026, invariante 87; ASA entrega 5 CFDI por
+   * carga): `archivos[]` (1–10) = una factura por elemento. Con la migración
+   * `20261016000003` cada factura se LIGA en la puente y se AGREGA a las que
+   * el gasto ya tenga (la primera queda como principal si no había; nunca se
+   * reemplaza). Deduplicación: por UUID fiscal y, para PDF sin XML, por la
+   * huella SHA-256 del PDF (mismo PDF ⇒ misma fila); el mismo archivo dos
+   * veces en un envío ⇒ una sola factura; reintentar un envío es seguro.
+   * Sin la migración: conducta 0.0.85 (una factura, la nueva REEMPLAZA a la
+   * principal) y más de un elemento ⇒ 503 `FACTURAS_GASTO_NO_DISPONIBLE`.
    *
    * Quien marca el gasto como FACTURADA sigue siendo el trigger de la BD
    * `gasto_sync_facturacion` al recibir el amarre; `estatus_comprobante` no
@@ -549,18 +861,54 @@ export class InvoicesService {
       xml_b64?: string;
       pdf_b64?: string;
       pdf_nombre?: string;
+      archivos?: Array<{ xml_b64?: string; pdf_b64?: string; nombre?: string }>;
     },
     userId: string,
   ) {
-    const xmlB64 = (dto.xml_b64 ?? '').trim();
-    const pdfB64 = (dto.pdf_b64 ?? '').trim();
-    if (!xmlB64 && !pdfB64) {
-      throw new BadRequestException(
-        'Sube al menos un archivo: el XML del CFDI o el PDF de la factura.',
-      );
+    // 1) Normaliza: `archivos[]` o el shape viejo (= un solo elemento).
+    const limpio = (v?: string) => (v ?? '').trim();
+    let entradas: Array<{ xml: string; pdf: string; nombre: string | null }>;
+    if (dto.archivos !== undefined) {
+      if (
+        limpio(dto.xml_b64) ||
+        limpio(dto.pdf_b64) ||
+        limpio(dto.pdf_nombre)
+      ) {
+        throw new BadRequestException(
+          'Manda los archivos en «archivos» o un solo XML/PDF, no las dos cosas.',
+        );
+      }
+      if (
+        dto.archivos.length === 0 ||
+        dto.archivos.length > MAX_ARCHIVOS_GASTO
+      ) {
+        throw new BadRequestException(
+          `Sube entre 1 y ${MAX_ARCHIVOS_GASTO} facturas a la vez.`,
+        );
+      }
+      entradas = dto.archivos.map((a, i) => {
+        const xml = limpio(a.xml_b64);
+        const pdf = limpio(a.pdf_b64);
+        if (!xml && !pdf) {
+          throw new BadRequestException(
+            `El archivo #${i + 1} no trae ni el XML ni el PDF de la factura.`,
+          );
+        }
+        return { xml, pdf, nombre: limpio(a.nombre) || null };
+      });
+    } else {
+      const xml = limpio(dto.xml_b64);
+      const pdf = limpio(dto.pdf_b64);
+      if (!xml && !pdf) {
+        throw new BadRequestException(
+          'Sube al menos un archivo: el XML del CFDI o el PDF de la factura.',
+        );
+      }
+      entradas = [{ xml, pdf, nombre: limpio(dto.pdf_nombre) || null }];
     }
+
     const conPdf = await this.conPdfRecibida();
-    if (pdfB64 && !conPdf) {
+    if (entradas.some((e) => e.pdf) && !conPdf) {
       throw new ConflictException({
         message:
           'Guardar el PDF de la factura todavía no está habilitado en la ' +
@@ -570,10 +918,12 @@ export class InvoicesService {
         details: { migracion: MIGRACION_PDF_RECIBIDA },
       });
     }
+    const varias = await this.conVariasFacturas();
+    if (!varias && entradas.length > 1) throw errorFacturasGastoNoDisponible();
 
     const { data: gasto, error: gErr } = await this.supabase.service
       .from('gasto')
-      .select('id, factura_recibida_id')
+      .select('id, factura_recibida_id, monto, moneda')
       .eq('id', dto.gasto_id)
       .maybeSingle();
     if (gErr) throw new Error(gErr.message);
@@ -581,94 +931,295 @@ export class InvoicesService {
       throw new NotFoundException(`Gasto ${dto.gasto_id} not found`);
     }
 
-    // Con XML: se parsea ANTES de subir nada (si el CFDI no es legible, no
-    // queda basura en el bucket).
-    const p = xmlB64
-      ? await this.pyservices.parseFacturaRecibida(xmlB64)
-      : null;
+    // 2) Con XML: se parsea ANTES de subir nada (si un CFDI no es legible, no
+    //    queda basura en el bucket ni facturas a medias del envío).
+    const leidos: ArchivoLeido[] = [];
+    for (const [i, e] of entradas.entries()) {
+      const parse = e.xml
+        ? ((await this.pyservices.parseFacturaRecibida(
+            e.xml,
+          )) as unknown as Record<string, unknown>)
+        : null;
+      const uuid =
+        typeof parse?.uuid_fiscal === 'string' && parse.uuid_fiscal
+          ? parse.uuid_fiscal
+          : null;
+      leidos.push({
+        indice: i,
+        xml_b64: e.xml || null,
+        pdf_b64: e.pdf || null,
+        nombre: e.nombre,
+        uuid,
+        pdf_sha256: e.pdf ? sha256Hex(Buffer.from(e.pdf, 'base64')) : null,
+        xml_sha256: e.xml ? sha256Hex(Buffer.from(e.xml, 'base64')) : null,
+        parse,
+      });
+    }
+    const grupos = agruparArchivos(leidos);
 
-    // ¿Esa factura ya estaba en el buzón? Entonces solo se le suma el gasto.
-    if (p?.uuid_fiscal) {
-      const { data: previa, error: pErr } = await this.supabase.service
+    // 3) Ligas previas del gasto (para «ya estaba en este gasto»).
+    const principalPrevia =
+      (gasto.factura_recibida_id as string | null) ?? null;
+    const previas = new Set<string>(
+      varias
+        ? (await ligasDeGastos(this.supabase.service, [dto.gasto_id])).map(
+            (l) => l.factura_recibida_id,
+          )
+        : [],
+    );
+    if (principalPrevia) previas.add(principalPrevia);
+    if (varias && grupos.some((g) => g.pdf_b64)) {
+      await this.asegurarHuellasDelGasto([...previas]);
+    }
+
+    // 4) Cada grupo ⇒ UNA factura (reutilizada o nueva) ligada al gasto.
+    const detalle: DetalleFacturaSubida[] = [];
+    for (const g of grupos) {
+      const r = await this.resolverFacturaDeGrupo(
+        g,
+        dto.gasto_id,
+        userId,
+        conPdf,
+        varias,
+      );
+      const yaEnEsteGasto = previas.has(r.id);
+      if (varias) {
+        // Idempotente (upsert + principal solo si falta): también repara un
+        // gasto con ligas y sin principal (p. ej. tras un rollback a 0.0.85).
+        await this.ligarFacturaAGasto(r.id, dto.gasto_id, userId);
+        await this.marcarEspejoYEstado(r.id, dto.gasto_id, userId);
+      } else {
+        // Conducta 0.0.85: la factura queda como LA del gasto.
+        await this.amarrarGastoAdicional(r.id, dto.gasto_id, userId);
+      }
+      previas.add(r.id);
+      detalle.push({
+        archivos: g.indices,
+        factura_id: r.id,
+        resultado: yaEnEsteGasto
+          ? 'YA_EN_ESTE_GASTO'
+          : r.creada
+            ? 'NUEVA'
+            : 'EXISTENTE',
+        pdf_agregado: r.pdf_agregado,
+        xml_agregado: r.xml_agregado,
+        ya_existia: !r.creada,
+      });
+    }
+
+    // 5) Respuesta: la de siempre (primera factura + `ya_existia`) + lo nuevo.
+    const primera = detalle[0];
+    const { data: gastoDespues, error: g2Err } = await this.supabase.service
+      .from('gasto')
+      .select('id, factura_recibida_id, monto, moneda')
+      .eq('id', dto.gasto_id)
+      .maybeSingle();
+    if (g2Err) throw new Error(g2Err.message);
+    const det = await detalleFacturasDeGasto(this.supabase.service, {
+      id: dto.gasto_id,
+      factura_recibida_id:
+        ((gastoDespues ?? gasto).factura_recibida_id as string | null) ?? null,
+      monto: (gastoDespues ?? gasto).monto,
+      moneda: (gastoDespues ?? gasto).moneda,
+    });
+    return {
+      ...(await this.recibidaPorId(primera.factura_id)),
+      ya_existia: primera.ya_existia,
+      facturas: det.facturas,
+      agregadas: detalle.filter((d) => d.resultado !== 'YA_EN_ESTE_GASTO')
+        .length,
+      ya_existian: detalle.filter((d) => d.resultado === 'YA_EN_ESTE_GASTO')
+        .length,
+      avisos: det.avisos,
+      detalle,
+      facturas_multiples: varias,
+    };
+  }
+
+  /**
+   * UNA factura del envío ⇒ su fila en el buzón: reutiliza por UUID fiscal
+   * (y le guarda el PDF si no lo tenía), o —con la migración— por la huella
+   * del PDF (un PDF sin XML ya subido; si ahora llega con su XML, la fila se
+   * COMPLETA con los datos del CFDI en vez de duplicarse); si no, la crea.
+   * Nada a medias: si la fila no entra, los archivos subidos se retiran.
+   */
+  private async resolverFacturaDeGrupo(
+    g: GrupoFactura,
+    gastoId: string,
+    userId: string,
+    conPdf: boolean,
+    varias: boolean,
+  ): Promise<{
+    id: string;
+    creada: boolean;
+    pdf_agregado: boolean;
+    xml_agregado: boolean;
+  }> {
+    const sb = this.supabase.service;
+    const p = g.parse;
+    const subir = async (
+      path: string,
+      b64: string,
+      tipo: 'application/xml' | 'application/pdf',
+    ) => {
+      const { error } = await sb.storage
+        .from('facturas')
+        .upload(path, Buffer.from(b64, 'base64'), {
+          contentType: tipo,
+          upsert: true,
+        });
+      if (error)
+        throw new Error(
+          `No se pudo guardar el ${tipo === 'application/xml' ? 'XML' : 'PDF'}: ${error.message}`,
+        );
+    };
+
+    // a) ¿Ese CFDI ya estaba en el buzón? Entonces solo se le suma el gasto
+    //    (y el PDF que le faltaba).
+    const porUuid = async () => {
+      if (!g.uuid) return null;
+      const { data, error } = await sb
         .from('factura_recibida')
-        .select('id')
-        .eq('uuid_fiscal', p.uuid_fiscal)
+        .select(conPdf ? 'id, pdf_url' : 'id')
+        .eq('uuid_fiscal', g.uuid)
         .maybeSingle();
-      if (pErr) throw new Error(pErr.message);
-      if (previa) {
-        const id = previa.id as string;
-        await this.amarrarGastoAdicional(id, dto.gasto_id, userId);
-        return {
-          ...(await this.recibidaPorId(id)),
-          ya_existia: true,
-        };
+      if (error) throw new Error(error.message);
+      return (data as { id: string; pdf_url?: string | null } | null) ?? null;
+    };
+    const previa = await porUuid();
+    if (previa) {
+      const pdfAgregado = await this.guardarPdfFaltante(
+        previa,
+        g,
+        conPdf,
+        varias,
+        userId,
+      );
+      return {
+        id: previa.id,
+        creada: false,
+        pdf_agregado: pdfAgregado,
+        xml_agregado: false,
+      };
+    }
+
+    // b) Con la migración: el MISMO PDF ya está en el buzón.
+    if (varias && g.pdf_sha256) {
+      const { data, error } = await sb
+        .from('factura_recibida')
+        .select('id, uuid_fiscal, notas')
+        .eq('pdf_sha256', g.pdf_sha256)
+        .order('created_at', { ascending: true })
+        .limit(1);
+      if (error) throw new Error(error.message);
+      const mismo = (
+        (data ?? []) as Array<{
+          id: string;
+          uuid_fiscal: string | null;
+          notas: string | null;
+        }>
+      )[0];
+      if (mismo) {
+        // PDF sin XML subido antes y AHORA llega su XML: se completa la fila.
+        if (g.xml_b64 && g.uuid && !mismo.uuid_fiscal) {
+          const xmlPath = `recibidas/${this.baseArchivo(g.uuid)}.xml`;
+          await subir(xmlPath, g.xml_b64, 'application/xml');
+          const { data: upd, error: uErr } = await sb
+            .from('factura_recibida')
+            .update({
+              ...this.camposDelCfdi(p),
+              ...camposSerieFolioInsert(
+                p,
+                await this.conSerieFolioRecibida(),
+                new Date().toISOString(),
+              ),
+              xml_url: xmlPath,
+              // La nota «Factura en PDF (sin XML)» deja de ser cierta; una
+              // nota escrita por la oficina se conserva.
+              ...((mismo.notas ?? '').startsWith(PREFIJO_NOTA_PDF_SIN_XML)
+                ? { notas: null }
+                : {}),
+              updated_by: userId,
+            })
+            .eq('id', mismo.id)
+            .is('uuid_fiscal', null)
+            .select('id');
+          if (uErr) {
+            if (uErr.code === '23505') {
+              // Carrera: el UUID entró por otro lado ⇒ esa fila.
+              const otra = await porUuid();
+              if (otra)
+                return {
+                  id: otra.id,
+                  creada: false,
+                  pdf_agregado: false,
+                  xml_agregado: false,
+                };
+            }
+            throw new Error(uErr.message);
+          }
+          if (((upd ?? []) as unknown[]).length > 0) {
+            return {
+              id: mismo.id,
+              creada: false,
+              pdf_agregado: false,
+              xml_agregado: true,
+            };
+          }
+          const otra = await porUuid();
+          if (otra)
+            return {
+              id: otra.id,
+              creada: false,
+              pdf_agregado: false,
+              xml_agregado: false,
+            };
+        } else if (!g.xml_b64 || mismo.uuid_fiscal === g.uuid) {
+          return {
+            id: mismo.id,
+            creada: false,
+            pdf_agregado: false,
+            xml_agregado: false,
+          };
+        }
+        // Mismo PDF pero OTRO CFDI (raro): se registra aparte.
       }
     }
 
-    // Base del nombre en Storage: el UUID fiscal (identifica al CFDI) o uno
-    // propio para las facturas que llegan solo en PDF.
-    const base = (p?.uuid_fiscal ?? randomUUID()).replace(/[^a-zA-Z0-9-]/g, '');
+    // c) Factura nueva. Base del nombre en Storage: el UUID fiscal (identifica
+    //    al CFDI) o uno propio para las facturas que llegan solo en PDF.
+    const base = this.baseArchivo(g.uuid ?? randomUUID());
     const subidos: string[] = [];
     let xmlPath: string | null = null;
     let pdfPath: string | null = null;
-    // Una vez insertada la fila, los archivos son SUYOS: un fallo posterior
-    // (amarre, relectura) ya no puede borrarlos o la factura quedaría
-    // apuntando a papeles que no existen.
-    let filaCreada = false;
     try {
-      if (xmlB64) {
+      if (g.xml_b64) {
         xmlPath = `recibidas/${base}.xml`;
-        const { error } = await this.supabase.service.storage
-          .from('facturas')
-          .upload(xmlPath, Buffer.from(xmlB64, 'base64'), {
-            contentType: 'application/xml',
-            upsert: true,
-          });
-        if (error)
-          throw new Error(`No se pudo guardar el XML: ${error.message}`);
+        await subir(xmlPath, g.xml_b64, 'application/xml');
         subidos.push(xmlPath);
       }
-      if (pdfB64) {
+      if (g.pdf_b64) {
         pdfPath = `recibidas/${base}.pdf`;
-        const { error } = await this.supabase.service.storage
-          .from('facturas')
-          .upload(pdfPath, Buffer.from(pdfB64, 'base64'), {
-            contentType: 'application/pdf',
-            upsert: true,
-          });
-        if (error)
-          throw new Error(`No se pudo guardar el PDF: ${error.message}`);
+        await subir(pdfPath, g.pdf_b64, 'application/pdf');
         subidos.push(pdfPath);
       }
-
-      const notas = !p
-        ? `Factura en PDF (sin XML)${dto.pdf_nombre ? `: ${dto.pdf_nombre}` : ''}`
-        : null;
-      const { data, error } = await this.supabase.service
+      const notas = !p ? notaPdfSinXml(g.nombre) : null;
+      const { data, error } = await sb
         .from('factura_recibida')
         .insert({
-          uuid_fiscal: p?.uuid_fiscal ?? null,
-          emisor_rfc: p?.emisor_rfc ?? null,
-          emisor_nombre: p?.emisor_nombre ?? null,
-          receptor_rfc: p?.receptor_rfc ?? null,
-          receptor_nombre: p?.receptor_nombre ?? null,
-          tipo_comprobante: p?.tipo_comprobante ?? null,
-          subtotal: p?.subtotal ?? null,
-          total: p?.total ?? null,
-          moneda: p?.moneda ?? null,
-          fecha_emision: p?.fecha_emision ?? null,
-          conceptos_resumen: p?.conceptos_resumen ?? null,
+          ...this.camposDelCfdi(p),
           xml_url: xmlPath,
           ...(conPdf ? { pdf_url: pdfPath } : {}),
+          ...(varias && pdfPath ? { pdf_sha256: g.pdf_sha256 } : {}),
           // ADITIVOS (5-oct-2026): serie/folio del CFDI (solo con XML).
           ...camposSerieFolioInsert(
-            p as unknown as Record<string, unknown> | null,
+            p,
             await this.conSerieFolioRecibida(),
             new Date().toISOString(),
           ),
           // Nace amarrada: llegó desde la fila de un gasto concreto.
           estado: 'CLASIFICADA',
-          gasto_id: dto.gasto_id,
+          gasto_id: gastoId,
           notas,
           created_by: userId,
           updated_by: userId,
@@ -677,25 +1228,37 @@ export class InvoicesService {
         .maybeSingle();
       if (error) {
         if (error.code === '23505') {
+          // Con la puente, una carrera por el MISMO UUID se resuelve
+          // reutilizando la fila (es la misma factura); sin ella, el 409 de
+          // siempre.
+          const otra = varias ? await porUuid() : null;
+          if (otra) {
+            // Los archivos subidos usan el path del CFDI: son de esa fila.
+            return {
+              id: otra.id,
+              creada: false,
+              pdf_agregado: false,
+              xml_agregado: false,
+            };
+          }
           throw new ConflictException('Esa factura (UUID) ya está registrada.');
         }
         throw new Error(error.message);
       }
-      const id = (data as { id: string }).id;
-      filaCreada = true;
-      await this.amarrarGastoAdicional(id, dto.gasto_id, userId);
-      return { ...(await this.recibidaPorId(id)), ya_existia: false };
+      return {
+        id: (data as { id: string }).id,
+        creada: true,
+        pdf_agregado: false,
+        xml_agregado: false,
+      };
     } catch (e) {
-      // Nada a medias: si la fila NO entró, los archivos no se quedan. Si sí
-      // entró, se conservan (la factura ya vive en el buzón y el amarre se
-      // puede rehacer desde el panel).
-      if (!filaCreada && subidos.length > 0) {
-        const { error } = await this.supabase.service.storage
-          .from('facturas')
-          .remove(subidos);
+      // Nada a medias: la fila NO entró ⇒ los archivos no se quedan. (Con
+      // UUID el path es el del CFDI: si otra fila ya lo usa, no se retira.)
+      if (subidos.length > 0 && !(e instanceof ConflictException && g.uuid)) {
+        const { error } = await sb.storage.from('facturas').remove(subidos);
         if (error) {
           this.logger.warn(
-            `Factura del gasto ${dto.gasto_id} falló y no se pudieron borrar ${subidos.join(', ')}: ${error.message}`,
+            `Factura del gasto ${gastoId} falló y no se pudieron borrar ${subidos.join(', ')}: ${error.message}`,
           );
         }
       }
@@ -703,10 +1266,94 @@ export class InvoicesService {
     }
   }
 
+  /** Base del nombre en Storage (sin caracteres raros). */
+  private baseArchivo(s: string): string {
+    return s.replace(/[^a-zA-Z0-9-]/g, '');
+  }
+
+  /** Campos del CFDI parseado para insertar/completar la fila. */
+  private camposDelCfdi(p: Record<string, unknown> | null) {
+    const v = (k: string): unknown => p?.[k] ?? null;
+    return {
+      uuid_fiscal: v('uuid_fiscal'),
+      emisor_rfc: v('emisor_rfc'),
+      emisor_nombre: v('emisor_nombre'),
+      receptor_rfc: v('receptor_rfc'),
+      receptor_nombre: v('receptor_nombre'),
+      tipo_comprobante: v('tipo_comprobante'),
+      subtotal: v('subtotal'),
+      total: v('total'),
+      moneda: v('moneda'),
+      fecha_emision: v('fecha_emision'),
+      conceptos_resumen: v('conceptos_resumen'),
+    };
+  }
+
+  /**
+   * `ya_existia` con PDF: si la factura del buzón NO tenía PDF y ahora llega,
+   * se GUARDA (antes se descartaba en silencio). CAS `pdf_url is null`: nunca
+   * pisa un PDF que ya estaba. Devuelve si se guardó.
+   */
+  private async guardarPdfFaltante(
+    previa: { id: string; pdf_url?: string | null },
+    g: GrupoFactura,
+    conPdf: boolean,
+    varias: boolean,
+    userId: string,
+  ): Promise<boolean> {
+    if (!conPdf || !g.pdf_b64 || previa.pdf_url) return false;
+    const pdfPath = `recibidas/${this.baseArchivo(g.uuid ?? previa.id)}.pdf`;
+    const { error: upErr } = await this.supabase.service.storage
+      .from('facturas')
+      .upload(pdfPath, Buffer.from(g.pdf_b64, 'base64'), {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+    if (upErr) throw new Error(`No se pudo guardar el PDF: ${upErr.message}`);
+    const { error } = await this.supabase.service
+      .from('factura_recibida')
+      .update({
+        pdf_url: pdfPath,
+        ...(varias ? { pdf_sha256: g.pdf_sha256 } : {}),
+        updated_by: userId,
+      })
+      .eq('id', previa.id)
+      .is('pdf_url', null);
+    if (error) throw new Error(error.message);
+    return true;
+  }
+
+  /**
+   * Espejo legado `factura_recibida.gasto_id` (solo si estaba vacío, para no
+   * borrar a cuál se amarró primero) y estado CLASIFICADA.
+   */
+  private async marcarEspejoYEstado(
+    recibidaId: string,
+    gastoId: string,
+    userId: string,
+  ): Promise<void> {
+    const { data: fila, error: rErr } = await this.supabase.service
+      .from('factura_recibida')
+      .select('gasto_id, estado')
+      .eq('id', recibidaId)
+      .maybeSingle();
+    if (rErr) throw new Error(rErr.message);
+    const patch: Record<string, unknown> = {};
+    if (!fila?.gasto_id) patch.gasto_id = gastoId;
+    if (fila?.estado !== 'CLASIFICADA') patch.estado = 'CLASIFICADA';
+    if (Object.keys(patch).length === 0) return;
+    const { error: uErr } = await this.supabase.service
+      .from('factura_recibida')
+      .update({ ...patch, updated_by: userId })
+      .eq('id', recibidaId);
+    if (uErr) throw new Error(uErr.message);
+  }
+
   /**
    * Amarra UN gasto a una factura recibida SIN tocar los demás gastos que ya
    * ampara (a diferencia de `amarrarGastos`, que reemplaza la lista). El
-   * trigger `gasto_sync_facturacion` lo deja en FACTURADA.
+   * trigger `gasto_sync_facturacion` lo deja en FACTURADA. Camino SIN la
+   * puente (0.0.85): la factura queda como LA del gasto.
    */
   private async amarrarGastoAdicional(
     recibidaId: string,
@@ -736,6 +1383,139 @@ export class InvoicesService {
     if (uErr) throw new Error(uErr.message);
   }
 
+  /**
+   * «QUITAR DE ESTE GASTO» (16-oct-2026, invariante 87): quita la liga de la
+   * factura con ESE gasto. NO borra la factura (sigue en el buzón y en los
+   * demás gastos que ampare). Si era la principal, el gasto pasa a la
+   * siguiente (la liga más antigua) o se queda sin factura (el trigger lo
+   * regresa a PENDIENTE). El espejo legado `factura_recibida.gasto_id` que
+   * apuntaba a ese gasto pasa a otro gasto ligado o a null (y la factura sin
+   * ningún gasto vuelve a SIN_CLASIFICAR, como `amarrarGastos([])`).
+   * Funciona también sin la migración (quita la principal).
+   */
+  async quitarFacturaDeGasto(
+    facturaId: string,
+    gastoId: string,
+    userId: string,
+  ) {
+    const sb = this.supabase.service;
+    const { data: gasto, error: gErr } = await sb
+      .from('gasto')
+      .select('id, factura_recibida_id')
+      .eq('id', gastoId)
+      .maybeSingle();
+    if (gErr) throw new Error(gErr.message);
+    if (!gasto) throw new NotFoundException(`Gasto ${gastoId} not found`);
+    const { data: factura, error: fErr } = await sb
+      .from('factura_recibida')
+      .select('id, gasto_id')
+      .eq('id', facturaId)
+      .maybeSingle();
+    if (fErr) throw new Error(fErr.message);
+    if (!factura)
+      throw new NotFoundException(`Factura recibida ${facturaId} not found`);
+
+    const varias = await this.conVariasFacturas();
+    const ligada =
+      gasto.factura_recibida_id === facturaId ||
+      (varias &&
+        (await ligasDeGastos(sb, [gastoId])).some(
+          (l) => l.factura_recibida_id === facturaId,
+        ));
+    if (!ligada) {
+      throw new NotFoundException({
+        message: 'Esa factura no está ligada a este gasto.',
+        error: 'FACTURA_NO_LIGADA',
+      });
+    }
+
+    let principal: string | null;
+    if (varias) {
+      principal = (await this.soltarFacturaDeGasto(facturaId, gastoId, userId))
+        .principal;
+    } else {
+      const { data: upd, error: uErr } = await sb
+        .from('gasto')
+        .update({ factura_recibida_id: null, updated_by: userId })
+        .eq('id', gastoId)
+        .eq('factura_recibida_id', facturaId)
+        .select('id');
+      if (uErr) throw new Error(uErr.message);
+      if (((upd ?? []) as unknown[]).length === 0) {
+        throw new ConflictException({
+          message:
+            'Las facturas de este gasto cambiaron mientras tanto. Recarga y vuelve a intentarlo.',
+          error: 'GASTO_FACTURAS_CAMBIARON',
+        });
+      }
+      principal = null;
+    }
+
+    // Espejo legado y estado de la factura.
+    const restantes = varias
+      ? await this.gastosDeFactura(facturaId)
+      : await (async () => {
+          const { data, error } = await sb
+            .from('gasto')
+            .select('id')
+            .eq('factura_recibida_id', facturaId);
+          if (error) throw new Error(error.message);
+          return ((data ?? []) as Array<{ id: string }>).map((g) => g.id);
+        })();
+    const patch: Record<string, unknown> = {};
+    if (restantes.length === 0) {
+      patch.gasto_id = null;
+      patch.estado = 'SIN_CLASIFICAR';
+    } else if (factura.gasto_id === gastoId) {
+      const ligasF = varias ? await ligasDeFacturas(sb, [facturaId]) : [];
+      const orden = [...restantes].sort((a, b) => {
+        const ca = ligasF.find((l) => l.gasto_id === a)?.created_at ?? '';
+        const cb = ligasF.find((l) => l.gasto_id === b)?.created_at ?? '';
+        return ca === cb ? (a < b ? -1 : 1) : ca < cb ? -1 : 1;
+      });
+      patch.gasto_id = orden[0];
+    }
+    if (Object.keys(patch).length > 0) {
+      const { error: eErr } = await sb
+        .from('factura_recibida')
+        .update({ ...patch, updated_by: userId })
+        .eq('id', facturaId);
+      if (eErr) throw new Error(eErr.message);
+    }
+
+    const { data: despues, error: dErr } = await sb
+      .from('gasto')
+      .select('id, factura_recibida_id, estatus_facturacion, monto, moneda')
+      .eq('id', gastoId)
+      .maybeSingle();
+    if (dErr) throw new Error(dErr.message);
+    const det = await detalleFacturasDeGasto(
+      sb,
+      despues
+        ? {
+            id: gastoId,
+            factura_recibida_id:
+              (despues.factura_recibida_id as string | null) ?? null,
+            monto: despues.monto,
+            moneda: despues.moneda,
+          }
+        : { id: gastoId, factura_recibida_id: principal },
+    );
+    return {
+      ok: true as const,
+      gasto_id: gastoId,
+      factura_recibida_id: facturaId,
+      principal: despues
+        ? ((despues.factura_recibida_id as string | null) ?? null)
+        : principal,
+      estatus_facturacion:
+        (despues?.estatus_facturacion as string | null | undefined) ?? null,
+      facturas: det.facturas,
+      avisos: det.avisos,
+      facturas_multiples: varias,
+    };
+  }
+
   /** Una factura recibida con sus gastos amarrados (respuesta canónica). */
   async recibidaPorId(id: string) {
     // string plano: el parser TIPADO de supabase-js no digiere el template
@@ -749,7 +1529,9 @@ export class InvoicesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
-    return data as unknown as Record<string, unknown>;
+    const fila = data as unknown as Record<string, unknown>;
+    await this.anexarGastosDeLaPuente([fila]);
+    return fila;
   }
 
   // ===== Relectura del folio de las recibidas ya guardadas (5-oct-2026) =====
@@ -976,7 +1758,31 @@ export class InvoicesService {
     return resumen;
   }
 
-  async deleteRecibida(id: string) {
+  async deleteRecibida(id: string, userId?: string) {
+    // VARIAS FACTURAS POR GASTO (16-oct-2026, invariante 87): con la puente,
+    // cada gasto donde era la PRINCIPAL promueve su siguiente factura (la
+    // liga más antigua) en vez de quedarse sin factura; solo el gasto que no
+    // tiene otra queda en null (⇒ PENDIENTE). Las filas de la puente se van
+    // solas con la factura (FK en cascada).
+    if (await this.conVariasFacturas()) {
+      const { data: gastos, error: gErr } = await this.supabase.service
+        .from('gasto')
+        .select('id')
+        .eq('factura_recibida_id', id);
+      if (gErr) throw new Error(gErr.message);
+      for (const g of (gastos ?? []) as Array<{ id: string }>) {
+        const ligas = await ligasDeGastos(this.supabase.service, [g.id]);
+        const { error: pErr } = await this.supabase.service
+          .from('gasto')
+          .update({
+            factura_recibida_id: siguientePrincipal(ligas, id),
+            ...(userId ? { updated_by: userId } : {}),
+          })
+          .eq('id', g.id)
+          .eq('factura_recibida_id', id);
+        if (pErr) throw new Error(pErr.message);
+      }
+    }
     // El FK gasto.factura_recibida_id es on delete set null, pero se limpia
     // explícito ANTES del delete para que el trigger de la BD regrese
     // estatus_facturacion a PENDIENTE (el comprobante del piloto no se toca).
