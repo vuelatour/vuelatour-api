@@ -9757,6 +9757,83 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ofrece «Ver en balance…» hacia un reporte que respondería 400
       PERIODO_ANTES_DEL_INICIO. Caja chica importa `ConfiguracionModule`
       solo para eso (saldo, libro y orden no lo usan).
+    - **Auditoría 16-oct-2026 (0.0.85, SIN migración)** — pedido del cliente
+      tras el deploy: «Ocultarlos está bien, solo asegúrate que no se vean
+      en ningún módulo». Se RECORTÓ (filas/listas/conteos; NINGÚN
+      acumulado cambia): **notificaciones** (`list` y `unreadCount`,
+      `created_at ≥ corte`; prod 3,909 no leídas de antes); **`GET
+      /calendar`** (`from = max(from, corte)`; rango entero anterior ⇒ 0
+      eventos; los deltas conservan `eliminados`; descansos, eventos y
+      mantenimientos con el mismo `from`); **`/me/capturas`** (`desde =
+      pisoDia` + ticket `fecha_gasto ≥ inicio` y `fecha_cobro ≥ corte` +
+      descarta ítems con `fecha_dia < inicio`); **ficha del piloto**
+      (`?mes` anterior ⇒ mes del inicio, eco en `stats.mes` y horas del
+      mes EFECTIVO; últimos vuelos `fecha_vuelo ≥ corte`, gastos recientes
+      `fecha_gasto ≥ inicio`, capturas recientes `sincronizado_at` null o ≥
+      corte; honorarios PILOTO_EXTERNO `fecha_gasto ≥ inicio` + aditivo
+      `honorarios.desde`); **descansos** (`listDescansos` = /me/descansos y
+      /pilots/descansos: `desde = pisoDia`, rango anterior ⇒ `[]`);
+      **ficha del avión** (`startYear/startMonth = max(…, corte)` ⇒
+      `horas_anio`/`vuelos_anio` desde el inicio + aditivo `anio_desde`;
+      `horas_total`, `vuelos_total`, horómetro, motores y hélices
+      INTACTOS); **lista de compras** (`fecha ≥ inicio`; detalle por id
+      sin piso); **rutas sugeridas** (`veces` cuenta desde el inicio,
+      `ultima_fecha` anterior ⇒ null; la plantilla aprende de toda la
+      historia); **resumen de facturas emitidas** (conteos y totales
+      `fecha_emision ≥ inicio`, `vuelos_con_varias` = vuelos con alerta y
+      ≥ 1 vigente visible; `huecos` sobre TODA la serie; aditivo
+      `resumen.desde`; el Excel dice «Registradas (desde el 1-sep-2026)»);
+      **tablero operativo** `fetchVuelosOps` (`fecha_vuelo` null o ≥
+      corte; prod #234); **Mi caja** de la app (`getMyFondo`: SOLO las
+      listas — 20 movimientos y gastos EFECTIVO — con piso, saldo/lectura
+      con el libro completo; `getMyHistorial`: la ventana sube, el corrido
+      `saldo_despues`/`por_reponer_despues` del libro completo, rango
+      anterior ⇒ vacío sin 400); **lista de estados de cuenta** (oculta
+      el archivo cuya fecha MÁXIMA de movimientos es < inicio; sin
+      movimientos decide su `created_at`; prod 27-jul y 18-ago ×2; la URL
+      firmada por id, importar y dedupe sin piso); **latentes**: Paywise
+      `solo_sistema` (después de cruzar, por día Cancún de `fecha_cobro`),
+      «también en otro pago» (`anotarFacturaConcepto`: ventana desde
+      `max(ventana, inicio)`), `GET /invoices` (`fecha_timbrado` null o ≥
+      corte), `GET /multas` (`fecha ≥ inicio`); **historiales técnicos
+      (solo filas)**: tacómetros del avión (filas `< inicio` fuera DESPUÉS
+      de ordenar; `horas_actuales`, componentes y próximo servicio del
+      arreglo completo; aditivo `saldo_inicial {fecha, taco}` = la fila
+      previa inmediata, con la que el panel valida el salto de la primera
+      fila visible), cardex (ficha del artículo, `/inventory/movimientos`
+      + Excel, ficha `resumen` y cardex libro: filas `fecha_movimiento ≥
+      inicio`, aditivo `saldo_inicial {fecha, etiqueta, existencia,
+      costo_vigente}` LEÍDO con `walkCardex`/`costoVigenteEn` sobre las
+      filas previas — `inventario-saldo-inicial.util.ts`; stock,
+      valorizado y precio vigente del cardex COMPLETO; el libro abre con
+      el renglón sintético sin valor de compra), utilidad de la tienda
+      (`desde` sube), historial de mantenimiento (COMPLETADOS con
+      `fecha_realizada ?? fecha_programada < inicio`; prod 9), bitácora de
+      motor/hélice (`componente_evento.fecha ≥ inicio`), bitácora PDF
+      (`desde = pisoDia`, vacío ⇒ el inicio; SEGURO: el tiempo de cada
+      renglón sale de la BASE de la ficha + tacómetro, no del rango; el
+      nombre del archivo lleva el `desde` efectivo); **cuenta de socios**
+      (`validarCuentaDesde(mes, mesActual, inicio)` ⇒ 400
+      `CUENTA_ANTES_DEL_INICIO` «La cuenta no puede arrancar antes de
+      septiembre de 2026 (inicio oficial).» `details {inicio}`;
+      `estadoDeCuenta`: `desde` anterior sube al mes del inicio — y
+      `hasta` con él — y lo previo entra en SALDO_ANTERIOR). **Se deja A
+      PROPÓSITO**: squawks ABIERTOS y vencimientos VIGENTES de cualquier
+      fecha (estado de seguridad actual); mantenimientos abiertos
+      (PROGRAMADO/EN_TALLER) de cualquier fecha; la liga «Vuelo anterior
+      del avión» (`/flights/:id/anterior`, cadena de tacómetros: búsqueda
+      SIN piso + aditivo `antes_del_inicio` para el chip); la bandeja
+      `/inventory/movimientos?sin_costo=true` (ENTRADAS pendientes de
+      costo: trabajo abierto; hoy 0 anteriores); `vuelosCandidatos` de
+      ingresos (un depósito de septiembre puede pagar un vuelo de agosto;
+      ya trae `fecha_vuelo`); detalle por id de todo; escrituras; saldos y
+      acumulados (horas de vida, horómetro, existencias/FIFO, saldo de
+      caja, cuenta de socios). Specs: `*.inicio-oficial.spec.ts` de
+      notifications, calendar, me-capturas, pilots, compras, caja-chica,
+      multas, engineering, componente-evento (motor y hélice),
+      inventario-saldo-inicial, reparto-cuenta; y las ampliaciones de
+      aircraft, quotes, facturas-emitidas, dashboards, invoices,
+      conciliacion y flights.
 
 ## Convenciones NestJS
 
@@ -11201,6 +11278,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   (deben ser idénticas). Rollback: `update … set activa = false` (≤ 60 s).
   Volver el API a 0.0.83 con la fila puesta la deja ver como un switch sin
   significado en Configuración (no rompe nada; mejor `activa = false`).
+- **16-oct-2026 — 0.0.85, SIN migración** (auditoría del inicio oficial,
+  invariante 86 «Auditoría 16-oct-2026»; rama `sin-agosto` sobre `b7e9be6e`
+  = 0.0.84 en prod). Solo LECTURAS: oculta lo anterior al 1-sep-2026 en la
+  campana, el calendario, /me/capturas, ficha del piloto, descansos, horas
+  del año del avión, compras, rutas sugeridas, resumen de facturas
+  emitidas, tablero operativo, Mi caja, estados de cuenta, Paywise,
+  /invoices, /multas, tacómetros, cardex, mantenimientos, bitácoras y
+  cuenta de socios (400 `CUENTA_ANTES_DEL_INICIO`). Llaves NUEVAS todas
+  ADITIVAS (`anio_desde`, `saldo_inicial` en tacómetros y cardex,
+  `honorarios.desde`, `resumen.desde`, `anterior.antes_del_inicio`): el
+  panel viejo las ignora y se ve como hoy. Con la fila apagada
+  (`activa = false`) todo es 0.0.84. Cualquier orden de deploy es seguro;
+  verificar `GET /v1/version` = `0.0.85`. Rollback: volver a 0.0.84.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
