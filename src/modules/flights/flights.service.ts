@@ -212,7 +212,7 @@ import {
 // detalle de la cotización. `import type` = se borra al compilar (sin ciclo
 // flights ↔ quotes en runtime).
 import type { FichaAvionMin } from '../quotes/quotes.service';
-// Confirmar desde el detalle (16-oct-2026, invariante 84): el COTIZADO lo
+// Confirmar desde el detalle (16-oct-2026, invariante 85): el COTIZADO lo
 // confirma QuotesService, inyectado por TOKEN (sin importar la clase: el
 // ciclo flights ↔ quotes en runtime sigue sin existir).
 import {
@@ -746,7 +746,7 @@ export class FlightsService {
     // las llaves se omiten.
     @Optional()
     private readonly seguimiento?: VueloSeguimientoService,
-    // CONFIRMAR desde el detalle (16-oct-2026, invariante 84): el COTIZADO
+    // CONFIRMAR desde el detalle (16-oct-2026, invariante 85): el COTIZADO
     // sigue siendo la transición de `QuotesService.confirm` (tramos del
     // REDONDO, correo, calendario, tripulación), que llega por el token
     // `CONFIRMADOR_COTIZACION` (QuotesModule lo provee con `useExisting`;
@@ -5789,7 +5789,7 @@ export class FlightsService {
 
   /**
    * CONFIRMAR desde el detalle del vuelo (app y panel, 16-oct-2026,
-   * invariante 84): `POST /v1/flights/:id/confirmar`, ADMIN/COORDINADOR.
+   * invariante 85): `POST /v1/flights/:id/confirmar`, ADMIN/COORDINADOR.
    * - COTIZADO ⇒ delega en `QuotesService.confirm` (la MISMA transición de
    *   `POST /v1/quotes/:id/confirm`: tramos del REDONDO, correo al cliente,
    *   calendario y aviso a la tripulación; nada se duplica aquí). Sin el

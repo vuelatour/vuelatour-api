@@ -37,7 +37,7 @@ import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
     QuotesService,
     QuotesPdfService,
     QuotesPdfInternoService,
-    // Confirmar desde el detalle del vuelo (16-oct-2026, invariante 84):
+    // Confirmar desde el detalle del vuelo (16-oct-2026, invariante 85):
     // FlightsService recibe `QuotesService.confirm` por este token (sin
     // importar la clase, para no crear el ciclo flights ↔ quotes en runtime).
     { provide: CONFIRMADOR_COTIZACION, useExisting: QuotesService },

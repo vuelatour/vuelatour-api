@@ -34,7 +34,7 @@ import { VueloSeguimientoService } from './vuelo-seguimiento.service';
     // PilotsModule no importa flights.
     PilotsModule,
     PyservicesModule,
-    // Confirmar desde el detalle (16-oct-2026, invariante 84): el COTIZADO
+    // Confirmar desde el detalle (16-oct-2026, invariante 85): el COTIZADO
     // lo confirma QuotesService vía el token CONFIRMADOR_COTIZACION. Ciclo
     // REAL de módulos (QuotesModule ya importa FlightsModule): forwardRef en
     // los dos lados.

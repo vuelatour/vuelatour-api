@@ -31,7 +31,7 @@ import type { ConfiguracionService } from '../configuracion/configuracion.servic
 import type { PilotsService } from '../pilots/pilots.service';
 
 /**
- * CONFIRMAR desde el detalle del vuelo (16-oct-2026, invariante 84):
+ * CONFIRMAR desde el detalle del vuelo (16-oct-2026, invariante 85):
  * RESERVA/SOLICITUD → CONFIRMADO con CAS por estado, candados de asignación
  * (avión y piloto, squawk ALTA, taller solo avisa), COTIZADO delegado al
  * confirmador inyectado, idempotencia y 409 estructurados. Supabase se

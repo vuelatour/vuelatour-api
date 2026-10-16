@@ -1,5 +1,5 @@
 // Cableado HTTP REAL de POST /v1/flights/:id/confirmar (16-oct-2026,
-// invariante 84): Express 5 (sin body ⇒ `req.body` undefined) + ValidationPipe
+// invariante 85): Express 5 (sin body ⇒ `req.body` undefined) + ValidationPipe
 // de main.ts + AllExceptionsFilter + versionado URI. Los servicios se
 // stubbean para no arrastrar la cadena de imports (notifications/jose,
 // calendar-sync/googleapis).

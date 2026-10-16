@@ -36,7 +36,7 @@ describe('FlightsModule', () => {
   });
 
   /**
-   * CONFIRMAR desde el detalle (16-oct-2026, invariante 84): FlightsService
+   * CONFIRMAR desde el detalle (16-oct-2026, invariante 85): FlightsService
    * recibe `QuotesService.confirm` por el token CONFIRMADOR_COTIZACION. Es un
    * ciclo REAL de módulos (QuotesModule ya importaba FlightsModule), así que
    * los DOS lados van con forwardRef y QuotesModule provee y exporta el

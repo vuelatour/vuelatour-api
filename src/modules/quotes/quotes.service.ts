@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
 import { VueloSeguimientoService } from '../flights/vuelo-seguimiento.service';
-// Confirmar desde el detalle del vuelo (16-oct-2026, invariante 84): este
+// Confirmar desde el detalle del vuelo (16-oct-2026, invariante 85): este
 // servicio ES el confirmador del COTIZADO que FlightsService recibe por token.
 import type { ConfirmadorCotizacion } from '../flights/confirmar-vuelo.util';
 import { AircraftService } from '../aircraft/aircraft.service';
