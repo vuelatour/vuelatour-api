@@ -367,6 +367,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: false,
         cuentas: ['Transferencia sin cuenta destino'],
+        registrada: null,
+        cobros_sin_factura: 1,
       },
       {
         id: 'v402',
@@ -375,6 +377,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'N4142R',
         solicitada: false,
         cuentas: ['HSBC Dólares'],
+        registrada: null,
+        cobros_sin_factura: 1,
       },
       {
         id: 'v403',
@@ -383,6 +387,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: false,
         cuentas: ['HSBC Pesos'],
+        registrada: null,
+        cobros_sin_factura: 1,
         // CANCELADO: el chip lo dice (ahí se registra directo en Facturas
         // emitidas; «pídela desde el vuelo» no existe para él).
         estado: 'CANCELADO',
@@ -394,6 +400,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: null,
         solicitada: false,
         cuentas: ['Scotiabank Pesos'],
+        registrada: null,
+        cobros_sin_factura: 1,
       },
       {
         id: 'v408',
@@ -402,6 +410,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: true,
         cuentas: ['HSBC Pesos'],
+        registrada: null,
+        cobros_sin_factura: 1,
       },
       {
         id: 'v410',
@@ -410,6 +420,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: false,
         cuentas: ['Scotiabank Dólares', 'Cheque sin cuenta destino'],
+        registrada: null,
+        cobros_sin_factura: 2,
       },
       {
         id: 'v300',
@@ -418,6 +430,8 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
         matricula: 'XA-VGV',
         solicitada: false,
         cuentas: ['Transferencia sin cuenta destino'],
+        registrada: null,
+        cobros_sin_factura: 1,
       },
     ]);
     expect(item).not.toHaveProperty('informativo');

@@ -1035,6 +1035,14 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84): la factura que ampara
+    // el cobro la clasifican SOLO ADMIN y FACTURACION (los del PATCH del
+    // cobro y los únicos que ven el selector). A COORDINADOR y PILOTO el
+    // campo se les DESCARTA (patrón `delete dto.tua_incluida`, invariante
+    // 66): jamás un 400 por un campo que su app no ve.
+    if (c.rol !== Rol.ADMIN && c.rol !== Rol.FACTURACION) {
+      delete dto.factura_emitida_id;
+    }
     return this.flights.createCobro(id, dto, c.userId, c.rol);
   }
 

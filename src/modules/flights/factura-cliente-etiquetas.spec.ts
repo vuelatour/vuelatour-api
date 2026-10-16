@@ -34,6 +34,8 @@ interface Mundo {
   errorFactura?: string;
   /** error de lectura de la tabla `cobro_vuelo`. */
   errorCobros?: string;
+  /** false = 42703 al pedir `cobro_vuelo.factura_emitida_id` (sin 20261016000001). */
+  cobroFactura?: boolean;
   /**
    * true = migración 20260924000003 aplicada (registro de facturas
    * emitidas). Default: NO aplicada (42703 al sondear
@@ -88,10 +90,14 @@ function fake(m: Mundo) {
     q.then = (res: (v: unknown) => unknown) => {
       consultas.push({ tabla, select, ids, range: rango });
       const faltante =
-        tabla === 'vuelo' &&
-        ((m.estatus === false && select.includes('factura_estatus')) ||
-          (m.folio === false && select.includes('factura_folio')) ||
-          (m.emitida !== true && select.includes('factura_solicitada_at')));
+        (tabla === 'vuelo' &&
+          ((m.estatus === false && select.includes('factura_estatus')) ||
+            (m.folio === false && select.includes('factura_folio')) ||
+            (m.emitida !== true &&
+              select.includes('factura_solicitada_at')))) ||
+        (tabla === 'cobro_vuelo' &&
+          m.cobroFactura === false &&
+          select.includes('factura_emitida_id'));
       if (faltante) {
         return Promise.resolve({
           data: null,
@@ -222,7 +228,10 @@ describe('etiquetasFacturaDeVuelos', () => {
     await etiquetasFacturaDeVuelos(sb, ids);
     const lotes = consultas.filter((c) => c.tabla === 'vuelo' && c.ids);
     expect(lotes.map((c) => c.ids!.length)).toEqual([200, 200, 50]);
-    const lotesCobros = consultas.filter((c) => c.tabla === 'cobro_vuelo');
+    // (sin la sonda de `factura_emitida_id`, que no lleva `ids`)
+    const lotesCobros = consultas.filter(
+      (c) => c.tabla === 'cobro_vuelo' && c.ids,
+    );
     expect(lotesCobros.map((c) => c.ids!.length)).toEqual([200, 200, 50]);
   });
 
@@ -362,6 +371,10 @@ describe('etiquetasFacturaDeVuelos', () => {
         origenes_exigen: ['en HSBC Pesos'],
         solicitud_automatica: false,
         solicitud_ya_no_aplica: false,
+        // Facturas por cobro (16-oct-2026, invariante 84): sin la migración
+        // de emitidas no hay liga posible ⇒ 0 (la sonda ni se consulta).
+        cobros_exigen_sin_factura: 0,
+        facturas_con_cobro: 0,
       });
       expect(d.get(V2)).toMatchObject({
         registrada: null,
@@ -380,6 +393,8 @@ describe('etiquetasFacturaDeVuelos', () => {
         origenes_exigen: [],
         solicitud_automatica: false,
         solicitud_ya_no_aplica: false,
+        cobros_exigen_sin_factura: 0,
+        facturas_con_cobro: 0,
       });
     });
 
@@ -447,8 +462,13 @@ describe('etiquetasFacturaDeVuelos', () => {
         origenes_exigen: [],
         etiqueta: ETIQUETA_FACTURA_NO_LLEVA,
       });
-      expect(consultas.find((c) => c.tabla === 'cobro_vuelo')?.select).toBe(
-        'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro',
+      // `fecha_cobro` y `cobro_grupo_id` (facturas por cobro, invariante 84);
+      // `factura_emitida_id` solo con las migraciones de emitidas Y la de
+      // 20261016000001 (este mundo no tiene la primera).
+      expect(
+        consultas.find((c) => c.tabla === 'cobro_vuelo' && c.ids)?.select,
+      ).toBe(
+        'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro, fecha_cobro, cobro_grupo_id',
       );
     });
 
@@ -569,6 +589,8 @@ describe('etiquetasFacturaDeVuelos', () => {
         origenes_exigen: ['en HSBC Dólares'],
         solicitud_automatica: false,
         solicitud_ya_no_aplica: false,
+        cobros_exigen_sin_factura: 0,
+        facturas_con_cobro: 0,
       });
     });
 
@@ -764,6 +786,9 @@ describe('etiquetasFacturaDeVuelos', () => {
         'origenes_exigen',
         'solicitud_automatica',
         'solicitud_ya_no_aplica',
+        // Facturas por cobro (16-oct-2026, invariante 84): siempre presentes.
+        'cobros_exigen_sin_factura',
+        'facturas_con_cobro',
       ]);
     });
   });
@@ -778,5 +803,109 @@ describe('etiquetasFacturaDeVuelos', () => {
   it('un error REAL de lectura se lanza (nunca un libro con datos parciales)', async () => {
     const { sb } = fake({ ...mundo, errorFactura: 'timeout' });
     await expect(etiquetasFacturaDeVuelos(sb, [V1])).rejects.toThrow('timeout');
+  });
+});
+
+describe('facturasDeVuelos — facturas por cobro (16-oct-2026, invariante 84)', () => {
+  const F0420 = 'f-0420';
+  const FGLOBAL = 'f-0430';
+  const vuelo332 = (id: string): Fila => ({
+    id,
+    facturado: false,
+    factura_estatus: 'FACTURADO',
+    factura_folio: null,
+    estado: 'COMPLETADO',
+    tc_usd_mxn: 17.4,
+    factura_solicitada_at: null,
+    factura_solicitud_nota: null,
+  });
+  const mxn = (
+    id: string,
+    vuelo_id: string,
+    monto: number,
+    factura: string | null,
+  ) =>
+    cobro(id, vuelo_id, {
+      monto,
+      moneda: 'MXN',
+      cuenta_destino: 'Scotiabank Pesos',
+      metodo_cobro: 'TRANSFERENCIA',
+      fecha_cobro: '2026-09-21T17:00:00Z',
+      cobro_grupo_id: null,
+      factura_emitida_id: factura,
+    });
+  const liga = (vuelo_id: string, id: string, folio: string): Fila => ({
+    vuelo_id,
+    factura: {
+      id,
+      serie: 'A',
+      folio,
+      folio_num: Number(folio),
+      estatus: 'VIGENTE',
+      deleted_at: null,
+    },
+  });
+
+  it('#332: A-0420 ampara el de 68,208 ⇒ facturas_con_cobro 1 y 3 cobros que exigen sin factura; con `conCobros` cada cobro trae su factura_emitida_id', async () => {
+    const { sb, consultas } = fake({
+      factura: [],
+      emitida: true,
+      vuelo: [vuelo332(V1)],
+      factura_emitida_vuelo: [liga(V1, F0420, '0420')],
+      cobro_vuelo: [
+        mxn('c1', V1, 68208, F0420),
+        mxn('c2', V1, 977.45, null),
+        mxn('c3', V1, 1700, null),
+        mxn('c4', V1, 1700, null),
+        // Un reembolso y una parte de sobre no cuentan.
+        mxn('r', V1, -100, null),
+        { ...mxn('s', V1, 500, null), cobro_grupo_id: 'sobre-1' },
+      ],
+    });
+    const d = (await facturasDeVuelos(sb, [V1], { conCobros: true })).get(V1)!;
+    expect(d).toMatchObject({
+      registrada: 'A-0420',
+      exigencia: 'EXIGE',
+      cobros_exigen_sin_factura: 3,
+      facturas_con_cobro: 1,
+    });
+    expect(d.cobros?.map((c) => [c.id, c.factura_emitida_id])).toEqual([
+      ['c1', F0420],
+      ['c2', null],
+      ['c3', null],
+      ['c4', null],
+      ['r', null],
+      ['s', null],
+    ]);
+    expect(
+      consultas.find((c) => c.tabla === 'cobro_vuelo' && c.ids)?.select,
+    ).toContain('factura_emitida_id');
+  });
+
+  it('factura global sin ligas (A-0430) ⇒ facturas_con_cobro 0; sin la sonda ⇒ 0/0 y la columna no se pide', async () => {
+    const mundo: Mundo = {
+      factura: [],
+      emitida: true,
+      vuelo: [vuelo332(V1)],
+      factura_emitida_vuelo: [liga(V1, FGLOBAL, '0430')],
+      cobro_vuelo: [mxn('c1', V1, 20000, null), mxn('c2', V1, 24344, null)],
+    };
+    const con = (await facturasDeVuelos(fake(mundo).sb, [V1])).get(V1)!;
+    expect(con).toMatchObject({
+      cobros_exigen_sin_factura: 2,
+      facturas_con_cobro: 0,
+    });
+    const { sb, consultas } = fake({ ...mundo, cobroFactura: false });
+    const sin = (await facturasDeVuelos(sb, [V1])).get(V1)!;
+    expect(sin).toMatchObject({
+      registrada: 'A-0430',
+      cobros_exigen_sin_factura: 0,
+      facturas_con_cobro: 0,
+    });
+    expect(
+      consultas.find((c) => c.tabla === 'cobro_vuelo' && c.ids)?.select,
+    ).toBe(
+      'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro, fecha_cobro, cobro_grupo_id',
+    );
   });
 });

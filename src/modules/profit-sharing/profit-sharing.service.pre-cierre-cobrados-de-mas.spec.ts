@@ -355,10 +355,12 @@ describe('ProfitSharingService.preCierre — «Vuelos cobrados de más» con los
       ),
     ).toBe(false);
     // `fetchCobros` sigue siendo UNA lectura para cancelados + completados:
-    // solo gana columnas (id, fecha_cobro, cobro_grupo_id).
+    // solo gana columnas (id, fecha_cobro, cobro_grupo_id). Se identifica
+    // por `comision_banco_monto`: desde el 16-oct-2026 (invariante 84) la
+    // lectura de `facturasDeVuelos` también pide `cobro_grupo_id`.
     const deFetchCobros = cobros.filter((l) =>
       String(l.ops.find((o) => o[0] === 'select')?.[1][0]).includes(
-        'cobro_grupo_id',
+        'comision_banco_monto',
       ),
     );
     expect(deFetchCobros).toHaveLength(1);

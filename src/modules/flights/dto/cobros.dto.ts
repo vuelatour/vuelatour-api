@@ -123,6 +123,21 @@ export class CreateCobroDto {
   @IsOptional()
   @IsUUID()
   client_request_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Factura emitida que ampara este cobro (clasificación; null = quitar). ' +
+      'Solo ADMIN/FACTURACION: a los demás roles el API lo descarta ' +
+      '(16-oct-2026, invariante 84). 503 COBRO_FACTURA_NO_DISPONIBLE sin la ' +
+      'migración 20261016000001.',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf(
+    (o: { factura_emitida_id?: unknown }) => o.factura_emitida_id !== null,
+  )
+  @IsUUID('all')
+  factura_emitida_id?: string | null;
 }
 
 /**
@@ -287,6 +302,20 @@ export class UpdateCobroDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Factura emitida que ampara este cobro (clasificación; null = quitar; ' +
+      'ausente = no tocar). No cuenta como dinero: un cobro conciliado o de ' +
+      'anticipo sí la acepta (16-oct-2026, invariante 84).',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf(
+    (o: { factura_emitida_id?: unknown }) => o.factura_emitida_id !== null,
+  )
+  @IsUUID('all')
+  factura_emitida_id?: string | null;
 }
 
 /**

@@ -23,6 +23,7 @@ import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { etiquetaSerieFolio } from '../flights/factura-cliente.util';
 import type {
   AlertaFactura,
+  AlertaFacturaDetalle,
   AvisoFactura,
   CobroResumen,
   EstatusFacturaEmitida,
@@ -334,35 +335,97 @@ interface FacturaParaAlertas {
   id: string;
   estatus: string;
   pdf_path: string | null;
+  /** Se sigue leyendo; desde el 16-oct-2026 NO decide alertas. */
   es_parcial: boolean | null;
+  /** Para `SUMA_SUPERA` y los textos del detalle (invariante 84). */
+  serie?: string | null;
+  folio?: string | null;
+  total?: unknown;
+  moneda?: string | null;
+}
+
+/** Liga del puente con lo que el vuelo aporta a las alertas. */
+export interface LigaParaAlertas {
+  factura_id: string;
+  vuelo_id: string;
+  vuelo?: {
+    estado?: string | null;
+    folio?: unknown;
+    monto_total_usd?: unknown;
+    monto_total_mxn?: unknown;
+    tc_usd_mxn?: unknown;
+  } | null;
+}
+
+/** Lo que se sabe de un vuelo para `DUPLICADO_VUELO` (invariante 84). */
+export interface VueloParaAlertas {
+  folio?: number | null;
+  /** total cotizado por moneda (null = no se conoce) */
+  usd: number | null;
+  mxn: number | null;
+  /** Σ cobros positivos (sin sobre) por moneda */
+  cobrado: { USD: number; MXN: number };
+}
+
+/** Contexto OPCIONAL de `calcularAlertas` (facturas por cobro). */
+export interface ContextoAlertas {
+  vuelos: ReadonlyMap<string, VueloParaAlertas>;
+  /**
+   * factura_id → cobros amparados (SOLO con la sonda de 20261016000001;
+   * ausente = regla `SIN_COBRO_ASIGNADO` apagada).
+   */
+  cobrosDeFactura?: ReadonlyMap<
+    string,
+    ReadonlyArray<{ vuelo_id: string; monto: number; moneda: string }>
+  >;
 }
 
 export interface AlertasCalculadas {
   porFactura: Map<string, AlertaFactura[]>;
-  /** Vuelos con ≥ 2 VIGENTES y al menos una NO parcial. */
+  /** Vuelos con alerta `DUPLICADO_VUELO` (suma que rebasa o vigente sin cobro). */
   vuelosDuplicados: Set<string>;
   /** Facturas VIGENTES por vuelo (para «otras_vigentes» y avisos). */
   vigentesPorVuelo: Map<string, string[]>;
+  /** Detalle de `DUPLICADO_VUELO` por factura (invariante 84). */
+  detalle: Map<string, AlertaFacturaDetalle[]>;
 }
 
 /**
+ * Tolerancia de `SUMA_SUPERA` (invariante 84): `max(1.00, 1 % de la
+ * referencia)` — facturas en pesos de un vuelo en dólares se emiten a T.C.
+ * del día. Ajustable sin migración.
+ */
+export function toleranciaSumaFacturas(referencia: number): number {
+  return Math.max(1, redondear2(referencia * 0.01));
+}
+
+/** Rótulo del chip/Excel de `DUPLICADO_VUELO` (16-oct-2026): dos facturas que cuadran ya no son alerta. */
+export const ROTULO_ALERTA_DUPLICADO_VUELO = 'Facturas que no cuadran';
+
+/**
  * Alertas por factura (solo VIGENTES; una CANCELADA no lleva alertas):
- *  - `DUPLICADO_VUELO`: alguno de sus vuelos tiene ≥ 2 VIGENTES y al menos
- *    una NO es parcial (anticipo + finiquito marcados es correcto);
+ *  - `DUPLICADO_VUELO` (regla del 16-oct-2026, invariante 84; `es_parcial`
+ *    ya NO interviene): alguno de sus vuelos V tiene ≥ 2 VIGENTES **y**
+ *    (a) `SUMA_SUPERA`: para alguna moneda M, Σ `total` de las vigentes de
+ *    V en M que cubren EXACTAMENTE un vuelo rebasa `max(cotizado de V en M,
+ *    Σ cobros de V en M)` + `toleranciaSumaFacturas` (sin referencia > 0
+ *    no se evalúa esa moneda; el cotizado sale del `ctx` o del `vuelo` de
+ *    la liga), **o** (b) `SIN_COBRO_ASIGNADO` (solo con
+ *    `ctx.cobrosDeFactura`): alguna vigente de V ampara 0 cobros DE V
+ *    mientras otra ampara ≥ 1 de V (por vuelo). El detalle (motivo y texto
+ *    es-MX) viaja en `detalle` para TODAS las vigentes de V;
  *  - `SIN_PDF`, `SIN_VUELO`;
  *  - `VUELO_CANCELADO`: alguno de sus vuelos está CANCELADO.
  */
 export function calcularAlertas(
   facturas: ReadonlyArray<FacturaParaAlertas>,
-  ligas: ReadonlyArray<{
-    factura_id: string;
-    vuelo_id: string;
-    vuelo?: { estado?: string | null } | null;
-  }>,
+  ligas: ReadonlyArray<LigaParaAlertas>,
+  ctx?: ContextoAlertas,
 ): AlertasCalculadas {
   const porId = new Map(facturas.map((f) => [f.id, f]));
   const vuelosDeFactura = new Map<string, string[]>();
   const estadoVuelo = new Map<string, string>();
+  const vueloDeLiga = new Map<string, NonNullable<LigaParaAlertas['vuelo']>>();
   const vigentesPorVuelo = new Map<string, string[]>();
   for (const l of ligas) {
     const f = porId.get(l.factura_id);
@@ -372,6 +435,7 @@ export function calcularAlertas(
       vuelosDeFactura.set(l.factura_id, []).get(l.factura_id)!
     ).push(l.vuelo_id);
     if (l.vuelo?.estado) estadoVuelo.set(l.vuelo_id, l.vuelo.estado);
+    if (l.vuelo) vueloDeLiga.set(l.vuelo_id, l.vuelo);
     if (f.estatus === 'VIGENTE') {
       (
         vigentesPorVuelo.get(l.vuelo_id) ??
@@ -379,14 +443,75 @@ export function calcularAlertas(
       ).push(f.id);
     }
   }
+  const etiquetaDe = (id: string): string => {
+    const f = porId.get(id);
+    return (
+      etiquetaSerieFolio(f?.serie ?? null, f?.folio ?? null) ?? 'una de ellas'
+    );
+  };
   const vuelosDuplicados = new Set<string>();
+  const detallePorVuelo = new Map<string, AlertaFacturaDetalle[]>();
   for (const [vid, ids] of vigentesPorVuelo) {
     if (ids.length < 2) continue;
-    if (ids.some((id) => porId.get(id)?.es_parcial !== true)) {
+    const motivos: AlertaFacturaDetalle[] = [];
+    const deCtx = ctx?.vuelos.get(vid);
+    const deLiga = vueloDeLiga.get(vid);
+    const folio = numeroONull(deCtx?.folio) ?? numeroONull(deLiga?.folio) ?? 0;
+    const cotizado = deLiga ? totalVueloDe(deLiga) : null;
+    for (const moneda of ['USD', 'MXN'] as const) {
+      const suma = redondear2(
+        ids
+          .filter(
+            (id) =>
+              (porId.get(id)?.moneda ?? 'MXN') === moneda &&
+              (vuelosDeFactura.get(id)?.length ?? 0) === 1,
+          )
+          .reduce(
+            (acc, id) => acc + (numeroONull(porId.get(id)?.total) ?? 0),
+            0,
+          ),
+      );
+      if (!(suma > 0)) continue;
+      const cot =
+        moneda === 'USD'
+          ? (deCtx?.usd ?? cotizado?.usd ?? null)
+          : (deCtx?.mxn ?? cotizado?.mxn ?? null);
+      const cobrado = deCtx?.cobrado[moneda] ?? 0;
+      const referencia = Math.max(cot ?? 0, cobrado);
+      if (!(referencia > 0)) continue;
+      if (suma > referencia + toleranciaSumaFacturas(referencia)) {
+        const verbo = cobrado >= (cot ?? 0) ? 'cobró' : 'cotizó';
+        motivos.push({
+          code: 'DUPLICADO_VUELO',
+          motivo: 'SUMA_SUPERA',
+          vuelo_folio: folio,
+          mensaje: `El vuelo #${folio} tiene ${ids.length} facturas vigentes que suman ${fmtDineroTexto(suma, moneda)} y el vuelo ${verbo} ${fmtDineroTexto(referencia, moneda)}.`,
+        });
+      }
+    }
+    if (ctx?.cobrosDeFactura) {
+      const n = (id: string) =>
+        (ctx.cobrosDeFactura!.get(id) ?? []).filter((c) => c.vuelo_id === vid)
+          .length;
+      const sinCobro = ids.filter((id) => n(id) === 0);
+      if (sinCobro.length > 0 && sinCobro.length < ids.length) {
+        for (const id of sinCobro) {
+          motivos.push({
+            code: 'DUPLICADO_VUELO',
+            motivo: 'SIN_COBRO_ASIGNADO',
+            vuelo_folio: folio,
+            mensaje: `El vuelo #${folio} tiene ${ids.length} facturas vigentes y ${etiquetaDe(id)} no ampara ningún cobro: asígnale los suyos o cancélala si es una re-emisión.`,
+          });
+        }
+      }
+    }
+    if (motivos.length > 0) {
       vuelosDuplicados.add(vid);
+      detallePorVuelo.set(vid, motivos);
     }
   }
   const porFactura = new Map<string, AlertaFactura[]>();
+  const detalle = new Map<string, AlertaFacturaDetalle[]>();
   for (const f of facturas) {
     if (f.estatus !== 'VIGENTE') {
       porFactura.set(f.id, []);
@@ -396,6 +521,10 @@ export function calcularAlertas(
     const alertas: AlertaFactura[] = [];
     if (vuelos.some((v) => vuelosDuplicados.has(v))) {
       alertas.push('DUPLICADO_VUELO');
+      detalle.set(
+        f.id,
+        vuelos.flatMap((v) => detallePorVuelo.get(v) ?? []),
+      );
     }
     if (!f.pdf_path) alertas.push('SIN_PDF');
     if (vuelos.length === 0) alertas.push('SIN_VUELO');
@@ -404,7 +533,7 @@ export function calcularAlertas(
     }
     porFactura.set(f.id, alertas);
   }
-  return { porFactura, vuelosDuplicados, vigentesPorVuelo };
+  return { porFactura, vuelosDuplicados, vigentesPorVuelo, detalle };
 }
 
 // ============================ HUECOS ============================
@@ -813,6 +942,206 @@ export function avisoTotalDistintoVuelo(p: {
       total_factura: p.total,
       total_vuelo: delVuelo,
       moneda,
+    },
+  };
+}
+
+// ================= FACTURAS POR COBRO (16-oct-2026, invariante 84) =================
+
+/** Cobro tal como lo lee el service para ligarlo a una factura. */
+export interface CobroRowParaFactura {
+  id: string;
+  vuelo_id: string;
+  monto: unknown;
+  moneda?: string | null;
+  cobro_grupo_id?: unknown;
+  factura_emitida_id?: unknown;
+}
+
+export type FalloCobrosFactura =
+  | { codigo: 'COBROS_NO_EXISTEN'; cobro_ids: string[] }
+  | { codigo: 'COBROS_DE_OTRO_VUELO'; cobro: CobroRowParaFactura }
+  | { codigo: 'REEMBOLSO_SIN_FACTURA'; cobro: CobroRowParaFactura }
+  | { codigo: 'COBRO_DE_GRUPO'; cobro: CobroRowParaFactura }
+  | {
+      codigo: 'COBRO_CON_OTRA_FACTURA';
+      cobro: CobroRowParaFactura;
+      factura_id: string;
+    };
+
+/**
+ * `cobro_ids` de registrar/editar una factura — regla PURA (§3.3 del
+ * contrato), en este orden: ids que no existen; cobro de un vuelo que NO es
+ * de la factura (sin excepción de grupo); reembolso; parte de sobre; ya
+ * amparado por OTRA factura (`facturaId` = la propia al editar; null al
+ * crear). `null` = todo bien.
+ */
+export function validarCobrosParaFactura(p: {
+  ids: ReadonlyArray<string>;
+  cobros: ReadonlyArray<CobroRowParaFactura>;
+  vueloIds: ReadonlyArray<string>;
+  facturaId: string | null;
+}): FalloCobrosFactura | null {
+  const porId = new Map(p.cobros.map((c) => [c.id, c]));
+  const faltan = p.ids.filter((id) => !porId.has(id));
+  if (faltan.length > 0)
+    return { codigo: 'COBROS_NO_EXISTEN', cobro_ids: faltan };
+  const vuelos = new Set(p.vueloIds);
+  for (const id of p.ids) {
+    const c = porId.get(id)!;
+    if (!vuelos.has(c.vuelo_id))
+      return { codigo: 'COBROS_DE_OTRO_VUELO', cobro: c };
+    const monto = Number(c.monto);
+    if (!Number.isFinite(monto) || monto <= 0) {
+      return { codigo: 'REEMBOLSO_SIN_FACTURA', cobro: c };
+    }
+    if (typeof c.cobro_grupo_id === 'string' && c.cobro_grupo_id) {
+      return { codigo: 'COBRO_DE_GRUPO', cobro: c };
+    }
+    const otra = c.factura_emitida_id;
+    if (typeof otra === 'string' && otra && otra !== p.facturaId) {
+      return { codigo: 'COBRO_CON_OTRA_FACTURA', cobro: c, factura_id: otra };
+    }
+  }
+  return null;
+}
+
+/** Σ por moneda (centavos) de cobros, en orden USD, MXN; solo las que suman. */
+export function montosPorMoneda(
+  cobros: ReadonlyArray<{ monto: unknown; moneda?: string | null }>,
+): { moneda: MonedaFactura; monto: number }[] {
+  const suma = { USD: 0, MXN: 0 };
+  for (const c of cobros) {
+    const m = Number(c.monto);
+    if (!Number.isFinite(m)) continue;
+    suma[c.moneda === 'USD' ? 'USD' : 'MXN'] += m;
+  }
+  return (['USD', 'MXN'] as const)
+    .filter((m) => suma[m] !== 0)
+    .map((m) => ({ moneda: m, monto: redondear2(suma[m]) }));
+}
+
+function textoMontos(
+  montos: ReadonlyArray<{ moneda: MonedaFactura; monto: number }>,
+): string {
+  return montos.map((m) => fmtDineroTexto(m.monto, m.moneda)).join(' y ');
+}
+
+/**
+ * `TOTAL_DISTINTO_COBROS` (NO bloquea; sustituye a `TOTAL_DISTINTO_VUELO`
+ * cuando la factura amparó cobros): misma moneda, |total − Σ amparados| >
+ * 1.00. Si algún cobro amparado es de OTRA moneda no se compara.
+ */
+export function avisoTotalDistintoCobros(p: {
+  etiqueta: string;
+  moneda: string;
+  total: number;
+  cobros: ReadonlyArray<{ id: string; monto: unknown; moneda?: string | null }>;
+}): AvisoFactura | null {
+  if (p.cobros.length === 0) return null;
+  const moneda = p.moneda === 'USD' ? 'USD' : 'MXN';
+  if (p.cobros.some((c) => (c.moneda === 'USD' ? 'USD' : 'MXN') !== moneda)) {
+    return null;
+  }
+  const suma = redondear2(
+    p.cobros.reduce((acc, c) => acc + (Number(c.monto) || 0), 0),
+  );
+  if (Math.abs(redondear2(p.total - suma)) <= 1) return null;
+  const n = p.cobros.length;
+  return {
+    code: 'TOTAL_DISTINTO_COBROS',
+    mensaje: `La factura ${p.etiqueta} suma ${fmtDineroTexto(p.total, moneda)} y los cobros que marcaste suman ${fmtDineroTexto(suma, moneda)} (${n} cobro${n === 1 ? '' : 's'}). Revisa el total o las casillas.`,
+    details: {
+      total_factura: p.total,
+      total_cobros: suma,
+      cobro_ids: p.cobros.map((c) => c.id),
+    },
+  };
+}
+
+/** Vuelo con cobros (positivos, sin sobre) que ninguna factura ampara. */
+export interface VueloConCobrosSinFactura {
+  vuelo_id: string;
+  folio: number;
+  cobros: ReadonlyArray<{ id: string; monto: unknown; moneda?: string | null }>;
+}
+
+/** Vuelos listados en el texto de `COBROS_SIN_FACTURA`; el resto, «y N vuelos más». */
+export const MAX_VUELOS_AVISO_SIN_FACTURA = 5;
+
+/**
+ * `COBROS_SIN_FACTURA`: UN solo aviso agregado (una factura global de 12
+ * vuelos no da 12 toasts), vuelos en orden de folio. `null` si ninguno
+ * tiene cobros sin factura. `remate` se agrega al final (reactivar).
+ */
+export function avisoCobrosSinFactura(
+  vuelos: ReadonlyArray<VueloConCobrosSinFactura>,
+  remate?: string,
+): AvisoFactura | null {
+  const con = vuelos
+    .filter((v) => v.cobros.length > 0)
+    .sort((a, b) => a.folio - b.folio);
+  if (con.length === 0) return null;
+  const partes = con.slice(0, MAX_VUELOS_AVISO_SIN_FACTURA).map((v) => {
+    const n = v.cobros.length;
+    return `#${v.folio} (${n} cobro${n === 1 ? '' : 's'} · ${textoMontos(montosPorMoneda(v.cobros))})`;
+  });
+  const resto = con.length - partes.length;
+  const lista =
+    partes.join(', ') +
+    (resto > 0 ? ` y ${resto} vuelo${resto === 1 ? '' : 's'} más` : '');
+  return {
+    code: 'COBROS_SIN_FACTURA',
+    mensaje: `Quedan cobros sin factura asignada: ${lista}.${remate ? ` ${remate}` : ''}`,
+    details: {
+      vuelos: con.map((v) => ({
+        vuelo_id: v.vuelo_id,
+        folio: v.folio,
+        cobro_ids: v.cobros.map((c) => c.id),
+        montos: montosPorMoneda(v.cobros),
+      })),
+    },
+  };
+}
+
+/**
+ * `COBROS_DESLIGADOS` al cancelar/dar de baja («La factura A-0420 amparaba
+ * 3 cobros (#332, #364); quedaron sin factura asignada.») o al quitar un
+ * vuelo («Al quitar el vuelo #332, 3 cobros quedaron sin factura
+ * asignada.»). `null` si n = 0.
+ */
+export function avisoCobrosDesligados(
+  p:
+    | {
+        por: 'FACTURA';
+        etiqueta: string;
+        cobros: ReadonlyArray<{ id: string; vuelo_id: string }>;
+        folios: ReadonlyArray<number>;
+      }
+    | {
+        por: 'VUELO';
+        vuelo_id: string;
+        folio: number;
+        cobros: ReadonlyArray<{ id: string }>;
+      },
+): AvisoFactura | null {
+  const n = p.cobros.length;
+  if (n === 0) return null;
+  const cobro = `${n} cobro${n === 1 ? '' : 's'}`;
+  if (p.por === 'VUELO') {
+    return {
+      code: 'COBROS_DESLIGADOS',
+      mensaje: `Al quitar el vuelo #${p.folio}, ${cobro} ${n === 1 ? 'quedó' : 'quedaron'} sin factura asignada.`,
+      details: { vuelo_id: p.vuelo_id, cobro_ids: p.cobros.map((c) => c.id) },
+    };
+  }
+  const folios = [...new Set(p.folios)].sort((a, b) => a - b);
+  return {
+    code: 'COBROS_DESLIGADOS',
+    mensaje: `La factura ${p.etiqueta} amparaba ${cobro} (${listaFolios(folios)}); ${n === 1 ? 'quedó' : 'quedaron'} sin factura asignada.`,
+    details: {
+      cobro_ids: p.cobros.map((c) => c.id),
+      vuelo_ids: [...new Set(p.cobros.map((c) => c.vuelo_id))],
     },
   };
 }

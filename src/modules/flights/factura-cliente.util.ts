@@ -470,6 +470,8 @@ export function extraerCfdiCompleto(xml: string | Buffer): CfdiCompleto | null {
 
 /** Fila de `factura_emitida` (vía el puente) que alimenta la cascada del Excel. */
 export interface FacturaEmitidaEtiquetaRow {
+  /** id de la factura (16-oct-2026, invariante 84: facturas por cobro). */
+  id?: unknown;
   serie?: unknown;
   folio?: unknown;
   folio_num?: unknown;

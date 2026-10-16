@@ -29,6 +29,11 @@ interface Opciones {
   migracion?: boolean;
   /** Falla la operación `op` sobre `tabla` (una vez). */
   fallar?: Array<{ tabla: string; op: 'insert' | 'update' | 'delete' }>;
+  /**
+   * false = SIN la migración 20261016000001 (facturas por cobro): nombrar
+   * `cobro_vuelo.factura_emitida_id` responde 42703 (la sonda se apaga).
+   */
+  cobroFactura?: boolean;
 }
 
 /** Texto comparable de un valor desconocido de la BD en memoria. */
@@ -121,6 +126,33 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
     let rango: [number, number] | null = null;
     let limite: number | null = null;
     let inner = false;
+    /** La consulta nombra `cobro_vuelo.factura_emitida_id` (sonda apagada ⇒ 42703). */
+    let nombraFactura = false;
+    const marcar = (col: string) => {
+      if (t === 'cobro_vuelo' && col.includes('factura_emitida_id')) {
+        nombraFactura = true;
+      }
+    };
+
+    /** Trigger A de 20261016000001 (espejo mínimo): la factura VIGENTE ligada al vuelo. */
+    const triggerA = (fila: Fila, facturaId: unknown) => {
+      if (typeof facturaId !== 'string' || !facturaId) return null;
+      if (Number(fila.monto) <= 0) return 'REEMBOLSO_SIN_FACTURA';
+      if (fila.cobro_grupo_id) return 'COBRO_DE_GRUPO';
+      const f = tabla('factura_emitida').find((x) => x.id === facturaId);
+      if (!f || f.deleted_at || f.estatus !== 'VIGENTE')
+        return 'FACTURA_NO_VIGENTE';
+      const liga = tabla('factura_emitida_vuelo').find(
+        (l) => l.factura_id === facturaId && l.vuelo_id === fila.vuelo_id,
+      );
+      return liga ? null : 'FACTURA_NO_LIGADA_AL_VUELO';
+    };
+    /** Trigger B (cancelar / baja) y FK ON DELETE SET NULL. */
+    const soltarCobros = (facturaId: unknown) => {
+      for (const c of tabla('cobro_vuelo')) {
+        if (c.factura_emitida_id === facturaId) c.factura_emitida_id = null;
+      }
+    };
 
     const ejecutar = (): { data: unknown; error: unknown; count?: number } => {
       if (
@@ -132,6 +164,15 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
           error: {
             code: '42703',
             message: 'column vuelo.factura_solicitada_at does not exist',
+          },
+        };
+      }
+      if (opts.cobroFactura === false && nombraFactura) {
+        return {
+          data: null,
+          error: {
+            code: '42703',
+            message: 'column cobro_vuelo.factura_emitida_id does not exist',
           },
         };
       }
@@ -199,7 +240,29 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
         filas = filas.filter((f) => f.factura != null);
       }
       if (op === 'update') {
-        for (const f of filas) Object.assign(f, payload as Fila);
+        const p = payload as Fila;
+        if (t === 'cobro_vuelo' && 'factura_emitida_id' in p) {
+          for (const f of filas) {
+            const codigo = triggerA(f, p.factura_emitida_id);
+            if (codigo) {
+              return {
+                data: null,
+                error: {
+                  code: '23514',
+                  message: `${codigo}: trigger A`,
+                  hint: codigo,
+                  details: JSON.stringify({ cobro_id: f.id }),
+                },
+              };
+            }
+          }
+        }
+        for (const f of filas) Object.assign(f, p);
+        if (t === 'factura_emitida') {
+          for (const f of filas) {
+            if (p.estatus === 'CANCELADA' || p.deleted_at) soltarCobros(f.id);
+          }
+        }
         return {
           data: devolver ? filas.map((f) => ({ ...f })) : null,
           error: null,
@@ -208,6 +271,14 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
       if (op === 'delete') {
         const quitar = new Set(filas);
         tablas[t] = tabla(t).filter((f) => !quitar.has(f));
+        if (t === 'factura_emitida') {
+          // FK: ON DELETE SET NULL en cobro_vuelo, CASCADE en el puente.
+          for (const f of filas) soltarCobros(f.id);
+          const ids = new Set(filas.map((f) => f.id));
+          tablas.factura_emitida_vuelo = tabla('factura_emitida_vuelo').filter(
+            (l) => !ids.has(l.factura_id),
+          );
+        }
         return { data: null, error: null };
       }
       if (rango) filas = filas.slice(rango[0], rango[1] + 1);
@@ -224,6 +295,7 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
       if (op === 'select') select = s ?? '*';
       else devolver = true;
       if (s?.includes('!inner')) inner = true;
+      marcar(s ?? '');
       return q;
     };
     q.insert = (p: unknown) => {
@@ -234,6 +306,7 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
     q.update = (p: unknown) => {
       op = 'update';
       payload = p;
+      marcar(Object.keys((p as Fila) ?? {}).join(','));
       return q;
     };
     q.delete = () => {
@@ -241,9 +314,10 @@ function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
       return q;
     };
     q.eq = (c: string, v: unknown) =>
-      encadenar(() =>
-        filtros.push((f) => String(valorDe(f, c)) === String(v)),
-      )();
+      encadenar(() => {
+        marcar(c);
+        filtros.push((f) => String(valorDe(f, c)) === String(v));
+      })();
     q.neq = (c: string, v: unknown) =>
       encadenar(() => filtros.push((f) => valorDe(f, c) !== v))();
     q.is = (c: string, v: unknown) =>
@@ -836,7 +910,8 @@ describe('FacturasEmitidasService — alta', () => {
     expect(
       r.avisos.find((a) => a.code === 'VUELO_CON_OTRA_FACTURA')?.mensaje,
     ).toBe(
-      'El vuelo #341 ya tiene la factura A-120 vigente. Si es anticipo y finiquito está bien; si es una re-emisión, cancela la anterior.',
+      // Texto del 16-oct-2026 (facturas por cobro, invariante 84).
+      'El vuelo #341 ya tiene la factura A-120 vigente. Si esta cubre otros cobros del mismo vuelo, asígnaselos en «¿Qué cobros cubre?»; si es una re-emisión, cancela la anterior.',
     );
     expect(r.factura.alertas).toContain('DUPLICADO_VUELO');
   });
@@ -1714,6 +1789,395 @@ describe('FacturasEmitidasService — solicitud automática que ya no aplica (14
     expect(ids.map((v) => [v.folio, v.solicitud])).toEqual([
       [341, false],
       [342, true],
+    ]);
+  });
+});
+
+describe('FacturasEmitidasService — cobro_ids (facturas por cobro, 16-oct-2026, invariante 84)', () => {
+  const F0420 = 'f-0420';
+  // Los ids de cobro viajan como UUID (el DTO los valida).
+  const C = (n: string) => `cccccccc-0000-4000-8000-0000000000${n}`;
+  const c1 = C('c1');
+  const c2 = C('c2');
+  const c3 = C('c3');
+  const c4 = C('c4');
+  const c5 = C('c5');
+  const cobroFila = (
+    id: string,
+    vuelo_id: string,
+    monto: number,
+    extra: Fila = {},
+  ): Fila => ({
+    id,
+    vuelo_id,
+    monto: String(monto),
+    moneda: 'MXN',
+    metodo_cobro: 'TRANSFERENCIA',
+    cuenta_destino: 'Scotiabank Pesos',
+    fecha_cobro: '2026-09-21T17:00:00Z',
+    cobro_grupo_id: null,
+    factura_emitida_id: null,
+    tc_usd_mxn: '17.4',
+    ...extra,
+  });
+  /** #341 como el #332 de prod: 4 cobros MXN y A-0420 (68,208) que ampara el de 68,208. */
+  const mundo332 = (extra: Record<string, Fila[]> = {}) =>
+    base({
+      factura_emitida: [
+        facturaFila(F0420, 'A', '0420', {
+          moneda: 'MXN',
+          total: '68208.00',
+          subtotal: null,
+          iva: null,
+        }),
+      ],
+      factura_emitida_vuelo: [{ factura_id: F0420, vuelo_id: V1 }],
+      cobro_vuelo: [
+        cobroFila(c1, V1, 68208, { factura_emitida_id: F0420 }),
+        cobroFila(c2, V1, 977.45, { fecha_cobro: '2026-09-15T17:00:00Z' }),
+        cobroFila(c3, V1, 1700),
+        cobroFila(c4, V1, 1700, { fecha_cobro: '2026-09-21T18:00:00Z' }),
+        cobroFila(c5, V2, 5000),
+      ],
+      ...extra,
+    });
+  const segunda = (d: Record<string, unknown> = {}) =>
+    datos({
+      folio: '0455',
+      moneda: 'MXN',
+      total: 4377.45,
+      vuelo_ids: [V1],
+      emisora_id: EM1,
+      ...d,
+    });
+  const codes = (avisos: Array<{ code: string }>) => avisos.map((a) => a.code);
+  const facturaDe = (db: ReturnType<typeof fakeDb>, id: string) =>
+    db.tablas.cobro_vuelo.find((c) => c.id === id)?.factura_emitida_id;
+
+  it('crear con casillas: UN UPDATE liga los 3 cobros, la respuesta trae cobros[] y cobros_n, y NO avisa VUELO_CON_OTRA_FACTURA ni TOTAL_DISTINTO_*', async () => {
+    const { svc, db } = armar(mundo332());
+    const r = await svc.crear(
+      segunda({ cobro_ids: [c2, c3, c4] }),
+      { pdf: [PDF()] },
+      actor,
+    );
+    const id = r.factura.id;
+    expect([c2, c3, c4].map((c) => facturaDe(db, c))).toEqual([id, id, id]);
+    expect(facturaDe(db, c1)).toBe(F0420);
+    expect(
+      r.factura.cobros.map((c) => [c.id, c.vuelo_folio, c.monto, c.moneda]),
+    ).toEqual([
+      [c2, 341, 977.45, 'MXN'],
+      [c3, 341, 1700, 'MXN'],
+      [c4, 341, 1700, 'MXN'],
+    ]);
+    expect(r.factura.vuelos[0]).toMatchObject({
+      cobros_n: 3,
+      cobros_sin_factura: 0,
+    });
+    expect(r.factura.alertas).toEqual([]);
+    expect(r.factura.alertas_detalle).toEqual([]);
+    expect(codes(r.avisos)).toEqual(
+      expect.not.arrayContaining([
+        'VUELO_CON_OTRA_FACTURA',
+        'TOTAL_DISTINTO_VUELO',
+        'TOTAL_DISTINTO_COBROS',
+        'COBROS_SIN_FACTURA',
+      ]),
+    );
+    // Con un total que no cuadra con lo marcado: TOTAL_DISTINTO_COBROS (no el del vuelo).
+    const otra = armar(mundo332());
+    const t = await otra.svc.crear(
+      segunda({ folio: '0456', total: 4500, cobro_ids: [c2, c3, c4] }),
+      { pdf: [PDF()] },
+      actor,
+    );
+    expect(t.avisos).toContainEqual(
+      expect.objectContaining({
+        code: 'TOTAL_DISTINTO_COBROS',
+        mensaje:
+          'La factura A-0456 suma $4,500 MXN y los cobros que marcaste suman $4,377.45 MXN (3 cobros). Revisa el total o las casillas.',
+      }),
+    );
+    expect(codes(t.avisos)).not.toContain('TOTAL_DISTINTO_VUELO');
+  });
+
+  it('cobro_ids AUSENTE ⇒ ni UPDATE ni COBROS_SIN_FACTURA; VUELO_CON_OTRA_FACTURA con el texto nuevo y el registro marca SIN_COBRO_ASIGNADO', async () => {
+    const { svc, db } = armar(mundo332());
+    const r = await svc.crear(segunda(), { pdf: [PDF()] }, actor);
+    expect([c2, c3, c4].map((c) => facturaDe(db, c))).toEqual([
+      null,
+      null,
+      null,
+    ]);
+    expect(codes(r.avisos)).not.toContain('COBROS_SIN_FACTURA');
+    expect(r.avisos).toContainEqual(
+      expect.objectContaining({
+        code: 'VUELO_CON_OTRA_FACTURA',
+        mensaje:
+          'El vuelo #341 ya tiene la factura A-0420 vigente. Si esta cubre otros cobros del mismo vuelo, asígnaselos en «¿Qué cobros cubre?»; si es una re-emisión, cancela la anterior.',
+      }),
+    );
+    expect(r.factura.alertas).toContain('DUPLICADO_VUELO');
+    expect(r.factura.alertas_detalle).toEqual([
+      {
+        code: 'DUPLICADO_VUELO',
+        motivo: 'SIN_COBRO_ASIGNADO',
+        vuelo_folio: 341,
+        mensaje:
+          'El vuelo #341 tiene 2 facturas vigentes y A-0455 no ampara ningún cobro: asígnale los suyos o cancélala si es una re-emisión.',
+      },
+    ]);
+    expect(r.factura.vuelos[0]).toMatchObject({
+      cobros_n: 0,
+      cobros_sin_factura: 3,
+    });
+  });
+
+  it('cobro_ids `[]` ⇒ sin UPDATE y UN solo COBROS_SIN_FACTURA con los 12 vuelos adentro', async () => {
+    const vuelos = Array.from({ length: 12 }, (_, i) =>
+      vuelo(
+        `bbbbbbbb-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`,
+        400 + i,
+      ),
+    );
+    const { svc, db } = armar(
+      base({
+        vuelo: vuelos,
+        cobro_vuelo: vuelos.map((v, i) =>
+          cobroFila(`g${i}`, v.id as string, 1000),
+        ),
+      }),
+    );
+    const r = await svc.crear(
+      datos({
+        moneda: 'MXN',
+        total: 12000,
+        vuelo_ids: vuelos.map((v) => v.id),
+        cobro_ids: [],
+        emisora_id: EM1,
+      }),
+      { pdf: [PDF()] },
+      actor,
+    );
+    expect(
+      db.tablas.cobro_vuelo.every((c) => c.factura_emitida_id === null),
+    ).toBe(true);
+    const sin = r.avisos.filter((a) => a.code === 'COBROS_SIN_FACTURA');
+    expect(sin).toHaveLength(1);
+    expect(sin[0].mensaje).toBe(
+      'Quedan cobros sin factura asignada: #400 (1 cobro · $1,000 MXN), #401 (1 cobro · $1,000 MXN), #402 (1 cobro · $1,000 MXN), #403 (1 cobro · $1,000 MXN), #404 (1 cobro · $1,000 MXN) y 7 vuelos más.',
+    );
+    expect((sin[0].details as { vuelos: unknown[] }).vuelos).toHaveLength(12);
+  });
+
+  it('sin la sonda: cobro_ids no vacío ⇒ 503 ANTES de subir archivos; sin cobro_ids todo sigue igual (cobros [] y cobros_n 0)', async () => {
+    const { svc, db } = armar(mundo332(), { cobroFactura: false });
+    const r = await codigoDe(
+      svc.crear(segunda({ cobro_ids: [c2] }), { pdf: [PDF()] }, actor),
+    );
+    expect(r.status).toBe(503);
+    expect(r.code).toBe('COBRO_FACTURA_NO_DISPONIBLE');
+    expect(db.subidos).toEqual([]);
+    expect(db.tablas.factura_emitida).toHaveLength(1);
+    const ok = await svc.crear(segunda(), { pdf: [PDF()] }, actor);
+    expect(ok.factura.cobros).toEqual([]);
+    expect(ok.factura.vuelos[0]).toMatchObject({
+      cobros_n: 0,
+      cobros_sin_factura: 0,
+    });
+    expect(ok.factura.alertas).toEqual([]);
+    const cand = await svc.vuelosCandidatos({ ids: V1 });
+    expect('cobros' in cand[0]).toBe(false);
+  });
+
+  it('validación: ya amparado por OTRA ⇒ 409 COBRO_CON_OTRA_FACTURA; de otro vuelo ⇒ 400; inexistente ⇒ 400; nada se sube', async () => {
+    const { svc, db } = armar(mundo332());
+    const otra = await codigoDe(
+      svc.crear(segunda({ cobro_ids: [c1] }), { pdf: [PDF()] }, actor),
+    );
+    expect(otra.status).toBe(409);
+    expect(otra.code).toBe('COBRO_CON_OTRA_FACTURA');
+    expect(otra.body.message).toBe(
+      'El cobro de $68,208 MXN del vuelo #341 ya tiene la factura A-0420. Quítaselo desde esa factura (Editar → ¿Qué cobros cubre?) o cámbialo desde el cobro en el vuelo.',
+    );
+    expect(otra.body.details).toEqual({
+      cobro_id: c1,
+      factura: { id: F0420, etiqueta: 'A-0420' },
+    });
+    const ajeno = await codigoDe(
+      svc.crear(segunda({ cobro_ids: [c5] }), { pdf: [PDF()] }, actor),
+    );
+    expect(ajeno.code).toBe('COBROS_DE_OTRO_VUELO');
+    expect(ajeno.body.message).toBe(
+      'El cobro de $5,000 MXN del vuelo #342 no es de ninguno de los vuelos de esta factura. Agrega ese vuelo en «Vuelos» y vuelve a marcarlo.',
+    );
+    expect(
+      (
+        await codigoDe(
+          svc.crear(
+            segunda({
+              cobro_ids: [c2, '99999999-0000-4000-8000-000000000000'],
+            }),
+            { pdf: [PDF()] },
+            actor,
+          ),
+        )
+      ).code,
+    ).toBe('COBROS_NO_EXISTEN');
+    expect(db.subidos).toEqual([]);
+  });
+
+  it('editar REEMPLAZA el conjunto en orden (ligas de vuelos → salen → entran); un fallo de «entran» responde 409 «La factura se guardó, pero…»', async () => {
+    const { svc, db } = armar(mundo332());
+    const r = await svc.editar(
+      F0420,
+      JSON.stringify({ vuelo_ids: [V1, V2], cobro_ids: [c2, c5] }),
+      undefined,
+      actor,
+    );
+    expect([c1, c2, c5].map((c) => facturaDe(db, c))).toEqual([
+      null,
+      F0420,
+      F0420,
+    ]);
+    expect(
+      r.factura.vuelos.map((v) => [v.folio, v.cobros_n, v.cobros_sin_factura]),
+    ).toEqual([
+      [341, 1, 3],
+      [342, 1, 0],
+    ]);
+    expect(r.factura.cobros.map((c) => c.id)).toEqual([c2, c5]);
+    // Mismo conjunto reenviado: nada cambia y no hay TOTAL_DISTINTO_VUELO (amparó cobros).
+    const igual = await svc.editar(
+      F0420,
+      JSON.stringify({ cobro_ids: [c2, c5], notas: 'sin cambio' }),
+      undefined,
+      actor,
+    );
+    expect(codes(igual.avisos)).not.toContain('TOTAL_DISTINTO_VUELO');
+    expect(codes(igual.avisos)).toContain('TOTAL_DISTINTO_COBROS');
+    // Fallo del UPDATE de «entran»: la factura ya quedó guardada.
+    const falla = armar(mundo332(), {
+      fallar: [{ tabla: 'cobro_vuelo', op: 'update' }],
+    });
+    const e = await codigoDe(
+      falla.svc.editar(
+        F0420,
+        JSON.stringify({ cobro_ids: [c1, c2], notas: 'guardada' }),
+        undefined,
+        actor,
+      ),
+    );
+    expect(e.status).toBe(409);
+    expect(e.code).toBe('COBROS_NO_ASIGNADOS');
+    expect(String(e.body.message)).toMatch(
+      /^La factura se guardó, pero no se pudieron asignar los cobros: .* Vuelve a intentarlo desde Editar\.$/,
+    );
+    expect(falla.db.tablas.factura_emitida[0].notas).toBe('guardada');
+    // Una CANCELADA no recibe cobros.
+    const canc = armar(
+      mundo332({
+        factura_emitida: [
+          facturaFila(F0420, 'A', '0420', {
+            moneda: 'MXN',
+            total: '68208.00',
+            estatus: 'CANCELADA',
+            cancelada_at: '2026-10-01T10:00:00Z',
+            motivo_cancelacion: 'prueba',
+          }),
+        ],
+      }),
+    );
+    expect(
+      (
+        await codigoDe(
+          canc.svc.editar(
+            F0420,
+            JSON.stringify({ cobro_ids: [c2] }),
+            undefined,
+            actor,
+          ),
+        )
+      ).code,
+    ).toBe('FACTURA_NO_VIGENTE');
+  });
+
+  it('quitar un vuelo suelta sus cobros y avisa COBROS_DESLIGADOS; cancelar y eliminar avisan con n; reactivar NO re-liga y avisa COBROS_SIN_FACTURA con el remate', async () => {
+    const quita = armar(mundo332());
+    const r = await quita.svc.editar(
+      F0420,
+      JSON.stringify({ vuelo_ids: [V2] }),
+      undefined,
+      actor,
+    );
+    expect(facturaDe(quita.db, c1)).toBeNull();
+    expect(r.avisos[0]).toEqual({
+      code: 'COBROS_DESLIGADOS',
+      mensaje: 'Al quitar el vuelo #341, 1 cobro quedó sin factura asignada.',
+      details: { vuelo_id: V1, cobro_ids: [c1] },
+    });
+
+    const { svc, db } = armar(mundo332());
+    const c = await svc.cancelar(F0420, 'Re-emitida', actor);
+    expect(c.avisos).toContainEqual({
+      code: 'COBROS_DESLIGADOS',
+      mensaje:
+        'La factura A-0420 amparaba 1 cobro (#341); quedó sin factura asignada.',
+      details: { cobro_ids: [c1], vuelo_ids: [V1] },
+    });
+    expect(facturaDe(db, c1)).toBeNull();
+    const re = await svc.reactivar(F0420, actor);
+    expect(facturaDe(db, c1)).toBeNull();
+    expect(re.avisos).toEqual([
+      expect.objectContaining({
+        code: 'COBROS_SIN_FACTURA',
+        mensaje:
+          'Quedan cobros sin factura asignada: #341 (4 cobros · $72,585.45 MXN). Vuelve a asignarlos desde Editar → ¿Qué cobros cubre?',
+      }),
+    ]);
+
+    const baja = armar(mundo332());
+    const e = await baja.svc.eliminar(F0420, 'Capturada doble', actor);
+    expect(codes(e.avisos)).toContain('COBROS_DESLIGADOS');
+    expect(facturaDe(baja.db, c1)).toBeNull();
+  });
+
+  it('lista y detalle traen cobros[] y alertas_detalle[]; el Excel suma «Cobros que ampara»; los candidatos por ids traen `cobros` con su factura', async () => {
+    const { svc, generateTablaXlsx } = armar(mundo332());
+    const l = await svc.lista({ limit: 100, offset: 0 });
+    expect(l.data[0].cobros).toEqual([
+      {
+        id: c1,
+        vuelo_id: V1,
+        vuelo_folio: 341,
+        monto: 68208,
+        moneda: 'MXN',
+        fecha_cobro: '2026-09-21T17:00:00Z',
+        metodo_cobro: 'TRANSFERENCIA',
+        cuenta_destino: 'Scotiabank Pesos',
+      },
+    ]);
+    expect(l.data[0].alertas_detalle).toEqual([]);
+    expect(l.data[0].vuelos[0]).toMatchObject({
+      cobros_n: 1,
+      cobros_sin_factura: 3,
+    });
+    expect((await svc.obtener(F0420)).cobros.map((c) => c.id)).toEqual([c1]);
+    await svc.exportXlsx({});
+    const payload = (
+      generateTablaXlsx.mock.calls as unknown as Array<
+        [{ columnas: Array<{ label: string }>; filas: unknown[][] }]
+      >
+    )[0][0];
+    expect(payload.columnas.at(-1)?.label).toBe('Cobros que ampara');
+    expect(payload.filas[0].at(-1)).toBe('#341: $68,208 MXN (21 sep 2026)');
+    const cand = await svc.vuelosCandidatos({ ids: V1 });
+    expect(cand[0].cobros?.map((c) => [c.id, c.factura])).toEqual([
+      [c2, null],
+      [c1, { id: F0420, etiqueta: 'A-0420' }],
+      [c3, null],
+      [c4, null],
     ]);
   });
 });

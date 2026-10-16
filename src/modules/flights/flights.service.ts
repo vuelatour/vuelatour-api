@@ -172,6 +172,19 @@ import {
   type ParteCobroBanco,
 } from '../../common/cobro-banco.util';
 import { ingresosDisponibles } from '../../common/ingreso-disponible.util';
+import {
+  cobroFacturaDisponible,
+  colCobroFactura,
+  errorCobroFacturaNoDisponible,
+} from '../../common/cobro-factura-disponible.util';
+import {
+  errorCobroFactura,
+  etiquetaDeFactura,
+  leerErrorCobroFactura,
+  validarFacturaParaCobro,
+  type CobroParaLigar,
+  type FacturaParaLigar,
+} from './cobro-factura.util';
 import { etiquetaIngreso } from '../../common/categoria-ingreso.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import {
@@ -453,6 +466,22 @@ export const COBRO_COLS =
   'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at, cobro_grupo_id, grupo_factor';
 
 /**
+ * FÁBRICA de columnas de `cobro_vuelo` (16-oct-2026, invariante 84): las de
+ * siempre + `factura_emitida_id` SOLO con la sonda de 20261016000001
+ * (`cobroFacturaDisponible`). TODO select de este service sobre
+ * `cobro_vuelo` pasa por aquí (7 usos: la relectura del replay, el candado
+ * de saldo, `listCobros`, la relectura de `createCobro`, las dos de
+ * `createReembolso` y la de `updateCobro`): un select que no pase responde
+ * la fila sin la llave y el chip «Factura A-0420» desaparece tras guardar.
+ */
+export function cobroCols(disponible: boolean): string {
+  return `${COBRO_COLS}${colCobroFactura(disponible)}`;
+}
+
+/** Fila de `cobro_vuelo` tal como la devuelve un select con `cobroCols`. */
+type FilaCobro = Record<string, unknown>;
+
+/**
  * Opciones INTERNAS del SOBRE de grupo (4-sep-2026): la parte de un sobre se
  * escribe por el MISMO camino que el cobro/reembolso por vuelo (insert +
  * comisión + refreshCobradoFlag) con su liga `cobro_grupo_id`/`grupo_factor`;
@@ -494,6 +523,13 @@ export interface CobroConSobre extends CobroLike {
   conciliado: boolean;
   movimiento_bancario_id: string | null;
   registrado_por_nombre: string | null;
+  /**
+   * ADITIVO (16-oct-2026, API 0.0.82, invariante 84) — SOLO con la
+   * migración 20261016000001 (sonda `cobroFacturaDisponible`) y NO para
+   * roles de campo (como `abonos_banco`): la factura emitida que AMPARA
+   * este cobro, `null` = sin factura. Clasificación, no dinero.
+   */
+  factura_emitida?: { id: string; etiqueta: string } | null;
   /**
    * ADITIVOS (24-sep-2026, ingresos) — SOLO con la migración
    * 20260924000004 (sonda `ingresosDisponibles`); sin ella no viajan.
@@ -850,14 +886,15 @@ export class FlightsService {
     vueloId: string,
     key: string,
   ): Promise<Record<string, unknown> | null> {
+    const conFactura = await cobroFacturaDisponible(this.supabase.service);
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select(COBRO_COLS)
+      .select(cobroCols(conFactura))
       .eq('client_request_id', key)
       .eq('vuelo_id', vueloId)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return data ?? null;
+    return (data as unknown as FilaCobro | null) ?? null;
   }
 
   /**
@@ -979,10 +1016,13 @@ export class FlightsService {
     if (montoUsd == null || !Number.isFinite(montoUsd)) return;
     const { data: previos, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select(COBRO_COLS)
+      .select(cobroCols(await cobroFacturaDisponible(this.supabase.service)))
       .eq('vuelo_id', vueloId);
     if (error) throw new Error(error.message);
-    const conv = cobrosEnUsd(previos ?? [], Number(vuelo.tc_usd_mxn) || null);
+    const conv = cobrosEnUsd(
+      (previos ?? []) as unknown as CobroLike[],
+      Number(vuelo.tc_usd_mxn) || null,
+    );
     // Tolerancia: 1 USD o 5 % del precio, lo que sea mayor (redondeos de TC
     // de un cobro en pesos capturado en campo no son un doble cobro).
     const tolerancia = Math.max(1, total * 0.05);
@@ -12703,11 +12743,11 @@ export class FlightsService {
     await this.findById(vueloId);
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select(COBRO_COLS)
+      .select(cobroCols(await cobroFacturaDisponible(this.supabase.service)))
       .eq('vuelo_id', vueloId)
       .order('fecha_cobro', { ascending: false });
     if (error) throw new Error(error.message);
-    return this.adjuntarSobres(data ?? [], {
+    return this.adjuntarSobres((data ?? []) as unknown as FilaCobro[], {
       sinDetalleBanco: FlightsService.esRolDeCampo(current),
     });
   }
@@ -12753,32 +12793,68 @@ export class FlightsService {
     // pagado dentro de un lote también sale conciliado.
     // ANTICIPOS (24-sep-2026): solo con la migración de ingresos. Sin ella,
     // consultas y payload IDÉNTICOS a los de siempre (ni una consulta más).
-    const conIngresos = await ingresosDisponibles(this.supabase.service);
-    const [sobresRes, movsRes, nombres, anticiposRes] = await Promise.all([
-      ids.length > 0
-        ? this.supabase.service
-            .from('cobro_grupo')
-            .select(
-              'id, grupo_id, monto, moneda, grupo:vuelo_grupo!grupo_id(folio)',
-            )
-            .in('id', ids)
-        : Promise.resolve({ data: [], error: null }),
-      leerLigasDeCobros<MovimientoLiga & { ingreso_id?: unknown }>(
-        this.supabase.service,
-        {
-          cobroIds,
-          sobreIds: ids,
-          cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
-        },
-      ).then((data) => ({ data, error: null as { message: string } | null })),
-      // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
-      fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
-      conIngresos
-        ? this.anticiposDeCobros(cobroIds)
-        : Promise.resolve(new Map<string, string>()),
+    // FACTURA QUE AMPARA (16-oct-2026, invariante 84): solo con la sonda de
+    // 20261016000001 y nunca para roles de campo; cero consultas si ningún
+    // cobro trae `factura_emitida_id`.
+    const [conIngresos, conFactura] = await Promise.all([
+      ingresosDisponibles(this.supabase.service),
+      cobroFacturaDisponible(this.supabase.service),
     ]);
+    const conFacturaDetalle = conFactura && !opts.sinDetalleBanco;
+    const facturaIds = conFacturaDetalle
+      ? [
+          ...new Set(
+            cobros
+              .map((c) => c.factura_emitida_id)
+              .filter(
+                (x): x is string => typeof x === 'string' && x.length > 0,
+              ),
+          ),
+        ]
+      : [];
+    const [sobresRes, movsRes, nombres, anticiposRes, etiquetasFactura] =
+      await Promise.all([
+        ids.length > 0
+          ? this.supabase.service
+              .from('cobro_grupo')
+              .select(
+                'id, grupo_id, monto, moneda, grupo:vuelo_grupo!grupo_id(folio)',
+              )
+              .in('id', ids)
+          : Promise.resolve({ data: [], error: null }),
+        leerLigasDeCobros<MovimientoLiga & { ingreso_id?: unknown }>(
+          this.supabase.service,
+          {
+            cobroIds,
+            sobreIds: ids,
+            cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+          },
+        ).then((data) => ({ data, error: null as { message: string } | null })),
+        // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
+        fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
+        conIngresos
+          ? this.anticiposDeCobros(cobroIds)
+          : Promise.resolve(new Map<string, string>()),
+        facturaIds.length > 0
+          ? this.etiquetasDeFacturasEmitidas(facturaIds)
+          : Promise.resolve(new Map<string, string>()),
+      ]);
     if (sobresRes.error) throw new Error(sobresRes.error.message);
     if (movsRes.error) throw new Error(movsRes.error.message);
+    // `factura_emitida {id, etiqueta} | null` del cobro: si la factura no
+    // volvió, está borrada o no es VIGENTE (no debería tras el trigger B)
+    // ⇒ null. Sin la sonda o para roles de campo la llave NO viaja.
+    const facturaDeCobro = (
+      c: Record<string, unknown>,
+    ): { factura_emitida?: { id: string; etiqueta: string } | null } => {
+      if (!conFacturaDetalle) return {};
+      const id = c.factura_emitida_id;
+      const etiqueta =
+        typeof id === 'string' && id ? etiquetasFactura.get(id) : undefined;
+      return {
+        factura_emitida: etiqueta ? { id: id as string, etiqueta } : null,
+      };
+    };
     const movs = [...((movsRes.data ?? []) as MovimientoLiga[])];
     // Segunda ronda SOLO si hubo cobros de anticipo: el abono que concilia
     // su anticipo y el folio (ING-n) para el chip del panel.
@@ -12847,6 +12923,7 @@ export class FlightsService {
           conciliado: banco.conciliado,
           movimiento_bancario_id: banco.movimiento_bancario_id,
           ...banco.aditivos,
+          ...facturaDeCobro(c),
         };
       }
       // Con ingresos: fuente única `conciliacionDeCobro` (directo, sobre o
@@ -12877,8 +12954,40 @@ export class FlightsService {
           : null,
         conciliado_via: conc?.via ?? null,
         ...banco.aditivos,
+        ...facturaDeCobro(c),
       };
     });
+  }
+
+  /**
+   * `factura_id → etiqueta` («A-0420») de las facturas emitidas VIGENTES no
+   * borradas (invariante 84), lotes de ≤ 200 ids. Una cancelada o borrada
+   * no entra al mapa (el cobro sale con `factura_emitida: null`).
+   */
+  private async etiquetasDeFacturasEmitidas(
+    ids: string[],
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const filas = await this.leerPorLotes<Record<string, unknown>>(
+      ids,
+      (lote) =>
+        this.supabase.service
+          .from('factura_emitida')
+          .select('id, serie, folio, estatus, deleted_at')
+          .in('id', lote),
+    );
+    for (const f of filas) {
+      if (f.estatus !== 'VIGENTE' || f.deleted_at) continue;
+      out.set(
+        f.id as string,
+        etiquetaDeFactura({
+          id: f.id as string,
+          serie: (f.serie as string | null) ?? null,
+          folio: (f.folio as string | null) ?? null,
+        }),
+      );
+    }
+    return out;
   }
 
   /**
@@ -13062,6 +13171,65 @@ export class FlightsService {
    * invariante): 409 estructurado `COBRO_DE_GRUPO` para que el panel mande
    * a "Cobros del grupo".
    */
+  /** Folio del vuelo para un mensaje (null si no se pudo leer; nunca lanza). */
+  private async folioDeVuelo(vueloId: string): Promise<number | null> {
+    try {
+      const { data } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio')
+        .eq('id', vueloId)
+        .maybeSingle();
+      const folio = Number((data as { folio?: unknown } | null)?.folio);
+      return Number.isFinite(folio) && folio > 0 ? folio : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * FACTURAS POR COBRO (16-oct-2026, invariante 84): lee la factura
+   * (`id, serie, folio, estatus, deleted_at`) y su liga al vuelo del cobro
+   * (SOLO ese vuelo: sin hermanos de grupo) y corre la regla PURA
+   * `validarFacturaParaCobro` (espejo del trigger A). Lanza el 400/409 del
+   * contrato; devuelve la factura para los textos de la carrera.
+   */
+  private async validarFacturaDeCobro(
+    cobro: CobroParaLigar,
+    facturaId: string,
+  ): Promise<FacturaParaLigar> {
+    const [facturaRes, ligasRes] = await Promise.all([
+      this.supabase.service
+        .from('factura_emitida')
+        .select('id, serie, folio, estatus, deleted_at')
+        .eq('id', facturaId)
+        .maybeSingle(),
+      this.supabase.service
+        .from('factura_emitida_vuelo')
+        .select('factura_id, vuelo_id')
+        .eq('factura_id', facturaId)
+        .eq('vuelo_id', cobro.vuelo_id),
+    ]);
+    if (facturaRes.error) throw new Error(facturaRes.error.message);
+    if (ligasRes.error) throw new Error(ligasRes.error.message);
+    const factura = (facturaRes.data ?? null) as FacturaParaLigar | null;
+    const fallo = validarFacturaParaCobro(
+      cobro,
+      factura,
+      ligasRes.data ?? [],
+      facturaId,
+    );
+    if (fallo) {
+      throw errorCobroFactura(fallo, {
+        etiqueta: etiquetaDeFactura(factura),
+        folio:
+          fallo.codigo === 'FACTURA_NO_LIGADA_AL_VUELO'
+            ? await this.folioDeVuelo(cobro.vuelo_id)
+            : null,
+      });
+    }
+    return factura!;
+  }
+
   private async assertNoEsParteDeSobre(cobro: {
     cobro_grupo_id?: unknown;
   }): Promise<void> {
@@ -13121,6 +13289,9 @@ export class FlightsService {
     interna?: CobroAltaInternaOpts,
   ) {
     const vuelo = await this.findById(vueloId);
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84): la sonda decide las
+    // columnas de toda relectura de `cobro_vuelo` de este método.
+    const conFactura = await cobroFacturaDisponible(this.supabase.service);
     // REPLAY del outbox (10-sep-2026 · B3): la rama idempotente va ANTES de
     // todo candado (rol, método, voucher, saldo) — el cobro YA está
     // registrado y un rechazo aquí dejaría al piloto con un «fallido» falso
@@ -13139,6 +13310,15 @@ export class FlightsService {
         return { ...ya, idempotente: true as const };
       }
     }
+    // La factura que AMPARA el cobro (invariante 84; ADMIN/FACTURACION: el
+    // controller descarta el campo a los demás). Sin la migración ⇒ 503
+    // ANTES de escribir nada (y DESPUÉS del replay: un reintento devuelve el
+    // cobro que ya existe, no un 503). Una parte de sobre nunca la trae.
+    const facturaId =
+      typeof dto.factura_emitida_id === 'string' && dto.factura_emitida_id
+        ? dto.factura_emitida_id
+        : null;
+    if (facturaId && !conFactura) throw errorCobroFacturaNoDisponible();
     // REGLA (cliente, 28-ago-2026): un vuelo CANCELADO puede tener cobros
     // reales — cargo por cancelación o anticipo retenido que NO se reembolsa.
     // La oficina (ADMIN/COORDINADOR/FACTURACION) SÍ los registra aquí y ese
@@ -13267,8 +13447,21 @@ export class FlightsService {
         );
       }
     }
+    // Pre-validación PURA de la factura con la regla del trigger A de
+    // 20261016000001 (mismos códigos, mismo orden): 400/409 con texto es-MX
+    // antes del INSERT; la carrera la rebota el trigger y se traduce abajo.
+    const facturaLigada: FacturaParaLigar | null = facturaId
+      ? await this.validarFacturaDeCobro(
+          {
+            vuelo_id: vueloId,
+            monto: dto.monto,
+            cobro_grupo_id: sobre?.cobro_grupo_id ?? null,
+          },
+          facturaId,
+        )
+      : null;
 
-    const { data: cobro, error } = await this.supabase.service
+    const { data: cobroRaw, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
         vuelo_id: vueloId,
@@ -13298,9 +13491,13 @@ export class FlightsService {
         ...(anticipo
           ? { ingreso_anticipo_id: anticipo.ingreso_anticipo_id }
           : {}),
+        // Factura que AMPARA el cobro (invariante 84): la columna SOLO entra
+        // cuando viaja (sin ella, el insert de siempre).
+        ...(facturaId ? { factura_emitida_id: facturaId } : {}),
       })
-      .select(COBRO_COLS)
+      .select(cobroCols(conFactura))
       .maybeSingle();
+    const cobro = cobroRaw as unknown as FilaCobro | null;
     if (error) {
       // Reintento con la misma llave de idempotencia: el cobro YA existe —
       // se devuelve tal cual (mismo shape/status que un alta normal), sin
@@ -13323,6 +13520,16 @@ export class FlightsService {
         // La llave pertenece a un cobro de OTRO vuelo: ni la fila ajena ni
         // un 500 (el outbox lo reintentaría para siempre).
         throw clientRequestIdEnUso('cobro', dto.client_request_id);
+      }
+      // Carrera con el trigger A de 20261016000001 (la factura se canceló o
+      // perdió el vuelo entre la pre-validación y el INSERT): el MISMO
+      // 400/409, nunca 500. Nada quedó escrito.
+      const falloFactura = leerErrorCobroFactura(error);
+      if (falloFactura) {
+        throw errorCobroFactura(falloFactura, {
+          etiqueta: etiquetaDeFactura(facturaLigada),
+          folio: Number(vuelo.folio) || null,
+        });
       }
       throw new Error(error.message);
     }
@@ -13430,6 +13637,11 @@ export class FlightsService {
     sobre?: CobroParteDeSobreOpts,
   ) {
     const vuelo = await this.findById(vueloId);
+    // Un reembolso nunca lleva factura (invariante 84): la sonda solo decide
+    // las columnas de la relectura (la fila responde con la llave en null).
+    const conFacturaReembolso = await cobroFacturaDisponible(
+      this.supabase.service,
+    );
     // Un reembolso en MXN debe poder convertir a USD (TC del DTO o el de la
     // cotización): sin TC no se puede vigilar el candado del neto y la fila
     // caería a sin_tc_* en NEGATIVO (ruido para el supervisor).
@@ -13480,7 +13692,7 @@ export class FlightsService {
       }
     }
     const motivo = dto.motivo.trim();
-    const { data: cobro, error } = await this.supabase.service
+    const { data: cobroRaw, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
         vuelo_id: vueloId,
@@ -13500,8 +13712,9 @@ export class FlightsService {
         created_by: userId,
         updated_by: userId,
       })
-      .select(COBRO_COLS)
+      .select(cobroCols(conFacturaReembolso))
       .maybeSingle();
+    const cobro = cobroRaw as unknown as FilaCobro | null;
     if (error) {
       // Reintento con la misma llave: devolver el reembolso YA registrado.
       if (
@@ -13509,11 +13722,12 @@ export class FlightsService {
         dto.client_request_id &&
         error.message.includes('uq_cobro_vuelo_client_request')
       ) {
-        const { data: existente, error: exErr } = await this.supabase.service
+        const { data: existenteRaw, error: exErr } = await this.supabase.service
           .from('cobro_vuelo')
-          .select(COBRO_COLS)
+          .select(cobroCols(conFacturaReembolso))
           .eq('client_request_id', dto.client_request_id)
           .maybeSingle();
+        const existente = existenteRaw as unknown as FilaCobro | null;
         if (!exErr && existente) {
           this.logger.log(
             `Reembolso idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el existente ${existente.id as string}.`,
@@ -13801,6 +14015,14 @@ export class FlightsService {
     const existing = existenteRaw as unknown as Record<string, unknown>;
     // Parte de un SOBRE de grupo: se corrige desde el grupo (409 COBRO_DE_GRUPO).
     await this.assertNoEsParteDeSobre(existing);
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84): `undefined` = no
+    // tocar; `null` = soltar; uuid = ligar. NO cuenta como dinero
+    // (`cambiaDineroDelCobro` no mira el campo): un cobro conciliado y uno
+    // de anticipo SÍ cambian de factura. Sin la migración ⇒ 503 antes de
+    // escribir nada.
+    const conFactura = await cobroFacturaDisponible(this.supabase.service);
+    const tocaFactura = dto.factura_emitida_id !== undefined;
+    if (tocaFactura && !conFactura) throw errorCobroFacturaNoDisponible();
     // Cobro que SALIÓ DE UN ANTICIPO (24-sep-2026): su dinero (monto, moneda,
     // comisión y método) viene del anticipo — cambiarlo aquí descuadraría el
     // saldo del anticipo. Se compara el valor NUEVO contra el VIGENTE (patrón
@@ -13896,8 +14118,23 @@ export class FlightsService {
         'Este movimiento es un reembolso: no se corrige su dinero — elimínalo y recaptúralo con el monto correcto.',
       );
     }
+    // Pre-validación PURA de la factura (regla del trigger A, DESPUÉS de los
+    // candados de siempre): 400/409 con texto es-MX antes del UPDATE.
+    const facturaLigada: FacturaParaLigar | null =
+      typeof dto.factura_emitida_id === 'string' && dto.factura_emitida_id
+        ? await this.validarFacturaDeCobro(
+            {
+              id: cobroId,
+              vuelo_id: existing.vuelo_id as string,
+              monto: existing.monto,
+              cobro_grupo_id: existing.cobro_grupo_id,
+            },
+            dto.factura_emitida_id,
+          )
+        : null;
 
     const patch: Record<string, unknown> = { updated_by: userId };
+    if (tocaFactura) patch.factura_emitida_id = dto.factura_emitida_id ?? null;
     if (dto.monto !== undefined) patch.monto = dto.monto;
     if (dto.moneda !== undefined) patch.moneda = dto.moneda;
     if (dto.metodo_cobro !== undefined) patch.metodo_cobro = dto.metodo_cobro;
@@ -13946,12 +14183,13 @@ export class FlightsService {
       }
     }
 
-    const { data, error } = await this.supabase.service
+    const { data: dataRaw, error } = await this.supabase.service
       .from('cobro_vuelo')
       .update(patch)
       .eq('id', cobroId)
-      .select(COBRO_COLS)
+      .select(cobroCols(conFactura))
       .maybeSingle();
+    const data = dataRaw as unknown as FilaCobro | null;
     if (error) {
       // Carrera con una liga nueva (trigger E de 20261014000003): el MISMO
       // 409 del candado, nunca 500.
@@ -13963,6 +14201,16 @@ export class FlightsService {
           { ...existing, id: cobroId },
           error,
         );
+      }
+      // Carrera con el trigger A de 20261016000001 (la factura se canceló o
+      // perdió el vuelo entre la pre-validación y el UPDATE): el MISMO
+      // 400/409 de la pre-validación, nunca 500.
+      const falloFactura = leerErrorCobroFactura(error);
+      if (falloFactura) {
+        throw errorCobroFactura(falloFactura, {
+          etiqueta: etiquetaDeFactura(facturaLigada),
+          folio: await this.folioDeVuelo(existing.vuelo_id as string),
+        });
       }
       throw new Error(error.message);
     }

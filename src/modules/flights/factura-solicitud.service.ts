@@ -13,6 +13,7 @@ import {
 } from '../../common/factura-emitida-disponible.util';
 import { fetchNombresUsuarios } from '../../common/registrado-por.util';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
+import { cobroFacturaDisponible } from '../../common/cobro-factura-disponible.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   cobroExigeFactura,
@@ -165,6 +166,9 @@ function BLOQUE_VACIO(): FacturaServicioBloque {
     exigencia: null,
     origenes_exigen: [],
     solicitud_ya_no_aplica: false,
+    cobros_sin_factura: 0,
+    cobros_sin_factura_exigen: 0,
+    asignacion_disponible: false,
   };
 }
 
@@ -296,17 +300,24 @@ export class FacturaSolicitudService {
     const out = new Map<string, FacturaServicioBloque>();
     const limpios = [...new Set(ids.filter(Boolean))];
     if (limpios.length === 0 || !(await this.disponible())) return out;
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84): el MISMO lector trae
+    // los cobros del vuelo (`conCobros`) con su `factura_emitida_id` cuando
+    // la sonda de 20261016000001 está; de ahí salen `cobros_n` /
+    // `cobros_monto` de cada mini y `cobros_sin_factura*` del bloque.
     const facturasP: Promise<Map<string, FacturaDeVuelo> | null> =
-      facturasDeVuelos(this.supabase.service, limpios).catch((e: unknown) => {
+      facturasDeVuelos(this.supabase.service, limpios, {
+        conCobros: true,
+      }).catch((e: unknown) => {
         this.logger.warn(
           `factura_servicio sin exigencia de ${limpios.length} vuelo(s) (el bloque sale igual): ${e instanceof Error ? e.message : String(e)}`,
         );
         return null;
       });
     try {
-      const [filas, ligadas] = await Promise.all([
+      const [filas, ligadas, asignacion] = await Promise.all([
         this.filasSolicitud(limpios),
         this.ligadasDeVuelos(limpios),
+        cobroFacturaDisponible(this.supabase.service),
       ]);
       const [nombres, facturas] = await Promise.all([
         fetchNombresUsuarios(
@@ -326,6 +337,7 @@ export class FacturaSolicitudService {
             ligadas.get(id) ?? [],
             quien ? (nombres.get(quien) ?? null) : null,
             facturas?.get(id) ?? null,
+            asignacion && facturas != null,
           ),
         );
       }

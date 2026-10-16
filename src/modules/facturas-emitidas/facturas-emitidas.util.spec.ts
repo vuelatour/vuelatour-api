@@ -1,8 +1,15 @@
 import {
+  ROTULO_ALERTA_DUPLICADO_VUELO,
+  avisoCobrosDesligados,
+  avisoCobrosSinFactura,
+  avisoTotalDistintoCobros,
   avisoTotalDistintoVuelo,
   buscarYaRegistrada,
   calcularAlertas,
   claveCompacta,
+  toleranciaSumaFacturas,
+  validarCobrosParaFactura,
+  type CobroRowParaFactura,
   folioSinSerie,
   cobroResumenDe,
   compararFacturas,
@@ -158,6 +165,10 @@ describe('calcularAlertas', () => {
       estatus: string;
       pdf_path: string | null;
       es_parcial: boolean;
+      total: number;
+      moneda: string;
+      serie: string | null;
+      folio: string;
     }> = {},
   ) => ({
     id,
@@ -165,34 +176,272 @@ describe('calcularAlertas', () => {
     pdf_path:
       extra.pdf_path === undefined ? `emitidas/${id}/x.pdf` : extra.pdf_path,
     es_parcial: extra.es_parcial ?? false,
+    serie: extra.serie === undefined ? 'A' : extra.serie,
+    folio: extra.folio ?? `0${id.replace(/\D/g, '') || '1'}`,
+    total: extra.total,
+    moneda: extra.moneda ?? 'MXN',
   });
   const liga = (
     factura_id: string,
     vuelo_id: string,
     estado = 'CONFIRMADO',
+    vuelo: Record<string, unknown> = {},
   ) => ({
     factura_id,
     vuelo_id,
-    vuelo: { estado },
+    vuelo: { estado, ...vuelo },
   });
 
-  it('DUPLICADO_VUELO con 2 vigentes y al menos una NO parcial', () => {
-    const r = calcularAlertas(
-      [fac('f1'), fac('f2', { es_parcial: true })],
-      [liga('f1', 'v1'), liga('f2', 'v1')],
-    );
-    expect(r.porFactura.get('f1')).toEqual(['DUPLICADO_VUELO']);
-    expect(r.porFactura.get('f2')).toEqual(['DUPLICADO_VUELO']);
-    expect(r.vuelosDuplicados.size).toBe(1);
+  it('2 vigentes sin totales ni contexto (como antes del 16-oct) ⇒ ya NO alerta; `es_parcial` no decide nada', () => {
+    for (const parcial of [false, true]) {
+      const r = calcularAlertas(
+        [fac('f1', { es_parcial: parcial }), fac('f2')],
+        [liga('f1', 'v1'), liga('f2', 'v1')],
+      );
+      expect(r.porFactura.get('f1')).toEqual([]);
+      expect(r.porFactura.get('f2')).toEqual([]);
+      expect(r.vuelosDuplicados.size).toBe(0);
+      expect(r.detalle.size).toBe(0);
+    }
   });
 
-  it('anticipo + finiquito (las dos parciales) NO alerta', () => {
-    const r = calcularAlertas(
-      [fac('f1', { es_parcial: true }), fac('f2', { es_parcial: true })],
-      [liga('f1', 'v1'), liga('f2', 'v1')],
-    );
-    expect(r.porFactura.get('f1')).toEqual([]);
-    expect(r.vuelosDuplicados.size).toBe(0);
+  describe('DUPLICADO_VUELO por suma y por cobros (16-oct-2026, invariante 84)', () => {
+    // #332: cotizó 4,172.44 USD / 72,585.38 MXN y cobró 72,585.45 MXN en
+    // 4 cobros; A-0420 (68,208) ampara el de 68,208.
+    const V332 = {
+      folio: 332,
+      monto_total_usd: '4172.44',
+      monto_total_mxn: '72585.38',
+      tc_usd_mxn: '17.396374',
+    };
+    const ctx332 = (
+      cobrosDeFactura?: Map<
+        string,
+        Array<{ vuelo_id: string; monto: number; moneda: string }>
+      >,
+    ) => ({
+      vuelos: new Map([
+        [
+          'v332',
+          {
+            folio: 332,
+            usd: 4172.44,
+            mxn: 72585.38,
+            cobrado: { USD: 0, MXN: 72585.45 },
+          },
+        ],
+      ]),
+      ...(cobrosDeFactura ? { cobrosDeFactura } : {}),
+    });
+    const A0420 = fac('f1', { total: 68208, folio: '0420' });
+    const c = (vuelo_id: string, monto: number, moneda = 'MXN') => ({
+      vuelo_id,
+      monto,
+      moneda,
+    });
+
+    it('A-0420 + 2.ª de 4,377.45 que ampara los otros 3 cobros ⇒ SIN alerta (aunque ninguna sea parcial)', () => {
+      const r = calcularAlertas(
+        [A0420, fac('f2', { total: 4377.45, folio: '0455' })],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f2', 'v332', 'COMPLETADO', V332),
+        ],
+        ctx332(
+          new Map([
+            ['f1', [c('v332', 68208)]],
+            ['f2', [c('v332', 977.45), c('v332', 1700), c('v332', 1700)]],
+          ]),
+        ),
+      );
+      expect(r.porFactura.get('f1')).toEqual([]);
+      expect(r.porFactura.get('f2')).toEqual([]);
+      expect(r.vuelosDuplicados.size).toBe(0);
+    });
+
+    it('2.ª de 10,000 ⇒ SUMA_SUPERA en las DOS vigentes con el texto («cobró» porque lo cobrado ≥ lo cotizado)', () => {
+      const r = calcularAlertas(
+        [A0420, fac('f2', { total: 10000, folio: '0455' })],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f2', 'v332', 'COMPLETADO', V332),
+        ],
+        ctx332(
+          new Map([
+            ['f1', [c('v332', 68208)]],
+            ['f2', [c('v332', 977.45)]],
+          ]),
+        ),
+      );
+      expect(r.porFactura.get('f1')).toEqual(['DUPLICADO_VUELO']);
+      expect(r.porFactura.get('f2')).toEqual(['DUPLICADO_VUELO']);
+      expect(r.vuelosDuplicados).toEqual(new Set(['v332']));
+      expect(r.detalle.get('f2')).toEqual([
+        {
+          code: 'DUPLICADO_VUELO',
+          motivo: 'SUMA_SUPERA',
+          vuelo_folio: 332,
+          mensaje:
+            'El vuelo #332 tiene 2 facturas vigentes que suman $78,208 MXN y el vuelo cobró $72,585.45 MXN.',
+        },
+      ]);
+    });
+
+    it('tolerancia = max(1.00, 1 % de la referencia): 73,311.30 pasa, 73,311.31 alerta; con referencia 50, 51.00 pasa y 51.01 alerta', () => {
+      const con = (total2: number) =>
+        calcularAlertas(
+          [A0420, fac('f2', { total: total2 })],
+          [
+            liga('f1', 'v332', 'COMPLETADO', V332),
+            liga('f2', 'v332', 'COMPLETADO', V332),
+          ],
+          ctx332(),
+        ).vuelosDuplicados.size;
+      // referencia 72,585.45 ⇒ tolerancia 725.85 ⇒ tope 73,311.30
+      expect(con(73311.3 - 68208)).toBe(0);
+      expect(con(73311.31 - 68208)).toBe(1);
+      const chico = (total2: number) =>
+        calcularAlertas(
+          [fac('f1', { total: 30 }), fac('f2', { total: total2 })],
+          [liga('f1', 'v9'), liga('f2', 'v9')],
+          {
+            vuelos: new Map([
+              [
+                'v9',
+                { folio: 9, usd: null, mxn: 50, cobrado: { USD: 0, MXN: 0 } },
+              ],
+            ]),
+          },
+        ).vuelosDuplicados.size;
+      expect(chico(21)).toBe(0);
+      expect(chico(21.01)).toBe(1);
+      expect(toleranciaSumaFacturas(50)).toBe(1);
+      expect(toleranciaSumaFacturas(72585.45)).toBe(725.85);
+    });
+
+    it('una factura MULTI-VUELO (A-0430) no entra a la suma; sin referencia (> 0) la moneda no se evalúa; monedas distintas no se mezclan', () => {
+      // f3 cubre 6 vuelos: no se puede atribuir a v332.
+      const ligas = [
+        liga('f1', 'v332', 'COMPLETADO', V332),
+        liga('f3', 'v332', 'COMPLETADO', V332),
+        liga('f3', 'v259'),
+      ];
+      const r = calcularAlertas(
+        [A0420, fac('f3', { total: 334341, folio: '0430' })],
+        ligas,
+        ctx332(),
+      );
+      expect(r.vuelosDuplicados.size).toBe(0);
+      // Una en USD de 5,000 sobre un vuelo cotizado en 4,172.44 USD: alerta
+      // en USD; la de MXN no se suma con ella.
+      const usd = calcularAlertas(
+        [A0420, fac('f4', { total: 5000, moneda: 'USD' })],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f4', 'v332', 'COMPLETADO', V332),
+        ],
+        ctx332(),
+      );
+      expect(usd.detalle.get('f1')?.[0]?.mensaje).toBe(
+        'El vuelo #332 tiene 2 facturas vigentes que suman $5,000 USD y el vuelo cotizó $4,172.44 USD.',
+      );
+      // Sin cotizado ni cobrado en esa moneda: nada que comparar.
+      const sinRef = calcularAlertas(
+        [
+          fac('f1', { total: 100, moneda: 'USD' }),
+          fac('f2', { total: 100, moneda: 'USD' }),
+        ],
+        [liga('f1', 'v0'), liga('f2', 'v0')],
+        {
+          vuelos: new Map([
+            ['v0', { usd: null, mxn: null, cobrado: { USD: 0, MXN: 0 } }],
+          ]),
+        },
+      );
+      expect(sinRef.vuelosDuplicados.size).toBe(0);
+    });
+
+    it('SIN_COBRO_ASIGNADO se decide POR VUELO: A-0440 (#375 + #376) ampara solo el cobro de #375 y #376 recibe otra factura CON cobros ⇒ alerta en las dos, nombrando A-0440', () => {
+      const r = calcularAlertas(
+        [
+          fac('fA', { total: 31435.91, folio: '0440' }),
+          fac('fB', { total: 16343.59, folio: '0460' }),
+        ],
+        [
+          liga('fA', 'v375', 'CANCELADO', { folio: 375 }),
+          liga('fA', 'v376', 'CONFIRMADO', { folio: 376 }),
+          liga('fB', 'v376', 'CONFIRMADO', { folio: 376 }),
+        ],
+        {
+          vuelos: new Map(),
+          cobrosDeFactura: new Map([
+            ['fA', [c('v375', 16343.59)]],
+            ['fB', [c('v376', 16343.59)]],
+          ]),
+        },
+      );
+      expect(r.porFactura.get('fA')).toEqual([
+        'DUPLICADO_VUELO',
+        'VUELO_CANCELADO',
+      ]);
+      expect(r.porFactura.get('fB')).toEqual(['DUPLICADO_VUELO']);
+      expect(r.vuelosDuplicados).toEqual(new Set(['v376']));
+      const esperado = {
+        code: 'DUPLICADO_VUELO',
+        motivo: 'SIN_COBRO_ASIGNADO',
+        vuelo_folio: 376,
+        mensaje:
+          'El vuelo #376 tiene 2 facturas vigentes y A-0440 no ampara ningún cobro: asígnale los suyos o cancélala si es una re-emisión.',
+      };
+      expect(r.detalle.get('fA')).toEqual([esperado]);
+      expect(r.detalle.get('fB')).toEqual([esperado]);
+      // Si NINGUNA ampara cobros (dos globales sin clasificar) no hay alerta.
+      const ninguna = calcularAlertas(
+        [fac('fA', { total: 100 }), fac('fB', { total: 100 })],
+        [liga('fA', 'v1'), liga('fB', 'v1')],
+        { vuelos: new Map(), cobrosDeFactura: new Map() },
+      );
+      expect(ninguna.vuelosDuplicados.size).toBe(0);
+    });
+
+    it('sin `ctx` (sonda apagada o lectura caída): SUMA_SUPERA solo con el cotizado de la liga («cotizó») y SIN_COBRO_ASIGNADO apagada', () => {
+      const r = calcularAlertas(
+        [A0420, fac('f2', { total: 10000 })],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f2', 'v332', 'COMPLETADO', V332),
+        ],
+      );
+      expect(r.vuelosDuplicados).toEqual(new Set(['v332']));
+      expect(r.detalle.get('f1')?.[0]?.mensaje).toBe(
+        'El vuelo #332 tiene 2 facturas vigentes que suman $78,208 MXN y el vuelo cotizó $72,585.38 MXN.',
+      );
+      // Con `cobrosDeFactura` ausente, una vigente sin cobros no alerta.
+      const sinCobros = calcularAlertas(
+        [A0420, fac('f2', { total: 4377.45 })],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f2', 'v332', 'COMPLETADO', V332),
+        ],
+        ctx332(),
+      );
+      expect(sinCobros.vuelosDuplicados.size).toBe(0);
+    });
+
+    it('`es_parcial` ya no silencia nada: dos parciales cuya suma rebasa alertan igual', () => {
+      const r = calcularAlertas(
+        [
+          fac('f1', { total: 68208, es_parcial: true }),
+          fac('f2', { total: 10000, es_parcial: true }),
+        ],
+        [
+          liga('f1', 'v332', 'COMPLETADO', V332),
+          liga('f2', 'v332', 'COMPLETADO', V332),
+        ],
+        ctx332(),
+      );
+      expect(r.vuelosDuplicados.size).toBe(1);
+    });
   });
 
   it('una CANCELADA no cuenta ni lleva alertas', () => {
@@ -220,6 +469,280 @@ describe('calcularAlertas', () => {
       [liga('f1', 'v1'), liga('fx', 'v1')],
     );
     expect(r.porFactura.get('f1')).toEqual([]);
+  });
+});
+
+describe('facturas por cobro — avisos y validación PURA (16-oct-2026, invariante 84)', () => {
+  it('ROTULO_ALERTA_DUPLICADO_VUELO', () => {
+    expect(ROTULO_ALERTA_DUPLICADO_VUELO).toBe('Facturas que no cuadran');
+  });
+
+  describe('avisoTotalDistintoCobros', () => {
+    it('misma moneda, |total − Σ| > 1.00 ⇒ aviso con texto y details; ≤ 1.00 ⇒ null', () => {
+      const cobros = [
+        { id: 'c1', monto: 977.45, moneda: 'MXN' },
+        { id: 'c2', monto: 1700, moneda: 'MXN' },
+        { id: 'c3', monto: 1700, moneda: 'MXN' },
+      ];
+      expect(
+        avisoTotalDistintoCobros({
+          etiqueta: 'A-0455',
+          moneda: 'MXN',
+          total: 4500,
+          cobros,
+        }),
+      ).toEqual({
+        code: 'TOTAL_DISTINTO_COBROS',
+        mensaje:
+          'La factura A-0455 suma $4,500 MXN y los cobros que marcaste suman $4,377.45 MXN (3 cobros). Revisa el total o las casillas.',
+        details: {
+          total_factura: 4500,
+          total_cobros: 4377.45,
+          cobro_ids: ['c1', 'c2', 'c3'],
+        },
+      });
+      expect(
+        avisoTotalDistintoCobros({
+          etiqueta: 'A-0455',
+          moneda: 'MXN',
+          total: 4378.45,
+          cobros,
+        }),
+      ).toBeNull();
+      expect(
+        avisoTotalDistintoCobros({
+          etiqueta: 'A',
+          moneda: 'MXN',
+          total: 1,
+          cobros: [{ id: 'c', monto: 5000, moneda: 'MXN' }],
+        })?.mensaje,
+      ).toContain('(1 cobro)');
+    });
+
+    it('monedas distintas ⇒ no se compara; sin cobros ⇒ null', () => {
+      expect(
+        avisoTotalDistintoCobros({
+          etiqueta: 'A',
+          moneda: 'MXN',
+          total: 860.47,
+          cobros: [
+            { id: 'u', monto: 600, moneda: 'USD' },
+            { id: 'm', monto: 860.47, moneda: 'MXN' },
+          ],
+        }),
+      ).toBeNull();
+      expect(
+        avisoTotalDistintoCobros({
+          etiqueta: 'A',
+          moneda: 'MXN',
+          total: 1,
+          cobros: [],
+        }),
+      ).toBeNull();
+    });
+  });
+
+  describe('validarCobrosParaFactura', () => {
+    const cobro = (
+      id: string,
+      vuelo_id: string,
+      extra: Partial<CobroRowParaFactura> = {},
+    ): CobroRowParaFactura => ({
+      id,
+      vuelo_id,
+      monto: 1700,
+      moneda: 'MXN',
+      cobro_grupo_id: null,
+      factura_emitida_id: null,
+      ...extra,
+    });
+
+    it('todo bien ⇒ null; el ya amparado por ESTA factura (editar) también pasa', () => {
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1', 'c2'],
+          cobros: [
+            cobro('c1', 'v332'),
+            cobro('c2', 'v332', { factura_emitida_id: 'f-mia' }),
+          ],
+          vueloIds: ['v332'],
+          facturaId: 'f-mia',
+        }),
+      ).toBeNull();
+    });
+
+    it('orden de los códigos: no existe → de otro vuelo (el HERMANO de grupo también rebota) → reembolso → sobre → con otra factura', () => {
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1', 'cx'],
+          cobros: [cobro('c1', 'v999', { monto: -1 })],
+          vueloIds: ['v332'],
+          facturaId: null,
+        }),
+      ).toEqual({ codigo: 'COBROS_NO_EXISTEN', cobro_ids: ['cx'] });
+      const hermano = cobro('c1', 'v333-hermano', { monto: -1 });
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1'],
+          cobros: [hermano],
+          vueloIds: ['v332'],
+          facturaId: null,
+        }),
+      ).toEqual({ codigo: 'COBROS_DE_OTRO_VUELO', cobro: hermano });
+      const reembolso = cobro('c1', 'v332', {
+        monto: -500,
+        cobro_grupo_id: 's1',
+      });
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1'],
+          cobros: [reembolso],
+          vueloIds: ['v332'],
+          facturaId: null,
+        }),
+      ).toEqual({ codigo: 'REEMBOLSO_SIN_FACTURA', cobro: reembolso });
+      const sobre = cobro('c1', 'v332', {
+        cobro_grupo_id: 's1',
+        factura_emitida_id: 'f-otra',
+      });
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1'],
+          cobros: [sobre],
+          vueloIds: ['v332'],
+          facturaId: null,
+        }),
+      ).toEqual({ codigo: 'COBRO_DE_GRUPO', cobro: sobre });
+      const ajeno = cobro('c1', 'v332', { factura_emitida_id: 'f-otra' });
+      expect(
+        validarCobrosParaFactura({
+          ids: ['c1'],
+          cobros: [ajeno],
+          vueloIds: ['v332'],
+          facturaId: 'f-mia',
+        }),
+      ).toEqual({
+        codigo: 'COBRO_CON_OTRA_FACTURA',
+        cobro: ajeno,
+        factura_id: 'f-otra',
+      });
+    });
+  });
+
+  describe('avisoCobrosSinFactura (UN aviso agregado)', () => {
+    const v = (vuelo_id: string, folio: number, montos: number[]) => ({
+      vuelo_id,
+      folio,
+      cobros: montos.map((m, i) => ({
+        id: `${vuelo_id}-${i}`,
+        monto: m,
+        moneda: 'MXN',
+      })),
+    });
+
+    it('vuelos en orden de folio con conteo y Σ por moneda; sin cobros ⇒ null; con remate', () => {
+      expect(
+        avisoCobrosSinFactura([
+          v('b', 364, [1700]),
+          v('a', 332, [977.45, 1700, 1700]),
+        ]),
+      ).toEqual({
+        code: 'COBROS_SIN_FACTURA',
+        mensaje:
+          'Quedan cobros sin factura asignada: #332 (3 cobros · $4,377.45 MXN), #364 (1 cobro · $1,700 MXN).',
+        details: {
+          vuelos: [
+            {
+              vuelo_id: 'a',
+              folio: 332,
+              cobro_ids: ['a-0', 'a-1', 'a-2'],
+              montos: [{ moneda: 'MXN', monto: 4377.45 }],
+            },
+            {
+              vuelo_id: 'b',
+              folio: 364,
+              cobro_ids: ['b-0'],
+              montos: [{ moneda: 'MXN', monto: 1700 }],
+            },
+          ],
+        },
+      });
+      expect(avisoCobrosSinFactura([v('a', 1, [])])).toBeNull();
+      expect(
+        avisoCobrosSinFactura(
+          [v('a', 1, [5])],
+          'Vuelve a asignarlos desde Editar → ¿Qué cobros cubre?',
+        )?.mensaje,
+      ).toBe(
+        'Quedan cobros sin factura asignada: #1 (1 cobro · $5 MXN). Vuelve a asignarlos desde Editar → ¿Qué cobros cubre?',
+      );
+    });
+
+    it('una factura global de 12 vuelos: lista 5 y «y 7 vuelos más» (nunca 12 toasts); USD y MXN con « y »', () => {
+      const vuelos = Array.from({ length: 12 }, (_, i) =>
+        v(`v${i}`, 100 + i, [10]),
+      );
+      const a = avisoCobrosSinFactura(vuelos)!;
+      expect(a.mensaje).toBe(
+        'Quedan cobros sin factura asignada: #100 (1 cobro · $10 MXN), #101 (1 cobro · $10 MXN), #102 (1 cobro · $10 MXN), #103 (1 cobro · $10 MXN), #104 (1 cobro · $10 MXN) y 7 vuelos más.',
+      );
+      expect((a.details as { vuelos: unknown[] }).vuelos).toHaveLength(12);
+      const mixto = avisoCobrosSinFactura([
+        {
+          vuelo_id: 'x',
+          folio: 305,
+          cobros: [
+            { id: 'u', monto: 600, moneda: 'USD' },
+            { id: 'm', monto: 860.47, moneda: 'MXN' },
+          ],
+        },
+      ])!;
+      expect(mixto.mensaje).toBe(
+        'Quedan cobros sin factura asignada: #305 (2 cobros · $600 USD y $860.47 MXN).',
+      );
+    });
+  });
+
+  describe('avisoCobrosDesligados', () => {
+    it('por FACTURA (cancelar/eliminar) con folios únicos ordenados; por VUELO (quitar vuelo); 0 ⇒ null', () => {
+      expect(
+        avisoCobrosDesligados({
+          por: 'FACTURA',
+          etiqueta: 'A-0420',
+          cobros: [
+            { id: 'c1', vuelo_id: 'v364' },
+            { id: 'c2', vuelo_id: 'v332' },
+            { id: 'c3', vuelo_id: 'v332' },
+          ],
+          folios: [364, 332, 332],
+        }),
+      ).toEqual({
+        code: 'COBROS_DESLIGADOS',
+        mensaje:
+          'La factura A-0420 amparaba 3 cobros (#332 y #364); quedaron sin factura asignada.',
+        details: { cobro_ids: ['c1', 'c2', 'c3'], vuelo_ids: ['v364', 'v332'] },
+      });
+      expect(
+        avisoCobrosDesligados({
+          por: 'VUELO',
+          vuelo_id: 'v332',
+          folio: 332,
+          cobros: [{ id: 'c1' }],
+        }),
+      ).toEqual({
+        code: 'COBROS_DESLIGADOS',
+        mensaje: 'Al quitar el vuelo #332, 1 cobro quedó sin factura asignada.',
+        details: { vuelo_id: 'v332', cobro_ids: ['c1'] },
+      });
+      expect(
+        avisoCobrosDesligados({
+          por: 'VUELO',
+          vuelo_id: 'v',
+          folio: 1,
+          cobros: [],
+        }),
+      ).toBeNull();
+    });
   });
 });
 

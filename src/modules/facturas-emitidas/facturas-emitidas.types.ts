@@ -57,7 +57,14 @@ export type CodigoAvisoFactura =
   | 'CFDI_NO_ES_INGRESO'
   | 'MONEDA_NO_SOPORTADA'
   | 'TOTAL_DISTINTO_VUELO'
-  | 'VUELO_SIGUE_FACTURADO';
+  | 'VUELO_SIGUE_FACTURADO'
+  // FACTURAS POR COBRO (16-oct-2026, API 0.0.82, invariante 84):
+  /** la factura no suma lo que los cobros que marcó */
+  | 'TOTAL_DISTINTO_COBROS'
+  /** al cancelar/baja/quitar vuelo: n cobros quedaron sin factura */
+  | 'COBROS_DESLIGADOS'
+  /** tras guardar, el vuelo sigue con cobros sin factura asignada */
+  | 'COBROS_SIN_FACTURA';
 
 /** Aviso NO bloqueante (la operación ya se hizo o se puede hacer). */
 export interface AvisoFactura {
@@ -65,6 +72,43 @@ export interface AvisoFactura {
   /** es-MX, listo para pintar. */
   mensaje: string;
   details?: Record<string, unknown>;
+}
+
+// ---- FACTURAS POR COBRO (16-oct-2026, API 0.0.82, invariante 84) ----
+
+/**
+ * Por qué un vuelo con ≥ 2 VIGENTES lleva `DUPLICADO_VUELO`: la suma de sus
+ * facturas (de un solo vuelo, misma moneda) rebasa lo cotizado/cobrado, o
+ * una vigente no ampara ningún cobro del vuelo mientras otra sí.
+ */
+export type MotivoDuplicadoVuelo = 'SUMA_SUPERA' | 'SIN_COBRO_ASIGNADO';
+
+export interface AlertaFacturaDetalle {
+  /** hoy solo 'DUPLICADO_VUELO' trae detalle */
+  code: AlertaFactura;
+  motivo: MotivoDuplicadoVuelo;
+  vuelo_folio: number;
+  /** es-MX listo para el title del chip */
+  mensaje: string;
+}
+
+/** Cobro que AMPARA una factura (lista/detalle del registro y Excel). */
+export interface CobroDeFactura {
+  id: string;
+  vuelo_id: string;
+  vuelo_folio: number;
+  monto: number;
+  moneda: 'USD' | 'MXN';
+  /** ISO */
+  fecha_cobro: string;
+  metodo_cobro: string;
+  cuenta_destino: string | null;
+}
+
+/** Cobro de un vuelo candidato (diálogo «Registrar factura»). */
+export interface CobroCandidatoFactura extends CobroDeFactura {
+  /** null = sin factura; {id, etiqueta} = ya amparado (por ESTA u otra) */
+  factura: { id: string; etiqueta: string } | null;
 }
 
 export type SemaforoCobroKey =
@@ -113,6 +157,11 @@ export interface VueloDeFactura {
   cobro: CobroResumen;
   /** Etiquetas de OTRAS facturas VIGENTES ligadas al mismo vuelo («A-120»). */
   otras_vigentes: string[];
+  /** ADITIVOS (16-oct-2026, invariante 84; 0 sin la migración 20261016000001). */
+  /** cobros de este vuelo amparados por ESTA factura */
+  cobros_n: number;
+  /** cobros positivos (sin sobre) de este vuelo sin ninguna factura */
+  cobros_sin_factura: number;
 }
 
 export interface FacturaEmitida {
@@ -156,6 +205,13 @@ export interface FacturaEmitida {
   created_at: string;
   created_por_nombre: string | null;
   updated_at: string;
+  /**
+   * ADITIVOS (16-oct-2026, API 0.0.82, invariante 84), ÚLTIMAS llaves:
+   * los cobros que ampara (orden vuelo_folio, fecha_cobro; `[]` sin la
+   * migración) y el detalle de `DUPLICADO_VUELO` (`[]` si no hay).
+   */
+  cobros: CobroDeFactura[];
+  alertas_detalle: AlertaFacturaDetalle[];
 }
 
 /** «Ya está registrada» (409 y leer-archivo). */
@@ -203,7 +259,11 @@ export interface ResumenFacturas {
   sin_pdf: number;
   /** VIGENTES sin vuelo */
   sin_vuelo: number;
-  /** vuelos con alerta DUPLICADO_VUELO (≥2 VIGENTES y al menos una NO parcial) */
+  /**
+   * vuelos con alerta DUPLICADO_VUELO (≥2 VIGENTES y, desde el 16-oct-2026,
+   * la suma rebasa lo cotizado/cobrado o una vigente no ampara ningún cobro
+   * mientras otra sí; `es_parcial` ya no decide)
+   */
   vuelos_con_varias: number;
   /** VIGENTES con alerta VUELO_CANCELADO */
   en_vuelo_cancelado: number;
@@ -280,6 +340,12 @@ export interface FacturaEmitidaDatos {
   notas?: string | null;
   es_parcial?: boolean;
   vuelo_ids?: string[];
+  /**
+   * ADITIVO (16-oct-2026, invariante 84): cobros que AMPARA esta factura.
+   * Ausente = no se tocan ligas (ni avisos nuevos); `[]` presente = el
+   * operador vio las casillas y no marcó ninguna (en PATCH, suelta todas).
+   */
+  cobro_ids?: string[];
 }
 
 export interface ResultadoGuardarFactura {
@@ -307,6 +373,15 @@ export interface FacturaEmitidaMini {
   metodo_pago: MetodoPagoFactura | null;
   tiene_pdf: boolean;
   tiene_xml: boolean;
+  /**
+   * ADITIVOS (16-oct-2026, API 0.0.82, invariante 84), ÚLTIMAS llaves y en
+   * este orden: `es_parcial` de la fila; `cobros_n` = cobros de ESTE vuelo
+   * que ampara; `cobros_monto` = Σ BRUTA por moneda de esos cobros. Sin la
+   * migración: 0 y [].
+   */
+  es_parcial: boolean;
+  cobros_n: number;
+  cobros_monto: { moneda: MonedaFactura; monto: number }[];
 }
 
 /** Bloque ADITIVO `factura_servicio` del snapshot del vuelo. */
@@ -344,6 +419,17 @@ export interface FacturaServicioBloque {
    * estado del vuelo. Una manual, nunca.
    */
   solicitud_ya_no_aplica: boolean;
+  /**
+   * ADITIVOS (16-oct-2026, API 0.0.82, invariante 84), ÚLTIMAS llaves y en
+   * este orden. `cobros_sin_factura` = cobros positivos del vuelo, sin
+   * sobre, con `factura_emitida_id` null; `cobros_sin_factura_exigen` = de
+   * esos, los que `cobroExigeFactura` (decide el TONO del chip);
+   * `asignacion_disponible` = la sonda de 20261016000001 (el panel ofrece
+   * selector/casillas/pistas SOLO con `true`). Sin la migración: 0, 0, false.
+   */
+  cobros_sin_factura: number;
+  cobros_sin_factura_exigen: number;
+  asignacion_disponible: boolean;
 }
 
 /** Campo ADITIVO por fila de GET /flights y GET /quotes. */
@@ -471,6 +557,13 @@ export interface VueloCandidatoFactura {
   /** tiene solicitud pendiente (por_facturar) */
   solicitud: boolean;
   grupo: GrupoDeVueloFactura | null;
+  /**
+   * ADITIVO (16-oct-2026, invariante 84), SOLO con la migración
+   * 20261016000001: cobros positivos sin sobre del vuelo (orden fecha_cobro
+   * asc) con la factura que ya los ampara. Ausente = API viejo o sin
+   * migración (el panel no pinta casillas).
+   */
+  cobros?: CobroCandidatoFactura[];
 }
 
 export interface ResponsablesFacturacion {

@@ -24,9 +24,10 @@
  */
 import { fechaCortaCancun } from '../../common/fecha-cancun.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
-import type {
-  CobroExigeFacturaRow,
-  ExigenciaFacturaVuelo,
+import {
+  cobroExigeFactura,
+  type CobroExigeFacturaRow,
+  type ExigenciaFacturaVuelo,
 } from '../../common/cuentas-cobro';
 import type {
   FacturaEmitidaMini,
@@ -88,11 +89,13 @@ export interface FacturaLigadaRow {
   pdf_path: string | null;
   xml_path: string | null;
   deleted_at?: string | null;
+  /** anticipo/finiquito (16-oct-2026: ya no decide alertas; se informa). */
+  es_parcial?: boolean | null;
 }
 
 /** Columnas de la factura embebida en el puente para el bloque/resumen. */
 export const COLS_FACTURA_LIGADA =
-  'id, serie, folio, folio_num, uuid, fecha_emision, estatus, total, moneda, metodo_pago, pdf_path, xml_path, deleted_at';
+  'id, serie, folio, folio_num, uuid, fecha_emision, estatus, total, moneda, metodo_pago, pdf_path, xml_path, deleted_at, es_parcial';
 
 /**
  * Estado de la SOLICITUD de factura de un vuelo (13-oct-2026, invariante 65;
@@ -255,7 +258,60 @@ export function ordenarFacturasLigadas<T extends FacturaLigadaRow>(
   });
 }
 
-export function miniDeFactura(f: FacturaLigadaRow): FacturaEmitidaMini {
+/**
+ * Cobros ASIGNABLES a una factura (invariante 84): positivos y sin sobre de
+ * grupo (un reembolso y la parte de un sobre nunca llevan factura).
+ */
+export function cobrosAsignables<T extends CobroParaFactura>(
+  cobros: ReadonlyArray<T>,
+): T[] {
+  return cobros.filter((c) => {
+    const m = Number(c.monto);
+    const sobre = c.cobro_grupo_id;
+    return Number.isFinite(m) && m > 0 && !(typeof sobre === 'string' && sobre);
+  });
+}
+
+/** ¿El cobro no tiene factura asignada (`factura_emitida_id` null/ausente)? */
+export function cobroSinFactura(c: CobroParaFactura): boolean {
+  return !(typeof c.factura_emitida_id === 'string' && c.factura_emitida_id);
+}
+
+/**
+ * `cobros_n` / `cobros_monto` (Σ BRUTA por moneda, redondeo a centavos) de
+ * los cobros de UN vuelo que ampara la factura `facturaId`. Orden de las
+ * monedas: USD y luego MXN (solo las que suman algo).
+ */
+export function resumenCobrosDeFactura(
+  facturaId: string,
+  cobros: ReadonlyArray<CobroParaFactura>,
+): Pick<FacturaEmitidaMini, 'cobros_n' | 'cobros_monto'> {
+  const propios = cobrosAsignables(cobros).filter(
+    (c) => c.factura_emitida_id === facturaId,
+  );
+  const suma = { USD: 0, MXN: 0 };
+  for (const c of propios) {
+    const moneda = c.moneda === 'USD' ? 'USD' : 'MXN';
+    suma[moneda] += Number(c.monto);
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return {
+    cobros_n: propios.length,
+    cobros_monto: (['USD', 'MXN'] as const)
+      .filter((m) => suma[m] > 0)
+      .map((m) => ({ moneda: m, monto: r2(suma[m]) })),
+  };
+}
+
+/**
+ * Mini de la burbuja. `cobros` = los del VUELO (lector `facturasDeVuelos`
+ * con `conCobros`), SOLO con la sonda de 20261016000001: sin ella se pasa
+ * `[]` y salen `cobros_n: 0`, `cobros_monto: []`.
+ */
+export function miniDeFactura(
+  f: FacturaLigadaRow,
+  cobros: ReadonlyArray<CobroParaFactura> = [],
+): FacturaEmitidaMini {
   const total = Number(f.total);
   return {
     id: f.id,
@@ -270,6 +326,9 @@ export function miniDeFactura(f: FacturaLigadaRow): FacturaEmitidaMini {
       f.metodo_pago === 'PUE' || f.metodo_pago === 'PPD' ? f.metodo_pago : null,
     tiene_pdf: !!f.pdf_path,
     tiene_xml: !!f.xml_path,
+    // ADITIVOS (16-oct-2026, invariante 84), últimas llaves y en este orden.
+    es_parcial: f.es_parcial === true,
+    ...resumenCobrosDeFactura(f.id, cobros),
   };
 }
 
@@ -299,14 +358,27 @@ export function bloqueFacturaServicio(
   v: VueloSolicitudRow,
   ligadas: ReadonlyArray<FacturaLigadaRow>,
   nombreSolicitante: string | null | undefined,
-  f: Pick<FacturaDeVuelo, 'exigencia' | 'origenes_exigen'> | null,
+  f:
+    | (Pick<FacturaDeVuelo, 'exigencia' | 'origenes_exigen'> & {
+        cobros?: ReadonlyArray<CobroParaFactura>;
+      })
+    | null,
+  /** La sonda de 20261016000001 (invariante 84): sin ella 0/[]/false. */
+  asignacionDisponible = false,
 ): FacturaServicioBloque {
   const { vigentes, canceladas } = clasificarLigadas(ligadas);
   const exigencia = f?.exigencia ?? null;
+  // FACTURAS POR COBRO (16-oct-2026, invariante 84): cobros positivos sin
+  // sobre del vuelo; los que no ampara ninguna factura y, de esos, los que
+  // exigen factura (deciden el tono del chip del panel).
+  const asignables = asignacionDisponible
+    ? cobrosAsignables(f?.cobros ?? [])
+    : [];
+  const sinFactura = asignables.filter(cobroSinFactura);
   return {
     solicitud: solicitudDe(v, nombreSolicitante),
     por_facturar: esPorFacturar(v, vigentes.length, exigencia),
-    facturas: vigentes.map(miniDeFactura),
+    facturas: vigentes.map((x) => miniDeFactura(x, asignables)),
     canceladas,
     // ADITIVO (13-oct-2026, invariante 65): pedida, sin VIGENTE ligada y
     // marcada «Facturado» a mano (ya NO cuenta como por_facturar).
@@ -318,6 +390,10 @@ export function bloqueFacturaServicio(
     exigencia,
     origenes_exigen: f ? [...f.origenes_exigen] : [],
     solicitud_ya_no_aplica: solicitudYaNoAplica(v, exigencia),
+    // ADITIVOS (16-oct-2026, invariante 84), ÚLTIMAS llaves y en este orden.
+    cobros_sin_factura: sinFactura.length,
+    cobros_sin_factura_exigen: sinFactura.filter(cobroExigeFactura).length,
+    asignacion_disponible: asignacionDisponible,
   };
 }
 
@@ -343,8 +419,19 @@ export function resumenFacturaServicio(
 
 // ================= SOLICITUD AUTOMÁTICA: TRANSICIONES (0.0.77) =================
 
-/** Un cobro tal como lo lee `facturasDeVuelos({ conCobros: true })`. */
-export type CobroParaFactura = CobroExigeFacturaRow & { id?: string | null };
+/**
+ * Un cobro tal como lo lee `facturasDeVuelos({ conCobros: true })`. Desde el
+ * 16-oct-2026 (invariante 84) trae además `vuelo_id`, `fecha_cobro`,
+ * `cobro_grupo_id` y —SOLO con la sonda de 20261016000001—
+ * `factura_emitida_id` (la factura que lo ampara; null = ninguna).
+ */
+export type CobroParaFactura = CobroExigeFacturaRow & {
+  id?: string | null;
+  vuelo_id?: unknown;
+  fecha_cobro?: unknown;
+  cobro_grupo_id?: unknown;
+  factura_emitida_id?: unknown;
+};
 
 /**
  * El cambio de dinero que acaba de pasar en un vuelo (14-oct-2026,

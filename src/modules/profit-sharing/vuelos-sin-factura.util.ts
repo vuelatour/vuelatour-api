@@ -39,7 +39,7 @@ export const TITULO_PRECIERRE_VUELOS_SIN_FACTURA =
   'Vuelos cobrados en cuentas que exigen factura sin factura registrada';
 
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA =
-  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y siguen ahí —un anticipo devuelto completo, por cualquier vía, no lleva factura; si se devolvió solo una parte, lo retenido sí—, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo; si el dinero se devolvió, regístralo como reembolso. No bloquea el cierre.';
+  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y siguen ahí —un anticipo devuelto completo, por cualquier vía, no lleva factura; si se devolvió solo una parte, lo retenido sí—, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo; si el dinero se devolvió, regístralo como reembolso. Un vuelo que ya tiene factura aparece si alguno de sus cobros que exigen factura no está amparado por ninguna (asígnala desde el cobro o registra la que falta). No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA =
@@ -67,6 +67,14 @@ export interface VueloCobradoSinFactura {
   /** Cuentas (texto) de los cobros que exigen factura, distintas. */
   cuentas: string[];
   /**
+   * ADITIVOS (16-oct-2026, invariante 84): la factura que YA tiene el vuelo
+   * (`FacturaDeVuelo.registrada`; null = sin factura, como hoy) y cuántos de
+   * sus cobros que exigen factura no ampara ninguna. Chip del panel:
+   * «#332 (A-0420 · 3 cobros sin factura · Scotiabank Pesos)».
+   */
+  registrada: string | null;
+  cobros_sin_factura: number;
+  /**
    * ADITIVO (revisión 13-oct-2026): SOLO en un vuelo CANCELADO —para él no
    * existe «pídela desde el vuelo»—; el panel lo pinta junto al folio. En
    * los demás estados la llave no viaja.
@@ -75,9 +83,31 @@ export interface VueloCobradoSinFactura {
 }
 
 /**
- * Los vuelos con exigencia `EXIGE` y SIN factura registrada, ordenados por
- * `fecha_vuelo` (empate por folio; sin fecha, al final) — misma función de
- * orden que `vuelos-sin-gasto.util`.
+ * ¿Entra al renglón? Exige factura y (a) no tiene ninguna registrada, o
+ * (b) —facturas por cobro, 16-oct-2026, invariante 84— ya tiene factura
+ * pero la oficina (o el backfill) clasificó algún cobro y quedan cobros que
+ * exigen sin factura. Un vuelo con factura «global» y 0 ligas se comporta
+ * como hoy (no entra): endurecerlo es decisión del cliente.
+ */
+export function entraAlPrecierreSinFactura(
+  f: Pick<
+    FacturaDeVuelo,
+    | 'exigencia'
+    | 'registrada'
+    | 'facturas_con_cobro'
+    | 'cobros_exigen_sin_factura'
+  >,
+): boolean {
+  if (f.exigencia !== 'EXIGE') return false;
+  if (f.registrada == null) return true;
+  return f.facturas_con_cobro > 0 && f.cobros_exigen_sin_factura > 0;
+}
+
+/**
+ * Los vuelos con exigencia `EXIGE` y SIN factura registrada (o con factura
+ * pero con cobros que exigen sin amparar, `entraAlPrecierreSinFactura`),
+ * ordenados por `fecha_vuelo` (empate por folio; sin fecha, al final) —
+ * misma función de orden que `vuelos-sin-gasto.util`.
  */
 export function vuelosCobradosSinFactura(args: {
   vuelos: ReadonlyArray<VueloCobradoRow>;
@@ -91,7 +121,7 @@ export function vuelosCobradosSinFactura(args: {
     if (typeof v.id !== 'string' || !v.id || vistos.has(v.id)) continue;
     vistos.add(v.id);
     const f = args.facturas.get(v.id);
-    if (!f || f.exigencia !== 'EXIGE' || f.registrada != null) continue;
+    if (!f || !entraAlPrecierreSinFactura(f)) continue;
     out.push({
       id: v.id,
       folio: Number(v.folio ?? 0),
@@ -102,6 +132,8 @@ export function vuelosCobradosSinFactura(args: {
           : null,
       solicitada: f.solicitada,
       cuentas: [...f.cuentas_exigen],
+      registrada: f.registrada ?? null,
+      cobros_sin_factura: f.cobros_exigen_sin_factura ?? 0,
       ...(f.estado === 'CANCELADO' ? { estado: 'CANCELADO' as const } : {}),
     });
   }

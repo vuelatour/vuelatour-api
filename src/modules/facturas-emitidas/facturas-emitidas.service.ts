@@ -21,6 +21,20 @@ import {
 } from '../../common/factura-emitida-disponible.util';
 import { fetchNombresUsuarios } from '../../common/registrado-por.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import { fmtDineroTexto } from '../../common/dinero-texto.util';
+import {
+  cobroFacturaDisponible,
+  colCobroFactura,
+  errorCobroFacturaNoDisponible,
+} from '../../common/cobro-factura-disponible.util';
+import {
+  errorCobroFactura,
+  leerErrorCobroFactura,
+} from '../flights/cobro-factura.util';
+import {
+  cobroSinFactura,
+  cobrosAsignables,
+} from '../flights/factura-solicitud.util';
 import {
   LIMITE_ARCHIVO_FACTURA_BYTES,
   extraerCfdiCompleto,
@@ -51,6 +65,9 @@ import {
   PAGINA_BD,
   RE_RFC,
   RE_UUID_FISCAL,
+  avisoCobrosDesligados,
+  avisoCobrosSinFactura,
+  avisoTotalDistintoCobros,
   avisoTotalDistintoVuelo,
   buscarYaRegistrada,
   calcularAlertas,
@@ -76,20 +93,28 @@ import {
   textoONull,
   totalVueloDe,
   totalesPorMoneda,
+  validarCobrosParaFactura,
   verificarEmisor,
   type CandidatoDuplicado,
+  type CobroRowParaFactura,
+  type ContextoAlertas,
   type EmisoraRef,
   type FacturaEmitidaRow,
   type FacturaFiltrable,
   type FiltrosFacturas,
   type LigaFacturaVuelo,
+  type VueloConCobrosSinFactura,
   type VueloLigadoRow,
+  type VueloParaAlertas,
 } from './facturas-emitidas.util';
 import { payloadExcelFacturas } from './facturas-emitidas-xlsx';
 import type {
   AlertaFactura,
+  AlertaFacturaDetalle,
   AvisoFactura,
   CamposLeidosFactura,
+  CobroCandidatoFactura,
+  CobroDeFactura,
   ConteoPorFacturar,
   FacturaDelClienteSugerida,
   FacturaEmitida,
@@ -184,6 +209,62 @@ interface DatosNormalizados {
   notas?: string | null;
   es_parcial?: boolean;
   vuelo_ids?: string[];
+  /** Presente (aunque sea `[]`) ≠ ausente (invariante 84). */
+  cobro_ids?: string[];
+}
+
+/** Factura (propia o vecina de un vuelo) para alertas y etiquetas. */
+interface FacturaRef {
+  id: string;
+  serie: string | null;
+  folio: string;
+  estatus: string;
+  es_parcial: boolean | null;
+  pdf_path: string | null;
+  total: unknown;
+  moneda: string | null;
+}
+
+/**
+ * Fila de `cobro_vuelo` que lee este módulo (facturas por cobro, invariante
+ * 84). `factura_emitida_id` SOLO viaja con la sonda de 20261016000001.
+ */
+type CobroFilaFactura = CobroRowParaFactura & {
+  metodo_cobro: string | null;
+  cuenta_destino: string | null;
+  fecha_cobro: string | null;
+};
+
+/** Columnas de `cobro_vuelo` (sin la de la sonda). */
+const COLS_COBRO_FACTURA =
+  'id, vuelo_id, monto, moneda, metodo_cobro, cuenta_destino, fecha_cobro, cobro_grupo_id';
+
+/** `CobroDeFactura` del contrato desde la fila (folio del vuelo aparte). */
+function cobroDeFacturaDe(c: CobroFilaFactura, folio: number): CobroDeFactura {
+  return {
+    id: c.id,
+    vuelo_id: c.vuelo_id,
+    vuelo_folio: folio,
+    monto: redondear2(Number(c.monto) || 0),
+    moneda: c.moneda === 'USD' ? 'USD' : 'MXN',
+    fecha_cobro: c.fecha_cobro ?? '',
+    metodo_cobro: c.metodo_cobro ?? '',
+    cuenta_destino: c.cuenta_destino ?? null,
+  };
+}
+
+function ordenarCobrosDeFactura<
+  T extends { vuelo_folio: number; fecha_cobro: string },
+>(lista: T[]): T[] {
+  return lista.sort(
+    (a, b) =>
+      a.vuelo_folio - b.vuelo_folio ||
+      (a.fecha_cobro < b.fecha_cobro
+        ? -1
+        : a.fecha_cobro > b.fecha_cobro
+          ? 1
+          : 0),
+  );
 }
 
 /** Contexto para convertir filas en `FacturaEmitida`. */
@@ -199,6 +280,10 @@ interface Contexto {
     string,
     { total_cobrado: number; sin_tc_count: number }
   > | null;
+  /** Facturas por cobro (invariante 84): `cobros[]` por factura, detalle de la alerta y «sin factura» por vuelo. */
+  cobrosDeFactura: Map<string, CobroDeFactura[]>;
+  detalleAlertas: Map<string, AlertaFacturaDetalle[]>;
+  cobrosSinFacturaPorVuelo: Map<string, number>;
 }
 
 const CAMPOS_NULLABLES_TEXTO = [
@@ -353,14 +438,7 @@ export class FacturasEmitidasService {
    */
   private async contextoDeFacturas(facturas: FacturaRowLike[]): Promise<{
     ligas: LigaFacturaVuelo[];
-    facturasRef: Array<{
-      id: string;
-      serie: string | null;
-      folio: string;
-      estatus: string;
-      es_parcial: boolean | null;
-      pdf_path: string | null;
-    }>;
+    facturasRef: FacturaRef[];
   }> {
     const ids = facturas.map((f) => f.id);
     const propias: LigaFacturaVuelo[] = [];
@@ -378,17 +456,7 @@ export class FacturasEmitidasService {
     }
     const vueloIds = [...new Set(propias.map((l) => l.vuelo_id))];
     const ligas: LigaFacturaVuelo[] = [];
-    const facturasRef = new Map<
-      string,
-      {
-        id: string;
-        serie: string | null;
-        folio: string;
-        estatus: string;
-        es_parcial: boolean | null;
-        pdf_path: string | null;
-      }
-    >();
+    const facturasRef = new Map<string, FacturaRef>();
     for (const f of facturas) {
       facturasRef.set(f.id, {
         id: f.id,
@@ -397,28 +465,22 @@ export class FacturasEmitidasService {
         estatus: f.estatus,
         es_parcial: f.es_parcial,
         pdf_path: f.pdf_path,
+        total: f.total,
+        moneda: f.moneda,
       });
     }
     for (const lote of enLotes(vueloIds)) {
       const { data, error } = await this.sb
         .from('factura_emitida_vuelo')
         .select(
-          `factura_id, vuelo_id, factura:factura_emitida!inner(id, serie, folio, estatus, es_parcial, pdf_path, deleted_at), vuelo:vuelo_id(${COLS_VUELO_LIGADO})`,
+          `factura_id, vuelo_id, factura:factura_emitida!inner(id, serie, folio, estatus, es_parcial, pdf_path, total, moneda, deleted_at), vuelo:vuelo_id(${COLS_VUELO_LIGADO})`,
         )
         .in('vuelo_id', lote)
         .is('factura.deleted_at', null);
       if (error) throw new Error(error.message);
       for (const l of (data ?? []) as Array<Record<string, unknown>>) {
         const fac = unwrap(
-          l.factura as {
-            id: string;
-            serie: string | null;
-            folio: string;
-            estatus: string;
-            es_parcial: boolean | null;
-            pdf_path: string | null;
-            deleted_at?: string | null;
-          } | null,
+          l.factura as (FacturaRef & { deleted_at?: string | null }) | null,
         );
         if (!fac || fac.deleted_at) continue;
         if (!facturasRef.has(fac.id)) {
@@ -429,6 +491,8 @@ export class FacturasEmitidasService {
             estatus: fac.estatus,
             es_parcial: fac.es_parcial,
             pdf_path: fac.pdf_path,
+            total: fac.total,
+            moneda: fac.moneda,
           });
         }
         ligas.push({
@@ -484,25 +548,244 @@ export class FacturasEmitidasService {
     }
   }
 
+  // ======================================================================
+  // FACTURAS POR COBRO (16-oct-2026, API 0.0.82, invariante 84) — LECTURAS
+  // ======================================================================
+
+  /** ¿Está la migración 20261016000001? (memorizado; re-sondeo ≤ 10 min). */
+  private conFactura(): Promise<boolean> {
+    return cobroFacturaDisponible(this.sb);
+  }
+
+  /** Cobros de varios vuelos: lotes ≤ 200 ids, PAGINADOS por `id` (anti-cap). */
+  private async cobrosDeVuelos(
+    vueloIds: ReadonlyArray<string>,
+    conFactura: boolean,
+  ): Promise<Map<string, CobroFilaFactura[]>> {
+    const out = new Map<string, CobroFilaFactura[]>();
+    const ids = [...new Set(vueloIds.filter(Boolean))];
+    const cols = `${COLS_COBRO_FACTURA}${colCobroFactura(conFactura)}`;
+    for (const lote of enLotes(ids)) {
+      const filas = await this.leerTodo<CobroFilaFactura>((d, h) =>
+        this.sb
+          .from('cobro_vuelo')
+          .select(cols)
+          .in('vuelo_id', lote)
+          .order('id')
+          .range(d, h),
+      );
+      for (const c of filas) {
+        (out.get(c.vuelo_id) ?? out.set(c.vuelo_id, []).get(c.vuelo_id)!).push(
+          c,
+        );
+      }
+    }
+    return out;
+  }
+
+  /** Igual, pero NUNCA lanza: `null` = la lectura cayó (warn; las alertas salen sin cobros). */
+  private async cobrosDeVuelosSeguros(
+    vueloIds: ReadonlyArray<string>,
+    conFactura: boolean,
+  ): Promise<Map<string, CobroFilaFactura[]> | null> {
+    try {
+      return await this.cobrosDeVuelos(vueloIds, conFactura);
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron leer los cobros de ${vueloIds.length} vuelo(s) para las alertas del registro: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+  }
+
+  /** Cobros por id (lotes ≤ 200; SOLO con la sonda, para validar `cobro_ids`). */
+  private async cobrosPorIds(
+    ids: ReadonlyArray<string>,
+  ): Promise<CobroFilaFactura[]> {
+    const out: CobroFilaFactura[] = [];
+    for (const lote of enLotes([...new Set(ids)])) {
+      const { data, error } = await this.sb
+        .from('cobro_vuelo')
+        .select(`${COLS_COBRO_FACTURA}${colCobroFactura(true)}`)
+        .in('id', lote);
+      if (error) throw new Error(error.message);
+      out.push(...((data ?? []) as unknown as CobroFilaFactura[]));
+    }
+    return out;
+  }
+
+  /** Cobros que AMPARA esta factura (SOLO con la sonda; sin ella `[]`). */
+  private async cobrosAmparadosPor(
+    facturaId: string,
+    conFactura: boolean,
+  ): Promise<CobroFilaFactura[]> {
+    if (!conFactura) return [];
+    return this.leerTodo<CobroFilaFactura>((d, h) =>
+      this.sb
+        .from('cobro_vuelo')
+        .select(`${COLS_COBRO_FACTURA}${colCobroFactura(true)}`)
+        .eq('factura_emitida_id', facturaId)
+        .order('id')
+        .range(d, h),
+    );
+  }
+
+  /**
+   * `cobro_ids` validados (regla PURA `validarCobrosParaFactura`) ⇒ 400/409
+   * del contrato (§3.3) o las filas. `facturaId` = la propia al editar.
+   */
+  private async cobrosValidadosParaFactura(p: {
+    ids: ReadonlyArray<string>;
+    vueloIds: ReadonlyArray<string>;
+    facturaId: string | null;
+    vuelos: Map<string, VueloParaLigar>;
+  }): Promise<CobroFilaFactura[]> {
+    const cobros = await this.cobrosPorIds(p.ids);
+    const fallo = validarCobrosParaFactura({
+      ids: p.ids,
+      cobros,
+      vueloIds: p.vueloIds,
+      facturaId: p.facturaId,
+    });
+    if (!fallo) return cobros;
+    const folioDe = async (vueloId: string): Promise<number | null> => {
+      const v = p.vuelos.get(vueloId);
+      if (v) return v.folio;
+      const { data } = await this.sb
+        .from('vuelo')
+        .select('id, folio')
+        .eq('id', vueloId)
+        .maybeSingle();
+      const n = Number((data as { folio?: unknown } | null)?.folio);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    switch (fallo.codigo) {
+      case 'COBROS_NO_EXISTEN':
+        throw new BadRequestException({
+          message:
+            fallo.cobro_ids.length === 1
+              ? 'Uno de los cobros marcados ya no existe. Recarga la página y vuelve a marcarlos.'
+              : `${fallo.cobro_ids.length} de los cobros marcados ya no existen. Recarga la página y vuelve a marcarlos.`,
+          error: 'COBROS_NO_EXISTEN',
+          details: { cobro_ids: fallo.cobro_ids },
+        });
+      case 'COBROS_DE_OTRO_VUELO': {
+        const folio = await folioDe(fallo.cobro.vuelo_id);
+        throw new BadRequestException({
+          message: `El cobro de ${fmtDineroTexto(Number(fallo.cobro.monto) || 0, fallo.cobro.moneda ?? 'MXN')} del vuelo #${folio ?? '?'} no es de ninguno de los vuelos de esta factura. Agrega ese vuelo en «Vuelos» y vuelve a marcarlo.`,
+          error: 'COBROS_DE_OTRO_VUELO',
+          details: {
+            cobro_id: fallo.cobro.id,
+            vuelo_id: fallo.cobro.vuelo_id,
+            folio,
+          },
+        });
+      }
+      case 'REEMBOLSO_SIN_FACTURA':
+        throw new BadRequestException({
+          message: 'Un reembolso no se liga a una factura.',
+          error: 'REEMBOLSO_SIN_FACTURA',
+          details: { cobro_id: fallo.cobro.id },
+        });
+      case 'COBRO_DE_GRUPO':
+        throw new ConflictException({
+          message:
+            'Uno de los cobros marcados es parte de un sobre de grupo: la parte de un sobre no lleva factura por vuelo.',
+          error: 'COBRO_DE_GRUPO',
+          details: {
+            cobro_id: fallo.cobro.id,
+            cobro_grupo_id: fallo.cobro.cobro_grupo_id,
+          },
+        });
+      case 'COBRO_CON_OTRA_FACTURA': {
+        const [otra] = await this.facturasPorIds([fallo.factura_id]);
+        const etiqueta = otra
+          ? etiquetaFactura(otra.serie, otra.folio)
+          : 'otra factura';
+        const folio = await folioDe(fallo.cobro.vuelo_id);
+        throw new ConflictException({
+          message: `El cobro de ${fmtDineroTexto(Number(fallo.cobro.monto) || 0, fallo.cobro.moneda ?? 'MXN')} del vuelo #${folio ?? '?'} ya tiene la factura ${etiqueta}. Quítaselo desde esa factura (Editar → ¿Qué cobros cubre?) o cámbialo desde el cobro en el vuelo.`,
+          error: 'COBRO_CON_OTRA_FACTURA',
+          details: {
+            cobro_id: fallo.cobro.id,
+            factura: { id: fallo.factura_id, etiqueta },
+          },
+        });
+      }
+    }
+  }
+
+  /** Vuelos con sus cobros (positivos, sin sobre) que ninguna factura ampara. */
+  private async sinFacturaDe(
+    vuelos: ReadonlyArray<VueloParaLigar>,
+  ): Promise<VueloConCobrosSinFactura[]> {
+    if (vuelos.length === 0) return [];
+    const cobros = await this.cobrosDeVuelos(
+      vuelos.map((v) => v.id),
+      true,
+    );
+    return vuelos.map((v) => ({
+      vuelo_id: v.id,
+      folio: v.folio,
+      cobros: cobrosAsignables(cobros.get(v.id) ?? []).filter(cobroSinFactura),
+    }));
+  }
+
+  /**
+   * Contexto PURO de `calcularAlertas` con las ligas (total cotizado del
+   * vuelo) y los cobros leídos (Σ por moneda; con la sonda, qué factura
+   * ampara cada uno). `undefined` si los cobros no se pudieron leer.
+   */
+  private contextoAlertasDe(
+    ligas: ReadonlyArray<LigaFacturaVuelo>,
+    cobrosVuelo: Map<string, CobroFilaFactura[]> | null,
+    conFactura: boolean,
+  ): ContextoAlertas | undefined {
+    if (!cobrosVuelo) return undefined;
+    const vuelos = new Map<string, VueloParaAlertas>();
+    const cobrosDeFactura = new Map<
+      string,
+      { vuelo_id: string; monto: number; moneda: string }[]
+    >();
+    for (const l of ligas) {
+      if (vuelos.has(l.vuelo_id)) continue;
+      const cobrado = { USD: 0, MXN: 0 };
+      for (const c of cobrosAsignables(cobrosVuelo.get(l.vuelo_id) ?? [])) {
+        const moneda = c.moneda === 'USD' ? 'USD' : 'MXN';
+        const monto = Number(c.monto) || 0;
+        cobrado[moneda] += monto;
+        const fid = c.factura_emitida_id;
+        if (conFactura && typeof fid === 'string' && fid) {
+          (
+            cobrosDeFactura.get(fid) ?? cobrosDeFactura.set(fid, []).get(fid)!
+          ).push({ vuelo_id: c.vuelo_id, monto, moneda });
+        }
+      }
+      const total = l.vuelo ? totalVueloDe(l.vuelo) : null;
+      vuelos.set(l.vuelo_id, {
+        folio: l.vuelo ? Number(l.vuelo.folio) : null,
+        usd: total?.usd ?? null,
+        mxn: total?.mxn ?? null,
+        cobrado: { USD: redondear2(cobrado.USD), MXN: redondear2(cobrado.MXN) },
+      });
+    }
+    return { vuelos, ...(conFactura ? { cobrosDeFactura } : {}) };
+  }
+
   /** Arma el contexto de presentación de un conjunto de facturas. */
   private async armarContexto(
     facturas: FacturaEmitidaRow[],
     ligas: LigaFacturaVuelo[],
-    facturasRef: Array<{
-      id: string;
-      serie: string | null;
-      folio: string;
-      estatus: string;
-      es_parcial: boolean | null;
-      pdf_path: string | null;
-    }>,
+    facturasRef: FacturaRef[],
     opts: {
       clientes?: Map<string, ClienteRef>;
       emisoras?: EmisoraRef[];
       conCobros?: boolean;
+      /** Cobros ya leídos (registro completo); `undefined` = leerlos aquí. */
+      cobrosVuelo?: Map<string, CobroFilaFactura[]> | null;
+      conFactura?: boolean;
     } = {},
   ): Promise<Contexto> {
-    const calc = calcularAlertas(facturasRef, ligas);
     const idsVisibles = new Set(facturas.map((f) => f.id));
     const ligasPorFactura = new Map<string, LigaFacturaVuelo[]>();
     for (const l of ligas) {
@@ -516,6 +799,42 @@ export class FacturasEmitidasService {
       .flat()
       .map((l) => l.vuelo)
       .filter((v): v is VueloLigadoRow => !!v);
+    // Facturas por cobro (invariante 84): los cobros de TODOS los vuelos de
+    // las ligas (las alertas miran también a las facturas vecinas).
+    const conFactura = opts.conFactura ?? (await this.conFactura());
+    const cobrosVuelo =
+      opts.cobrosVuelo !== undefined
+        ? opts.cobrosVuelo
+        : await this.cobrosDeVuelosSeguros(
+            [...new Set(ligas.map((l) => l.vuelo_id))],
+            conFactura,
+          );
+    const calc = calcularAlertas(
+      facturasRef,
+      ligas,
+      this.contextoAlertasDe(ligas, cobrosVuelo, conFactura),
+    );
+    const cobrosDeFactura = new Map<string, CobroDeFactura[]>();
+    const cobrosSinFacturaPorVuelo = new Map<string, number>();
+    if (cobrosVuelo && conFactura) {
+      for (const [fid, ls] of ligasPorFactura) {
+        const lista: CobroDeFactura[] = [];
+        for (const l of ls) {
+          const folio = l.vuelo ? Number(l.vuelo.folio) : 0;
+          for (const c of cobrosAsignables(cobrosVuelo.get(l.vuelo_id) ?? [])) {
+            if (c.factura_emitida_id === fid)
+              lista.push(cobroDeFacturaDe(c, folio));
+          }
+        }
+        cobrosDeFactura.set(fid, ordenarCobrosDeFactura(lista));
+      }
+      for (const [vid, cs] of cobrosVuelo) {
+        cobrosSinFacturaPorVuelo.set(
+          vid,
+          cobrosAsignables(cs).filter(cobroSinFactura).length,
+        );
+      }
+    }
     const idsClientes = [
       ...facturas.map((f) => f.cliente_id),
       ...vuelosVisibles.map((v) => v.cliente_id),
@@ -550,6 +869,9 @@ export class FacturasEmitidasService {
       emisoras: new Map(emisoras.map((e) => [e.id, e])),
       nombres,
       cobros,
+      cobrosDeFactura,
+      detalleAlertas: calc.detalle,
+      cobrosSinFacturaPorVuelo,
     };
   }
 
@@ -574,6 +896,11 @@ export class FacturasEmitidasService {
             .filter((id) => id !== f.id)
             .map((id) => ctx.etiquetaDe.get(id) ?? '')
             .filter(Boolean),
+          // Facturas por cobro (invariante 84; 0 sin la migración).
+          cobros_n: (ctx.cobrosDeFactura.get(f.id) ?? []).filter(
+            (c) => c.vuelo_id === v.id,
+          ).length,
+          cobros_sin_factura: ctx.cobrosSinFacturaPorVuelo.get(v.id) ?? 0,
         };
       })
       .sort((a, b) => {
@@ -650,6 +977,9 @@ export class FacturasEmitidasService {
         ? (ctx.nombres.get(f.created_by) ?? null)
         : null,
       updated_at: f.updated_at,
+      // ADITIVOS (16-oct-2026, invariante 84), últimas llaves.
+      cobros: ctx.cobrosDeFactura.get(f.id) ?? [],
+      alertas_detalle: ctx.detalleAlertas.get(f.id) ?? [],
     };
   }
 
@@ -673,16 +1003,28 @@ export class FacturasEmitidasService {
     clientes: Map<string, ClienteRef>;
     filtrables: FacturaFiltrable[];
     ctxBase: ReturnType<typeof calcularAlertas>;
+    /** Facturas por cobro (invariante 84): cobros de TODOS los vuelos ligados (null = lectura caída). */
+    cobrosVuelo: Map<string, CobroFilaFactura[]> | null;
+    conFactura: boolean;
   }> {
-    const [facturas, ligasTodas, emisoras] = await Promise.all([
+    const [facturas, ligasTodas, emisoras, conFactura] = await Promise.all([
       this.cargarFacturas(),
       this.cargarTodasLasLigas(),
       this.cargarEmisoras(),
+      this.conFactura(),
     ]);
     const vivas = new Set(facturas.map((f) => f.id));
     // Ligas de facturas borradas NO cuentan (todo lector filtra deleted_at).
     const ligas = ligasTodas.filter((l) => vivas.has(l.factura_id));
-    const calc = calcularAlertas(facturas, ligas);
+    const cobrosVuelo = await this.cobrosDeVuelosSeguros(
+      [...new Set(ligas.map((l) => l.vuelo_id))],
+      conFactura,
+    );
+    const calc = calcularAlertas(
+      facturas,
+      ligas,
+      this.contextoAlertasDe(ligas, cobrosVuelo, conFactura),
+    );
     const clientes = await this.cargarClientes(
       facturas.map((f) => f.cliente_id).filter((x): x is string => !!x),
     );
@@ -716,7 +1058,16 @@ export class FacturasEmitidasService {
         alertas: calc.porFactura.get(f.id) ?? [],
       };
     });
-    return { facturas, ligas, emisoras, clientes, filtrables, ctxBase: calc };
+    return {
+      facturas,
+      ligas,
+      emisoras,
+      clientes,
+      filtrables,
+      ctxBase: calc,
+      cobrosVuelo,
+      conFactura,
+    };
   }
 
   private resumenDe(
@@ -787,6 +1138,8 @@ export class FacturasEmitidasService {
       this.armarContexto(pagina, reg.ligas, reg.facturas, {
         clientes: reg.clientes,
         emisoras: reg.emisoras,
+        cobrosVuelo: reg.cobrosVuelo,
+        conFactura: reg.conFactura,
       }),
       this.conteoSeguro(),
     ]);
@@ -848,6 +1201,8 @@ export class FacturasEmitidasService {
       this.armarContexto(filtradas, reg.ligas, reg.facturas, {
         clientes: reg.clientes,
         emisoras: reg.emisoras,
+        cobrosVuelo: reg.cobrosVuelo,
+        conFactura: reg.conFactura,
       }),
       this.conteoSeguro(),
     ]);
@@ -1475,16 +1830,70 @@ export class FacturasEmitidasService {
     const grupoIds = filas
       .map((v) => unwrap(v.grupo as { id: string } | null)?.id)
       .filter((x): x is string => !!x);
-    const [ligadas, conteoGrupos, exigencias] = await Promise.all([
+    const [ligadas, conteoGrupos, exigencias, conFactura] = await Promise.all([
       this.solicitud.ligadasDeVuelos(ids),
       this.avionesPorGrupo(grupoIds),
       this.solicitud.exigenciasDeAutomaticas(filas),
+      this.conFactura(),
     ]);
+    // FACTURAS POR COBRO (invariante 84), SOLO con la sonda: los cobros de
+    // cada vuelo (una lectura paginada) con la factura que ya los ampara,
+    // resuelta con las vigentes ligadas; si alguna no está entre ellas (el
+    // clon de `reassignAircraft`), una lectura en lote de las que falten.
+    const cobrosVuelo =
+      conFactura && ids.length > 0
+        ? await this.cobrosDeVuelos(ids, true)
+        : null;
+    const etiquetaDeFacturaId = new Map<string, string>();
+    if (cobrosVuelo) {
+      for (const fs of ligadas.values()) {
+        for (const f of fs) {
+          if (f.estatus === 'VIGENTE' && !f.deleted_at) {
+            etiquetaDeFacturaId.set(f.id, etiquetaFactura(f.serie, f.folio));
+          }
+        }
+      }
+      const faltan = [...cobrosVuelo.values()]
+        .flat()
+        .map((c) => c.factura_emitida_id)
+        .filter(
+          (x): x is string =>
+            typeof x === 'string' && x !== '' && !etiquetaDeFacturaId.has(x),
+        );
+      if (faltan.length > 0) {
+        for (const f of await this.facturasPorIds(faltan)) {
+          if (f.estatus === 'VIGENTE') {
+            etiquetaDeFacturaId.set(f.id, etiquetaFactura(f.serie, f.folio));
+          }
+        }
+      }
+    }
     return filas.map((v) => {
       const cli = unwrap(v.cliente as { nombre?: string; rfc?: string } | null);
       const vig = (ligadas.get(v.id) ?? []).filter(
         (f) => f.estatus === 'VIGENTE',
       );
+      const cobros: CobroCandidatoFactura[] | undefined = cobrosVuelo
+        ? cobrosAsignables(cobrosVuelo.get(v.id) ?? [])
+            .map((c) => {
+              const fid = c.factura_emitida_id;
+              const etiqueta =
+                typeof fid === 'string' && fid
+                  ? etiquetaDeFacturaId.get(fid)
+                  : undefined;
+              return {
+                ...cobroDeFacturaDe(c, Number(v.folio)),
+                factura: etiqueta ? { id: fid as string, etiqueta } : null,
+              };
+            })
+            .sort((a, b) =>
+              a.fecha_cobro < b.fecha_cobro
+                ? -1
+                : a.fecha_cobro > b.fecha_cobro
+                  ? 1
+                  : 0,
+            )
+        : undefined;
       return {
         id: v.id,
         folio: Number(v.folio),
@@ -1497,6 +1906,7 @@ export class FacturasEmitidasService {
         facturas_vigentes: vig.map((f) => etiquetaFactura(f.serie, f.folio)),
         solicitud: esPorFacturar(v, vig.length, exigencias.get(v.id) ?? null),
         grupo: this.grupoDe(v.grupo, conteoGrupos),
+        ...(cobros ? { cobros } : {}),
       };
     });
   }
@@ -1734,6 +2144,10 @@ export class FacturasEmitidasService {
       datos.es_parcial = d.es_parcial === true;
     if (tiene('vuelo_ids') && Array.isArray(d.vuelo_ids)) {
       datos.vuelo_ids = [...new Set(d.vuelo_ids)];
+    }
+    // Facturas por cobro (invariante 84): presente (aunque sea []) ≠ ausente.
+    if (tiene('cobro_ids') && Array.isArray(d.cobro_ids)) {
+      datos.cobro_ids = [...new Set(d.cobro_ids)];
     }
 
     if (alta) {
@@ -1998,8 +2412,20 @@ export class FacturasEmitidasService {
     receptor_rfc: string | null;
     vuelos: VueloParaLigar[];
     avisosEmisor: AvisoFactura[];
+    /**
+     * FACTURAS POR COBRO (invariante 84): los cobros que ESTA factura ampara
+     * tras guardar (`[]` sin sonda o sin cobros): omite
+     * `VUELO_CON_OTRA_FACTURA` en esos vuelos y cambia
+     * `TOTAL_DISTINTO_VUELO` por `TOTAL_DISTINTO_COBROS`.
+     */
+    cobrosAmparados?: ReadonlyArray<CobroFilaFactura>;
+    /** Vuelos con sus cobros sin factura; `null`/ausente = no se evalúa `COBROS_SIN_FACTURA`. */
+    sinFactura?: ReadonlyArray<VueloConCobrosSinFactura> | null;
+    remateSinFactura?: string;
   }): Promise<AvisoFactura[]> {
     const avisos: AvisoFactura[] = [...p.avisosEmisor];
+    const amparados = p.cobrosAmparados ?? [];
+    const vuelosConCobro = new Set(amparados.map((c) => c.vuelo_id));
     if (p.estatus === 'VIGENTE' && p.vuelos.length > 0) {
       try {
         const otras = await this.otrasVigentesPorVuelo(
@@ -2009,13 +2435,15 @@ export class FacturasEmitidasService {
         for (const v of p.vuelos) {
           const o = otras.get(v.id);
           if (!o) continue;
+          // El operador ya dijo por qué hay dos: esta ampara cobros del vuelo.
+          if (vuelosConCobro.has(v.id)) continue;
           const lista =
             o.length === 1
               ? `la factura ${o[0]} vigente`
               : `las facturas ${o.slice(0, -1).join(', ')} y ${o[o.length - 1]} vigentes`;
           avisos.push({
             code: 'VUELO_CON_OTRA_FACTURA',
-            mensaje: `El vuelo #${v.folio} ya tiene ${lista}. Si es anticipo y finiquito está bien; si es una re-emisión, cancela la anterior.`,
+            mensaje: `El vuelo #${v.folio} ya tiene ${lista}. Si esta cubre otros cobros del mismo vuelo, asígnaselos en «¿Qué cobros cubre?»; si es una re-emisión, cancela la anterior.`,
             details: { vuelo_id: v.id, folio: v.folio, otras: o },
           });
         }
@@ -2042,15 +2470,29 @@ export class FacturasEmitidasService {
         }
       }
     }
-    const total = avisoTotalDistintoVuelo({
-      estatus: p.estatus,
-      es_parcial: p.es_parcial,
-      moneda: p.moneda,
-      total: p.total,
-      etiqueta: p.etiqueta,
-      vuelos: p.vuelos,
-    });
+    // Con cobros amparados, el total se compara contra ESOS cobros
+    // (`TOTAL_DISTINTO_COBROS`), no contra el total del vuelo.
+    const total =
+      amparados.length > 0
+        ? avisoTotalDistintoCobros({
+            etiqueta: p.etiqueta,
+            moneda: p.moneda,
+            total: p.total,
+            cobros: amparados,
+          })
+        : avisoTotalDistintoVuelo({
+            estatus: p.estatus,
+            es_parcial: p.es_parcial,
+            moneda: p.moneda,
+            total: p.total,
+            etiqueta: p.etiqueta,
+            vuelos: p.vuelos,
+          });
     if (total) avisos.push(total);
+    if (p.sinFactura) {
+      const aviso = avisoCobrosSinFactura(p.sinFactura, p.remateSinFactura);
+      if (aviso) avisos.push(aviso);
+    }
     return avisos;
   }
 
@@ -2269,6 +2711,25 @@ export class FacturasEmitidasService {
     if (traeCliente && datos.cliente_id) {
       await this.asegurarClienteExiste(datos.cliente_id);
     }
+    // 4b) FACTURAS POR COBRO (16-oct-2026, invariante 84): `cobro_ids`
+    // ausente ⇒ nada nuevo (panel viejo byte-igual); `[]` ⇒ sin UPDATE pero
+    // SÍ se evalúa COBROS_SIN_FACTURA; no vacío ⇒ 503 sin la sonda ANTES de
+    // subir archivos y validación PURA de cada cobro.
+    const traeCobros = datos.cobro_ids !== undefined;
+    const cobroIds = datos.cobro_ids ?? [];
+    const conFactura = traeCobros ? await this.conFactura() : false;
+    if (cobroIds.length > 0 && !conFactura) {
+      throw errorCobroFacturaNoDisponible();
+    }
+    const cobrosMarcados =
+      cobroIds.length > 0
+        ? await this.cobrosValidadosParaFactura({
+            ids: cobroIds,
+            vueloIds,
+            facturaId: null,
+            vuelos,
+          })
+        : [];
     // 4b) Emisora (es parte del número: ANTES de buscar duplicados).
     const { emisoraId, avisos: avisosEmisor } = await this.resolverEmisora(
       datos,
@@ -2376,6 +2837,25 @@ export class FacturasEmitidasService {
       }
     }
     const etiqueta = etiquetaFactura(fila.serie, fila.folio);
+    // 9b) Cobros que AMPARA (invariante 84): UN UPDATE después del puente (el
+    // trigger A exige la liga del vuelo). Si rebota (carrera: un cobro se
+    // acaba de ligar a otra factura, se reembolsó…) se deshace TODO como
+    // cuando falla el puente (el borrado duro limpia la liga por FK).
+    if (cobroIds.length > 0) {
+      const { error: cobErr } = await this.sb
+        .from('cobro_vuelo')
+        .update({ factura_emitida_id: id })
+        .in('id', cobroIds);
+      if (cobErr) {
+        await this.sb.from('factura_emitida').delete().eq('id', id);
+        await this.borrarRecienSubidos(subidos.map((s) => s.path));
+        const fallo = leerErrorCobroFactura(cobErr);
+        if (fallo) throw errorCobroFactura(fallo, { etiqueta });
+        throw new Error(
+          `No se pudieron asignar los cobros a la factura: ${cobErr.message}`,
+        );
+      }
+    }
     // 10) Efectos (best-effort).
     await this.efectosDeLigar({ id, etiqueta }, listaVuelos, actor);
     // 11) Respuesta con avisos.
@@ -2389,6 +2869,9 @@ export class FacturasEmitidasService {
       receptor_rfc: fila.receptor_rfc,
       vuelos: listaVuelos,
       avisosEmisor,
+      cobrosAmparados: cobrosMarcados,
+      sinFactura:
+        traeCobros && conFactura ? await this.sinFacturaDe(listaVuelos) : null,
     });
     return { factura: await this.facturaCompleta(id), avisos };
   }
@@ -2491,11 +2974,48 @@ export class FacturasEmitidasService {
       }
     }
     // Vuelos: si viene la lista, REEMPLAZA el conjunto.
-    const ligasActuales = (await this.vuelosDeFactura(id)).map((v) => v.id);
+    const ligasActualesFilas = await this.vuelosDeFactura(id);
+    const ligasActuales = ligasActualesFilas.map((v) => v.id);
     const vueloIdsFinal = datos.vuelo_ids ?? ligasActuales;
     const vuelos = await this.vuelosParaLigar(vueloIdsFinal);
     const entran = vueloIdsFinal.filter((v) => !ligasActuales.includes(v));
     const salen = ligasActuales.filter((v) => !vueloIdsFinal.includes(v));
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84): `cobro_ids` presente
+    // REEMPLAZA el conjunto de cobros que ampara (como `vuelo_ids`); ausente
+    // no toca ligas. Con la sonda se leen los amparados de ANTES (avisos y
+    // «salen»); una CANCELADA no recibe cobros (409 FACTURA_NO_VIGENTE).
+    const traeCobros = datos.cobro_ids !== undefined;
+    const cobroIdsFinal = datos.cobro_ids ?? [];
+    const conFactura = await this.conFactura();
+    if (cobroIdsFinal.length > 0) {
+      if (!conFactura) throw errorCobroFacturaNoDisponible();
+      if (actual.estatus !== 'VIGENTE') {
+        throw new ConflictException({
+          message: `La factura ${etiquetaFactura(actual.serie, actual.folio)} está cancelada: reactívala antes de asignarle cobros.`,
+          error: 'FACTURA_NO_VIGENTE',
+          details: { factura_id: id, estatus: actual.estatus, borrada: false },
+        });
+      }
+    }
+    const amparadosAntes = await this.cobrosAmparadosPor(id, conFactura);
+    if (traeCobros && conFactura && cobroIdsFinal.length > 0) {
+      await this.cobrosValidadosParaFactura({
+        ids: cobroIdsFinal,
+        vueloIds: vueloIdsFinal,
+        facturaId: id,
+        vuelos,
+      });
+    }
+    const cobrosEntran =
+      traeCobros && conFactura
+        ? cobroIdsFinal.filter((c) => !amparadosAntes.some((a) => a.id === c))
+        : [];
+    const cobrosSalen =
+      traeCobros && conFactura
+        ? amparadosAntes
+            .filter((a) => !cobroIdsFinal.includes(a.id))
+            .map((a) => a.id)
+        : [];
 
     // Emisora: solo se re-resuelve si vino la llave o si cambió el emisor.
     let emisoraId = actual.emisora_id;
@@ -2615,6 +3135,83 @@ export class FacturasEmitidasService {
         );
       }
     }
+    // Cobros (invariante 84), en este ORDEN: los de los vuelos que SALEN se
+    // sueltan (+ aviso COBROS_DESLIGADOS por vuelo: sin esto la burbuja
+    // mostraría un chip de una factura que ya no es del vuelo); luego
+    // `cobrosSalen` (un `set null` no puede rebotar); al final
+    // `cobrosEntran` en UN UPDATE atómico (el trigger A ya tiene la liga del
+    // vuelo). Si este último rebota, la factura y sus vuelos ya quedaron
+    // guardados: 409 claro, nunca 500.
+    const avisosCobros: AvisoFactura[] = [];
+    if (salen.length > 0 && conFactura) {
+      const porVuelo = salen
+        .map((vid) => ({
+          vid,
+          cobros: amparadosAntes.filter((a) => a.vuelo_id === vid),
+        }))
+        .filter((x) => x.cobros.length > 0);
+      if (porVuelo.length > 0) {
+        const { error } = await this.sb
+          .from('cobro_vuelo')
+          .update({ factura_emitida_id: null })
+          .eq('factura_emitida_id', id)
+          .in('vuelo_id', salen);
+        if (error) {
+          throw new Error(
+            `La factura se guardó, pero no se pudieron soltar los cobros de los vuelos que salieron: ${error.message}. Vuelve a intentarlo.`,
+          );
+        }
+        for (const x of porVuelo) {
+          const aviso = avisoCobrosDesligados({
+            por: 'VUELO',
+            vuelo_id: x.vid,
+            folio: ligasActualesFilas.find((v) => v.id === x.vid)?.folio ?? 0,
+            cobros: x.cobros,
+          });
+          if (aviso) avisosCobros.push(aviso);
+        }
+      }
+    }
+    const cobrosSalenVivos = cobrosSalen.filter(
+      (c) => !salen.includes(amparadosAntes.find((a) => a.id === c)!.vuelo_id),
+    );
+    if (cobrosSalenVivos.length > 0) {
+      const { error } = await this.sb
+        .from('cobro_vuelo')
+        .update({ factura_emitida_id: null })
+        .eq('factura_emitida_id', id)
+        .in('id', cobrosSalenVivos);
+      if (error) {
+        throw new Error(
+          `La factura se guardó, pero no se pudieron soltar los cobros desmarcados: ${error.message}. Vuelve a intentarlo desde Editar.`,
+        );
+      }
+    }
+    if (cobrosEntran.length > 0) {
+      const { error } = await this.sb
+        .from('cobro_vuelo')
+        .update({ factura_emitida_id: id })
+        .in('id', cobrosEntran);
+      if (error) {
+        const fallo = leerErrorCobroFactura(error);
+        const motivo = fallo
+          ? (
+              errorCobroFactura(fallo, {
+                etiqueta: etiquetaFactura(actual.serie, actual.folio),
+              }).getResponse() as { message: string }
+            ).message
+          : error.message;
+        throw new ConflictException({
+          message: `La factura se guardó, pero no se pudieron asignar los cobros: ${motivo} Vuelve a intentarlo desde Editar.`,
+          error: 'COBROS_NO_ASIGNADOS',
+          details: {
+            factura_id: id,
+            cobro_ids: cobrosEntran,
+            ...fallo?.details,
+          },
+        });
+      }
+    }
     const factura = await this.facturaCompleta(id);
     const listaVuelos = vueloIdsFinal.map((v) => vuelos.get(v)!);
     if (factura.estatus === 'VIGENTE') {
@@ -2634,8 +3231,11 @@ export class FacturasEmitidasService {
       receptor_rfc: factura.receptor_rfc,
       vuelos: listaVuelos,
       avisosEmisor,
+      cobrosAmparados: await this.cobrosAmparadosPor(id, conFactura),
+      sinFactura:
+        traeCobros && conFactura ? await this.sinFacturaDe(listaVuelos) : null,
     });
-    return { factura, avisos };
+    return { factura, avisos: [...avisosCobros, ...avisos] };
   }
 
   // ======================================================================
@@ -2672,6 +3272,9 @@ export class FacturasEmitidasService {
         error: 'FACTURA_YA_CANCELADA',
       });
     }
+    // Facturas por cobro (invariante 84): el trigger B suelta sus cobros al
+    // cancelar; se leen ANTES para avisarlo (COBROS_DESLIGADOS).
+    const desligados = await this.avisoCobrosDesligadosDe(actual);
     const { error } = await this.sb
       .from('factura_emitida')
       .update({
@@ -2686,7 +3289,36 @@ export class FacturasEmitidasService {
       .is('deleted_at', null);
     if (error) throw new Error(error.message);
     const avisos = await this.avisosSigueFacturado(id);
-    return { factura: await this.facturaCompleta(id), avisos };
+    return {
+      factura: await this.facturaCompleta(id),
+      avisos: [...avisos, ...(desligados ? [desligados] : [])],
+    };
+  }
+
+  /**
+   * `COBROS_DESLIGADOS` de cancelar/eliminar (invariante 84): los cobros que
+   * la factura amparaba (el trigger B los suelta) con los folios de sus
+   * vuelos. `null` si no amparaba ninguno o sin la sonda.
+   */
+  private async avisoCobrosDesligadosDe(
+    f: FacturaEmitidaRow,
+  ): Promise<AvisoFactura | null> {
+    const amparados = await this.cobrosAmparadosPor(
+      f.id,
+      await this.conFactura(),
+    );
+    if (amparados.length === 0) return null;
+    const folios = new Map(
+      (await this.vuelosDeFactura(f.id)).map((v) => [v.id, v.folio]),
+    );
+    return avisoCobrosDesligados({
+      por: 'FACTURA',
+      etiqueta: etiquetaFactura(f.serie, f.folio),
+      cobros: amparados,
+      folios: amparados
+        .map((c) => folios.get(c.vuelo_id))
+        .filter((x): x is number => typeof x === 'number'),
+    });
   }
 
   /** `POST /:id/reactivar` */
@@ -2728,6 +3360,10 @@ export class FacturasEmitidasService {
       lista.map((v) => ({ ...v, factura_solicitada_at: null })),
       actor,
     );
+    // Facturas por cobro (invariante 84): reactivar NO re-liga (la
+    // clasificación se perdió al cancelar, a propósito); si sus vuelos
+    // tienen cobros sin factura, UN aviso COBROS_SIN_FACTURA con el remate.
+    const conFactura = await this.conFactura();
     const avisos = await this.avisosDeGuardado({
       id,
       estatus: 'VIGENTE',
@@ -2738,10 +3374,16 @@ export class FacturasEmitidasService {
       receptor_rfc: null,
       vuelos: lista,
       avisosEmisor: [],
+      sinFactura: conFactura ? await this.sinFacturaDe(lista) : null,
+      remateSinFactura: 'Vuelve a asignarlos desde Editar → ¿Qué cobros cubre?',
     });
     return {
       factura,
-      avisos: avisos.filter((a) => a.code === 'VUELO_CON_OTRA_FACTURA'),
+      avisos: avisos.filter(
+        (a) =>
+          a.code === 'VUELO_CON_OTRA_FACTURA' ||
+          a.code === 'COBROS_SIN_FACTURA',
+      ),
     };
   }
 
@@ -2753,7 +3395,10 @@ export class FacturasEmitidasService {
   ): Promise<{ ok: true; id: string; avisos: AvisoFactura[] }> {
     await this.asegurarDisponible();
     const m = this.motivoValido(motivo);
-    await this.facturaOFalla(id);
+    const actual = await this.facturaOFalla(id);
+    // Facturas por cobro (invariante 84): el trigger B suelta sus cobros al
+    // dar de baja; se leen ANTES para avisarlo (COBROS_DESLIGADOS).
+    const desligados = await this.avisoCobrosDesligadosDe(actual);
     const { error } = await this.sb
       .from('factura_emitida')
       .update({
@@ -2766,7 +3411,11 @@ export class FacturasEmitidasService {
       .is('deleted_at', null);
     if (error) throw new Error(error.message);
     const avisos = await this.avisosSigueFacturado(id);
-    return { ok: true, id, avisos };
+    return {
+      ok: true,
+      id,
+      avisos: [...avisos, ...(desligados ? [desligados] : [])],
+    };
   }
 
   // ======================================================================
@@ -3195,4 +3844,6 @@ type FacturaRowLike = Pick<
   | 'es_parcial'
   | 'pdf_path'
   | 'archivos_historial'
+  | 'total'
+  | 'moneda'
 >;

@@ -3,6 +3,11 @@ import { columnaOpcional } from '../../common/columna-opcional.util';
 import { facturaEmitidaDisponible } from '../../common/factura-emitida-disponible.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
+  cobroFacturaDisponible,
+  colCobroFactura,
+} from '../../common/cobro-factura-disponible.util';
+import {
+  cobroExigeFactura,
   cuentasQueExigenFactura,
   origenesQueExigenFactura,
   vueloExigeFactura,
@@ -17,6 +22,8 @@ import {
   type VueloFacturaRow,
 } from './factura-cliente.util';
 import {
+  cobroSinFactura,
+  cobrosAsignables,
   esSolicitudAutomatica,
   solicitudYaNoAplica,
   type CobroParaFactura,
@@ -83,8 +90,19 @@ export interface FacturaDeVuelo {
   solicitud_automatica: boolean;
   solicitud_ya_no_aplica: boolean;
   /**
+   * ADITIVOS (16-oct-2026, invariante 84; SOLO con la sonda de
+   * 20261016000001, sin ella 0): cobros positivos sin sobre que
+   * `cobroExigeFactura` y no ampara ninguna factura, y facturas emitidas
+   * VIGENTES del vuelo que amparan ≥ 1 de sus cobros. El pre-cierre lista
+   * un vuelo CON factura solo si `facturas_con_cobro > 0 &&
+   * cobros_exigen_sin_factura > 0`.
+   */
+  cobros_exigen_sin_factura: number;
+  facturas_con_cobro: number;
+  /**
    * SOLO con `{ conCobros: true }` (el aviso de transición de la solicitud
-   * automática): las filas de `cobro_vuelo` leídas y el T.C. del vuelo
+   * automática y el bloque `factura_servicio`): las filas de `cobro_vuelo`
+   * leídas —con `factura_emitida_id` si hay sonda— y el T.C. del vuelo
    * (respaldo de `cobrosEnUsd`). Sin la opción, las llaves no existen.
    */
   cobros?: CobroParaFactura[];
@@ -108,6 +126,7 @@ export interface OpcionesFacturasDeVuelos {
 async function cobrosDeVuelosPaginado(
   sb: SupabaseClient,
   lote: string[],
+  conFactura: boolean,
 ): Promise<CobroFila[]> {
   const out: CobroFila[] = [];
   for (let pagina = 0; ; pagina += 1) {
@@ -122,9 +141,11 @@ async function cobrosDeVuelosPaginado(
       // `moneda` (revisión 13-oct-2026): la exigencia se decide por el NETO
       // de cada cuenta y moneda. `tc_usd_mxn` (14-oct-2026, API 0.0.77):
       // `cobrado` = `cobrosEnUsd` del vuelo, insumo de la regla 2 del
-      // anticipo devuelto (devolución CRUZADA).
+      // anticipo devuelto (devolución CRUZADA). `fecha_cobro`,
+      // `cobro_grupo_id` y —solo con la sonda— `factura_emitida_id`
+      // (16-oct-2026, invariante 84): facturas por cobro.
       .select(
-        'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro',
+        `id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro, fecha_cobro, cobro_grupo_id${colCobroFactura(conFactura)}`,
       )
       .in('vuelo_id', lote)
       .order('id', { ascending: true })
@@ -190,6 +211,8 @@ export async function facturasDeVuelos(
         'Columnas vuelo.factura_folio/factura_uuid no existen todavía: el folio de la factura del servicio no se guarda hasta aplicar la migración 20260924000001',
     }).disponible());
   const conEmitidas = await facturaEmitidaDisponible(sb);
+  // Facturas por cobro (invariante 84): la columna SOLO se nombra con la sonda.
+  const conFactura = conEmitidas && (await cobroFacturaDisponible(sb));
   const colsVuelo = [
     'id',
     'facturado',
@@ -217,11 +240,11 @@ export async function facturasDeVuelos(
         ? sb
             .from('factura_emitida_vuelo')
             .select(
-              'vuelo_id, factura:factura_emitida!inner(serie, folio, folio_num, estatus, deleted_at)',
+              'vuelo_id, factura:factura_emitida!inner(id, serie, folio, folio_num, estatus, deleted_at)',
             )
             .in('vuelo_id', lote)
         : Promise.resolve({ data: [], error: null }),
-      cobrosDeVuelosPaginado(sb, lote),
+      cobrosDeVuelosPaginado(sb, lote, conFactura),
     ]);
     if (facturasRes.error) throw new Error(facturasRes.error.message);
     if (vuelosRes.error) throw new Error(vuelosRes.error.message);
@@ -279,6 +302,24 @@ export async function facturasDeVuelos(
     // una manual viva de un cancelado que retuvo dinero sigue diciendo
     // «Pendiente de factura» (la bandeja excluye cancelados: es el único aviso).
     const solicitada = solicitud.factura_solicitada_at != null && !yaNoAplica;
+    // FACTURAS POR COBRO (16-oct-2026, invariante 84), solo con la sonda:
+    // cobros que exigen factura sin ninguna asignada y facturas VIGENTES del
+    // vuelo que amparan ≥ 1 de sus cobros.
+    const asignables = conFactura ? cobrosAsignables(cobros) : [];
+    const amparan = new Set(
+      asignables
+        .map((c) => c.factura_emitida_id)
+        .filter((x): x is string => typeof x === 'string' && x !== ''),
+    );
+    const facturasConCobro = conFactura
+      ? (emitidasPorVuelo.get(id) ?? []).filter(
+          (f) =>
+            f.estatus === 'VIGENTE' &&
+            !f.deleted_at &&
+            typeof f.id === 'string' &&
+            amparan.has(f.id),
+        ).length
+      : 0;
     out.set(id, {
       registrada: etiquetaFacturaRegistrada(base),
       exigencia,
@@ -289,6 +330,10 @@ export async function facturasDeVuelos(
       origenes_exigen: origenesQueExigenFactura(cobros, cobrado),
       solicitud_automatica: esSolicitudAutomatica(solicitud),
       solicitud_ya_no_aplica: yaNoAplica,
+      cobros_exigen_sin_factura: asignables.filter(
+        (c) => cobroSinFactura(c) && cobroExigeFactura(c),
+      ).length,
+      facturas_con_cobro: facturasConCobro,
       ...(opciones.conCobros === true
         ? {
             cobros: cobros.map((c) => ({ ...c })),

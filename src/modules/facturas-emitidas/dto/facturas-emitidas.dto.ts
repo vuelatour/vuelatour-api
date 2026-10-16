@@ -295,4 +295,15 @@ export class FacturaEmitidaDatosDto {
   @ArrayMaxSize(50)
   @IsUUID('all', { each: true })
   vuelo_ids?: string[];
+
+  /**
+   * FACTURAS POR COBRO (16-oct-2026, invariante 84): cobros que AMPARA esta
+   * factura. Ausente ≠ `[]`: ausente no toca ligas; `[]` = ninguna (en PATCH
+   * suelta las que tenía). Cada cobro debe ser de uno de sus vuelos.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsUUID('all', { each: true })
+  cobro_ids?: string[];
 }

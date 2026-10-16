@@ -37,6 +37,8 @@ const factura = (p: Partial<FacturaEmitida>): FacturaEmitida => ({
   xml: null,
   archivos_anteriores: 0,
   vuelos: [],
+  cobros: [],
+  alertas_detalle: [],
   alertas: ['SIN_PDF', 'SIN_VUELO'],
   cancelada: null,
   created_at: '2026-09-24T15:00:00Z',

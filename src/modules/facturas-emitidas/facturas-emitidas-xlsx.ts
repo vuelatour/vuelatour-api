@@ -16,7 +16,10 @@ import type {
   FacturaEmitida,
   ResumenFacturas,
 } from './facturas-emitidas.types';
-import type { FiltrosFacturas } from './facturas-emitidas.util';
+import {
+  ROTULO_ALERTA_DUPLICADO_VUELO,
+  type FiltrosFacturas,
+} from './facturas-emitidas.util';
 
 export const COLUMNAS_EXCEL_FACTURAS: TablaXlsxPayload['columnas'] = [
   { label: 'Serie-Folio', tipo: 'texto' },
@@ -45,6 +48,8 @@ export const COLUMNAS_EXCEL_FACTURAS: TablaXlsxPayload['columnas'] = [
   { label: 'Registró', tipo: 'texto' },
   { label: 'Registrada el', tipo: 'texto' },
   { label: 'Motivo de cancelación', tipo: 'texto' },
+  // ADITIVA AL FINAL (16-oct-2026, invariante 84): «#332: $68,208.00 MXN (21 sep 2026)».
+  { label: 'Cobros que ampara', tipo: 'texto' },
 ];
 
 const COL_SUBTOTAL = 13;
@@ -52,7 +57,9 @@ const COL_IVA = 14;
 const COL_TOTAL = 15;
 
 export const ETIQUETAS_ALERTA_EXCEL: Record<AlertaFactura, string> = {
-  DUPLICADO_VUELO: 'Vuelo con 2 facturas',
+  // Mismo rótulo que el chip del registro (16-oct-2026): dos facturas que
+  // cuadran ya no son alerta.
+  DUPLICADO_VUELO: ROTULO_ALERTA_DUPLICADO_VUELO,
   SIN_PDF: 'Sin PDF',
   SIN_VUELO: 'Sin vuelo',
   VUELO_CANCELADO: 'Vuelo cancelado',
@@ -79,6 +86,45 @@ function diaVuelo(iso: string | null): string {
   } catch {
     return '';
   }
+}
+
+const MESES_CORTOS = [
+  'ene',
+  'feb',
+  'mar',
+  'abr',
+  'may',
+  'jun',
+  'jul',
+  'ago',
+  'sep',
+  'oct',
+  'nov',
+  'dic',
+];
+
+/** Instante ⇒ «21 sep 2026» (día Cancún; '' si no es válido). */
+export function diaCortoCobro(iso: string | null | undefined): string {
+  if (!iso) return '';
+  try {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(diaCancun(iso));
+    if (!m) return '';
+    return `${Number(m[3])} ${MESES_CORTOS[Number(m[2]) - 1] ?? ''} ${m[1]}`;
+  } catch {
+    return '';
+  }
+}
+
+/** Columna «Cobros que ampara»: «#332: $68,208.00 MXN (21 sep 2026); …». */
+export function textoCobrosQueAmpara(
+  f: Pick<FacturaEmitida, 'cobros'>,
+): string {
+  return (f.cobros ?? [])
+    .map((c) => {
+      const dia = diaCortoCobro(c.fecha_cobro);
+      return `#${c.vuelo_folio}: ${fmtDineroTexto(c.monto, c.moneda)}${dia ? ` (${dia})` : ''}`;
+    })
+    .join('; ');
 }
 
 /** Una fila del Excel por factura (mismo orden de columnas). */
@@ -115,6 +161,7 @@ export function filaExcelFactura(
     f.created_por_nombre ?? '',
     fechaHoraDdmm(f.created_at),
     f.cancelada?.motivo ?? '',
+    textoCobrosQueAmpara(f),
   ];
 }
 
@@ -149,7 +196,7 @@ export function textoFiltrosExcel(
   }
   if (f.alerta) {
     const etiqueta: Record<string, string> = {
-      duplicado_vuelo: 'Vuelo con 2 facturas',
+      duplicado_vuelo: ROTULO_ALERTA_DUPLICADO_VUELO,
       sin_pdf: 'Sin PDF',
       sin_vuelo: 'Sin vuelo',
       vuelo_cancelado: 'Vuelo cancelado',

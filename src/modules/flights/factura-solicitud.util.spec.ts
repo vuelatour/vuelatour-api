@@ -1,6 +1,9 @@
 import {
   bloqueFacturaServicio,
   cobrosAntesDelCambio,
+  cobrosAsignables,
+  miniDeFactura,
+  resumenCobrosDeFactura,
   elegirDestinatarios,
   esMarcadoSinRegistro,
   esPorFacturar,
@@ -512,6 +515,10 @@ describe('solicitud AUTOMÁTICA que ya no aplica (14-oct-2026, API 0.0.77)', () 
       'exigencia',
       'origenes_exigen',
       'solicitud_ya_no_aplica',
+      // Facturas por cobro (16-oct-2026, invariante 84), últimas y en orden.
+      'cobros_sin_factura',
+      'cobros_sin_factura_exigen',
+      'asignacion_disponible',
     ]);
     expect(b).toMatchObject({
       por_facturar: false,
@@ -706,5 +713,133 @@ describe('solicitud AUTOMÁTICA que ya no aplica (14-oct-2026, API 0.0.77)', () 
     ).toBe(
       'Entró dinero al vuelo #12 y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
     );
+  });
+});
+
+describe('facturas por cobro — mini y bloque (16-oct-2026, invariante 84)', () => {
+  const c = (
+    id: string,
+    monto: number,
+    factura: string | null,
+    extra: Partial<CobroParaFactura> = {},
+  ): CobroParaFactura => ({
+    id,
+    monto,
+    moneda: 'MXN',
+    cuenta_destino: 'Scotiabank Pesos',
+    metodo_cobro: 'TRANSFERENCIA',
+    cobro_grupo_id: null,
+    factura_emitida_id: factura,
+    ...extra,
+  });
+  // #332: A-0420 (68,208 MXN) ampara el cobro de 68,208; 3 quedan sin factura.
+  const cobros332 = [
+    c('c1', 68208, '0420'),
+    c('c2', 977.45, null),
+    c('c3', 1700, null),
+    c('c4', 1700, null),
+    c('r', -100, null),
+    c('s', 500, null, { cobro_grupo_id: 'sobre' }),
+  ];
+
+  it('miniDeFactura: es_parcial, cobros_n y cobros_monto (Σ por moneda, USD y luego MXN) al FINAL y en orden; sin cobros ⇒ 0 / []', () => {
+    const m = miniDeFactura(
+      ligada('0420', 'VIGENTE', {
+        moneda: 'MXN',
+        total: '68208.00',
+        es_parcial: true,
+      }),
+      cobros332,
+    );
+    expect(Object.keys(m).slice(-3)).toEqual([
+      'es_parcial',
+      'cobros_n',
+      'cobros_monto',
+    ]);
+    expect(m).toMatchObject({
+      es_parcial: true,
+      cobros_n: 1,
+      cobros_monto: [{ moneda: 'MXN', monto: 68208 }],
+    });
+    const mixta = miniDeFactura(ligada('0423', 'VIGENTE'), [
+      c('u', 600, '0423', { moneda: 'USD' }),
+      c('m', 860.47, '0423'),
+      c('r', -5, '0423'),
+    ]);
+    expect(mixta.cobros_monto).toEqual([
+      { moneda: 'USD', monto: 600 },
+      { moneda: 'MXN', monto: 860.47 },
+    ]);
+    expect(miniDeFactura(ligada('0420', 'VIGENTE'))).toMatchObject({
+      es_parcial: false,
+      cobros_n: 0,
+      cobros_monto: [],
+    });
+    expect(resumenCobrosDeFactura('0420', cobros332)).toEqual({
+      cobros_n: 1,
+      cobros_monto: [{ moneda: 'MXN', monto: 68208 }],
+    });
+    expect(cobrosAsignables(cobros332).map((x) => x.id)).toEqual([
+      'c1',
+      'c2',
+      'c3',
+      'c4',
+    ]);
+  });
+
+  it('bloque: con la sonda, cobros_sin_factura / _exigen y asignacion_disponible true; sin la sonda 0 / 0 / false y las minis en 0', () => {
+    const f = {
+      exigencia: 'EXIGE' as const,
+      origenes_exigen: ['en Scotiabank Pesos'],
+      cobros: cobros332,
+    };
+    const con = bloqueFacturaServicio(
+      SOLICITADA,
+      [ligada('0420', 'VIGENTE', { moneda: 'MXN', total: '68208.00' })],
+      'Itzi',
+      f,
+      true,
+    );
+    expect(con).toMatchObject({
+      cobros_sin_factura: 3,
+      cobros_sin_factura_exigen: 3,
+      asignacion_disponible: true,
+    });
+    expect(con.facturas[0]).toMatchObject({
+      cobros_n: 1,
+      cobros_monto: [{ moneda: 'MXN', monto: 68208 }],
+    });
+    // Un cobro que NO exige (Paywise) cuenta en cobros_sin_factura pero no en _exigen.
+    const paywise = bloqueFacturaServicio(
+      SOLICITADA,
+      [ligada('0420', 'VIGENTE')],
+      'Itzi',
+      {
+        ...f,
+        cobros: [
+          c('p', 100, null, {
+            cuenta_destino: 'Paywise',
+            metodo_cobro: 'PAYWISE',
+          }),
+        ],
+      },
+      true,
+    );
+    expect(paywise).toMatchObject({
+      cobros_sin_factura: 1,
+      cobros_sin_factura_exigen: 0,
+    });
+    const sin = bloqueFacturaServicio(
+      SOLICITADA,
+      [ligada('0420', 'VIGENTE')],
+      'Itzi',
+      f,
+    );
+    expect(sin).toMatchObject({
+      cobros_sin_factura: 0,
+      cobros_sin_factura_exigen: 0,
+      asignacion_disponible: false,
+    });
+    expect(sin.facturas[0]).toMatchObject({ cobros_n: 0, cobros_monto: [] });
   });
 });
