@@ -9471,7 +9471,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       sin tocarse.
 
 84. **FACTURAS POR COBRO: UN VUELO, VARIAS FACTURAS; CADA COBRO CON LA SUYA
-    (16-oct-2026, API 0.0.82, migración `20261016000001` PENDIENTE).** Pedido
+    (16-oct-2026, API 0.0.82, migración `20261016000001` APLICADA el 16-oct-2026 ~02:18 Cancún por MCP: dry-run DRYRUN_OK C1–C9, backfill 44 cobros en 37 facturas, historial `20261016071824`).** Pedido
     del cliente con la card de #332 (4 cobros conciliados y UNA «Factura
     A-0420» de 68,208 que solo cubre el cobro de 68,208): «necesitamos poder
     cargar en un vuelo varias facturas y poder vincularlas». Modelo:
@@ -10947,7 +10947,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   anterior; migración ⇒ SOLO SQL Editor con el pie comentado (exportar antes
   las omisiones) y REINICIAR el API (la sonda memoriza el «sí»). Las claves
   retiradas `pistas_sin_gasto` y `tua_cobrada_sin_pagada` no se reusan nunca.
-- **16-oct-2026 — 0.0.82, migración `20261016000001` PENDIENTE** (facturas
+- **16-oct-2026 — 0.0.82, migración `20261016000001` APLICADA (16-oct-2026 ~02:18 Cancún, por MCP; postchecks P1–P5 ok, 44 ligas en 37 facturas, incoherentes=0)** (facturas
   por cobro, invariante 84; rama `facturas-por-cobro` sobre `1654e16e` =
   0.0.81 en prod). Orden: (1) migración `20261016000001_cobro_factura_emitida`
   por MCP con dry-run `begin … rollback` (C1–C9 de su cabecera) ⇒
