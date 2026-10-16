@@ -11111,7 +11111,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la rechaza)**: `alter table public.ingreso drop constraint if exists
   ingreso_aeronave_chk;` (y registrar la reversa en el historial si se
   aplica).
-- **PENDIENTE (15-oct-2026) — `20261015000001_escala_taco_omitido.sql`**
+- **APLICADA (15-oct-2026 ~21:05 Cancún, por MCP: DRYRUN_OK A–C9 en prod sin residuos; `apply_migration` con el cuerpo —el MCP SÍ aceptó el `on delete set null` de la FK, no hizo falta el plan B—; historial por `name`, version 20261016020506; postcheck: 3 columnas, CHECK con btrim y `taco_llegada IS NULL`, FK `confdeltype = n`, 0 omitidos; `get_advisors` sin nada nuevo) — `20261015000001_escala_taco_omitido.sql`**
   (invariante 79, tacómetro omitido por tramo; la aplica el orquestador).
   ADITIVA e idempotente: `escala.taco_omitido_at timestamptz`,
   `taco_omitido_por uuid` (FK `usuario`, on delete set null) y
