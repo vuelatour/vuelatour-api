@@ -57,6 +57,11 @@ import {
   type GastoCambioFecha,
 } from './cambio-fecha-gasto.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
+import {
+  conteoFacturasDeGastos,
+  detalleFacturasDeGasto,
+} from '../facturacion/gasto-facturas.lector';
+import type { FacturaDeGasto } from '../facturacion/gasto-facturas.util';
 import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
@@ -805,6 +810,9 @@ export class ExpensesService {
     const rows = (data ?? []) as Array<Record<string, unknown>>;
     await this.anexarPagosDeCompra(rows);
     await this.anexarConciliacionParcial(rows);
+    // ADITIVO (16-oct-2026, invariante 87): cuántas facturas recibidas
+    // amparan cada gasto («Facturada · 5»).
+    await this.anexarConteoFacturas(rows);
     // ADITIVO (13-oct-2026, invariante 66): la TUA que separa la LECTURA de
     // la IA, ignorando la de la oficina («La IA detectó una TUA de $X»).
     // Puro, sin consulta.
@@ -901,6 +909,65 @@ export class ExpensesService {
       r.monto_vinculado = ligado;
       r.faltante = faltanteDe(Number(r.monto), ligado);
       r.parcial = r.conciliado !== true;
+    }
+  }
+
+  /**
+   * `facturas_n` (ADITIVO, 16-oct-2026, invariante 87) = cuántas facturas
+   * recibidas amparan el gasto (puente `gasto_factura_recibida`; sin la
+   * migración, 1 si tiene `factura_recibida_id`). Es presentación: si la
+   * lectura falla la lista sale sin la llave, nunca con un 500.
+   */
+  private async anexarConteoFacturas(
+    rows: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    try {
+      const conteo = await conteoFacturasDeGastos(
+        this.supabase.service,
+        rows.map((r) => ({
+          id: String(r.id),
+          factura_recibida_id: (r.factura_recibida_id as string | null) ?? null,
+        })),
+      );
+      for (const r of rows) r.facturas_n = conteo.get(String(r.id)) ?? 0;
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo contar las facturas de los gastos: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Facturas del gasto para el DETALLE (`GET /v1/expenses/:id`, roles de
+   * oficina; ADITIVO, 16-oct-2026, invariante 87): `facturas` (principal
+   * primero), `facturas_avisos` (Σ facturas vs monto, no bloqueante) y
+   * `facturas_multiples` (la migración está aplicada ⇒ el panel AGREGA en
+   * vez de reemplazar). `null` si la lectura falla (el detalle no se cae).
+   */
+  async facturasDelGasto(gasto: Record<string, unknown>): Promise<{
+    facturas: FacturaDeGasto[];
+    facturas_avisos: string[];
+    facturas_multiples: boolean;
+  } | null> {
+    try {
+      const det = await detalleFacturasDeGasto(this.supabase.service, {
+        id: String(gasto.id),
+        factura_recibida_id:
+          (gasto.factura_recibida_id as string | null) ?? null,
+        monto: gasto.monto,
+        moneda: gasto.moneda,
+      });
+      return {
+        facturas: det.facturas,
+        facturas_avisos: det.avisos,
+        facturas_multiples: det.multiples,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `No se pudieron leer las facturas del gasto ${String(gasto.id)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
   }
 

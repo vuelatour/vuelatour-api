@@ -382,6 +382,17 @@ export class ExpensesController {
       delete g.verificado_por;
       delete g.verificado_at;
       delete g.verificador;
+      return gasto;
+    }
+    // ADITIVO (16-oct-2026, invariante 87): las facturas del gasto para
+    // «Verificar / editar» (solo oficina; sin la llave si la lectura falla).
+    if (
+      c.rol === Rol.ADMIN ||
+      c.rol === Rol.COORDINADOR ||
+      c.rol === Rol.FACTURACION
+    ) {
+      const extra = await this.expenses.facturasDelGasto(gasto);
+      if (extra) return { ...gasto, ...extra };
     }
     return gasto;
   }
