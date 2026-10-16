@@ -9844,7 +9844,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       conciliacion y flights.
 
 87. **VARIAS FACTURAS RECIBIDAS POR GASTO (16-oct-2026, API 0.0.87,
-    migración `20261016000003` PENDIENTE).** Pedido del cliente: ASA entrega
+    migración `20261016000003` APLICADA el 16-oct-2026 ~12:43 Cancún por MCP).** Pedido del cliente: ASA entrega
     5 CFDI por carga de combustible (producto, almacenamiento, expendio,
     DUGAEAM, servicio administrativo) y «Subir factura» aceptaba 1 PDF + 1
     XML: una segunda REEMPLAZABA a la primera sin desligarla y un PDF sin XML
@@ -11479,7 +11479,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   (`pagoOperadorExternoEnGastos`, `common/costo-externo.util.ts`). En prod
   solo cambia #308 (OPERACIONES sep $51,786.94 → $26,452.52). Solo
   lecturas; cualquier orden de deploy es seguro.
-- **16-oct-2026 — 0.0.87, migración `20261016000003` PENDIENTE** (varias
+- **16-oct-2026 — 0.0.87, migración `20261016000003` APLICADA (16-oct-2026 ~12:43 Cancún por MCP tras API 0.0.87; DRYRUN_OK T1–T10; 124 pares en la puente, 0 principales fuera; historial `20261016174306`)** (varias
   facturas recibidas por gasto, invariante 87; rama `facturas-gasto` rebasada
   sobre `66a386cd` = 0.0.86 en prod). Orden: (1) API 0.0.87 (push a `main`,
   `GET /v1/version` = `0.0.87`; sin la migración se comporta como 0.0.86 y
