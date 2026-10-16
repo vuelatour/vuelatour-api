@@ -9621,6 +9621,131 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       503 estructurados) y `flights.module.spec` (forwardRef en los dos
       módulos, token provisto/exportado, `import type` en flights.service).
 
+86. **INICIO OFICIAL DEL SISTEMA = 1-sep-2026 (16-oct-2026, API 0.0.84,
+    migración `20261016000002` = el INTERRUPTOR).** Pedido del cliente:
+    «quitemos todo lo de agosto … para que iniciemos en septiembre 2026 de
+    forma oficial» (agosto se cerró en el sistema anterior). **El piso SOLO
+    OCULTA: no se borra ni se modifica nada; ningún número de un periodo que
+    empiece el día del inicio o después cambia** (reparto, balance,
+    pre-cierre, tableros, Excel/PDF), ni ningún saldo acumulado (caja chica,
+    existencias, horas, cuenta de socios, anticipos con saldo).
+    - **Fuente única de la fecha**: fila `configuracion_sistema` clave
+      `fecha_inicio_oficial`, `valor_json = ["2026-09-01"]` (día de pared
+      Cancún; la tabla exige arreglo), `activa = true`. Sin fila,
+      `activa = false` o día inválido ⇒ **`null` = sin piso = 0.0.83 byte a
+      byte**. NO se reusa `comisiones_al_avion_desde`, `folios_releer_desde`
+      ni `CUENTA_DESDE_DEFAULT` (decisiones distintas). Lector:
+      `ConfiguracionService.inicioOficial()` (lee `clave, activa,
+      valor_json`; caché 60 s; BD caída ⇒ último valor, o null si nunca se
+      leyó). NO `fecha(clave, default)` (ignora `activa` y exige default).
+      La clave está en `CLAVES_SECCION_PROPIA`: `GET /v1/config` no la
+      lista y `PATCH /v1/config/fecha_inicio_oficial` ⇒ 400
+      `CLAVE_NO_EDITABLE_AQUI` («…se cambia por SQL (CLAUDE.md, invariante
+      86).»).
+    - **Los servicios leen SIEMPRE por `inicioOficialDe(cfg)`**
+      (`common/inicio-oficial.util.ts`): tolera `cfg` ausente o mocks
+      PARCIALES (specs viejos) y un lector que lanza ⇒ null. Los servicios
+      que no tenían `ConfiguracionService` lo reciben **último y
+      `@Optional()`** (groups, ingresos, dashboards, dinero-report,
+      facturas-emitidas, invoices, alerts, aircraft); módulos que lo
+      importan nuevo: groups, ingresos, dashboards, facturacion, alerts.
+    - **Utilidad pura** (fuente única de las reglas):
+      `corteTs(inicio)` = `${inicio}T00:00:00-05:00` (timestamptz);
+      `pisoDia(desde, inicio)` (max de días; null ⇒ intacto);
+      `rangoConPiso` (`vacio` si `hasta < inicio`);
+      `exigirPeriodoDesdeInicio` (400 **`PERIODO_ANTES_DEL_INICIO`**
+      `details {inicio}` «El sistema arranca el 1-sep-2026. Elige un
+      periodo a partir de esa fecha.»); `esAntesDelInicio` (timestamptz ⇒
+      día Cancún: `2026-09-01T04:59:59Z` es «antes»); `fechaInicioCorta`
+      (`1-sep-2026`). Specs: `inicio-oficial.util.spec`; fixture común
+      `common/inicio-oficial.fixture-spec.ts` (Supabase que graba cadenas).
+    - **Tres formas, SOLO en la ENTRADA del lector**: **L** (listado:
+      condición AND `col ≥ corte`; con columna anulable que significa «sin
+      fecha todavía», `.or('col.is.null,col.gte.<corte>')`; rango todo
+      anterior ⇒ lista vacía, nunca 400); **V** (ventana por default: hoy −
+      90 / mes en curso ⇒ `max(…, inicio)`, `desde` explícito sube; la
+      validación «desde > hasta» se hace ANTES con lo pedido, así un rango
+      anterior sale vacío y no 400); **R** (reporte por periodo:
+      `exigirPeriodoDesdeInicio`; el periodo SUBIDO va en consultas,
+      títulos, hojas y nombre de archivo — `reporteXlsx`/`auditoriaPaywiseXlsx`
+      de conciliación devuelven el aditivo `desde` para el nombre).
+    - **RECORTAR**: L — `GET /flights` (siempre
+      `or(fecha_vuelo.is.null,fecha_fin.gte.corte)`, sin reescribir `desde`:
+      la app manda ISO; vale para Mis vuelos, EN_VUELO, mecánico y deltas),
+      `/quotes` + `/quotes/:id/vecinos` (`aplicarFiltrosLista`: sin `desde`
+      ⇒ or que conserva las cotizaciones sin fecha; `desde` anterior sube),
+      `/grupos`, `/expenses` + export (`fecha_gasto ≥ inicio` en tabla,
+      bandeja, `orden=captura`, duplicados; **NO con `vuelo_id` ni
+      `compra_id`**: son los gastos de un registro abierto por id), IA de la
+      bandeja (`sugerirAsignaciones`), `/conciliacion/movimientos`,
+      `/conciliacion/resumen`, `/aircraft/:id/metrics` **solo `finanzas`**
+      (+ aditivo `finanzas_desde`; horas/vuelos/motores/hélices NO) y
+      `combustible-mensual`, `/facturas-emitidas` + export (`filtrosDe`:
+      `fecha_emision`; el `resumen` del registro sigue sobre todas: los
+      huecos de folio necesitan la serie completa), `por-facturar` + conteo
+      (`vuelosConSolicitud(cols, inicio)`; `vuelos-candidatos` lo llama sin
+      piso), `/invoices/pending`, `/invoices/recibidas` (conserva
+      `fecha_emision` null), KPI «abiertos» de dashboards, alertas
+      `vuelo_estancado` (pre-vuelo por `fecha_vuelo`, EN_VUELO por
+      `fecha_fin`), `cobro_pendiente` (por `fecha_vuelo`, no `updated_at`) y
+      `gastos_sin_avion`; `taco-live?fecha=` anterior ⇒ `{fecha, vuelos: []}`
+      (el default hoy no cambia). V — `cobros-sin-banco` (**eje
+      `fecha_cobro`**: los 9 cobros del 31-ago de vuelos de septiembre salen;
+      el pre-cierre ya no los listaba), `gastos-sin-banco`,
+      `abonos-pendientes`, auto-cruce y sugerir abonos **SIN
+      `movimiento_ids`** (con ids no hay piso), sugerir lote, `/ingresos/
+      resumen|entradas|lista` (`periodoConPiso`), `otros-gastos`/Nómina y
+      `pistas/pendientes` (periodo anterior ⇒ vacío). R — reparto
+      (`compute`, PDF, Excel), `dinero.xlsx`, pre-cierre, balances por avión
+      y general, los 5 tableros, `conciliacion/reporte.xlsx`, auditoría
+      Paywise (+ su «conciliar» y Excel), `/ingresos/export.xlsx`,
+      `/invoices/cierre`.
+    - **NO TOCAR** (prohibido poner piso): siembras
+      (`aircraft-balance.ultimaLlegadaAntesDe`: lee ANTES del `desde` ya
+      subido), ventanas ±N días y candidatos (`gastosCandidatos`,
+      `candidatosCobro`, reversos, Paywise ±días, `sugerir-vuelo`,
+      `:id/sugerir-asignacion`, `vuelos-candidatos`, combinar), detalle por
+      id de cualquier registro, importación/dedupe y lista de estados de
+      cuenta, saldos (caja chica completa y `caja_negativa`, inventario
+      completo e `inventario_bajo`, horas: tacómetros, bitácora, eventos de
+      componentes, `servicio_horas`, `/anterior`, `/ultimo-taco`, crones de
+      tacos, `/me/horas`, `/pilots/:id`), cuenta corriente de socios
+      (`utilidadMesSocios` llama `compute(…, {sinPiso: true})`), anticipos
+      `saldo=con_saldo`, `/calendar`, notificaciones, auditoría,
+      `/multas`, y **escrituras**: el API NO bloquea fechas anteriores (la
+      cola offline de la app fallaría para siempre; el panel avisa sin
+      bloquear).
+    - **Exposición**: `GET /v1/me` y `PATCH /v1/me` → `config.inicio_oficial:
+      "AAAA-MM-DD" | null` (aditivo; MISMO shape en los dos, la app cachea
+      ambas en la misma llave). El panel acota selectores con ella; la app
+      no cambia (hereda el piso del API).
+    - **Orden de despliegue**: API 0.0.84 (`GET /v1/version`) ⇒ panel ⇒
+      migración `20261016000002` (enciende en ≤ 60 s por instancia). Al
+      revés: con API viejo la fila saldría como switch en Configuración;
+      con panel viejo, sus selectores ofrecen agosto y reciben 400.
+    - **Reversibilidad (todo por UPDATE, el MCP lo acepta)**:
+      ```sql
+      -- APAGAR (vuelve julio/agosto, como 0.0.83):
+      update public.configuracion_sistema set activa = false, updated_at = now()
+       where clave = 'fecha_inicio_oficial';
+      -- VOLVER A PRENDERLO:
+      update public.configuracion_sistema set activa = true, updated_at = now()
+       where clave = 'fecha_inicio_oficial';
+      -- CAMBIAR la fecha:
+      update public.configuracion_sistema set valor_json = '["2026-10-01"]'::jsonb,
+             updated_at = now() where clave = 'fecha_inicio_oficial';
+      -- Verificar:
+      select clave, activa, valor_json, updated_at from public.configuracion_sistema
+       where clave = 'fecha_inicio_oficial';
+      ```
+    - Specs: `inicio-oficial.util.spec`, `configuracion.inicio-oficial.spec`,
+      `me.controller.permisos.spec` (GET/PATCH), y un
+      `*.inicio-oficial.spec` por servicio (flights, quotes, groups,
+      expenses, conciliacion — con la regresión «un cargo del 2-sep sigue
+      viendo gastos del 30-ago» —, ingresos, profit-sharing — septiembre ⇒
+      MISMAS consultas que con null —, aircraft, dashboards,
+      facturas-emitidas, invoices, alerts).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -11050,6 +11175,20 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   commit de la ruta + la revisión + el renumerado a 85/0.0.83. Push a `main`
   ⇒ `GET /v1/version` = `0.0.83`. Verificar el arranque (ciclo de módulos
   flights ↔ quotes con `forwardRef`) con ese GET.
+- **16-oct-2026 — 0.0.84, migración `20261016000002` PENDIENTE** (inicio
+  oficial del sistema = 1-sep-2026, invariante 86; rama `inicio-oficial`
+  sobre `6da2176c` = 0.0.83 en prod). La migración NO tiene DDL: siembra la
+  fila `fecha_inicio_oficial` (`["2026-09-01"]`, activa) y ES EL
+  INTERRUPTOR. Orden: (1) API 0.0.84 (push a `main`, `GET /v1/version` =
+  `0.0.84`; sin la fila se comporta como 0.0.83); (2) panel; (3) dry-run
+  por `execute_sql` (bloque `do … raise exception 'DRYRUN_OK …'`, cuerpo
+  real + idempotencia + apagar/prender + CHECK) ⇒ SELECT de que la fila no
+  existe ⇒ `apply_migration` ⇒ SELECT de la fila ⇒ `get_advisors`. Antes
+  de aplicarla guardar las respuestas del QA (reparto/pre-cierre/balances
+  de septiembre, caja chica, inventario, horas) y compararlas después
+  (deben ser idénticas). Rollback: `update … set activa = false` (≤ 60 s).
+  Volver el API a 0.0.83 con la fila puesta la deja ver como un switch sin
+  significado en Configuración (no rompe nada; mejor `activa = false`).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
