@@ -239,7 +239,7 @@ export class AlertsService {
       if (!pilotoId) continue;
       if (t.taco_llegada !== null) continue; // ese tramo ya voló
       // Tacómetro OMITIDO por la oficina (invariante 79): no se persigue.
-      if (esTramoOmitido(t as unknown as Record<string, unknown>)) continue;
+      if (esTramoOmitido(t)) continue;
       // Fecha incoherente (tramo 2+ "antes" de la salida del vuelo, típico
       // dato viejo tras reagendar la ida): mejor callar que avisar mal.
       const salidaVuelo = vuelo.fecha_vuelo

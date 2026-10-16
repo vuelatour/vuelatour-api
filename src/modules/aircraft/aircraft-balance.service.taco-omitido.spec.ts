@@ -73,7 +73,7 @@ const regresoOmitido = tramo({
  */
 function sinMigracion(sb: ReturnType<typeof fakeSupabase>['supabase']) {
   const from = (tabla: string) => {
-    const q = sb.service.from(tabla) as Record<string, unknown>;
+    const q = sb.service.from(tabla);
     const select = q.select as (c?: string) => unknown;
     q.select = (cols?: string) => {
       if (typeof cols === 'string' && cols.includes('taco_omitido')) {

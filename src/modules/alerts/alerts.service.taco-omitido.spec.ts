@@ -220,11 +220,11 @@ describe('checkVuelosEstancados · «sigue EN VUELO»', () => {
       false,
     );
     await svc.checkVuelosEstancados(config);
-    expect(notifications.notifyRole).toHaveBeenCalledWith(
-      'ADMIN',
-      expect.objectContaining({
-        cuerpo: expect.stringContaining('faltan lecturas de llegada'),
-      }),
-    );
+    const [rol, aviso] = notifications.notifyRole.mock.calls[0] as [
+      string,
+      { cuerpo: string },
+    ];
+    expect(rol).toBe('ADMIN');
+    expect(aviso.cuerpo).toContain('faltan lecturas de llegada');
   });
 });

@@ -12,7 +12,6 @@ jest.mock('../vision/vision.service', () => ({ VisionService: class {} }));
 jest.mock('../pilots/pilots.service', () => ({ PilotsService: class {} }));
 
 import { FlightsService } from './flights.service';
-import type { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type { EmailService } from '../notifications/email.service';
 import type { NotificationsService } from '../realtime/notifications.service';
@@ -21,7 +20,6 @@ import type { AirportsService } from '../airports/airports.service';
 import type { VisionService } from '../vision/vision.service';
 import type { ConfiguracionService } from '../configuracion/configuracion.service';
 import type { PilotsService } from '../pilots/pilots.service';
-import type { CaptureTacoDto, ConfirmTacoDto } from './dto/escalas.dto';
 import {
   fakeSupabase,
   type Op,
@@ -484,11 +482,7 @@ describe('deshacerOmisionTaco (DELETE legs/:legId/taco/omitir)', () => {
 describe('una LLEGADA REAL retira la omisión en el MISMO update', () => {
   it('captureTaco con llegada: los tres null van en el patch de la llegada y la bitácora lo dice', async () => {
     const { svc, updates } = armar(mundo300({ tramos: [omitido()] }));
-    const fila = await svc.captureTaco(
-      'e300',
-      { taco_llegada: 4455.3 } as CaptureTacoDto,
-      LUIS,
-    );
+    const fila = await svc.captureTaco('e300', { taco_llegada: 4455.3 }, LUIS);
     const conLlegada = updates('escala').find(
       (u) => u.patch?.taco_llegada === 4455.3,
     );
@@ -506,11 +500,7 @@ describe('una LLEGADA REAL retira la omisión en el MISMO update', () => {
   it('captureTaco con SALIDA sola NO retira la omisión', async () => {
     const t = mundo300({ tramos: [omitido()] });
     const { svc, updates } = armar(t);
-    await svc.captureTaco(
-      'e300',
-      { taco_salida: 4455.1 } as CaptureTacoDto,
-      LUIS,
-    );
+    await svc.captureTaco('e300', { taco_salida: 4455.1 }, LUIS);
     for (const u of updates('escala')) {
       expect(Object.keys(u.patch ?? {})).not.toContain('taco_omitido_at');
     }
@@ -520,11 +510,7 @@ describe('una LLEGADA REAL retira la omisión en el MISMO update', () => {
   it('confirmTaco con llegada (oficina): retira y asienta «ajustada»', async () => {
     const t = mundo300({ tramos: [omitido({ taco_salida: 4455.1 })] });
     const { svc, updates } = armar(t);
-    await svc.confirmTaco(
-      'e300',
-      { taco_llegada: 4455.3 } as ConfirmTacoDto,
-      ITZI,
-    );
+    await svc.confirmTaco('e300', { taco_llegada: 4455.3 }, ITZI);
     const [u] = updates('escala');
     expect(u.patch).toMatchObject({
       taco_llegada: 4455.3,
@@ -558,7 +544,7 @@ describe('una LLEGADA REAL retira la omisión en el MISMO update', () => {
         foto_taco_llegada_url: 'taco-fotos/e300.jpg',
         capturado_offline: true,
         pendiente_lectura: true,
-      } as unknown as CaptureTacoDto,
+      },
       LUIS,
     );
     expect(t.escala[0]).toMatchObject({
@@ -865,11 +851,7 @@ describe('sección 9: salida DEDUCIDA que cruza un tramo omitido ⇒ ámbar', ()
   it('captureTaco: copia DEDUCIDA + ámbar con el texto exacto en el MISMO update, y sobrevive al recálculo', async () => {
     const t = cadena(true);
     const { svc, updates } = armar(t);
-    await svc.captureTaco(
-      'e322',
-      { taco_llegada: 4455.6 } as CaptureTacoDto,
-      LUIS,
-    );
+    await svc.captureTaco('e322', { taco_llegada: 4455.6 }, LUIS);
     const u = updates('escala').find((x) => x.patch?.taco_llegada === 4455.6);
     expect(u?.patch).toMatchObject({
       taco_salida: 4455.1,
@@ -885,11 +867,7 @@ describe('sección 9: salida DEDUCIDA que cruza un tramo omitido ⇒ ámbar', ()
   it('sin omitido en medio ⇒ copia sin ámbar', async () => {
     const t = cadena(false);
     const { svc, updates } = armar(t);
-    await svc.captureTaco(
-      'e322',
-      { taco_llegada: 4455.6 } as CaptureTacoDto,
-      LUIS,
-    );
+    await svc.captureTaco('e322', { taco_llegada: 4455.6 }, LUIS);
     const u = updates('escala').find((x) => x.patch?.taco_llegada === 4455.6);
     expect(u?.patch).toMatchObject({
       taco_salida: 4455.1,

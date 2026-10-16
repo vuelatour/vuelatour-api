@@ -266,7 +266,6 @@ import {
   lineaRegistroOmisionRetirada,
   normalizarMotivoOmision,
   textoSalidaCruzaOmitido,
-  tramoExigeLlegada,
 } from '../../common/taco-omitido.util';
 import {
   apoyoItem,
@@ -8503,7 +8502,7 @@ export class FlightsService {
     // asienta en la bitácora. Una salida sola NO la retira.
     const lineaRetiro =
       omitidoOk &&
-      esTramoOmitido(current as Record<string, unknown>) &&
+      esTramoOmitido(current) &&
       dto.taco_llegada !== undefined &&
       dto.taco_llegada !== null
         ? lineaRegistroOmisionRetirada({
@@ -8981,7 +8980,7 @@ export class FlightsService {
         .select('taco_omitido_at')
         .eq('id', escala.id as string)
         .maybeSingle();
-      if (om && esTramoOmitido(om as Record<string, unknown>)) {
+      if (om && esTramoOmitido(om)) {
         patch.taco_omitido_at = null;
         patch.taco_omitido_por = null;
         patch.taco_omitido_motivo = null;
@@ -9201,7 +9200,7 @@ export class FlightsService {
       .eq('id', escalaId)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as unknown as Record<string, unknown> | null) ?? null;
+    return data ?? null;
   }
 
   /**
@@ -9228,7 +9227,7 @@ export class FlightsService {
     }
     const row = await this.leerTramoParaOmision(escalaId);
     if (!row) throw this.escalaNoExisteOmision(escalaId);
-    const emb = row.vuelo as unknown;
+    const emb: unknown = row.vuelo;
     const v = (Array.isArray(emb) ? emb[0] : emb) as Record<
       string,
       unknown
@@ -9573,7 +9572,7 @@ export class FlightsService {
     // retira la omisión en el MISMO update (CHECK, invariante 79).
     const retiraOmision =
       omitidoOk &&
-      esTramoOmitido(current as unknown as Record<string, unknown>) &&
+      esTramoOmitido(current) &&
       dto.taco_llegada !== undefined &&
       dto.taco_llegada !== null;
     if (retiraOmision) {
@@ -11280,9 +11279,7 @@ export class FlightsService {
     // (su llegada es null) y el ámbar lo metería en `tacos_en_revision`; si
     // después llega su lectura real, captureTaco/confirmTaco retiran la
     // omisión y la cadena se revisa como siempre.
-    const esteOmitido = esTramoOmitido(
-      data as unknown as Record<string, unknown>,
-    );
+    const esteOmitido = esTramoOmitido(data);
     const alertaCruce = esteOmitido
       ? null
       : await this.alertaSalidaCruzaOmitido(
@@ -11367,7 +11364,10 @@ export class FlightsService {
       ...((heredadas.data ?? []) as unknown as Row[]),
     ]) {
       if (fila.id === escala.id) continue;
-      const vuelo = Array.isArray(fila.vuelo) ? fila.vuelo[0] : fila.vuelo;
+      const emb: unknown = fila.vuelo;
+      const vuelo = (
+        Array.isArray(emb) ? (emb as unknown[])[0] : emb
+      ) as Row['vuelo'];
       const f = ms(fila.fecha_salida_plan ?? vuelo?.fecha_vuelo);
       if (Number.isNaN(f) || f >= fechaEste) continue;
       const cruza =

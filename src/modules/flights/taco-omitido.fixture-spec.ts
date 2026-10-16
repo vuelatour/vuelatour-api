@@ -27,12 +27,18 @@ const valor = (r: Row, col: string): unknown =>
     .split('.')
     .reduce<unknown>((o, k) => (o == null ? undefined : (o as Row)[k]), r);
 
+/** Texto comparable de un escalar (fechas ISO, números). */
+const texto = (v: unknown): string =>
+  typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+    ? String(v)
+    : '';
+
 export function violaCheck(r: Row): boolean {
   const at = r.taco_omitido_at ?? null;
   const motivo = r.taco_omitido_motivo ?? null;
   if (at == null && motivo == null) return false;
   if (at == null || motivo == null) return true;
-  const n = String(motivo).trim().length;
+  const n = typeof motivo === 'string' ? motivo.trim().length : 0;
   return n < 10 || n > 500 || r.taco_llegada != null;
 }
 
@@ -80,13 +86,13 @@ export function fakeSupabase(
             case 'in':
               return (v as unknown[]).includes(x);
             case 'lt':
-              return x != null && String(x) < String(v);
+              return x != null && texto(x) < texto(v);
             case 'gt':
               return x != null && Number(x) > Number(v);
             case 'lte':
-              return x != null && String(x) <= String(v);
+              return x != null && texto(x) <= texto(v);
             case 'gte':
-              return x != null && String(x) >= String(v);
+              return x != null && texto(x) >= texto(v);
             default:
               return true;
           }
