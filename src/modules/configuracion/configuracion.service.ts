@@ -146,6 +146,18 @@ export const CONFIG_FOLIOS_RELEER_CAPTURADOS_HASTA =
 export const CONFIG_COMISIONES_AL_AVION_DESDE = 'comisiones_al_avion_desde';
 
 /**
+ * INICIO OFICIAL DEL SISTEMA (16-oct-2026, API 0.0.84, invariante 86,
+ * migración 20261016000002): primer día (Cancún) que muestran listados,
+ * filtros, pendientes y reportes por periodo; lo anterior se CONSERVA y abre
+ * por id. `valor_json = ["AAAA-MM-DD"]`, leída con `inicioOficial()` (NO con
+ * `fecha()`: aquí sin fila, `activa = false` o fecha inválida ⇒ `null` =
+ * sin piso, comportamiento de 0.0.83). Reglas puras en
+ * `common/inicio-oficial.util.ts`. Sección propia: no sale en `GET
+ * /v1/config` ni se edita por `PATCH :clave` (se cambia por SQL).
+ */
+export const CONFIG_FECHA_INICIO_OFICIAL = 'fecha_inicio_oficial';
+
+/**
  * Rango permitido por clave numérica (PATCH `valor_numerico`). Fuera de él
  * ⇒ 400 VALOR_FUERA_DE_RANGO. La BD solo exige ≥ 0.
  */
@@ -218,6 +230,8 @@ const CLAVES_SECCION_PROPIA: Record<string, string> = {
     'Esta configuración se edita en «Editan cotizaciones cobradas».',
   [CONFIG_IA_MODELO]:
     'Esta configuración se edita en Créditos de IA → Modelo de IA.',
+  [CONFIG_FECHA_INICIO_OFICIAL]:
+    'La fecha de inicio oficial se cambia por SQL (CLAUDE.md, invariante 86).',
 };
 
 /** Roles de oficina que pueden ser responsables de facturación. */
@@ -305,6 +319,12 @@ export class ConfiguracionService {
   private cacheListas = new Map<string, { ids: string[]; at: number }>();
   /** Caché corto (60 s) de las fechas en `valor_json` por clave. */
   private cacheFechas = new Map<string, { valor: string | null; at: number }>();
+  /**
+   * Caché corto (60 s) del inicio oficial (`activa` + fecha ya resueltas a
+   * `string | null`). Con la BD caída se responde el último valor leído.
+   */
+  private cacheInicioOficial: { valor: string | null; at: number } | null =
+    null;
   /**
    * Caché corto (MISMO TTL de 60 s) del modelo de IA configurado: lo lee
    * cada llamada a pyservices. Se rearma al escribir (`setModeloIa`).
@@ -407,6 +427,36 @@ export class ConfiguracionService {
     );
     this.cacheFechas.set(clave, { valor, at: now });
     return valor ?? porDefecto;
+  }
+
+  /**
+   * INICIO OFICIAL (invariante 86): fecha `AAAA-MM-DD` (día Cancún) o `null`
+   * = sin piso. Sin fila, `activa = false` o `valor_json` que no es un día
+   * real ⇒ `null`. Caché de 60 s; con la BD caída responde el último valor
+   * leído (o `null` si nunca se leyó). Los servicios la leen SIEMPRE por
+   * `inicioOficialDe(cfg)` (`common/inicio-oficial.util.ts`).
+   */
+  async inicioOficial(): Promise<string | null> {
+    const now = Date.now();
+    const c = this.cacheInicioOficial;
+    if (c && now - c.at <= ConfiguracionService.TTL_MS) return c.valor;
+    try {
+      const { data, error } = await this.supabase.service
+        .from('configuracion_sistema')
+        .select('clave, activa, valor_json')
+        .eq('clave', CONFIG_FECHA_INICIO_OFICIAL)
+        .maybeSingle();
+      if (error) return c ? c.valor : null;
+      const fila = data as { activa?: unknown; valor_json?: unknown } | null;
+      const valor =
+        fila && fila.activa === true
+          ? ConfiguracionService.fechaDeValorJson(fila.valor_json)
+          : null;
+      this.cacheInicioOficial = { valor, at: now };
+      return valor;
+    } catch {
+      return c ? c.valor : null;
+    }
   }
 
   /** Primer elemento de `valor_json` si es `AAAA-MM-DD` real; si no, null. */

@@ -18,6 +18,7 @@ import { PilotsService } from '../pilots/pilots.service';
 import { PushService } from '../realtime/push.service';
 import { UpdateSelfDto } from '../users/dto/update-self.dto';
 import { UsersService } from '../users/users.service';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
 import { CapturasQuery } from './dto/capturas.dto';
 import { MeCapturasService } from './me-capturas.service';
 
@@ -62,6 +63,7 @@ export class MeController {
       sinLimiteHasta,
       pushDispositivos,
       permisos,
+      inicioOficial,
     ] = await Promise.all([
       this.users.findByAuthId(current.authId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -69,6 +71,7 @@ export class MeController {
       this.users.gastosSinLimiteHasta(current.userId),
       this.misDispositivos(current.userId),
       this.configuracion.permisosDe(current.userId, current.rol),
+      inicioOficialDe(this.configuracion),
     ]);
     return {
       ...usuario,
@@ -86,6 +89,10 @@ export class MeController {
         // los candados de TIEMPO de gastos no aplican a este usuario; la app
         // lo usa solo para no regañarlo en la UI. ISO o null (= regla normal).
         gastos_sin_limite_hasta: sinLimiteHasta,
+        // Inicio oficial del sistema (16-oct-2026, invariante 86, ADITIVO):
+        // `AAAA-MM-DD` (día Cancún) o null = sin piso. El panel acota con
+        // esto sus selectores de fecha; la app no lo usa todavía.
+        inicio_oficial: inicioOficial,
       },
     };
   }
@@ -106,6 +113,7 @@ export class MeController {
       sinLimiteHasta,
       pushDispositivos,
       permisos,
+      inicioOficial,
     ] = await Promise.all([
       this.users.updateSelf(current.authId, body, current.userId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -113,6 +121,7 @@ export class MeController {
       this.users.gastosSinLimiteHasta(current.userId),
       this.misDispositivos(current.userId),
       this.configuracion.permisosDe(current.userId, current.rol),
+      inicioOficialDe(this.configuracion),
     ]);
     return {
       ...usuario,
@@ -124,6 +133,7 @@ export class MeController {
         dias_gracia_gastos_semana: diasGraciaSemana,
         // MISMO shape que el GET (ver nota de la llave de caché offline).
         gastos_sin_limite_hasta: sinLimiteHasta,
+        inicio_oficial: inicioOficial,
       },
     };
   }

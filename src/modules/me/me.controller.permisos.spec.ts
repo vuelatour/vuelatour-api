@@ -25,7 +25,7 @@ import type { CajaChicaService } from '../caja-chica/caja-chica.service';
 
 const ALE = 'c691cc8b-3034-4f04-a383-d0b25c1971ec';
 
-function armar(permiso: boolean) {
+function armar(permiso: boolean, inicio?: string | null) {
   const permisosDe = jest.fn().mockResolvedValue({
     editar_cotizacion_cobrada: permiso,
   });
@@ -33,6 +33,11 @@ function armar(permiso: boolean) {
     isActiva: jest.fn().mockResolvedValue(true),
     numero: jest.fn().mockResolvedValue(1),
     permisosDe,
+    // Sin `inicio` el mock NO trae el método (mock parcial de los specs
+    // viejos): `inicioOficialDe` responde null.
+    ...(inicio === undefined
+      ? {}
+      : { inicioOficial: jest.fn().mockResolvedValue(inicio) }),
   } as unknown as ConfiguracionService;
   const users = {
     findByAuthId: jest.fn().mockResolvedValue({
@@ -84,6 +89,7 @@ describe('MeController — permisos por persona', () => {
       captura_taco_foto_ia: true,
       dias_gracia_gastos_semana: 1,
       gastos_sin_limite_hasta: null,
+      inicio_oficial: null,
     });
     expect(r.push_dispositivos).toBe(1);
   });
@@ -92,5 +98,21 @@ describe('MeController — permisos por persona', () => {
     const { ctrl } = armar(false);
     const r = (await ctrl.update({}, yo)) as Record<string, unknown>;
     expect(r.permisos).toEqual({ editar_cotizacion_cobrada: false });
+  });
+});
+
+describe('MeController — inicio oficial (16-oct-2026, invariante 86)', () => {
+  it.each([
+    ['fecha', '2026-09-01'],
+    ['null (sin piso)', null],
+  ])('GET y PATCH traen config.inicio_oficial con %s', async (_n, inicio) => {
+    const { ctrl } = armar(true, inicio);
+    const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
+    const p = (await ctrl.update({}, yo)) as {
+      config: Record<string, unknown>;
+    };
+    expect(g.config.inicio_oficial).toBe(inicio);
+    // MISMO shape en las dos (la app cachea ambas en la misma llave).
+    expect(p.config).toEqual(g.config);
   });
 });
