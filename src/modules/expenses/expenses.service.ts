@@ -490,9 +490,16 @@ export class ExpensesService {
     for (const [clave, total] of [...porPersona.entries()].sort()) {
       resumen.push([clave, Math.round(total * 100) / 100]);
     }
+    // INICIO OFICIAL (invariante 86, revisión 16-oct): el subtítulo dice el
+    // periodo que de verdad trae el libro (el `desde` subido), no el pedido;
+    // con vuelo/compra no hay piso (mismo criterio que `list`).
+    const desdeRotulo =
+      filters.vuelo_id || filters.compra_id
+        ? filters.desde
+        : pisoDia(filters.desde, await inicioOficialDe(this.configuracion));
     const rango =
-      filters.desde || filters.hasta
-        ? ` · ${filters.desde ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
+      desdeRotulo || filters.hasta
+        ? ` · ${desdeRotulo ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
         : '';
     // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
     const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;

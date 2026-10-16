@@ -112,6 +112,38 @@ describe('ExpensesService — inicio oficial', () => {
     ).toBe(true);
   });
 
+  it('Revisión: el subtítulo del Excel dice el periodo SUBIDO (no el pedido)', async () => {
+    const subtitulo = async (
+      inicio: string | null,
+      over: Partial<ListGastosQuery>,
+    ): Promise<string> => {
+      const g = supabaseGrabador();
+      const gen = jest.fn().mockResolvedValue(Buffer.from('x'));
+      const svc = new ExpensesService(
+        g.supabase,
+        {} as NotificationsService,
+        { generateTablaXlsx: gen } as unknown as PyservicesService,
+        {} as VisionService,
+        cfgInicio(inicio) as unknown as ConfiguracionService,
+        {} as CajaChicaService,
+        {} as IaUsoService,
+      );
+      await svc.listXlsx(q(over));
+      const llamada = gen.mock.calls[0] as unknown as [{ subtitulo: string }];
+      return llamada[0].subtitulo;
+    };
+    expect(
+      await subtitulo(INICIO, { desde: '2026-08-01', hasta: '2026-09-30' }),
+    ).toContain(' · 2026-09-01 a 2026-09-30');
+    expect(await subtitulo(INICIO, {})).toContain(' · 2026-09-01 a hoy');
+    // Sin inicio y sin rango: el subtítulo de siempre (sin «·»).
+    expect(await subtitulo(null, {})).not.toContain(' · ');
+    // Con vuelo: sin piso, el pedido tal cual.
+    expect(
+      await subtitulo(INICIO, { vuelo_id: 'v1', desde: '2026-08-01' }),
+    ).toContain(' · 2026-08-01 a hoy');
+  });
+
   it('pistas pendientes de un periodo anterior ⇒ vacío', async () => {
     const { svc, consultas } = armar(INICIO);
     await expect(

@@ -9675,8 +9675,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `/quotes` + `/quotes/:id/vecinos` (`aplicarFiltrosLista`: sin `desde`
       ⇒ or que conserva las cotizaciones sin fecha; `desde` anterior sube),
       `/grupos`, `/expenses` + export (`fecha_gasto ≥ inicio` en tabla,
-      bandeja, `orden=captura`, duplicados; **NO con `vuelo_id` ni
-      `compra_id`**: son los gastos de un registro abierto por id), IA de la
+      bandeja, `orden=captura`, duplicados; el subtítulo del Excel dice el
+      `desde` subido; **NO con `vuelo_id` ni `compra_id`**: son los gastos
+      de un registro abierto por id), IA de la
       bandeja (`sugerirAsignaciones`), `/conciliacion/movimientos`,
       `/conciliacion/resumen`, `/aircraft/:id/metrics` **solo `finanzas`**
       (+ aditivo `finanzas_desde`; horas/vuelos/motores/hélices NO) y
@@ -9684,7 +9685,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `fecha_emision`; el `resumen` del registro sigue sobre todas: los
       huecos de folio necesitan la serie completa), `por-facturar` + conteo
       (`vuelosConSolicitud(cols, inicio)`; `vuelos-candidatos` lo llama sin
-      piso), `/invoices/pending`, `/invoices/recibidas` (conserva
+      piso), `/invoices/pending` (sin `desde` ⇒ or que conserva los vuelos
+      sin `fecha_vuelo`; revisión 16-oct), `/invoices/recibidas` (conserva
       `fecha_emision` null), KPI «abiertos» de dashboards, alertas
       `vuelo_estancado` (pre-vuelo por `fecha_vuelo`, EN_VUELO por
       `fecha_fin`), `cobro_pendiente` (por `fecha_vuelo`, no `updated_at`) y
@@ -9693,7 +9695,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `fecha_cobro`**: los 9 cobros del 31-ago de vuelos de septiembre salen;
       el pre-cierre ya no los listaba), `gastos-sin-banco`,
       `abonos-pendientes`, auto-cruce y sugerir abonos **SIN
-      `movimiento_ids`** (con ids no hay piso), sugerir lote, `/ingresos/
+      `movimiento_ids`** (con ids no hay piso), sugerir lote, «Emparejar
+      devoluciones» `POST reversos/auto` (anclas = abonos; sus cargos
+      candidatos de 60 días NO; revisión 16-oct), `/ingresos/
       resumen|entradas|lista` (`periodoConPiso`), `otros-gastos`/Nómina y
       `pistas/pendientes` (periodo anterior ⇒ vacío). R — reparto
       (`compute`, PDF, Excel), `dinero.xlsx`, pre-cierre, balances por avión
