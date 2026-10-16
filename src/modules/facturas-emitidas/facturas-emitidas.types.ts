@@ -270,8 +270,14 @@ export interface ResumenFacturas {
   /** §3.8 */
   por_facturar: number;
   totales_vigentes: TotalMoneda[];
-  /** solo series con total_faltantes > 0 */
+  /** solo series con total_faltantes > 0 (sobre TODA la serie) */
   huecos: HuecoSerie[];
+  /**
+   * ADITIVO (0.0.85, invariante 86): conteos y totales cuentan desde esta
+   * fecha (`fecha_emision ≥ desde`); null = todo el registro. Opcional: un
+   * API previo no la manda.
+   */
+  desde?: string | null;
 }
 
 export interface ListaFacturasEmitidas {

@@ -1081,29 +1081,50 @@ export class FacturasEmitidasService {
     };
   }
 
+  /**
+   * INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): conteos
+   * y totales SOLO con `fecha_emision ≥ inicio` (A-0397 y FA-A-0393 del
+   * 31-ago dejan de contar); `vuelos_con_varias` cuenta los vuelos con
+   * alerta que tienen al menos una vigente desde el inicio. Los `huecos` de
+   * folio siguen sobre TODA la serie (un folio de agosto no es un hueco).
+   * Aditivo `desde` (null = todo el registro).
+   */
   private resumenDe(
-    facturas: FacturaEmitidaRow[],
+    todas: FacturaEmitidaRow[],
     ligas: LigaFacturaVuelo[],
     calc: ReturnType<typeof calcularAlertas>,
     emisoras: EmisoraRef[],
     porFacturar: number,
+    inicio: string | null,
   ): ResumenFacturas {
+    const facturas = inicio
+      ? todas.filter((f) => f.fecha_emision.slice(0, 10) >= inicio)
+      : todas;
     const vigentes = facturas.filter((f) => f.estatus === 'VIGENTE');
     const conLiga = new Set(ligas.map((l) => l.factura_id));
     const razon = new Map(emisoras.map((e) => [e.id, e.razon_social]));
+    const idsVisibles = new Set(facturas.map((f) => f.id));
+    const vuelosConVarias = inicio
+      ? [...calc.vuelosDuplicados].filter((vid) =>
+          (calc.vigentesPorVuelo.get(vid) ?? []).some((id) =>
+            idsVisibles.has(id),
+          ),
+        ).length
+      : calc.vuelosDuplicados.size;
     return {
       registradas: facturas.length,
       vigentes: vigentes.length,
       canceladas: facturas.length - vigentes.length,
       sin_pdf: vigentes.filter((f) => !f.pdf_path).length,
       sin_vuelo: vigentes.filter((f) => !conLiga.has(f.id)).length,
-      vuelos_con_varias: calc.vuelosDuplicados.size,
+      vuelos_con_varias: vuelosConVarias,
       en_vuelo_cancelado: vigentes.filter((f) =>
         (calc.porFactura.get(f.id) ?? []).includes('VUELO_CANCELADO'),
       ).length,
       por_facturar: porFacturar,
       totales_vigentes: totalesPorMoneda(facturas),
-      huecos: huecosPorSerie(facturas, (id) => razon.get(id) ?? null),
+      huecos: huecosPorSerie(todas, (id) => razon.get(id) ?? null),
+      desde: inicio,
     };
   }
 
@@ -1135,10 +1156,8 @@ export class FacturasEmitidasService {
     await this.asegurarDisponible();
     this.validarRango(query);
     const reg = await this.registroCompleto();
-    const filtros = this.filtrosDe(
-      query,
-      await inicioOficialDe(this.configuracion),
-    );
+    const inicio = await inicioOficialDe(this.configuracion);
+    const filtros = this.filtrosDe(query, inicio);
     const idsFiltrados = new Set(
       filtrarFacturas(reg.filtrables, filtros).map((f) => f.id),
     );
@@ -1169,6 +1188,7 @@ export class FacturasEmitidasService {
         reg.ctxBase,
         reg.emisoras,
         porFacturar,
+        inicio,
       ),
       filtrado: {
         count: vigentesFiltradas.length,
@@ -1179,9 +1199,9 @@ export class FacturasEmitidasService {
 
   /**
    * INICIO OFICIAL (invariante 86): la lista y el Excel filtran
-   * `fecha_emision ≥ inicio` (el `desde` sube). El `resumen` del registro
-   * (conteos, huecos por serie) sigue sobre TODAS las facturas: los huecos
-   * de folio necesitan la serie completa. Con `vuelo_id` NO hay piso: son
+   * `fecha_emision ≥ inicio` (el `desde` sube). El `resumen` del registro:
+   * conteos y totales desde el inicio (auditoría 16-oct, 0.0.85) y huecos
+   * por serie sobre TODAS las facturas (necesitan la serie completa). Con `vuelo_id` NO hay piso: son
    * las facturas de UN vuelo abierto por id («N canceladas» de la burbuja),
    * igual que `GET /expenses?vuelo_id=`.
    */
@@ -1215,10 +1235,8 @@ export class FacturasEmitidasService {
     await this.asegurarDisponible();
     this.validarRango(query);
     const reg = await this.registroCompleto();
-    const filtros = this.filtrosDe(
-      query,
-      await inicioOficialDe(this.configuracion),
-    );
+    const inicio = await inicioOficialDe(this.configuracion);
+    const filtros = this.filtrosDe(query, inicio);
     const ids = new Set(
       filtrarFacturas(reg.filtrables, filtros).map((f) => f.id),
     );
@@ -1241,6 +1259,7 @@ export class FacturasEmitidasService {
       reg.ctxBase,
       reg.emisoras,
       porFacturar,
+      inicio,
     );
     let clienteNombre: string | null = null;
     if (query.cliente_id) {

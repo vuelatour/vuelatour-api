@@ -4248,6 +4248,13 @@ export class QuotesService implements ConfirmadorCotizacion {
       servicio_notas: string | null;
     }
 
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+    // PLANTILLA (tramos, millas) se sigue aprendiendo de TODA la historia,
+    // pero `veces` cuenta solo vuelos desde el inicio (o sin fecha) y
+    // `ultima_fecha` anterior al inicio viaja null.
+    const inicio = await inicioOficialDe(this.configuracion);
+    const cuenta = (fecha: string | null | undefined) =>
+      esAntesDelInicio(fecha ?? null, inicio) ? 0 : 1;
     const grupos = new Map<string, RutaSugerida>();
     for (const v of data ?? []) {
       const legs = (v.escalas ?? []).slice().sort((a, b) => a.orden - b.orden);
@@ -4261,7 +4268,7 @@ export class QuotesService implements ConfirmadorCotizacion {
         .join('|');
       const existente = grupos.get(clave);
       if (existente) {
-        existente.veces += 1;
+        existente.veces += cuenta(v.fecha_vuelo as string | null);
         // El query viene ordenado por recencia: el primero ya trae el
         // itinerario y la fecha más recientes del grupo.
         existente.ruta_id ??= v.ruta_id as string | null;
@@ -4274,8 +4281,10 @@ export class QuotesService implements ConfirmadorCotizacion {
       grupos.set(clave, {
         clave,
         etiqueta,
-        veces: 1,
-        ultima_fecha: (v.fecha_vuelo as string | null) ?? null,
+        veces: cuenta(v.fecha_vuelo as string | null),
+        ultima_fecha: esAntesDelInicio(v.fecha_vuelo as string | null, inicio)
+          ? null
+          : ((v.fecha_vuelo as string | null) ?? null),
         ruta_id: (v.ruta_id as string | null) ?? null,
         tramos: legs.map((l) => ({
           origen_iata: l.origen_iata,

@@ -768,11 +768,19 @@ export class DashboardsService {
     hasta: string,
   ): Promise<VueloOpsRow[]> {
     // Conversión: nos basamos en la fecha de solicitud (entrada al embudo).
-    const { data, error } = await this.supabase.service
+    let q = this.supabase.service
       .from('vuelo')
       .select('id, estado, fecha_solicitud, fecha_vuelo')
       .gte('fecha_solicitud', `${desde}T00:00:00-05:00`)
       .lte('fecha_solicitud', `${hasta}T23:59:59-05:00`);
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): un
+    // vuelo solicitado en el periodo pero que VOLÓ antes del inicio (#234)
+    // no aparece en el tablero; los sin fecha (cotizaciones) sí.
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) {
+      q = q.or(`fecha_vuelo.is.null,fecha_vuelo.gte.${corteTs(inicio)}`);
+    }
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     return data ?? [];
   }

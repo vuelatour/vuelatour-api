@@ -111,3 +111,60 @@ describe('QuotesService — inicio oficial', () => {
     }
   });
 });
+
+// ===== Auditoría 16-oct-2026 (API 0.0.85): rutas sugeridas =====
+
+describe('QuotesService.rutasSugeridas — inicio oficial (0.0.85)', () => {
+  const vuelo = (id: string, fecha: string | null) => ({
+    id,
+    ruta_id: null,
+    fecha_vuelo: fecha,
+    estado: 'COMPLETADO',
+    escalas: [
+      {
+        orden: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'CZM',
+        millas_nauticas: 40,
+        pasajeros: 2,
+        es_ferry: false,
+        requiere_pernocta: false,
+        pernocta_costo_usd: null,
+        tipo_parada: 'NORMAL',
+        servicio_notas: null,
+      },
+    ],
+  });
+  const responder: Responder = (tabla) =>
+    tabla === 'vuelo'
+      ? {
+          data: [
+            vuelo('v3', '2026-09-10T15:00:00Z'),
+            vuelo('v2', '2026-08-20T15:00:00Z'),
+            vuelo('v1', '2026-07-20T15:00:00Z'),
+          ],
+          error: null,
+        }
+      : undefined;
+  const soloAgosto: Responder = (tabla) =>
+    tabla === 'vuelo'
+      ? { data: [vuelo('v2', '2026-08-20T15:00:00Z')], error: null }
+      : undefined;
+
+  it('veces cuenta desde el inicio; la plantilla se sigue aprendiendo', async () => {
+    const [r] = await armar('2026-09-01', responder).svc.rutasSugeridas('c1');
+    expect(r.veces).toBe(1);
+    expect(r.ultima_fecha).toBe('2026-09-10T15:00:00Z');
+    const [s] = await armar('2026-09-01', soloAgosto).svc.rutasSugeridas('c1');
+    expect(s.veces).toBe(0);
+    expect(s.ultima_fecha).toBeNull();
+    expect(s.tramos).toHaveLength(1);
+  });
+
+  it('inicio null ⇒ como 0.0.84', async () => {
+    const [r] = await armar(null, responder).svc.rutasSugeridas('c1');
+    expect(r.veces).toBe(3);
+    const [s] = await armar(null, soloAgosto).svc.rutasSugeridas('c1');
+    expect(s.ultima_fecha).toBe('2026-08-20T15:00:00Z');
+  });
+});

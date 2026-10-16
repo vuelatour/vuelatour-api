@@ -1101,6 +1101,12 @@ export class InvoicesService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (filters.emisora_id)
       q = q.eq('entidad_fiscal_emisora_id', filters.emisora_id);
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): CFDI
+    // timbrados desde el inicio; los aún sin timbrar (null) se quedan.
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) {
+      q = q.or(`fecha_timbrado.is.null,fecha_timbrado.gte.${corteTs(inicio)}`);
+    }
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);

@@ -1,4 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CreateMultaDto, ListMultasQuery, UpdateMultaDto } from './dto/multas.dto';
 
@@ -8,7 +10,12 @@ const LIST_COLS = `${COLS}, aeronave:aeronave_id(matricula), piloto:piloto_id(no
 
 @Injectable()
 export class MultasService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
+    // lista no muestra multas anteriores (hoy 0). @Optional y ÚLTIMO.
+    @Optional() private readonly configuracion?: ConfiguracionService,
+  ) {}
 
   async list(filters: ListMultasQuery) {
     let q = this.supabase.service
@@ -20,6 +27,8 @@ export class MultasService {
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.piloto_id) q = q.eq('piloto_id', filters.piloto_id);
     if (filters.estado) q = q.eq('estado', filters.estado);
+    const inicio = await inicioOficialDe(this.configuracion);
+    if (inicio) q = q.gte('fecha', inicio);
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
     return { data: data ?? [], count: count ?? 0, limit: filters.limit, offset: filters.offset };

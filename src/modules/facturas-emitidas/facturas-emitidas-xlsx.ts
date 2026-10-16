@@ -11,6 +11,7 @@
 import type { TablaXlsxPayload } from '../pyservices/pyservices.service';
 import { diaCancun, fechaHoraCancun } from '../../common/fecha-cancun.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
+import { fechaInicioCorta } from '../../common/inicio-oficial.util';
 import type {
   AlertaFactura,
   FacturaEmitida,
@@ -221,7 +222,12 @@ export function payloadExcelFacturas(p: {
   const r = p.resumen;
   const resumen: (string | number | null)[][] = [
     ['Facturas en este Excel', p.facturas.length],
-    ['Registradas (todo el registro)', r.registradas],
+    [
+      r.desde
+        ? `Registradas (desde el ${fechaInicioCorta(r.desde)})`
+        : 'Registradas (todo el registro)',
+      r.registradas,
+    ],
     ['Vigentes', r.vigentes],
     ['Canceladas', r.canceladas],
     ['Sin PDF', r.sin_pdf],

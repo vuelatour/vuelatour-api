@@ -94,3 +94,20 @@ describe('InvoicesService — inicio oficial', () => {
     });
   });
 });
+
+describe('InvoicesService.listFacturas — inicio oficial (0.0.85)', () => {
+  it('timbradas desde el inicio; las sin timbrar (null) se quedan', async () => {
+    const a = armar(INICIO);
+    await a.svc.listFacturas({ limit: 50, offset: 0 });
+    expect(
+      a.lleva(
+        a.de('factura')[0],
+        'or',
+        'fecha_timbrado.is.null,fecha_timbrado.gte.2026-09-01T00:00:00-05:00',
+      ),
+    ).toBe(true);
+    const b = armar(null);
+    await b.svc.listFacturas({ limit: 50, offset: 0 });
+    expect(b.de('factura')[0].ops.some((o) => o.m === 'or')).toBe(false);
+  });
+});

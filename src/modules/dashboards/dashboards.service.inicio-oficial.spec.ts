@@ -79,3 +79,23 @@ describe('DashboardsService — inicio oficial', () => {
     expect(b.de('vuelo')[0].ops.some((o) => o.m === 'or')).toBe(false);
   });
 });
+
+describe('DashboardsService.fetchVuelosOps — inicio oficial (0.0.85)', () => {
+  type Ops = {
+    fetchVuelosOps(desde: string, hasta: string): Promise<unknown[]>;
+  };
+  it('solicitados en el periodo pero volados antes del inicio salen (#234); sin fecha se quedan', async () => {
+    const a = armar(INICIO);
+    await (a.svc as unknown as Ops).fetchVuelosOps('2026-09-01', '2026-09-30');
+    expect(
+      a.lleva(
+        a.de('vuelo')[0],
+        'or',
+        'fecha_vuelo.is.null,fecha_vuelo.gte.2026-09-01T00:00:00-05:00',
+      ),
+    ).toBe(true);
+    const b = armar(null);
+    await (b.svc as unknown as Ops).fetchVuelosOps('2026-09-01', '2026-09-30');
+    expect(b.de('vuelo')[0].ops.some((o) => o.m === 'or')).toBe(false);
+  });
+});
