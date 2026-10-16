@@ -3708,17 +3708,23 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vivas y calcula el mes en curso en cada lectura; el PDF/Excel del
       reparto no imprimen las entregas; en LECTURAS la utilidad de un mes
       cerrado puede tardar 10 min en reflejar un cobro tardío (memo; las
-      escrituras van frescas). **La utilidad de los meses cerrados NO está
-      congelada**: la cuenta los recalcula con los datos de HOY, así que (a)
-      dar de baja un avión borra lo que generó (aviso), (b) `PATCH
-      /v1/aircraft/owners/:id {porcentaje}` reescribe el % de TODOS los
-      meses de esa vigencia (sin aviso: no queda rastro del % anterior) y
-      (c) cerrar y abrir vigencia en el mismo mes suma los dos % (aviso de
-      Σ % ≠ 100). Las entregas ya hechas pasan a «adelanto» o «por
-      entregar» sin que nadie entregue nada. DECISIÓN DE FONDO pendiente con
-      el cliente: congelar la utilidad mensual por socio al cerrar el mes
-      (snapshot) o rechazar el PATCH de `porcentaje` cuando la vigencia ya
-      cubre meses cerrados (forzar cerrar + crear). No se incluyen aviones
+      escrituras van frescas). **Desde el 0.0.88 (16-oct-2026, invariante
+      89) la utilidad de un mes con CIERRE FORMAL (`cierre_mes.estado =
+      'CERRADO'`) SÍ está congelada**: `utilidadMesSocios` toma
+      `cierre_mes.socios_snapshot` (sin compute; `origen:
+      'SNAPSHOT_CIERRE'` en `por_mes[]`, « · cierre del 16-oct» en el
+      concepto y un aviso en `avisos[]`): cambiar un % o un T.C. después ya
+      no mueve la cuenta (el reparto en pantalla lo delata con
+      `cierre.coincide_con_snapshot = false`: reabrir y volver a cerrar). La
+      DECISIÓN DE FONDO quedó resuelta así: congelar al cerrar (snapshot);
+      el PATCH de `porcentaje` NO se bloquea. Los meses SIN cierre formal
+      (o sin la migración `20261016000004`) siguen como antes: la cuenta
+      los recalcula con los datos de HOY, así que (a) dar de baja un avión
+      borra lo que generó (aviso), (b) `PATCH /v1/aircraft/owners/:id
+      {porcentaje}` reescribe el % de TODOS esos meses de la vigencia (sin
+      aviso) y (c) cerrar y abrir vigencia en el mismo mes suma los dos %
+      (aviso de Σ % ≠ 100); las entregas ya hechas pasan a «adelanto» o
+      «por entregar» sin que nadie entregue nada. No se incluyen aviones
       dados de baja en meses pasados a propósito: la cuenta debe cuadrar
       con la pantalla del reparto de ese mes (que tampoco los trae).
       **Rollback del API a 0.0.49 con CUALQUIER entrega v2 capturada:
@@ -10015,6 +10021,163 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `profit-sharing.service.comisiones.spec` (bloque `externos`: sin
       coincidencia, 25,500 ÷ 17 = 1,500, K oficial, CANCELADO).
 
+89. **CIERRE DE MES FORMAL + VUELOS PENDIENTES DE COBRO PASAN AL MES
+    SIGUIENTE (16-oct-2026, API 0.0.88, migración `20261016000004`
+    PENDIENTE).** Pedido del cliente: «una opción para cerrar el mes que no
+    es el corriente (el anterior) y que los vuelos que aún no se cobren se
+    marquen en el balance y se muevan al siguiente mes hasta que se cobren y
+    completen». Decisiones del 16-oct-2026: el vuelo pasa COMPLETO (venta,
+    gastos de eje vuelo y comisiones); las HORAS (tacos, utilización,
+    reserva de overhaul) se quedan en su fecha real; cobro PARCIAL ⇒ pasa
+    completo; los 5 de septiembre cobrados en octubre (#316, #337, #343,
+    #344, #351) PASAN a octubre; mes cerrado = bloqueado para capturas;
+    «Reabrir» solo ADMIN con confirmación.
+    - **Modelo** (migración, aditiva y SIN backfill): `vuelo.periodo_contable`
+      (medianoche Cancún del día 1 del mes al que se DIFIRIÓ; CHECK día 1;
+      null = el mes de su `fecha_vuelo`) y `vuelo.fecha_contable` GENERADA
+      STORED = `coalesce(periodo_contable, fecha_vuelo)` + índice: LA
+      expresión de «¿en qué mes cuenta este vuelo?». `cierre_mes` (PK
+      `periodo` día 1; `estado` CERRADO | REABIERTO — `CERRADO` es la ÚNICA
+      verdad de «mes cerrado»; sellos de quién/cuándo cerró y reabrió con
+      motivo 5–300; `version`; `precierre_snapshot`, `reparto_snapshot`,
+      `socios_snapshot`, `totales {…, por_avion}`) y `cierre_mes_vuelo`
+      (bitácora REVERSIBLE: origen, destino, `periodo_contable_anterior`,
+      montos al corte, motivo SIN_COBRO | COBRO_PARCIAL | COBRO_POSTERIOR,
+      `revertido_at/por`). RLS sin policies. FK sin cláusula de borrado (un
+      vuelo con diferimiento no se borra; solo se borran CANCELADOS sin
+      cobros, que jamás se difieren).
+    - **Sonda ÚNICA** `common/cierre-mes-disponible.util#cierreMesDisponible`
+      (columna `vuelo.periodo_contable`, patrón `columnaOpcional`). REGLA
+      DURA: todo lo que nombre `periodo_contable`, `fecha_contable`,
+      `cierre_mes` o `cierre_mes_vuelo` va detrás. Sin la migración = 0.0.87
+      byte a byte (lectores por `fecha_vuelo`, ninguna llave nueva,
+      `GET /v1/cierres` ⇒ `{disponible:false, meses:[]}`, escrituras ⇒ 503
+      `CIERRE_NO_DISPONIBLE`, sin candado). Los specs viejos de los libros
+      fijan la sonda en false (`jest.mock(…cierre-mes-disponible.util)`):
+      congelan la conducta SIN la migración; la conducta CON ella vive en
+      los `*.cierre-mes.spec.ts`.
+    - **Fuentes únicas PURAS** `common/fecha-contable.util` (mes/día
+      contable y real del vuelo; sin ciclo con la ubicación del gasto) y
+      `common/mes-contable.util`: `cobradoAlCorte` (cobrosEnUsd, inv. 2, con
+      `fecha_cobro` día Cancún ≤ fin de mes: LA prueba de «cobrado al
+      cierre»; NO es la bandera `vuelo.cobrado`), `decisionDiferir`
+      (CANCELADO, $0 o cliente interno ⇒ se queda; COMPLETADO cobrado al
+      corte ≥ total − 1 USD ⇒ se queda; si no ⇒ pasa con su motivo),
+      `ejeContableDeGasto`/`diaContableDeGasto`/`mesContableDeGasto` (el eje
+      de `ubicacionBalanceDeGasto`, inv. 72: eje vuelo ⇒ el mes contable del
+      vuelo; eje gasto ⇒ `fecha_gasto`), `papelContableEnPeriodo` (normal /
+      viene / sombra / fuera), `motivoNoCerrable`, `mesesPermitidosDelVuelo`
+      y TODOS los textos es-MX (409, leyendas «Pasa a octubre 2026 · …»,
+      «Viene de septiembre 2026», «Pendiente de cobro: pasará a … al
+      cerrar»). `common/filtro-periodo-contable.util` (`colPeriodoContable`,
+      `colsVueloContable`). Lector + candado: `common/cierre-mes.lector`.
+    - **Lectores que pasan a `fecha_contable`** (con la sonda): reparto
+      (`fetchVuelos`; las HORAS por escala salen del universo de los que
+      VOLARON en el periodo —dinero con día real dentro + «sombras»—;
+      `fetchGastos` ∪ gastos de los vuelos del dinero, cada uno en el día de
+      su EJE: un gasto de eje vuelo con fecha fuera del mes de su vuelo ya
+      cuenta con el vuelo, como en el balance — en prod solo cambia el
+      OPERACIONES de $3,648 del 9-sep del #190 (agosto): sale del reparto de
+      septiembre); pre-cierre (completados/cancelados y notas de
+      seguimiento; los SIN completar, tacos, tramos y grupos siguen por
+      `fecha_vuelo`); balance por avión / EXTERNOS / general (vuelos,
+      compartidos, tramo cancelado con gastos, «otros movimientos»); Libro
+      Dinero; tablero `fetchVuelosPeriodo`; `aircraft/:id/metrics`
+      finanzas; ubicación del gasto (`diaVuelo` contable, lector con embed
+      `fecha_contable`); candado `FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO` y
+      `candado_mes_vuelo` de Conciliación (un diferido acepta su mes real y
+      el contable: aditivos `mes_contable`, `meses`); ventana de la
+      cotización y `hijoEnMesCerrado` de grupos. ALARMA DE PARIDAD
+      `common/alarma-eje-contable.spec`: todo `.gte('fecha_vuelo'…)` que
+      quede en los 4 lectores de dinero lleva «eje REAL a propósito
+      (invariante 89)».
+    - **Libros**: un vuelo diferido aparece en el mes de ORIGEN como FILA
+      SOMBRA (horas reales, TODO el dinero null, `status_cobro 'Pasa a
+      oct-2026'`, `fila_sombra: true`) y en el DESTINO con el dinero
+      completo y las horas null («Viene de septiembre 2026»); fuente única
+      `aircraft/cierre-balance.util`. Sus cobros, gastos y factura NO se
+      leen en el origen; sus acumulados y pendientes se deshacen. El
+      reparto no lo trae en `aviones[]` del origen (va en
+      `cierre.diferidos_salen`) y lo reparte completo en el destino; el
+      Libro Dinero igual (lista `cierre.pasan`). balance = reparto = Libro
+      Dinero (spec `libros.cierre-mes.spec`).
+    - **Endpoints** `src/modules/cierres/` (`CierresModule`; importa
+      ProfitSharing, Realtime y Configuración; nadie lo importa): `GET
+      /v1/cierres` (ADMIN, ANALISTA, FACTURACION, COORDINADOR, SOCIO), `GET
+      /v1/cierres/:periodo/previa` (ADMIN, FACTURACION, ANALISTA,
+      COORDINADOR), `POST /v1/cierres/:periodo` (ADMIN, FACTURACION; body
+      `{confirmar: true, vuelos_esperados?}`) y `POST
+      /v1/cierres/:periodo/reabrir` (ADMIN; `{motivo 5–300, confirmar:
+      true}`). `periodo` AAAA-MM o 400 `PERIODO_INVALIDO`. Precondiciones de
+      cerrar en orden: 503 `CIERRE_NO_DISPONIBLE`, 400
+      `PERIODO_ANTES_DEL_INICIO`, 409 `MES_EN_CURSO`, `YA_CERRADO`,
+      `MES_ANTERIOR_ABIERTO`, `PRECIERRE_NO_LISTO` (los 6 bloqueantes de
+      `listo`), `PREVIA_CAMBIO` (la lista del diálogo cambió; `details.previa`
+      trae la nueva). La DECISIÓN la evalúa `compute(M)` (misma cadena de
+      T.C.: `cierre.pendientes_que_pasarian`); el snapshot es `compute(M,
+      {excluirVuelos})` (parámetro INTERNO). Escritura a mano con CAS: fila
+      de `cierre_mes` (insert o REABIERTO→CERRADO con `version + 1`; 23505 o
+      0 filas ⇒ `YA_CERRADO`/`CIERRE_CONCURRENTE`), por vuelo
+      `periodo_contable` con CAS por el valor leído + bitácora; un fallo
+      REVIERTE lo movido y deja el mes REABIERTO con «cierre incompleto: …»
+      ⇒ 500 `CIERRE_INCOMPLETO` (sin DELETE). Reabrir: 409 `NO_ESTA_CERRADO`
+      / `MES_SIGUIENTE_CERRADO`; regresa cada vuelo a
+      `periodo_contable_anterior` con CAS por el destino (`no_revertidos`
+      si otro cierre lo movió). Los dos olvidan las memorias (candado y
+      utilidades de socios) y avisan a ADMIN (`alerta_sistema`).
+    - **Candado 409 `MES_CERRADO`** (`assertMesAbierto`, caché ≤ 60 s y
+      relectura de un mes pasado «abierto» tras 10 s; cuerpo `{message:
+      «Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes
+      para corregir.», error, details {periodo, cerrado_at, cerrado_por {id,
+      nombre}, registro}}`): GASTOS alta/PATCH (antes y después, solo si
+      cambian monto, moneda, T.C., fecha, vuelo, tramo, avión, categoría,
+      medio, propina, TUA o litros)/baja/reparto manual por su mes CONTABLE
+      (un replay con llave nunca rebota); COBROS (alta DESPUÉS del replay,
+      PATCH de dinero, baja, sobres de grupo, anticipos) por el mes contable
+      del VUELO — un vuelo diferido a un mes abierto acepta cobros y gastos;
+      INGRESOS por `fecha`; CAJA CHICA por la fecha del movimiento; ENTREGAS
+      a socios por `fecha_pago`; COTIZACIÓN (`revise`, `cancel`) y VUELO
+      (`complete`, `cancel`, cambiar `fecha_vuelo` hacia un mes cerrado,
+      `clearTaco` de un COMPLETADO) por el mes contable. NO se bloquea:
+      conciliación bancaria, facturas, comprobantes, tacómetros, notas,
+      inventario, PATCH de solo clasificación ni el % de socios.
+    - **Aditivos**: reparto `cierre {disponible, periodo, estado,
+      cerrado_at, cerrado_por_nombre, reabierto_at, reabierto_por_nombre,
+      version, coincide_con_snapshot, diferidos_salen, diferidos_entran,
+      pendientes_que_pasarian}` + `detalle.vuelos[].cierre_marca /
+      diferido_de / diferido_a` (también en el payload del PDF/XLSX);
+      pre-cierre `cierre {…, puede_cerrar, motivo_no_cerrable,
+      roles_cierran}`, `cobros_pendientes.vuelos[].pasara_a / leyenda /
+      cobrado_al_corte_usd` y el renglón INFORMATIVO `vuelos_que_vienen`;
+      balances `cierre {…, pasan, vienen, pasarian}` (general + `resumen_cierre`)
+      y por fila `cierre_marca`, `fila_sombra`, `diferido_a`, `diferido_de`;
+      Libro Dinero `cierre` y marcas por fila; detalle del vuelo
+      `periodo_contable`, `mes_contable`, `cierre {diferido_de, diferido_a,
+      mes_cerrado, cierre}`; cuenta de socios `por_mes[].origen` (ver la
+      invariante 38: la utilidad de un mes CERRADO sale del snapshot).
+      pyservices solo PINTA (esquemas aditivos).
+    - **Orden de despliegue**: migración (dry-run ⇒ `DRYRUN_OK` ⇒ apply ⇒
+      postcheck ⇒ advisors; inocua para 0.0.87) ⇒ pyservices ⇒ API 0.0.88 ⇒
+      panel. El primer cierre lo hace la oficina desde el panel. Rollback
+      del API con meses cerrados: los vuelos diferidos quedarían en su
+      `fecha_vuelo` para el 0.0.87 (no lee `periodo_contable`) — reabrir
+      primero. Tras un rollback de la migración: reiniciar el API.
+    - Specs: `mes-contable.util.spec` (los 5 de prod, tolerancia, parcial,
+      $0/interno/cancelado, sobrecobro, corte Cancún, textos),
+      `cierre-mes.lector.spec` (sonda, 409, caché, cobros y gastos por mes
+      contable, replay), `cierre-balance.util.spec`,
+      `libros.cierre-mes.spec` (reparto/balance/Dinero/pre-cierre con un
+      diferido, balance = reparto = Dinero, sin migración ⇒ 0.0.87 y con
+      migración sin cierres ⇒ mismos números), `cierres.service.spec`
+      (cerrar el septiembre sintético difiere posterior/parcial/sin cobro y
+      NO $0 ni cancelado; precondiciones; carrera; cierre incompleto;
+      reabrir revierte y recerrar = version 2), `cierres.controller.spec`
+      (HTTP, roles, DTO), `expenses.service.cierre-mes.spec`,
+      `flights.service.cierre-mes.spec`,
+      `candado-servicios.cierre-mes.spec` (caja chica, ingresos, entregas),
+      `alarma-eje-contable.spec`; ajustes en `ubicacion-balance-gasto.util.spec`
+      y `cambio-fecha-gasto.util.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -11495,6 +11658,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   los envíos grandes (base64 ≈ ×1.34). Rollback: API ⇒ 0.0.86 (ver la nota
   de rollback de la invariante 87); migración ⇒ SQL Editor con el pie del
   archivo y REINICIAR el API.
+- **16-oct-2026 — 0.0.88, migración `20261016000004` PENDIENTE** (cierre
+  de mes formal + vuelos pendientes de cobro pasan al mes siguiente,
+  invariante 89; rama `cierre-mes` sobre `32863830` = 0.0.87 en prod).
+  Orden: (1) migración por MCP — dry-run (`dryrun-mcp.sql` del paquete:
+  cuerpo real ⇒ 4 vuelos sintéticos de septiembre con folio negativo
+  DESPUÉS del DDL ⇒ T1–T12 con escrituras reales ⇒ `DRYRUN_OK
+  20261016000004`) ⇒ `apply_migration` (solo el CUERPO) ⇒ postcheck
+  (columnas, CHECK, índices, tablas, RLS, `count(*) from vuelo where
+  periodo_contable is not null` = 0) ⇒ `get_advisors`; inocua para el
+  0.0.87; (2) pyservices (aditivo); (3) API 0.0.88 (`GET /v1/version`),
+  humo SOLO lecturas: `GET /v1/cierres` ⇒ `disponible:true` y septiembre
+  `puede_cerrar`; `GET /v1/cierres/2026-09/previa` ⇒ los 5 (#316, #337,
+  #343, #344, #351, COBRO_POSTERIOR, 16,199.76 USD); reparto de septiembre
+  = el del 0.0.87 salvo XB-PEV ≈ +205 USD (el gasto del #190 de agosto,
+  eje del gasto); (4) panel. El primer cierre lo ejecuta la oficina.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
