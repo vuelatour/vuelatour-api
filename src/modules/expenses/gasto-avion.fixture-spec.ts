@@ -5,9 +5,10 @@
  * `*.fixture-spec.ts` del repo. Lo comparten `gasto-avion.util.spec`,
  * `gasto-avion.paridad.spec` y `expenses.service.xlsx.spec`.
  *
- * `FILAS_REALES`: gastos REALES de prod (SELECT por MCP, 15-oct-2026), solo
- * con los campos que lee la columna (sin notas). Ese día el Excel cambiaba
- * 296 de 1,144 celdas; las 848 restantes ya decían la matrícula.
+ * `FILAS_REALES`: gastos REALES de prod (SELECT por MCP, 15-oct-2026; la
+ * NÓMINA, 16-oct-2026), solo con los campos que lee la columna (sin notas).
+ * Ese día el Excel cambiaba 296 de 1,144 celdas; las 848 restantes ya
+ * decían la matrícula.
  */
 import { CATEGORIA_GASTO_LABEL } from '../../common/categoria-gasto.util';
 
@@ -168,6 +169,14 @@ export const FILAS_REALES: readonly CasoReal[] = [
     fila: real('43a21812-a972-4983-bb6b-d8d4f13d09c1', 'PERSONAL_DUENO', 1681),
     antes: '(pendiente)',
     celda: 'Personal',
+  },
+  {
+    // 16-oct-2026 (invariante 91): NÓMINA sin reparto — no entra a ningún
+    // balance hasta repartirla en el módulo Nómina.
+    nombre: 'e0e069f3 NÓMINA $27,500 del 15-oct sin repartir',
+    fila: real('e0e069f3-5def-499e-b87c-c95160fc6b66', 'NOMINA', 27500),
+    antes: '(pendiente)',
+    celda: 'Sin repartir',
   },
   {
     nombre: '0f5e6659 SERVICIOS sin avión: pendiente de verdad',

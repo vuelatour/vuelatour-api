@@ -33,11 +33,17 @@ import {
 } from '../tipo-cambio/tipo-cambio.service';
 import {
   CATEGORIA_COMISARIATO,
+  CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_EMPRESA,
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
   categoriaEsPagoVendedor,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
+// NÓMINA SIN REPARTIR (16-oct-2026, invariante 91): sumas y texto del aviso.
+import {
+  pendienteBalanceNominaSinRepartir,
+  resumenNominaSinRepartir,
+} from '../../common/nomina-sin-repartir.util';
 import {
   etiquetaGastoPagoOperador,
   pagoOperadorExternoEnGastos,
@@ -701,7 +707,10 @@ interface ComisionesAvionOtrosMovimientos {
  * `utilidad_despues_usd`; el vuelo se cita como referencia ("· vuelo #123").
  * Sobreviven intactas: `PERSONAL_DUENO` fuera del dinero de la empresa,
  * `GAS` en la hoja "combustible", y el REPARTO MANUAL que sigue GANANDO
- * (parciales a los aviones + remanente a la empresa).
+ * (parciales a los aviones + remanente a la empresa). **Excepción NÓMINA
+ * (16-oct-2026, API 0.0.90, invariante 91)**: SIN reparto ya no va a «otros
+ * gastos» (no entra a ningún libro; aviso «Nómina sin repartir» en el
+ * consolidado del general); repartida, igual que siempre.
  *
  * Columna **PAGO** (11-sep-2026): cada fila de hoja ledger viaja con la
  * forma de pago (`etiquetaMedioPago`, espejo del panel) para conciliar las
@@ -1547,6 +1556,13 @@ export class AircraftBalanceService {
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
         ...(await this.pendienteGasSinAvion(d, h)),
+        // NÓMINA SIN REPARTIR (invariante 91): no entra a ningún balance
+        // hasta repartirla entre aviones en el módulo Nómina (solo con N > 0).
+        ...[
+          pendienteBalanceNominaSinRepartir(
+            resumenNominaSinRepartir(empresaYSueltos.nominaSinRepartir),
+          ),
+        ].filter((x): x is string => x != null),
         // Hoja "otros gastos" del general (antes "gastos VuelaTour"):
         // gastos de empresa en USD sin ningún TC
         // (fila sin MXN) — mismos gritos que las hojas de gastos.
@@ -5699,6 +5715,11 @@ export class AircraftBalanceService {
    *  - `tuasSueltos`: TUAS sin vuelo sin avión sin reparto — regla 7
    *    (28-ago): no restan en ninguna hoja; su único lugar sigue siendo la
    *    fila suelta "tuas sin vuelo" de "Otros movimientos".
+   *  - `nominaSinRepartir` (16-oct-2026, API 0.0.90, invariante 91): NÓMINA
+   *    SIN ninguna parte de reparto ⇒ NO va a `empresa` (no entra a ningún
+   *    balance hasta repartirla en el módulo Nómina); solo alimenta el aviso
+   *    «Nómina sin repartir: …» de `consolidado.pendientes`. La repartida,
+   *    como siempre (parciales a los aviones; remanente a `empresa`).
    */
   private async gastosEmpresaYSueltos(
     desde: string,
@@ -5707,6 +5728,7 @@ export class AircraftBalanceService {
     empresa: GastoRow[];
     tuasSueltos: GastoRow[];
     pagosAfac: GastoRow[];
+    nominaSinRepartir: GastoRow[];
   }> {
     const sb = this.supabase.service;
     // `vuelo:vuelo_id(folio)` = solo traza para el detalle; `medio_pago` +
@@ -5786,7 +5808,14 @@ export class AircraftBalanceService {
     // comprobante de los costos reales por vuelo: NO va a «otros gastos»
     // (no egresa dos veces) sino al resumen AFAC de «otros movimientos».
     const pagosAfac: GastoRow[] = [];
-    if (sueltos.length === 0) return { empresa, tuasSueltos, pagosAfac };
+    // NÓMINA SIN REPARTIR (16-oct-2026, API 0.0.90, invariante 91): solo la
+    // nómina REPARTIDA cuenta (sus parciales en «Gastos Indirectos» de cada
+    // avión y su remanente, si lo hay, aquí con la regla de siempre); sin
+    // ninguna parte NO va a «otros gastos» ni a ningún libro — se junta
+    // aparte para el aviso del consolidado del general.
+    const nominaSinRepartir: GastoRow[] = [];
+    if (sueltos.length === 0)
+      return { empresa, tuasSueltos, pagosAfac, nominaSinRepartir };
     // El reparto manual GANA: un gasto repartido ya vive en los libros de
     // sus aviones — aquí solo entra lo que nadie reclama.
     const repartos = await fetchRepartos(
@@ -5819,6 +5848,8 @@ export class AircraftBalanceService {
         // suelta de "Otros movimientos" (su único lugar).
         if (fila.categoria === 'TUAS') tuasSueltos.push(fila);
         else if (esPagoAfac(fila)) pagosAfac.push(fila);
+        else if (fila.categoria === CATEGORIA_NOMINA)
+          nominaSinRepartir.push(fila);
         else empresa.push(fila);
         continue;
       }
@@ -5843,7 +5874,7 @@ export class AircraftBalanceService {
         });
       }
     }
-    return { empresa, tuasSueltos, pagosAfac };
+    return { empresa, tuasSueltos, pagosAfac, nominaSinRepartir };
   }
 
   /**

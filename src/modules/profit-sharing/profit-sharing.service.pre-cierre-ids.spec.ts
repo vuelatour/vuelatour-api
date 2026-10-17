@@ -172,12 +172,16 @@ const AERONAVES: Fila[] = [
   { id: A2, matricula: 'XA-BBB' },
 ];
 
-/** Las 11 claves con `ids` (contrato del resolver §2.2). */
+/**
+ * Las 11 claves con `ids` (contrato del resolver §2.2) + `nomina_sin_repartir`
+ * (16-oct-2026, API 0.0.90, invariante 91).
+ */
 const CLAVES_CON_IDS = [
   'combustible_sin_avion',
   'permisos_sin_avion',
   'repartos_incoherentes',
   'gastos_sin_avion',
+  'nomina_sin_repartir',
   'fijos_con_avion',
   'matricula_recibo_distinta',
   'duplicados_sin_resolver',
@@ -218,6 +222,19 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
         gasto('g-banco', { medio_pago: 'TARJETA_CORP' }),
         gasto('g-sin-tc', { moneda: 'MXN', tc_gasto: null }),
         gasto('g-sin-factura', { estatus_facturacion: 'PENDIENTE' }),
+        // NÓMINA sin reparto (invariante 91) y una repartida (no cuenta).
+        gasto('g-nomina', {
+          aeronave_id: null,
+          categoria: 'NOMINA',
+          moneda: 'MXN',
+          tc_gasto: 17,
+        }),
+        gasto('g-nomina-ok', {
+          aeronave_id: null,
+          categoria: 'NOMINA',
+          moneda: 'MXN',
+          tc_gasto: 17,
+        }),
         // Un banco ya conciliado y un gasto FUERA del periodo: no cuentan.
         gasto('g-banco-ok', { medio_pago: 'TRANSFERENCIA', conciliado: true }),
         gasto('g-otro-mes', {
@@ -229,6 +246,8 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
       gasto_reparto: [
         { gasto_id: 'g-reparto', aeronave_id: A1, monto: 90 },
         { gasto_id: 'g-reparto', aeronave_id: A2, monto: 60 },
+        { gasto_id: 'g-nomina-ok', aeronave_id: A1, monto: 50 },
+        { gasto_id: 'g-nomina-ok', aeronave_id: A2, monto: 50 },
       ],
       movimiento_bancario: [
         {
@@ -268,6 +287,7 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
       permisos_sin_avion: ['g-permiso'],
       repartos_incoherentes: ['g-reparto'],
       gastos_sin_avion: ['g-sin-avion', 'g-gas', 'g-permiso'],
+      nomina_sin_repartir: ['g-nomina'],
       fijos_con_avion: ['g-fijo'],
       matricula_recibo_distinta: ['g-matricula'],
       duplicados_sin_resolver: ['g-duplicado'],

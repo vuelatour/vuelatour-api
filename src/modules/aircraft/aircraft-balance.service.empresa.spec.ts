@@ -304,7 +304,11 @@ type Privado = {
   gastosEmpresaYSueltos: (
     desde: string,
     hasta: string,
-  ) => Promise<{ empresa: unknown[]; tuasSueltos: unknown[] }>;
+  ) => Promise<{
+    empresa: unknown[];
+    tuasSueltos: unknown[];
+    nominaSinRepartir: unknown[];
+  }>;
   buildHoja: (
     gastos: unknown[],
     tcPromedio: number | null,
@@ -357,10 +361,9 @@ describe('Balance por avión — la categoría de EMPRESA manda sobre el vuelo (
   });
 
   it('la hoja "otros gastos" del general reúne los de EMPRESA con o sin vuelo, sin duplicar', async () => {
-    const { empresa, tuasSueltos } = await priv(armar()).gastosEmpresaYSueltos(
-      DESDE,
-      HASTA,
-    );
+    const { empresa, tuasSueltos, nominaSinRepartir } = await priv(
+      armar(),
+    ).gastosEmpresaYSueltos(DESDE, HASTA);
     const porId = new Map(
       (empresa as Array<Record<string, unknown>>).map((g) => [
         g.id as string,
@@ -369,12 +372,16 @@ describe('Balance por avión — la categoría de EMPRESA manda sobre el vuelo (
     );
     // Un gasto por id: el suelto de empresa cae en las DOS consultas.
     expect(empresa).toHaveLength(porId.size);
+    // La NÓMINA SIN reparto ya no entra (16-oct-2026, invariante 91): va
+    // aparte, solo para el aviso del consolidado.
     expect([...porId.keys()].sort()).toEqual([
-      'g-nomina-avion',
       'g-otro-repartido',
       'g-otro-suelto',
       'g-otro-vuelo',
     ]);
+    expect(
+      (nominaSinRepartir as Array<Record<string, unknown>>).map((g) => g.id),
+    ).toEqual(['g-nomina-avion']);
     // El OTRO del vuelo entra COMPLETO y con la referencia al folio.
     expect(porId.get('g-otro-vuelo')!.monto).toBe(1000);
     expect(porId.get('g-otro-vuelo')!.referencia_detalle).toBe('vuelo #501');
@@ -398,8 +405,9 @@ describe('Balance por avión — la categoría de EMPRESA manda sobre el vuelo (
     expect(fila!.detalle).toBe('Comisariato del vuelo · vuelo #501');
     // Columna PAGO (conciliación con bancos): medio + terminación.
     expect(fila!.pago).toBe('Tarjeta corporativa ****4321');
-    // 1000 + 2000 + 150 + 300 de remanente.
-    expect(hoja.total_mxn).toBe(3450);
+    // 1000 + 150 + 300 de remanente (la NÓMINA de 2000 sin reparto salió
+    // el 16-oct-2026, invariante 91).
+    expect(hoja.total_mxn).toBe(1450);
   });
 
   it('columna PAGO en la hoja del avión: medio conocido y celda vacía sin medio', () => {

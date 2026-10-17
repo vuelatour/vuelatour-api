@@ -534,6 +534,25 @@ describe('confirmación — los textos son espejo de los libros', () => {
     );
   });
 
+  it('NÓMINA SIN reparto (16-oct-2026, invariante 91): ya NO dice «balance general» (no vive en ningún libro); el Libro Dinero sí', () => {
+    const g = sinVuelo({ categoria: 'NOMINA', aeronave_id: null });
+    expect(confirmacion(decidir(g, '2026-10-01')).message).toBe(
+      `Pasa de septiembre 2026 a octubre 2026. En el Libro Dinero pasa a octubre 2026. ${SEP_TERMINO}`,
+    );
+  });
+
+  it('NÓMINA repartida en partes iguales: los aviones del reparto (sin general: no hay remanente) y sus partes', () => {
+    const g = sinVuelo({ categoria: 'NOMINA', aeronave_id: null });
+    const repartos = [
+      { aeronave_id: N41, monto: 750 },
+      { aeronave_id: PEV, monto: 750 },
+    ];
+    expect(confirmacion(decidir(g, '2026-10-01', { repartos })).message).toBe(
+      'Pasa de septiembre 2026 a octubre 2026. En el balance de N4142R y XB-PEV pasa a octubre 2026. En el reparto a socios pasan a octubre 2026 sus partes (N4142R y XB-PEV). En el Libro Dinero pasa a octubre 2026. ' +
+        `${LINEA_TC} ${SEP_TERMINO}`,
+    );
+  });
+
   it('FIJO: el reparto lo prorratea entre TODA la flota', () => {
     const g = sinVuelo({ categoria: 'FIJO', aeronave_id: null });
     expect(confirmacion(decidir(g, '2026-10-01')).message).toBe(

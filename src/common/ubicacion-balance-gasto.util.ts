@@ -23,7 +23,8 @@
  *    «reporte horas FLOTA» (las filas de todos los libros), «combustible»,
  *    «otros gastos» (`gastosEmpresaYSueltos`: categorías de EMPRESA con o
  *    sin vuelo + sueltos sin vuelo ni avión salvo PERSONAL_DUENO y GAS;
- *    remanente del reparto), «repartidos a aviones» (parciales no
+ *    remanente del reparto; la NÓMINA SIN reparto NO desde el 16-oct-2026,
+ *    invariante 91 ⇒ null), «repartidos a aviones» (parciales no
  *    INDIRECTO/NOMINA) e «inventario» (bloque 2 = refacciones). NO pinta
  *    «Gastos Indirectos» ni «permisos».
  * `hoja_general` es la PRIMERA hoja del general donde aparece el gasto.
@@ -38,6 +39,7 @@ import {
   vueloEmbebido,
 } from './hojas-balance.util';
 import {
+  CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_EMPRESA,
   categoriaEsPagoVendedor,
 } from './categoria-gasto.util';
@@ -257,6 +259,11 @@ function ubicar(
           : null;
     return armar('gasto', diaGasto, aviones, 'gastos_indirectos', hojaGeneral);
   }
+  // R4b (16-oct-2026, API 0.0.90, invariante 91): NÓMINA SIN reparto ⇒
+  // ningún libro (`gastosEmpresaYSueltos` la salta: no va a «otros gastos»
+  // hasta repartirla en el módulo Nómina). Sin enlace desde Conciliación ni
+  // Caja chica. La repartida ya salió por R4.
+  if (cat === CATEGORIA_NOMINA) return null;
   // R5: LA CATEGORÍA DE EMPRESA MANDA (aunque traiga vuelo o avión).
   if (CATEGORIAS_GASTO_EMPRESA.has(cat)) {
     return armar('gasto', diaGasto, [], null, 'otros_gastos');
@@ -305,9 +312,9 @@ function ubicar(
 }
 
 /**
- * Dónde vive el gasto (reglas R1–R8 de la invariante 72; R8 = el periodo es
- * el mes calendario de la fecha del eje). Nunca lanza: una fecha ilegible o
- * un dato raro ⇒ null (sin enlace).
+ * Dónde vive el gasto (reglas R1–R8 de la invariante 72 + R2b de la 90 y R4b
+ * de la 91; R8 = el periodo es el mes calendario de la fecha del eje). Nunca
+ * lanza: una fecha ilegible o un dato raro ⇒ null (sin enlace).
  */
 export function ubicacionBalanceDeGasto(
   g: GastoParaUbicacion,

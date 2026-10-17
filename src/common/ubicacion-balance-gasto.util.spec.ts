@@ -333,9 +333,43 @@ describe('R3 — GAS (hoja «combustible»)', () => {
   });
 });
 
+describe('R4b — NÓMINA SIN reparto (16-oct-2026, invariante 91)', () => {
+  it('con o sin vuelo/avión ⇒ null: no vive en ningún libro hasta repartirla (sin enlace)', () => {
+    expect(ubicacionBalanceDeGasto(gasto({ categoria: 'NOMINA' }))).toBeNull();
+    expect(
+      ubicacionBalanceDeGasto(
+        sinVuelo({ categoria: 'NOMINA', aeronave_id: null }),
+      ),
+    ).toBeNull();
+    expect(
+      ubicacionBalanceDeGasto(sinVuelo({ categoria: 'NOMINA' }), []),
+    ).toBeNull();
+  });
+
+  it('REPARTIDA en partes iguales (sin remanente) ⇒ los aviones del reparto en «Gastos Indirectos», SIN general', () => {
+    expect(
+      ubicacionBalanceDeGasto(
+        sinVuelo({ categoria: 'NOMINA', monto: 27500, aeronave_id: null }),
+        [
+          { aeronave_id: N41, monto: 9166.67 },
+          { aeronave_id: VGV, monto: 9166.67 },
+          { aeronave_id: PEV, monto: 9166.66 },
+        ],
+      ),
+    ).toEqual({
+      periodo: SEP,
+      eje: 'gasto',
+      aviones: [N41, VGV, PEV],
+      general: false,
+      hoja_avion: 'gastos_indirectos',
+      hoja_general: null,
+    });
+  });
+});
+
 describe('R5 — LA CATEGORÍA DE EMPRESA MANDA', () => {
-  it('OTRO, NOMINA, GASOLINA, FIJO y VISITA con vuelo y avión ⇒ «otros gastos» del general, eje gasto', () => {
-    for (const categoria of ['OTRO', 'NOMINA', 'GASOLINA', 'FIJO', 'VISITA']) {
+  it('OTRO, GASOLINA, FIJO y VISITA con vuelo y avión ⇒ «otros gastos» del general, eje gasto (NOMINA: R4b)', () => {
+    for (const categoria of ['OTRO', 'GASOLINA', 'FIJO', 'VISITA']) {
       expect(ubicacionBalanceDeGasto(gasto({ categoria }))).toEqual({
         periodo: SEP,
         eje: 'gasto',
@@ -645,6 +679,18 @@ describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
       ".neq('categoria', 'GAS')",
     );
     tiene(".gte('gasto.fecha_gasto', desde)");
+  });
+
+  it('NÓMINA SIN REPARTIR (invariante 91): sin partes NO entra a «otros gastos» (R4b ⇒ null) y solo alimenta el aviso del consolidado', () => {
+    enOrden(
+      'const partes = repartos.get(g.id as string) ?? [];',
+      'if (partes.length === 0) {',
+      'else if (fila.categoria === CATEGORIA_NOMINA) nominaSinRepartir.push(fila);',
+      'else empresa.push(fila);',
+    );
+    tiene(
+      'pendienteBalanceNominaSinRepartir( resumenNominaSinRepartir(empresaYSueltos.nominaSinRepartir), )',
+    );
   });
 
   it('PAGO DE AFAC (invariante 90): el marcado sale de «permisos» (las MISMAS dos fuentes) y los sin vuelo ni avión no van a «otros gastos»', () => {

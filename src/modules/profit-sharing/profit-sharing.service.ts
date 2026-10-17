@@ -35,6 +35,7 @@ import {
 } from './grupos-reparto.util';
 import type { Rol } from '../../common/types/auth.types';
 import {
+  CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
   categoriaEsPagoVendedor,
@@ -51,7 +52,16 @@ import { dineroDevueltoCompleto } from '../../common/cuentas-cobro';
 import {
   expandirConReparto,
   fetchRepartos,
+  gastosConReparto,
 } from '../../common/gasto-reparto.util';
+// NÓMINA SIN REPARTIR (16-oct-2026, invariante 91): renglón BLOQUEANTE del
+// pre-cierre (sumas y textos en la fuente única pura).
+import {
+  CLAVE_PRECIERRE_NOMINA_SIN_REPARTIR,
+  TITULO_PRECIERRE_NOMINA_SIN_REPARTIR,
+  detallePrecierreNominaSinRepartir,
+  resumenNominaSinRepartir,
+} from '../../common/nomina-sin-repartir.util';
 import {
   cobradoParteAvion,
   pagoVendedorUsd,
@@ -607,6 +617,9 @@ export const CLAVES_BLOQUEANTES_PRECIERRE = [
   'cobros_sin_tc',
   'combustible_sin_avion',
   'permisos_sin_avion',
+  // 16-oct-2026 (API 0.0.90, invariante 91): no se cierra un mes con
+  // nómina sin repartir (no entra a ningún balance ni al reparto).
+  'nomina_sin_repartir',
 ] as const;
 
 @Injectable()
@@ -3696,6 +3709,14 @@ export class ProfitSharingService {
           g as { categoria?: string | null; es_pago_afac?: boolean | null },
         ),
     );
+    // NÓMINA SIN REPARTIR (16-oct-2026, API 0.0.90, invariante 91): las
+    // NÓMINA del periodo (la MISMA lectura de gastos, ya con el inicio
+    // oficial) sin ninguna fila en `gasto_reparto`. Lectura propia de
+    // existencia, paginada y por lotes (`gastosConReparto`), best-effort:
+    // caída ⇒ null ⇒ count 0 + `lectura_fallida`. BLOQUEA el cierre.
+    const nominaSinRepartir = await this.nominaSinRepartirPrecierre(
+      gastos.filter((g) => g.categoria === CATEGORIA_NOMINA),
+    );
     // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el
     // monto a la baja DESPUÉS de repartir) — el sobrante restaría dinero
     // inexistente a los aviones. Aviso para corregir en Otros gastos.
@@ -4154,6 +4175,8 @@ export class ProfitSharingService {
         count: sinAvion.length,
         ...idsPrecierre(sinAvion),
       },
+      // Justo después de la bandeja (invariante 91): BLOQUEANTE.
+      renglonNominaSinRepartir(nominaSinRepartir),
       {
         clave: 'fijos_con_avion',
         titulo: 'Gastos FIJOS capturados con avión',
@@ -4397,7 +4420,8 @@ export class ProfitSharingService {
     // gastos/cobros MXN que no convierten ni con el TC oficial (29-ago),
     // combustible sin avión (el gas del mes es por avión) y —desde el 0.0.77
     // (14-oct-2026, invariante 62)— permisos sin avión (el permiso lo carga
-    // el avión). El resto es aviso (cobranza/conciliación son procesos).
+    // el avión) y —desde el 0.0.90 (16-oct-2026, invariante 91)— nómina sin
+    // repartir. El resto es aviso (cobranza/conciliación son procesos).
     const bloqueantes: readonly string[] = CLAVES_BLOQUEANTES_PRECIERRE;
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))
@@ -4414,6 +4438,30 @@ export class ProfitSharingService {
       ...(cierre ? { cierre } : {}),
       items,
     };
+  }
+
+  /**
+   * Pre-cierre · NÓMINA SIN REPARTIR (16-oct-2026, API 0.0.90, invariante
+   * 91): de las NÓMINA ya leídas del periodo, las que no tienen NINGUNA fila
+   * en `gasto_reparto`. Nunca lanza: un error de lectura ⇒ null (el renglón
+   * sale «No se pudo verificar…» con `lectura_fallida`).
+   */
+  private async nominaSinRepartirPrecierre(
+    nomina: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>> | null> {
+    if (nomina.length === 0) return [];
+    try {
+      const con = await gastosConReparto(
+        this.supabase.service,
+        nomina.map((g) => String(g.id)),
+      );
+      return nomina.filter((g) => !con.has(String(g.id)));
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: no se pudo verificar la nómina sin repartir: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -5431,6 +5479,29 @@ function cobrosNecesitanTc(cobros: CobroRow[], tcVuelo: unknown): boolean {
     (c) =>
       c.moneda === 'MXN' && pos(c.tc_usd_mxn) == null && Number(c.monto) > 0,
   );
+}
+
+/**
+ * Renglón BLOQUEANTE `nomina_sin_repartir` del pre-cierre (16-oct-2026, API
+ * 0.0.90, invariante 91): los pagos de NÓMINA del periodo sin reparto, su
+ * monto por moneda (`monto_usd` solo con dólares; jamás se suman monedas) y
+ * sus `ids` como ÚLTIMAS llaves (invariante 81). null (lectura caída) ⇒
+ * count 0 + `lectura_fallida: true` + «No se pudo verificar…».
+ */
+function renglonNominaSinRepartir(
+  lista: Array<Record<string, unknown>> | null,
+) {
+  const r = lista ? resumenNominaSinRepartir(lista) : null;
+  return {
+    clave: CLAVE_PRECIERRE_NOMINA_SIN_REPARTIR,
+    titulo: TITULO_PRECIERRE_NOMINA_SIN_REPARTIR,
+    detalle: detallePrecierreNominaSinRepartir(r),
+    count: r?.n ?? 0,
+    monto_mxn: r?.mxn ?? 0,
+    ...(r && r.usd > 0 ? { monto_usd: r.usd } : {}),
+    ...(lista ? {} : { lectura_fallida: true as const }),
+    ...idsPrecierre(lista ?? []),
+  };
 }
 
 /**

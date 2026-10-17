@@ -9,6 +9,7 @@ import {
 import { matrizAvionGasto, FILAS_REALES } from './gasto-avion.fixture-spec';
 import {
   ETIQUETA_AVION_PERSONAL,
+  ETIQUETA_AVION_SIN_REPARTIR,
   ETIQUETA_AVION_VUELATOUR,
   ETIQUETA_FALTA_AVION,
   ETIQUETA_REPARTIDO,
@@ -36,6 +37,11 @@ import {
  * Sin repo hermano se SALTA (CI, Railway). Con el repo ahí (o la variable
  * puesta) es OBLIGATORIA: si el helper o la tabla se mudaron, o la ruta
  * está mal, truena en vez de saltarse.
+ *
+ * Desde el 16-oct-2026 (API 0.0.90, invariante 91) incluye la regla «Sin
+ * repartir» (NÓMINA sin reparto, entre «Personal» y «VuelaTour»): la matriz
+ * ya trae NOMINA × aviones × repartos y hay un caso propio que la pide por
+ * su TEXTO (no por el nombre de la constante del panel).
  *
  * Si un lado cambia una regla o un texto sin el otro, esto truena en
  * pruebas y no en el Excel de la oficina. Revisión del 15-oct-2026: SOLO
@@ -276,6 +282,32 @@ function celdaDeLaTabla(e: EstadoPanel, p: HelperAvionPanel): string {
         [...CATEGORIAS_GASTO_SIN_AVION].sort(),
       );
       expect(categorias.CATEGORIA_PAGO_VENDEDOR).toBe(CATEGORIA_PAGO_VENDEDOR);
+    });
+
+    it('NÓMINA sin reparto (16-oct-2026, invariante 91): la tabla dice «Sin repartir» por la rama de «VuelaTour»/«Personal», con su «ref.»', () => {
+      const nomina = (extra: Modulo = {}): Modulo => ({
+        id: 'g-nomina',
+        categoria: 'NOMINA',
+        monto: 27500,
+        moneda: 'MXN',
+        aeronave_id: null,
+        aeronave: null,
+        vuelo_id: null,
+        repartos: [],
+        ...extra,
+      });
+      const sinAvion = panel.estadoAvionGasto(nomina());
+      // Solo lo que se PINTA (el panel puede traer más llaves, p. ej. el
+      // `title` de la insignia).
+      expect(sinAvion).toMatchObject(estadoAvionGasto(nomina()));
+      expect(celdaDeLaTabla(sinAvion, panel)).toBe(ETIQUETA_AVION_SIN_REPARTIR);
+      const conAvion = nomina({
+        aeronave_id: 'av-1',
+        aeronave: { matricula: 'N4142R' },
+      });
+      expect(celdaDeLaTabla(panel.estadoAvionGasto(conAvion), panel)).toBe(
+        `${ETIQUETA_AVION_SIN_REPARTIR} (${textoReferenciaAvion('N4142R')})`,
+      );
     });
 
     it('las filas REALES de prod dicen lo mismo en el Excel y en la tabla', () => {

@@ -1016,9 +1016,12 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     hoja "otros gastos" del Balance general VuelaTour
     (`gastosEmpresaYSueltos`, eje `fecha_gasto`) AUNQUE el gasto traiga
     vuelo o aeronave sellados — el vuelo queda solo como referencia en el
-    detalle ("· vuelo #123"). Esas categorías **no restan** en la fila del
-    vuelo (la columna OTROS quedó en SOLO FBO —y desde el 13-oct-2026 FBO
-    + COMISARIATO, invariante 63—; antes OTRO con vuelo caía
+    detalle ("· vuelo #123"). **Salvo la NÓMINA SIN reparto desde el
+    16-oct-2026 (invariante 91)**: no va a ningún libro (aviso «Nómina sin
+    repartir» en el consolidado del general). Esas categorías **no
+    restan** en la fila del vuelo (la columna OTROS quedó en SOLO FBO —y
+    desde el 13-oct-2026 FBO + COMISARIATO, invariante 63—; antes OTRO
+    con vuelo caía
     ahí — regla del 27-jul), ni en "Gastos Indirectos"/"otros gastos" del
     libro del avión, ni en la cascada de `utilidad_despues_usd`.
     En el **reparto a socios** (`profit-sharing.service`) 'OTRO' SALIÓ del
@@ -8035,7 +8038,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `parcialEntraAlAvion`) ⇒ eje gasto, los aviones del reparto en «Gastos
       Indirectos» y en el general «otros gastos» si hay remanente y
       `gastosEmpresaYSueltos` lo lee (EMPRESA o suelto sin vuelo ni avión),
-      si no «repartidos a aviones» salvo INDIRECTO/NOMINA (sin general); R5
+      si no «repartidos a aviones» salvo INDIRECTO/NOMINA (sin general); R4b
+      (16-oct-2026, invariante 91) NOMINA sin reparto ⇒ null; R5
       EMPRESA ⇒ solo «otros gastos», eje gasto; R6 con vuelo ⇒ el mes del
       VUELO (día Cancún): externo sin avión ⇒ «reporte horas FLOTA» (PERMISO
       e INDIRECTO ⇒ null: el general no pinta esas hojas); si no, el avión
@@ -10118,8 +10122,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       true}`). `periodo` AAAA-MM o 400 `PERIODO_INVALIDO`. Precondiciones de
       cerrar en orden: 503 `CIERRE_NO_DISPONIBLE`, 400
       `PERIODO_ANTES_DEL_INICIO`, 409 `MES_EN_CURSO`, `YA_CERRADO`,
-      `MES_ANTERIOR_ABIERTO`, `PRECIERRE_NO_LISTO` (los 6 bloqueantes de
-      `listo`), `PREVIA_CAMBIO` (la lista del diálogo cambió; `details.previa`
+      `MES_ANTERIOR_ABIERTO`, `PRECIERRE_NO_LISTO` (los 7 bloqueantes de
+      `listo`; el 7.º, `nomina_sin_repartir`, desde el 0.0.90, invariante
+      91), `PREVIA_CAMBIO` (la lista del diálogo cambió; `details.previa`
       trae la nueva). La DECISIÓN la evalúa `compute(M)` (misma cadena de
       T.C.: `cierre.pendientes_que_pasarian`); el snapshot es `compute(M,
       {excluirVuelos})` (parámetro INTERNO). Escritura a mano con CAS: fila
@@ -10335,6 +10340,100 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `tc_gasto`, oficial 17.0077): cada libro suelta EXACTO su propia
       conversión (reparto 293.98 USD) y `pagos_afac` conserva el T.C. que
       tenía en «permisos».
+
+91. **NÓMINA FUERA DE GASTOS Y REPARTO EN PARTES IGUALES; SOLO LA NÓMINA
+    REPARTIDA CUENTA EN LOS LIBROS (16-oct-2026, API 0.0.90, SIN
+    migración).** Pedido del cliente: «todo lo de nómina no se sume o
+    agregue al gasto… sumar todo lo de la nómina y repartir en partes
+    iguales a los aviones que yo elija… por lotes o todos de un jalón… y ya
+    solo así repartido y asignado se vaya al balance del avión y al
+    general». Decisiones (no se vuelven a preguntar): la NÓMINA vive SOLO en
+    el módulo Nómina; cada pago se reparte POR SEPARADO (conserva su
+    `gasto_reparto`, su mes y su trazabilidad); sin reparto no entra a
+    ningún balance; el pre-cierre la BLOQUEA. NO cambian: Libro Dinero (la
+    nómina pagada sigue en «otros gastos» del Dinero: es caja), tablero de
+    gastos, reparto a socios (ya la dejaba EXCLUIDA sin reparto), app ni
+    pyservices. `NOMINA` sigue en `CATEGORIAS_GASTO_EMPRESA` (su destino no
+    se tocó: moverlo movería dinero en todos los lectores).
+    - **`POST /v1/expenses/reparto-iguales`** (ADMIN, COORDINADOR,
+      FACTURACION = los del reparto masivo; ruta literal ANTES de `:id`; 200).
+      `RepartoIgualesDto`: `gasto_ids` 1–200 uuid sin repetir,
+      `aeronave_ids` 0–20 uuid sin repetir (`[]` = QUITAR el reparto),
+      `simular?` booleano CRUDO (el texto «"false"» ⇒ 400; `true` no escribe
+      nada). `putRepartoIguales`: (1) aviones en UNA lectura — inexistente o
+      inactivo ⇒ 400 `AERONAVE_INACTIVA` ANTES de leer gastos; ordenados por
+      matrícula; (2) pagos en lotes ≤ 150 + `ya_repartido` con
+      `gastosConReparto` (`common/gasto-reparto.util`, existencia en lotes ≤
+      200 y PAGINADA); orden `fecha_gasto`, `id`; (3) validación POR PAGO
+      (un pago malo no tumba el lote): `GASTO_NO_EXISTE`,
+      `CATEGORIA_NO_REPARTIBLE`, `GASTO_CON_VUELO`, `MONTO_MUY_CHICO` (monto
+      < n centavos), `MES_CERRADO` (`assertMesAbierto` por su `fecha_gasto`,
+      invariante 89, con el texto del 409); (4) al aplicar, SECUENCIAL, el
+      núcleo de siempre `reemplazarRepartoDeGasto` (sus candados viven ahí):
+      HttpException ⇒ su `error`/`message` (normalizado como el
+      `AllExceptionsFilter`), otra cosa ⇒ `ERROR` genérico + `logger.warn`.
+      Respuesta `{simulado, quitar, aeronaves[{id, matricula}], gastos[{
+      gasto_id, fecha_gasto, monto, moneda, ok, ya_repartido, partes[{
+      aeronave_id, matricula, monto}], error {code, message} | null}],
+      totales[{moneda, monto, gastos_n, por_avion[…]}] (solo OK, jamás
+      mezcla monedas), aplicados (OK; en `simular`, los que se aplicarían),
+      errores}`. Los que no existen van al final, en el orden pedido.
+    - **Aritmética** (fuente única PURA `expenses/reparto-iguales.util.ts`):
+      `repartirIgualesCents(T, n, cursor)` — `base = floor(T/n)`, los
+      `residuo` centavos extra a `(cursor + k) % n`, el cursor avanza
+      `residuo` mod n; Σ == monto EXACTO (sin remanente para VuelaTour).
+      `planRepartoIguales` lleva un cursor POR MONEDA sobre los pagos YA
+      validados ⇒ en un lote el total por avión difiere ≤ 1 ¢ y la vista
+      previa es EXACTAMENTE lo que se escribe. Octubre real (12 pagos,
+      $109,921.46) entre 4 aviones ⇒ dos con $27,480.37 y dos con $27,480.36.
+    - **Gastos sin nómina**: `ListGastosQuery.excluir_categoria` (enum) ⇒
+      `.neq('categoria', …)` en la consulta ÚNICA de `list()` (lista + su
+      `count`, bandeja, duplicados, `orden=captura`) y en el Excel
+      (`listParaXlsx`; subtítulo «· sin Nómina»). Con `categoria` igual ⇒
+      lista vacía. «Otros gastos» (`listOtrosGastos`) ya no lee NOMINA.
+    - **Balance** (`gastosEmpresaYSueltos`): una NOMINA SIN partes ya NO va
+      a `empresa` («otros gastos» del general, bloque VUELATOUR) — se junta
+      en `nominaSinRepartir` para el aviso del consolidado «Nómina sin
+      repartir: N pagos por $X MXN[ y $Y USD] — no entra a ningún balance
+      hasta repartirla entre aviones (módulo Nómina).»
+      (`common/nomina-sin-repartir.util`, PURO). Repartida, como siempre:
+      parciales a «Gastos Indirectos» de cada avión (`PARCIAL_A_INDIRECTOS`)
+      y al reparto por su grupo INDIRECTO; el remanente de un parcial, a
+      «otros gastos» con la regla de siempre.
+    - **Ubicación** (`ubicacionBalanceDeGasto`, invariante 72): regla R4b —
+      después de R4 (reparto) y antes de R5 (EMPRESA) — NOMINA ⇒ null (sin
+      enlace desde Conciliación ni Caja chica). La ALARMA DE PARIDAD exige
+      el salto en el servicio del balance. «Corregir fecha» (invariante 74)
+      queda consistente sola: sin reparto ya no dice «balance general».
+    - **Celda «Avión»** (`celdaAvionGasto`, invariante 71): regla 2b después
+      del reparto y de PERSONAL_DUENO y antes de empresa: NOMINA ⇒ «Sin
+      repartir» (+ « (ref. N4142R)» con avión sellado); repartida dice
+      «Repartido: …». Paridad con `estadoAvionGasto` del panel (mismo
+      texto, rama `FUERA_DEL_AVION`).
+    - **Pre-cierre**: renglón BLOQUEANTE `nomina_sin_repartir` (en
+      `CLAVES_BLOQUEANTES_PRECIERRE` ⇒ `listo` y la previa del cierre de mes),
+      justo después de `gastos_sin_avion`: NÓMINA de la lectura de gastos del
+      periodo (ya con el inicio oficial) sin ninguna fila en `gasto_reparto`
+      (`gastosConReparto`); `{clave, titulo: «Nómina sin repartir entre
+      aviones», detalle, count, monto_mxn, monto_usd? (solo > 0),
+      lectura_fallida? , ids, ids_truncado?}` (ids ÚLTIMOS, invariante 81).
+      Lectura caída ⇒ count 0 + `lectura_fallida: true` + «No se pudo
+      verificar la nómina del periodo.». Una NÓMINA CON vuelo también cuenta
+      y el reparto la rechaza (`GASTO_CON_VUELO`): se le quita el vuelo en
+      Gastos → Verificar / editar.
+    - Specs: `reparto-iguales.util.spec` (Σ, rotación ≤ 1 ¢, octubre real,
+      cursor por moneda, bordes, textos), `nomina-sin-repartir.util.spec`,
+      `gasto-reparto.util.spec` (`gastosConReparto` paginado),
+      `expenses.service.reparto-iguales.spec` (BD en memoria: simular no
+      escribe, aplicar = previa, quitar, errores por pago, 400 sin leer
+      gastos), `expenses.controller.reparto-iguales.spec` (HTTP: roles, DTO,
+      «"false"», ruta antes de `:id`, `excluir_categoria`),
+      `expenses.service.excluir-categoria.spec`,
+      `aircraft-balance.service.nomina.spec`,
+      `profit-sharing.service.pre-cierre-nomina.spec` y ajustes en
+      `gasto-avion.util`/`paridad`, `ubicacion-balance-gasto.util`,
+      `cambio-fecha-gasto.util`, `aircraft-balance.service.empresa` y
+      `pre-cierre-ids` (12 renglones con `ids`).
 
 ## Convenciones NestJS
 
@@ -11848,6 +11947,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   XB-PEV 42,800.91) y TOTALES / RESULTADO VUELATOUR = 0.0.88 (± 0.01); (4)
   panel. Rollback: panel ⇒ API 0.0.88 ⇒ reversa SOLO si no hay reales ni
   marcas (SQL Editor, `reversa-20261016000005.sql`) y reiniciar el API.
+- **16-oct-2026 — 0.0.90, SIN migración** (nómina fuera de Gastos y
+  reparto en partes iguales, invariante 91; sobre `fbc94805` = 0.0.89).
+  Orden: API 0.0.90 (push a `main`, `GET /v1/version` = `0.0.90`) ⇒ panel.
+  Panel viejo + API nuevo: nada se rompe (no manda `excluir_categoria` y
+  Gastos sigue mostrando la nómina; el Balance general ya no pone la
+  nómina sin repartir en «otros gastos» y el pre-cierre la bloquea — el
+  módulo Nómina del panel viejo no puede repartirla en partes iguales,
+  solo con el reparto por gasto de siempre). Panel nuevo + API ≤ 0.0.89:
+  el 400 «property excluir_categoria should not exist» ⇒ el panel relee
+  SIN el campo, y `POST /reparto-iguales` ⇒ 404 «Falta actualizar el
+  servidor». Humo SOLO lecturas: `GET /v1/expenses?excluir_categoria=NOMINA`
+  (sin nómina), pre-cierre de octubre con `nomina_sin_repartir` 12 pagos
+  $109,921.46 y de septiembre 7 pagos $25,757.80 (bloqueante: `listo:
+  false` hasta repartirlas). Rollback: API 0.0.89 (los repartos ya hechos
+  son filas normales de `gasto_reparto`: el 0.0.89 los lee igual).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera

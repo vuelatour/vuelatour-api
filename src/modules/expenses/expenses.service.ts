@@ -154,8 +154,31 @@ import {
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
+  gastosConReparto,
   repartirPorcentajeCents,
 } from '../../common/gasto-reparto.util';
+// NÓMINA: reparto en PARTES IGUALES (16-oct-2026, invariante 91): la
+// aritmética, el orden, los totales y los textos (PURO).
+import {
+  CODIGO_REPARTO_IGUALES,
+  GASTO_REPARTO_IGUALES_COLS,
+  MENSAJE_AERONAVE_INACTIVA,
+  MENSAJE_GASTO_CON_VUELO,
+  MENSAJE_GASTO_NO_EXISTE,
+  REPARTO_IGUALES_LOTE_LECTURA,
+  centavosDe,
+  compararAvionesPorMatricula,
+  compararPagosPorFecha,
+  errorRepartoDeExcepcion,
+  mensajeCategoriaNoRepartible,
+  mensajeMontoMuyChico,
+  montoDeCentavos,
+  planRepartoIguales,
+  totalesRepartoIguales,
+  type ErrorRepartoIguales,
+  type GastoRepartoIguales,
+  type RespuestaRepartoIguales,
+} from './reparto-iguales.util';
 import { NotificationsService } from '../realtime/notifications.service';
 import {
   PyservicesService,
@@ -639,8 +662,12 @@ export class ExpensesService {
       desdeRotulo || filters.hasta
         ? ` · ${desdeRotulo ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
         : '';
+    // Invariante 91: el libro dice qué categoría dejó fuera («sin Nómina»).
+    const sinCategoria = filters.excluir_categoria
+      ? ` · sin ${etiquetaCategoriaGasto(filters.excluir_categoria)}`
+      : '';
     // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
-    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
+    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${sinCategoria}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
     if (!opts.detalleBanco) {
       return this.pyservices.generateTablaXlsx({
         titulo: 'Gastos por avión / categoría',
@@ -874,6 +901,13 @@ export class ExpensesService {
     if (filters.usuario_captura_id)
       q = q.eq('usuario_captura_id', filters.usuario_captura_id);
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
+    // NÓMINA FUERA DE GASTOS (16-oct-2026, invariante 91): el módulo Gastos
+    // manda `excluir_categoria=NOMINA` (vive en su propio módulo). Es la
+    // MISMA consulta que pagina y cuenta (`count: 'exact'`), así que vale para
+    // la lista, su conteo, la bandeja, duplicados, `orden=captura` y el Excel
+    // (`listParaXlsx` pasa por aquí). Con `categoria` igual ⇒ lista vacía.
+    if (filters.excluir_categoria)
+      q = q.neq('categoria', filters.excluir_categoria);
     if (filters.estatus_comprobante)
       q = q.eq('estatus_comprobante', filters.estatus_comprobante);
     // NO_FACTURADA = pendiente o solicitada (para "todo lo que falta por
@@ -5042,7 +5076,7 @@ export class ExpensesService {
 
   /**
    * Gastos GENERALES del periodo (sin vuelo, categorías OTRO/FIJO/
-   * INDIRECTO/GASOLINA/VISITA)
+   * INDIRECTO/GASOLINA/VISITA; la NÓMINA salió el 16-oct-2026, invariante 91)
    * con su reparto embebido + resumen del mes: total, asignado a aviones y
    * gasto de la EMPRESA VuelaTour (remanentes + no asignados), por moneda.
    * Alimenta la pantalla "Otros gastos".
@@ -5075,16 +5109,11 @@ export class ExpensesService {
       .from('gasto')
       .select(await this.listCols())
       .is('vuelo_id', null)
-      // NOMINA (29-ago) se administra aquí como los indirectos; SERVICIOS
-      // no: es gasto directo del avión (vive en el tablero normal).
-      .in('categoria', [
-        'OTRO',
-        'FIJO',
-        'INDIRECTO',
-        'NOMINA',
-        'GASOLINA',
-        'VISITA',
-      ])
+      // SERVICIOS no: es gasto directo del avión (vive en el tablero
+      // normal). NOMINA tampoco desde el 16-oct-2026 (invariante 91): vive
+      // en su propio módulo y se reparte allí en partes iguales
+      // (`putRepartoIguales`); del 29-ago al 0.0.89 se administraba aquí.
+      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO', 'GASOLINA', 'VISITA'])
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta)
       .order('fecha_gasto', { ascending: false })
@@ -5418,6 +5447,251 @@ export class ExpensesService {
       `Reparto masivo: ${exitos} gastos repartidos, ${errores.length} con error (usuario ${userId})`,
     );
     return { procesados: gastoIds.length, exitos, errores };
+  }
+
+  /**
+   * NÓMINA: REPARTO EN PARTES IGUALES (16-oct-2026, API 0.0.90, invariante
+   * 91) — `POST /v1/expenses/reparto-iguales`. Cada pago se reparte POR
+   * SEPARADO en partes iguales (centavos enteros, Σ == monto, sin
+   * remanente) entre los aviones ACTIVOS elegidos; el residuo de centavos
+   * rota entre los aviones a lo largo del lote con un cursor por moneda
+   * (aritmética y textos en `reparto-iguales.util.ts`, PURO).
+   * `aeronave_ids: []` QUITA el reparto. `simular` no escribe nada: calcula
+   * y valida con las MISMAS reglas, así que la vista previa es lo que se
+   * aplica.
+   *
+   * Orden: (1) aviones en UNA lectura — alguno inexistente o inactivo ⇒ 400
+   * AERONAVE_INACTIVA ANTES de leer o escribir gastos; (2) pagos en lotes
+   * ≤ 150 y quién ya tenía reparto (`gastosConReparto`, paginada); (3)
+   * validación POR PAGO (un pago inválido no tumba el lote): no existe,
+   * categoría no repartible, con vuelo, alguna parte en 0 ¢ y mes cerrado
+   * (`assertMesAbierto` por su `fecha_gasto`, invariante 89); (4) al
+   * aplicar, SECUENCIAL por pago, el núcleo de siempre
+   * `reemplazarRepartoDeGasto` (sus candados viven allí y solo allí): una
+   * HttpException ⇒ su código y texto; otra cosa ⇒ ERROR + `logger.warn`.
+   */
+  async putRepartoIguales(
+    dto: { gasto_ids: string[]; aeronave_ids: string[]; simular?: boolean },
+    userId: string,
+  ): Promise<RespuestaRepartoIguales> {
+    const simulado = dto.simular === true;
+    const quitar = dto.aeronave_ids.length === 0;
+    const sb = this.supabase.service;
+
+    // (1) Aviones: UNA lectura y un 400 del LOTE antes de tocar nada.
+    let aeronaves: Array<{ id: string; matricula: string | null }> = [];
+    if (!quitar) {
+      const pedidos = [...new Set(dto.aeronave_ids)];
+      const { data, error } = await sb
+        .from('aeronave')
+        .select('id, matricula, activa')
+        .in('id', pedidos);
+      if (error) throw new Error(error.message);
+      const porId = new Map(
+        ((data ?? []) as Array<Record<string, unknown>>).map((a) => [
+          String(a.id),
+          a,
+        ]),
+      );
+      const malas = pedidos.filter((id) => porId.get(id)?.activa !== true);
+      if (malas.length > 0) {
+        throw new BadRequestException({
+          message: MENSAJE_AERONAVE_INACTIVA,
+          error: CODIGO_REPARTO_IGUALES.AERONAVE_INACTIVA,
+          details: { aeronave_ids: malas },
+        });
+      }
+      aeronaves = pedidos
+        .map((id) => {
+          const m = porId.get(id)?.matricula;
+          return { id, matricula: typeof m === 'string' ? m : null };
+        })
+        .sort(compararAvionesPorMatricula);
+    }
+    const n = aeronaves.length;
+
+    // (2) Pagos en lotes ≤ 150 y quién ya tenía reparto.
+    const ids = [...new Set(dto.gasto_ids)];
+    const leidos = new Map<string, Record<string, unknown>>();
+    for (let i = 0; i < ids.length; i += REPARTO_IGUALES_LOTE_LECTURA) {
+      const { data, error } = await sb
+        .from('gasto')
+        .select(GASTO_REPARTO_IGUALES_COLS)
+        .in('id', ids.slice(i, i + REPARTO_IGUALES_LOTE_LECTURA));
+      if (error) throw new Error(error.message);
+      for (const g of (data ?? []) as Array<Record<string, unknown>>) {
+        if (typeof g.id === 'string') leidos.set(g.id, g);
+      }
+    }
+    const conReparto = await gastosConReparto(sb, [...leidos.keys()]);
+    const encontrados = [...leidos.values()].sort((a, b) =>
+      compararPagosPorFecha(
+        {
+          id: String(a.id),
+          fecha_gasto: typeof a.fecha_gasto === 'string' ? a.fecha_gasto : null,
+        },
+        {
+          id: String(b.id),
+          fecha_gasto: typeof b.fecha_gasto === 'string' ? b.fecha_gasto : null,
+        },
+      ),
+    );
+
+    // (3) Validación POR PAGO (igual en `simular` y al aplicar).
+    const errores = new Map<string, ErrorRepartoIguales>();
+    const validos: Array<Record<string, unknown>> = [];
+    for (const g of encontrados) {
+      const id = String(g.id);
+      const categoria = typeof g.categoria === 'string' ? g.categoria : null;
+      const totalCents = centavosDe(g.monto) ?? 0;
+      if (!categoria || !CATEGORIAS_REPARTIBLES.has(categoria)) {
+        errores.set(id, {
+          code: CODIGO_REPARTO_IGUALES.CATEGORIA_NO_REPARTIBLE,
+          message: mensajeCategoriaNoRepartible(categoria),
+        });
+        continue;
+      }
+      if (g.vuelo_id) {
+        errores.set(id, {
+          code: CODIGO_REPARTO_IGUALES.GASTO_CON_VUELO,
+          message: MENSAJE_GASTO_CON_VUELO,
+        });
+        continue;
+      }
+      if (!quitar && totalCents < n) {
+        errores.set(id, {
+          code: CODIGO_REPARTO_IGUALES.MONTO_MUY_CHICO,
+          message: mensajeMontoMuyChico(
+            totalCents,
+            typeof g.moneda === 'string' ? g.moneda : null,
+            n,
+          ),
+        });
+        continue;
+      }
+      try {
+        await assertMesAbierto(
+          sb,
+          typeof g.fecha_gasto === 'string' ? g.fecha_gasto.slice(0, 7) : null,
+          'gasto',
+        );
+      } catch (err) {
+        const e = errorRepartoDeExcepcion(err);
+        if (!e.esHttp) {
+          this.logger.warn(
+            `Reparto en partes iguales: no se pudo revisar el mes del pago ${id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        errores.set(id, { code: e.code, message: e.message });
+        continue;
+      }
+      validos.push(g);
+    }
+    const plan = quitar
+      ? new Map<string, number[]>()
+      : planRepartoIguales(
+          validos.map((g) => ({
+            id: String(g.id),
+            moneda: typeof g.moneda === 'string' ? g.moneda : 'MXN',
+            totalCents: centavosDe(g.monto) ?? 0,
+          })),
+          n,
+        );
+
+    // (4) Aplicar: secuencial, el núcleo de siempre por pago.
+    if (!simulado) {
+      for (const g of validos) {
+        const id = String(g.id);
+        const cents = plan.get(id) ?? [];
+        const items = quitar
+          ? []
+          : aeronaves.map((a, i) => ({
+              aeronave_id: a.id,
+              monto: montoDeCentavos(cents[i]),
+            }));
+        try {
+          await this.reemplazarRepartoDeGasto(g, items, userId);
+        } catch (err) {
+          const e = errorRepartoDeExcepcion(err);
+          if (!e.esHttp) {
+            this.logger.warn(
+              `Reparto en partes iguales: falló el pago ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          errores.set(id, { code: e.code, message: e.message });
+        }
+      }
+    }
+
+    // Respuesta: encontrados por fecha e id; los que no existen al final,
+    // en el orden pedido.
+    const gastos: GastoRepartoIguales[] = encontrados.map((g) => {
+      const id = String(g.id);
+      const error = errores.get(id) ?? null;
+      const cents = plan.get(id) ?? [];
+      const totalCents = centavosDe(g.monto);
+      return {
+        gasto_id: id,
+        fecha_gasto: typeof g.fecha_gasto === 'string' ? g.fecha_gasto : null,
+        monto: totalCents == null ? null : montoDeCentavos(totalCents),
+        moneda: typeof g.moneda === 'string' ? g.moneda : null,
+        ok: error == null,
+        ya_repartido: conReparto.has(id),
+        partes:
+          error || quitar
+            ? []
+            : aeronaves.map((a, i) => ({
+                aeronave_id: a.id,
+                matricula: a.matricula,
+                monto: montoDeCentavos(cents[i]),
+              })),
+        error,
+      };
+    });
+    for (const id of ids) {
+      if (leidos.has(id)) continue;
+      gastos.push({
+        gasto_id: id,
+        fecha_gasto: null,
+        monto: null,
+        moneda: null,
+        ok: false,
+        ya_repartido: false,
+        partes: [],
+        error: {
+          code: CODIGO_REPARTO_IGUALES.GASTO_NO_EXISTE,
+          message: MENSAJE_GASTO_NO_EXISTE,
+        },
+      });
+    }
+    const totales = totalesRepartoIguales(
+      encontrados
+        .filter((g) => !errores.has(String(g.id)))
+        .map((g) => ({
+          moneda: typeof g.moneda === 'string' ? g.moneda : 'MXN',
+          totalCents: centavosDe(g.monto) ?? 0,
+          partesCents: quitar ? [] : (plan.get(String(g.id)) ?? []),
+        })),
+      aeronaves,
+    );
+    const aplicados = gastos.filter((g) => g.ok).length;
+    const conError = gastos.length - aplicados;
+    this.logger.log(
+      `Reparto en partes iguales${simulado ? ' (SIMULACIÓN, sin escribir)' : ''}: ${aplicados} de ${gastos.length} pagos ${
+        quitar
+          ? 'sin reparto (se quitó)'
+          : `entre ${n} aviones (${aeronaves.map((a) => a.matricula ?? a.id).join(', ')})`
+      }, ${conError} con error (usuario ${userId})`,
+    );
+    return {
+      simulado,
+      quitar,
+      aeronaves,
+      gastos,
+      totales,
+      aplicados,
+      errores: conError,
+    };
   }
 }
 

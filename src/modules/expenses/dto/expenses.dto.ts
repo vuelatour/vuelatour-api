@@ -3,6 +3,10 @@ import { Transform, Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import { descripcionCategoriasGasto } from '../../../common/categoria-gasto.util';
 import {
+  REPARTO_IGUALES_MAX_AVIONES,
+  REPARTO_IGUALES_MAX_GASTOS,
+} from '../reparto-iguales.util';
+import {
   CARGOS_A_GASTO_MAX,
   CARGOS_A_GASTO_MIN,
   MENSAJE_LOTE_CARGOS_INVALIDO,
@@ -801,6 +805,65 @@ export class RepartoMasivoDto {
   items!: RepartoMasivoLineaDto[];
 }
 
+/**
+ * NÓMINA: REPARTO EN PARTES IGUALES (16-oct-2026, API 0.0.90, invariante 91)
+ * — `POST /v1/expenses/reparto-iguales`. Cada pago se reparte por separado
+ * en partes iguales (centavos enteros, Σ == monto) entre los aviones
+ * ACTIVOS elegidos; `aeronave_ids: []` QUITA el reparto. Con whitelist +
+ * forbidNonWhitelisted (main.ts) cualquier otra llave ⇒ 400.
+ */
+export class RepartoIgualesDto {
+  @ApiProperty({
+    type: [String],
+    description: 'Pagos (gastos) a repartir: 1–200 uuid sin repetir.',
+  })
+  @IsArray({ message: 'gasto_ids debe ser una lista de pagos' })
+  @ArrayMinSize(1, { message: 'Elige al menos un pago.' })
+  @ArrayMaxSize(REPARTO_IGUALES_MAX_GASTOS, {
+    message: `Se reparten hasta ${REPARTO_IGUALES_MAX_GASTOS} pagos por vez.`,
+  })
+  @ArrayUnique({ message: 'Hay un pago repetido en la lista.' })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Cada pago debe ser un id válido (uuid).',
+  })
+  gasto_ids!: string[];
+
+  @ApiProperty({
+    type: [String],
+    description:
+      'Aviones ACTIVOS entre los que se reparte cada pago en partes iguales (0–20 uuid sin repetir). [] = QUITAR el reparto de esos pagos.',
+  })
+  @IsArray({ message: 'aeronave_ids debe ser una lista de aviones' })
+  @ArrayMaxSize(REPARTO_IGUALES_MAX_AVIONES, {
+    message: `Se reparte entre hasta ${REPARTO_IGUALES_MAX_AVIONES} aviones.`,
+  })
+  @ArrayUnique({ message: 'Hay un avión repetido en la lista.' })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Cada avión debe ser un id válido (uuid).',
+  })
+  aeronave_ids!: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'true = NO escribe nada: solo calcula las partes y valida cada pago (vista previa).',
+  })
+  @IsOptional()
+  // Booleano ESTRICTO sobre el valor CRUDO del cuerpo (patrón de
+  // `solo_enriquecer` / `corregir_comision`): con `enableImplicitConversion`
+  // (main.ts) el texto «"false"» llegaría como Boolean('false') = true; así
+  // solo pasan `true` y `false` de verdad.
+  @Transform(({ obj, key, value }): unknown => {
+    const fuente = obj as Record<string, unknown> | null | undefined;
+    return fuente && typeof fuente === 'object' && key in fuente
+      ? fuente[key]
+      : (value as unknown);
+  })
+  @IsBoolean({ message: 'simular debe ser true o false' })
+  simular?: boolean;
+}
+
 export class ListOtrosGastosQuery {
   @ApiPropertyOptional({
     description: 'fecha_gasto >= (YYYY-MM-DD); default inicio del mes Cancún',
@@ -844,6 +907,15 @@ export class ListGastosQuery {
   @IsOptional()
   @IsEnum(CategoriaGasto)
   categoria?: CategoriaGasto;
+
+  @ApiPropertyOptional({
+    enum: CategoriaGasto,
+    description:
+      'Deja FUERA una categoría (16-oct-2026, invariante 91: el módulo Gastos manda NOMINA, que vive en su propio módulo). Aplica a la lista, su conteo, la bandeja, duplicados, orden=captura y el Excel. Con `categoria` igual ⇒ lista vacía.',
+  })
+  @IsOptional()
+  @IsEnum(CategoriaGasto)
+  excluir_categoria?: CategoriaGasto;
 
   @ApiPropertyOptional({ description: 'fecha_gasto >= (YYYY-MM-DD)' })
   @IsOptional()

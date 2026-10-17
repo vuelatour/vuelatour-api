@@ -17,6 +17,7 @@ import {
 } from './gasto-avion.fixture-spec';
 import {
   ETIQUETA_AVION_PERSONAL,
+  ETIQUETA_AVION_SIN_REPARTIR,
   ETIQUETA_AVION_VUELATOUR,
   ETIQUETA_FALTA_AVION,
   ETIQUETA_REPARTIDO,
@@ -64,6 +65,11 @@ const EMPRESA_Y_COMISION = [
   'VISITA',
   'COMISION_VENDEDOR',
 ];
+/**
+ * Las que dicen «VuelaTour» SIEMPRE sin reparto: la NÓMINA salió el
+ * 16-oct-2026 (invariante 91: sin reparto dice «Sin repartir»).
+ */
+const VUELATOUR_SIEMPRE = EMPRESA_Y_COMISION.filter((c) => c !== 'NOMINA');
 const REPARTO_STARLINK = [
   parte(AV.N4142R, 1577.92, 'N4142R'),
   parte(AV.N621TX, 1577.92, 'N621TX'),
@@ -106,13 +112,15 @@ describe('columna «Avión» — gastos REALES de prod (15-oct-2026)', () => {
 });
 
 describe('sin avión ni reparto: las 22 categorías', () => {
-  it('empresa, comisión (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; PERSONAL_DUENO ⇒ «Personal»; las 14 restantes ⇒ «Falta avión»', () => {
+  it('empresa, comisión (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; NÓMINA ⇒ «Sin repartir»; PERSONAL_DUENO ⇒ «Personal»; las 14 restantes ⇒ «Falta avión»', () => {
     expect(CATEGORIAS).toHaveLength(22);
     const falta: string[] = [];
     for (const categoria of CATEGORIAS) {
       const celda = celdaAvionGasto(gasto({ categoria }));
-      if ([...EMPRESA_Y_COMISION, 'INDIRECTO'].includes(categoria)) {
+      if ([...VUELATOUR_SIEMPRE, 'INDIRECTO'].includes(categoria)) {
         expect([categoria, celda]).toEqual([categoria, 'VuelaTour']);
+      } else if (categoria === 'NOMINA') {
+        expect(celda).toBe('Sin repartir');
       } else if (categoria === 'PERSONAL_DUENO') {
         expect(celda).toBe('Personal');
       } else {
@@ -146,7 +154,7 @@ describe('sin avión ni reparto: las 22 categorías', () => {
 
 describe('con avión sellado', () => {
   it('empresa y comisión (VuelaTour) ⇒ «VuelaTour (ref. N4142R)»: la categoría manda, el avión es solo referencia', () => {
-    for (const categoria of EMPRESA_Y_COMISION) {
+    for (const categoria of VUELATOUR_SIEMPRE) {
       for (const vuelo of [null, 'v-1']) {
         expect([
           categoria,
@@ -409,6 +417,60 @@ describe('cableado en el Excel de gastos', () => {
     );
     expect(cuerpo).not.toContain("'(pendiente)'");
     expect(cuerpo).not.toContain('`Repartido(');
+  });
+});
+
+describe('NÓMINA sin repartir (16-oct-2026, invariante 91)', () => {
+  it('sin reparto ⇒ «Sin repartir»; con avión sellado ⇒ «Sin repartir (ref. N4142R)» (misma forma que «VuelaTour (ref.)»)', () => {
+    expect(ETIQUETA_AVION_SIN_REPARTIR).toBe('Sin repartir');
+    expect(celdaAvionGasto(gasto({ categoria: 'NOMINA' }))).toBe(
+      'Sin repartir',
+    );
+    expect(celdaAvionGasto(gasto({ categoria: 'NOMINA', ...conAvion() }))).toBe(
+      'Sin repartir (ref. N4142R)',
+    );
+    expect(
+      estadoAvionGasto(gasto({ categoria: 'NOMINA', ...conAvion() })),
+    ).toEqual({
+      tipo: 'FUERA_DEL_AVION',
+      etiqueta: 'Sin repartir',
+      referencia: 'N4142R',
+    });
+    // Con vuelo (no debería pasar) y sin matrícula en el join: la MISMA
+    // regla que la rama de empresa.
+    expect(
+      celdaAvionGasto(
+        gasto({
+          categoria: 'NOMINA',
+          vuelo_id: 'v-1',
+          aeronave_id: AV.XB_PEV,
+          aeronave: null,
+        }),
+      ),
+    ).toBe('Sin repartir');
+  });
+
+  it('REPARTIDA ⇒ «Repartido: …» como cualquier otra (el reparto gana); sin remanente, sin «VuelaTour»', () => {
+    expect(
+      celdaAvionGasto(
+        gasto({
+          categoria: 'NOMINA',
+          monto: 27500,
+          repartos: [
+            parte(AV.N4142R, 6875, 'N4142R'),
+            parte(AV.N621TX, 6875, 'N621TX'),
+            parte(AV.N990GG, 6875, 'N990GG'),
+            parte(AV.XA_VGV, 6875, 'XA-VGV'),
+          ],
+        }),
+      ),
+    ).toBe('Repartido: N4142R, N621TX, N990GG, XA-VGV');
+  });
+
+  it('las demás categorías de empresa NO cambian (siguen «VuelaTour»)', () => {
+    for (const categoria of ['OTRO', 'GASOLINA', 'FIJO', 'VISITA']) {
+      expect(celdaAvionGasto(gasto({ categoria }))).toBe('VuelaTour');
+    }
   });
 });
 

@@ -23,12 +23,17 @@
  *     fuente única de los libros: el Excel dice «VuelaTour» justo cuando los
  *     libros le cargan algo a la empresa.
  *  2. PERSONAL_DUENO ⇒ «Personal» (fuera de balances).
+ *  2b. NÓMINA sin reparto (16-oct-2026, API 0.0.90, invariante 91) ⇒ «Sin
+ *     repartir» (+ « (ref. N4142R)» con avión sellado): no entra a ningún
+ *     balance hasta repartirla entre aviones en el módulo Nómina. Va ANTES
+ *     de la 3 (NÓMINA sigue siendo categoría de empresa) y después de la 1
+ *     (repartida dice «Repartido: …» como cualquier otra).
  *  3. Empresa (`categoriaEsDeEmpresa`) o «Comisión del vendedor (VuelaTour)»
  *     (`ladoPagoVendedor` = VUELATOUR) ⇒ «VuelaTour» SIEMPRE, aunque traiga
  *     avión sellado (la categoría de empresa manda sobre el vuelo, regla del
  *     11-sep-2026).
- *     En 2 y 3, con avión sellado: « (ref. N4142R)» — solo referencia, no se
- *     le carga.
+ *     En 2, 2b y 3, con avión sellado: « (ref. N4142R)» — solo referencia,
+ *     no se le carga.
  *  3b. PAGO DE AFAC marcado (16-oct-2026, invariante 90; `esPagoAfac`) ⇒
  *     «VuelaTour · pago de AFAC» (+ « (ref. N4142R)» con avión sellado):
  *     lo paga VuelaTour, no le resta al avión. Sin la migración la lista no
@@ -52,6 +57,7 @@
  * lote: la prueba de paridad truena.
  */
 import {
+  CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
   ladoPagoVendedor,
@@ -73,6 +79,12 @@ export const ETIQUETA_FALTA_AVION = 'Falta avión';
 export const ETIQUETA_AVION_VUELATOUR = 'VuelaTour';
 /** «Personal» (espejo de `ETIQUETA_AVION_PERSONAL` del panel). */
 export const ETIQUETA_AVION_PERSONAL = 'Personal';
+/**
+ * «Sin repartir» (16-oct-2026, invariante 91): NÓMINA sin reparto. MISMO
+ * texto que la tabla del panel (`estadoAvionGasto` de `lib/admin/
+ * gasto-avion.ts`; lo vigila `gasto-avion.paridad.spec`).
+ */
+export const ETIQUETA_AVION_SIN_REPARTIR = 'Sin repartir';
 /** «Repartido:» (espejo de `ETIQUETA_REPARTIDO` del panel). */
 export const ETIQUETA_REPARTIDO = 'Repartido:';
 /** Parte de un reparto sin matrícula en el join (`MATRICULA_DESCONOCIDA`). */
@@ -103,6 +115,7 @@ export type EstadoAvionGasto =
       etiqueta:
         | typeof ETIQUETA_AVION_VUELATOUR
         | typeof ETIQUETA_AVION_PERSONAL
+        | typeof ETIQUETA_AVION_SIN_REPARTIR
         | typeof ETIQUETA_AVION_PAGO_AFAC;
       /** Matrícula sellada que NO se carga (solo referencia) o null. */
       referencia: string | null;
@@ -170,6 +183,14 @@ export function estadoAvionGasto(
       referencia,
     };
   }
+  // 2b. NÓMINA sin reparto (invariante 91): no vive en ningún balance.
+  if (categoria === CATEGORIA_NOMINA) {
+    return {
+      tipo: 'FUERA_DEL_AVION',
+      etiqueta: ETIQUETA_AVION_SIN_REPARTIR,
+      referencia,
+    };
+  }
   if (
     categoriaEsDeEmpresa(categoria) ||
     ladoPagoVendedor(categoria) === 'VUELATOUR'
@@ -206,7 +227,8 @@ export function estadoAvionGasto(
 
 /**
  * Texto de la celda: «Repartido: N4142R, N621TX[, VuelaTour]»,
- * «VuelaTour (ref. N4142R)», «Personal», la matrícula o «Falta avión».
+ * «VuelaTour (ref. N4142R)», «Personal», «Sin repartir», la matrícula o
+ * «Falta avión».
  */
 export function textoAvionGasto(e: EstadoAvionGasto): string {
   switch (e.tipo) {

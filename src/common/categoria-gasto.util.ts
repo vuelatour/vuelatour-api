@@ -227,6 +227,19 @@ export const CATEGORIA_PAGO_VENDEDOR_AVION = 'COMISION_VENDEDOR_AVION';
  */
 export const CATEGORIA_COMISARIATO = 'COMISARIATO';
 
+/**
+ * «Nómina» (16-oct-2026, API 0.0.90, invariante 91): vive en su módulo
+ * (fuera de Gastos y de Otros gastos) y SOLO cuenta en los libros
+ * REPARTIDA entre aviones (sus parciales van a «Gastos Indirectos» de cada
+ * avión). Sin reparto no entra a ningún balance: ni a «otros gastos» del
+ * general (`gastosEmpresaYSueltos`), ni tiene ubicación
+ * (`ubicacionBalanceDeGasto` ⇒ null); la celda «Avión» dice «Sin
+ * repartir» y el pre-cierre la BLOQUEA (`nomina_sin_repartir`). Sigue
+ * siendo categoría de EMPRESA (destino de arriba): el Libro Dinero, el
+ * tablero y el reparto a socios no cambian.
+ */
+export const CATEGORIA_NOMINA = 'NOMINA';
+
 /** Quién paga un pago al vendedor: VuelaTour o el avión del vuelo. */
 export type LadoPagoVendedor = 'VUELATOUR' | 'AVION';
 

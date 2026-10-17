@@ -103,6 +103,44 @@ export async function fetchRepartos(
 }
 
 /**
+ * ¿Qué gastos YA tienen reparto manual? (16-oct-2026, API 0.0.90, invariante
+ * 91: `ya_repartido` del reparto en partes iguales y el renglón
+ * `nomina_sin_repartir` del pre-cierre). Solo la EXISTENCIA (`gasto_id`), en
+ * lotes de ≤ 200 ids (`.in()` de PostgREST) y PAGINADA por lote: PostgREST
+ * corta en 1000 filas sin avisar y 200 gastos × 7 aviones ya son 1,400. Un
+ * error de lectura LANZA (quien llama decide si es best-effort).
+ */
+export async function gastosConReparto(
+  sb: SupabaseClient,
+  gastoIds: ReadonlyArray<string>,
+  lote = 200,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const unicos = [...new Set(gastoIds.filter((x) => !!x))];
+  const tam = Math.max(1, Math.min(200, Math.floor(lote)));
+  const PAGINA = 1000;
+  for (let i = 0; i < unicos.length; i += tam) {
+    const ids = unicos.slice(i, i + tam);
+    for (let desde = 0; ; desde += PAGINA) {
+      const { data, error } = await sb
+        .from('gasto_reparto')
+        .select('gasto_id')
+        .in('gasto_id', ids)
+        .order('gasto_id', { ascending: true })
+        .order('aeronave_id', { ascending: true })
+        .range(desde, desde + PAGINA - 1);
+      if (error) throw new Error(error.message);
+      const filas = (data ?? []) as Array<{ gasto_id?: unknown }>;
+      for (const r of filas) {
+        if (typeof r.gasto_id === 'string') out.add(r.gasto_id);
+      }
+      if (filas.length < PAGINA) break;
+    }
+  }
+  return out;
+}
+
+/**
  * Expande una lista de gastos aplicando el reparto: los gastos SIN reparto
  * pasan tal cual; los que SÍ tienen se sustituyen por clones parciales
  * (mismo shape del lector: spread del padre) con `aeronave_id` y `monto`

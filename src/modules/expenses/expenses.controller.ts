@@ -35,6 +35,7 @@ import {
   UpdateTarifaAerodromoDto,
   ListOtrosGastosQuery,
   PutRepartoDto,
+  RepartoIgualesDto,
   RepartoMasivoDto,
 } from './dto/expenses.dto';
 import {
@@ -228,7 +229,7 @@ export class ExpensesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO/NOMINA/GASOLINA/VISITA) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
+      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO/GASOLINA/VISITA; la NÓMINA vive en su módulo desde el 16-oct-2026) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
   })
   otrosGastos(@Query() q: ListOtrosGastosQuery) {
     return this.expenses.listOtrosGastos(q.desde, q.hasta);
@@ -353,6 +354,24 @@ export class ExpensesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.expenses.putRepartoMasivo(dto, c.userId);
+  }
+
+  // ===== Nómina: reparto en PARTES IGUALES — ruta literal antes de :id =====
+  // (16-oct-2026, API 0.0.90, invariante 91). Mismos roles que el reparto
+  // masivo.
+
+  @Post('reparto-iguales')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Reparte cada pago en PARTES IGUALES (centavos enteros, Σ == monto, el residuo rota entre aviones a lo largo del lote) entre los aviones ACTIVOS elegidos; aeronave_ids [] quita el reparto; simular: true no escribe. Errores por pago (GASTO_NO_EXISTE, CATEGORIA_NO_REPARTIBLE, GASTO_CON_VUELO, MONTO_MUY_CHICO, MES_CERRADO, ERROR) sin tumbar el lote; 400 AERONAVE_INACTIVA antes de tocar nada.',
+  })
+  repartoIguales(
+    @Body() dto: RepartoIgualesDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.putRepartoIguales(dto, c.userId);
   }
 
   @Get(':id')
