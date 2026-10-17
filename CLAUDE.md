@@ -10211,7 +10211,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
 
 90. **AFAC POR VUELO: RESERVADO vs COSTO REAL, EDITABLE EN EL BALANCE
     GENERAL; LOS «PAGO DE AFAC» NO RESTAN AL AVIÓN (16-oct-2026, API
-    0.0.89, migración `20261016000005` PENDIENTE).** Pedido del cliente: «lo
+    0.0.89, migración `20261016000005` APLICADA el 16-oct-2026 ~20:15 Cancún por MCP).** Pedido del cliente: «lo
     del AFAC … en balance general en la hoja de Otros movimientos para
     poder confirmar el monto … 2 columnas juntas, una que sea lo reservado
     … y otra de lo que realmente costó y que en esa celda poder poner el
@@ -11831,7 +11831,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   #343, #344, #351, COBRO_POSTERIOR, 16,199.76 USD); reparto de septiembre
   = el del 0.0.87 salvo XB-PEV ≈ +205 USD (el gasto del #190 de agosto,
   eje del gasto); (4) panel. El primer cierre lo ejecuta la oficina.
-- **16-oct-2026 — 0.0.89, migración `20261016000005` PENDIENTE** (AFAC por
+- **16-oct-2026 — 0.0.89, migración `20261016000005` APLICADA (16-oct-2026 ~20:15 Cancún por MCP: DRYRUN_OK, postcheck OK, historial `20261017011507`; orden migración ⇒ pyservices 8f59ace ⇒ API ⇒ panel)** (AFAC por
   vuelo: reservado vs costo real editable en el Balance general y la marca
   «Pago de AFAC» del gasto, invariante 90; rama `afac-real` sobre
   `96e06df1` = 0.0.88). Orden: (1) migración por MCP — dry-run
