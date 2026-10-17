@@ -309,6 +309,15 @@ export class CreateGastoDto {
   @Min(0)
   tua_incluida?: number | null;
 
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'Pago de AFAC que paga VuelaTour (16-oct-2026, invariante 90): solo categoría Permiso; no resta a ningún avión (es el comprobante de los costos reales AFAC capturados por vuelo en el Balance general). Solo OFICINA (ADMIN, FACTURACION, COORDINADOR): otro rol que lo cambie ⇒ 403 PAGO_AFAC_SOLO_OFICINA (un eco igual al vigente se ignora). true fuera de Permiso ⇒ 400 PAGO_AFAC_SOLO_PERMISO. Sin la migración 20261016000005: true ⇒ 503 AFAC_REAL_NO_DISPONIBLE; false se ignora. En el PATCH: ausente = no tocar; marcar/desmarcar en un mes cerrado ⇒ 409 MES_CERRADO.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_pago_afac?: boolean;
+
   @ApiProperty({ enum: Moneda })
   @IsEnum(Moneda)
   moneda!: Moneda;
@@ -893,6 +902,15 @@ export class ListGastosQuery {
   @ToBooleanQuery()
   @IsBoolean()
   duplicados?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Solo gastos marcados «Pago de AFAC» (16-oct-2026, invariante 90). Sin la migración 20261016000005 se ignora.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  pago_afac?: boolean;
 
   @ApiPropertyOptional({
     description:

@@ -16,6 +16,13 @@ import {
   fetchRepartos,
 } from '../../common/gasto-reparto.util';
 import { SupabaseService } from '../supabase/supabase.service';
+// AFAC POR VUELO (16-oct-2026, invariante 90): un PERMISO marcado «Pago de
+// AFAC» lo paga VuelaTour ⇒ bloque de EMPRESA, no el gasto de su avión.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import { esPagoAfac } from '../../common/afac-real.util';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import {
   PyservicesService,
@@ -59,6 +66,8 @@ interface GastoRow {
   tc_gasto: string | null;
   medio_pago: string | null;
   tarjeta_terminacion: string | null;
+  /** Marca «Pago de AFAC» (invariante 90; detrás de la sonda). */
+  es_pago_afac?: boolean | null;
 }
 
 interface VueloHorasRow {
@@ -451,6 +460,12 @@ export class DashboardsService {
         continue;
       }
       if (!g.es_reparto_parcial && categoriaFueraDelAvion(g.categoria)) {
+        gastoEmpresa += usd;
+        continue;
+      }
+      // Pago de AFAC (invariante 90): lo paga VuelaTour — EMPRESA, antes
+      // que el gasto por avión (espejo de la hoja «permisos» del balance).
+      if (esPagoAfac(g)) {
         gastoEmpresa += usd;
         continue;
       }
@@ -848,10 +863,13 @@ export class DashboardsService {
     desde: string,
     hasta: string,
   ): Promise<GastoRow[]> {
+    const colAfac = colPagoAfac(
+      await afacRealDisponible(this.supabase.service),
+    );
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(
-        'id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion',
+        `id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion${colAfac}` as 'id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion',
       )
       // Gastos PERSONALES del dueño fuera del tablero de gastos de la
       // empresa (26-ago); el tablero de TARJETAS sí los conserva — el cargo

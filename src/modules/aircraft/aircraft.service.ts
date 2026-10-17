@@ -8,6 +8,13 @@ import {
   Optional,
 } from '@nestjs/common';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90): un PERMISO marcado «Pago de
+// AFAC» lo paga VuelaTour ⇒ fuera de las finanzas del avión.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import { esPagoAfac } from '../../common/afac-real.util';
 import {
   corteTs,
   esAntesDelInicio,
@@ -156,7 +163,11 @@ export class AircraftService {
     // `not.in` de PostgREST que además descartaría una categoría nula.
     let gastosQ = this.supabase.service
       .from('gasto')
-      .select('monto, moneda, categoria')
+      .select(
+        `monto, moneda, categoria${colPagoAfac(
+          await afacRealDisponible(this.supabase.service),
+        )}` as 'monto, moneda, categoria',
+      )
       .eq('aeronave_id', id);
     if (inicioFinanzas) {
       cobrosQ = cobrosQ.gte(
@@ -338,6 +349,8 @@ export class AircraftService {
       // (28-sep-2026, invariante 31) tampoco: el pago al vendedor vive en
       // «otros movimientos» del general (`categoriaFueraDelAvion`).
       if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
+      // Pago de AFAC marcado (invariante 90): lo paga VuelaTour.
+      if (esPagoAfac(g)) continue;
       bump(g.moneda as string, 'gastos', Number(g.monto));
     }
     const finanzas = [...byMoneda.entries()].map(([moneda, v]) => ({

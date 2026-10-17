@@ -72,7 +72,10 @@ export type RegistroCandado =
   | 'caja_chica'
   | 'entrega_socio'
   | 'cotizacion'
-  | 'vuelo';
+  | 'vuelo'
+  // Costo real AFAC de un vuelo (16-oct-2026, invariante 90): por el mes
+  // CONTABLE del vuelo.
+  | 'afac_real';
 
 /** Código del 409. */
 export const CODIGO_MES_CERRADO = 'MES_CERRADO';

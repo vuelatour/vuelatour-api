@@ -3,6 +3,7 @@ import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { saldoCaja } from '../../common/caja-chica-saldo.util';
 import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
+import { afacRealDisponible } from '../../common/afac-real-disponible.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
@@ -1615,6 +1616,11 @@ export class AlertsService {
     const inicio = await inicioOficialDe(this.configuracion);
     let qg = this.supabase.service.from('gasto').select('id, monto, moneda');
     if (inicio) qg = qg.gte('fecha_gasto', inicio);
+    // Mismo universo que la bandeja (invariante 90): un pago de AFAC marcado
+    // lo paga VuelaTour — no es pendiente de avión (≡ esPagoAfac, trigger).
+    if (await afacRealDisponible(this.supabase.service)) {
+      qg = qg.eq('es_pago_afac', false);
+    }
     const { data, error } = await qg
       .is('aeronave_id', null)
       // MISMO criterio que el pre-cierre y la bandeja de pendientes de

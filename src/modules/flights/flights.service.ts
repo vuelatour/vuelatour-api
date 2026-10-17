@@ -24,6 +24,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { afacRealDisponible } from '../../common/afac-real-disponible.util';
 import { randomUUID } from 'node:crypto';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
@@ -1416,31 +1417,54 @@ export class FlightsService {
       });
     }
     const sb = this.supabase.service;
-    const [{ count: cobros }, { count: gastos }, { count: tacos }] =
-      await Promise.all([
-        sb
-          .from('cobro_vuelo')
-          .select('id', { count: 'exact', head: true })
-          .eq('vuelo_id', id),
-        sb
-          .from('gasto')
-          .select('id', { count: 'exact', head: true })
-          .eq('vuelo_id', id),
-        sb
-          .from('escala')
-          .select('id', { count: 'exact', head: true })
-          .eq('vuelo_id', id)
-          .not('taco_salida', 'is', null),
-      ]);
-    if ((cobros ?? 0) > 0 || (gastos ?? 0) > 0 || (tacos ?? 0) > 0) {
+    // AFAC por vuelo (16-oct-2026, invariante 90): un costo real capturado
+    // es dinero de VuelaTour — también es actividad (detrás de la sonda).
+    const conAfac = await afacRealDisponible(sb);
+    const [
+      { count: cobros },
+      { count: gastos },
+      { count: tacos },
+      { count: afacReal },
+    ] = await Promise.all([
+      sb
+        .from('cobro_vuelo')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id),
+      sb
+        .from('gasto')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id),
+      sb
+        .from('escala')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id)
+        .not('taco_salida', 'is', null),
+      conAfac
+        ? sb
+            .from('afac_vuelo')
+            .select('vuelo_id', { count: 'exact', head: true })
+            .eq('vuelo_id', id)
+            .not('costo_real_mxn', 'is', null)
+        : Promise.resolve({ count: 0 }),
+    ]);
+    if (
+      (cobros ?? 0) > 0 ||
+      (gastos ?? 0) > 0 ||
+      (tacos ?? 0) > 0 ||
+      (afacReal ?? 0) > 0
+    ) {
       throw new ConflictException({
         message:
-          'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
+          (afacReal ?? 0) > 0
+            ? 'El vuelo tiene actividad registrada (costo real AFAC capturado en el Balance general); cancélalo en lugar de borrarlo para no perder el rastro.'
+            : 'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
         error: 'VUELO_CON_ACTIVIDAD',
         details: {
           cobros: cobros ?? 0,
           gastos: gastos ?? 0,
           tacos: tacos ?? 0,
+          // ADITIVO (invariante 90): solo con la migración.
+          ...(conAfac ? { afac_real: afacReal ?? 0 } : {}),
         },
       });
     }
@@ -1494,6 +1518,10 @@ export class FlightsService {
     await this.calendar.removeFlight(id).catch(() => undefined);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
+    // Filas de `afac_vuelo` SIN costo (alguien lo capturó y lo quitó): el
+    // FK sin cláusula de borrado las haría estorbar. Solo las vacías — un
+    // costo capturado en la carrera deja que la FK bloquee el borrado.
+    if (conAfac) await this.limpiarAfacVacio(id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) {
       // Revertir la bitácora: el vuelo sigue existiendo.
@@ -1539,6 +1567,21 @@ export class FlightsService {
    * SIN bitácora NO hay borrado. Devuelve el id para revertirla si el
    * DELETE del vuelo falla después.
    */
+  /**
+   * AFAC por vuelo (16-oct-2026, invariante 90): antes de borrar un vuelo
+   * se eliminan SOLO sus filas de `afac_vuelo` con costo null (capturado y
+   * quitado: no hay dinero; la bitácora `afac_vuelo_bitacora` conserva la
+   * historia, sin FK). Con costo, la FK sin cláusula bloquea el borrado.
+   */
+  private async limpiarAfacVacio(vueloId: string): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('afac_vuelo')
+      .delete()
+      .eq('vuelo_id', vueloId)
+      .is('costo_real_mxn', null);
+    if (error) throw new Error(error.message);
+  }
+
   /**
    * CANDADO de borrado por FACTURAS EMITIDAS (24-sep-2026). Con una factura
    * VIGENTE (no borrada) ligada ⇒ 409 `VUELO_CON_FACTURA_EMITIDA` (se cancela
@@ -1791,6 +1834,28 @@ export class FlightsService {
         `El vuelo #${folio ?? '?'} tiene ${gastosRes.count} gasto(s) ligados que quedarían huérfanos. Reasígnalos a otro vuelo/avión o elimínalos primero (Gastos).`,
       );
     }
+    // AFAC por vuelo (16-oct-2026, invariante 90): un costo real capturado
+    // es dinero de VuelaTour — jamás se borra en cascada (FK sin cláusula).
+    const conAfac = await afacRealDisponible(sb);
+    if (conAfac) {
+      const { data: afacFila, error: afacErr } = await sb
+        .from('afac_vuelo')
+        .select('costo_real_mxn')
+        .eq('vuelo_id', id)
+        .not('costo_real_mxn', 'is', null)
+        .maybeSingle();
+      if (afacErr) throw new Error(afacErr.message);
+      if (afacFila) {
+        const monto = Number(afacFila.costo_real_mxn).toLocaleString('es-MX', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+        throw new ConflictException({
+          message: `El vuelo #${folio ?? '?'} tiene costo real AFAC capturado ($${monto}): quítalo primero en el Balance general (otros movimientos).`,
+          error: 'VUELO_CON_AFAC_REAL',
+        });
+      }
+    }
 
     // Fotos de storage: recolectar los paths ANTES del delete (los tramos
     // caen por CASCADE y nadie más conoce esos paths) — patrón engines.
@@ -1854,6 +1919,7 @@ export class FlightsService {
       .eq('vuelo_id', id);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
+    if (conAfac) await this.limpiarAfacVacio(id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) {
       // Revertir la bitácora: el vuelo sigue existiendo.
@@ -1863,7 +1929,7 @@ export class FlightsService {
       await this.reponerLigasDesligadas(desligadas);
       if (error.code === '23503') {
         throw new ConflictException(
-          'La base bloqueó el borrado: el vuelo tiene cobros o factura ligados (capturados mientras confirmabas).',
+          'La base bloqueó el borrado: el vuelo tiene cobros, factura o costo real AFAC ligados (capturados mientras confirmabas).',
         );
       }
       throw new Error(error.message);

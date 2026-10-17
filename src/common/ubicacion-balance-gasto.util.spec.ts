@@ -507,6 +507,75 @@ describe('R4 — REPARTO MANUAL (casos reales)', () => {
   });
 });
 
+describe('R2b — PERMISO marcado «Pago de AFAC» (invariante 90)', () => {
+  const permiso = (extra: Partial<GastoParaUbicacion> = {}) =>
+    gasto({ categoria: 'PERMISO', es_pago_afac: true, ...extra });
+
+  it('con vuelo: Balance general, hoja «otros movimientos», NINGÚN avión; eje y mes del VUELO (los del PERMISO sin marca)', () => {
+    const sinMarca = ubicacionBalanceDeGasto(permiso({ es_pago_afac: false }));
+    expect(sinMarca).toMatchObject({
+      eje: 'vuelo',
+      aviones: [N41],
+      hoja_avion: 'permisos',
+    });
+    expect(ubicacionBalanceDeGasto(permiso())).toEqual({
+      periodo: OCT,
+      eje: 'vuelo',
+      aviones: [],
+      general: true,
+      hoja_avion: null,
+      hoja_general: 'otros_movimientos',
+    });
+  });
+
+  it('sin vuelo (con o sin avión): eje y mes de la fecha del gasto', () => {
+    for (const aeronave_id of [VGV, null]) {
+      expect(
+        ubicacionBalanceDeGasto(
+          sinVuelo({ categoria: 'PERMISO', es_pago_afac: true, aeronave_id }),
+        ),
+      ).toEqual({
+        periodo: SEP,
+        eje: 'gasto',
+        aviones: [],
+        general: true,
+        hoja_avion: null,
+        hoja_general: 'otros_movimientos',
+      });
+    }
+  });
+
+  it('el hueco del libro (#255) y el vuelo sin avión resoluble siguen sin libro; EXTERNOS sin avión ⇒ general', () => {
+    expect(
+      ubicacionBalanceDeGasto(
+        permiso({ aeronave_id: VGV, aviones_con_tramo_vivo: [N41] }),
+      ),
+    ).toBeNull();
+    expect(
+      ubicacionBalanceDeGasto(
+        permiso({
+          aeronave_id: null,
+          vuelo: {
+            fecha_vuelo: '2026-09-25T15:00:00Z',
+            aeronave_id: null,
+            es_externo: true,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      eje: 'vuelo',
+      periodo: SEP,
+      hoja_general: 'otros_movimientos',
+    });
+  });
+
+  it('la marca fuera de PERMISO no existe (trigger): un OTRO «marcado» se ubica como OTRO', () => {
+    expect(
+      ubicacionBalanceDeGasto(gasto({ categoria: 'OTRO', es_pago_afac: true })),
+    ).toMatchObject({ hoja_general: 'otros_gastos' });
+  });
+});
+
 describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
   // El espejo imita consultas y reglas del libro: si alguien las cambia,
   // este spec obliga a revisar `ubicacion-balance-gasto.util.ts`. Se compara
@@ -576,6 +645,13 @@ describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
       ".neq('categoria', 'GAS')",
     );
     tiene(".gte('gasto.fecha_gasto', desde)");
+  });
+
+  it('PAGO DE AFAC (invariante 90): el marcado sale de «permisos» (las MISMAS dos fuentes) y los sin vuelo ni avión no van a «otros gastos»', () => {
+    tiene('const filasPermisos = permisosTodos.filter((g) => !esPagoAfac(g));');
+    tiene('.filter((g) => esPagoAfac(g))');
+    tiene('else if (esPagoAfac(fila)) pagosAfac.push(fila);');
+    tiene('juntarPagosAfac(');
   });
 
   it('los conjuntos compartidos vienen de hojas-balance.util (sin copias locales)', () => {

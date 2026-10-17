@@ -152,6 +152,15 @@ describe('CANDADO 409 MES_CERRADO', () => {
     });
   });
 
+  it('costo real AFAC (invariante 90): registro «afac_real» en el cuerpo del 409', async () => {
+    const f = fakeCierre(mundo());
+    const e = await atrapa(assertMesAbierto(sbDe(f), '2026-09', 'afac_real'));
+    expect(e.getResponse()).toMatchObject({
+      error: 'MES_CERRADO',
+      details: { periodo: '2026-09', registro: 'afac_real' },
+    });
+  });
+
   it('mes abierto, null o sin la migración ⇒ pasa', async () => {
     const f = fakeCierre(mundo());
     await expect(

@@ -7,6 +7,7 @@ import {
   CAMBIO_FECHA_DIAS_ATRAS_MAX,
   CODIGO_CAMBIO_FECHA,
   GASTO_CAMBIO_FECHA_COLS,
+  gastoCambioFechaCols,
   TEXTO_YA_CONCILIADO,
   alcanceRepartoPorFecha,
   avionesParaTextos,
@@ -893,6 +894,34 @@ describe('candadoMesDelVuelo — la regla del 409 y de la ficha del candidato', 
         d.tipo === 'ERROR' &&
           d.error.code === 'FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO',
       ).toBe(bloquea);
+    }
+  });
+});
+
+describe('PAGO DE AFAC (16-oct-2026, invariante 90)', () => {
+  it('un PERMISO marcado no mueve NINGÚN reparto (grupo EXCLUIDO); sin marca, el de su avión', () => {
+    expect(
+      alcanceRepartoPorFecha(
+        sinVuelo({ categoria: 'PERMISO', es_pago_afac: true }),
+        [],
+      ),
+    ).toBeNull();
+    expect(
+      alcanceRepartoPorFecha(
+        sinVuelo({ categoria: 'PERMISO', es_pago_afac: false }),
+        [],
+      ),
+    ).toEqual({ tipo: 'AVION', avion: N41 });
+  });
+
+  it('la lectura trae la marca SOLO con la migración 20261016000005 (con o sin la del cierre)', () => {
+    expect(gastoCambioFechaCols(false)).toBe(GASTO_CAMBIO_FECHA_COLS);
+    for (const cierre of [false, true]) {
+      const cols = gastoCambioFechaCols(cierre, true);
+      expect(cols).toContain('inventario_movimiento_id, es_pago_afac,');
+      expect(cols.replace(' es_pago_afac,', '')).toBe(
+        gastoCambioFechaCols(cierre),
+      );
     }
   });
 });

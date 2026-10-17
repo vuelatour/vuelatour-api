@@ -309,20 +309,21 @@ describe('Balance GENERAL — CLAVE con el ID en libros, consolidado y «otros m
     expect(f364.clave_cliente).toBe('beh05-011026');
     // El #364 trae TUAS + comisión + extras: la fila es la COLAPSADA.
     expect(f364.concepto_ingreso).toContain('conceptos (ver nota)');
-    // Sueltas (TUAS sin vuelo, gas sin avión, ING-n) y AFAC: sin la llave.
-    for (const f of [
-      ...om.filas_sueltas,
-      ...om.filas.filter((x) => x.seccion === 'AFAC'),
-    ]) {
+    // Sueltas (TUAS sin vuelo, gas sin avión, ING-n): sin la llave.
+    for (const f of om.filas_sueltas) {
       expect(f).not.toHaveProperty('clave_cliente');
     }
     expect(om.filas_sueltas.map((f) => f.clave)).toEqual(
       expect.arrayContaining(['tuas sin vuelo', 'gas sin avión', 'ING-12']),
     );
-    // La fila AFAC cita la CLAVE de la maestra (que ya trae el ID).
-    const afac = om.filas.find((f) => f.seccion === 'AFAC')!;
-    expect(afac.clave).toBe('AFAC · XB-TST');
-    expect(afac.nota_ingreso).toContain('#364 · beh05-011026 · Beh Kay  = $');
+    // AFAC POR VUELO (invariante 90): una fila por vuelo con la CLAVE de la
+    // maestra (que ya trae el ID) y su `clave_cliente` copiada de la fila.
+    const afac = om.filas.filter((f) => f.seccion === 'AFAC_VUELO');
+    expect(afac.map((f) => [f.clave, f.clave_cliente])).toEqual([
+      ['#364 · beh05-011026 · Beh Kay ', 'beh05-011026'],
+      ['#503 · january02-211026 · January Davila', 'january02-211026'],
+    ]);
+    expect(om.filas.some((f) => f.seccion === 'AFAC')).toBe(false);
   });
 
   it('sin ID: «vtbeh364» / «#364 · Beh Kay » como siempre y NINGUNA llave clave_cliente en todo el payload', async () => {
@@ -330,7 +331,12 @@ describe('Balance GENERAL — CLAVE con el ID en libros, consolidado y «otros m
     const g = await general();
     const om = g.consolidado.otros_movimientos;
     // (El #503 no tiene TUAS/extras/comisión ni cobros: no lleva fila aquí.)
-    expect(om.filas.map((f) => f.clave)).toEqual(['vtbeh364', 'AFAC · XB-TST']);
+    // AFAC POR VUELO (invariante 90): una fila por vuelo con AFAC reservado.
+    expect(om.filas.map((f) => f.clave)).toEqual([
+      'vtbeh364',
+      '#364 · Beh Kay ',
+      '#503 · January Davila',
+    ]);
     expect(g.consolidado.vuelos.map((v) => v.clave)).toContain(
       '#364 · Beh Kay ',
     );

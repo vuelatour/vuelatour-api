@@ -1,3 +1,12 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('../../common/afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/afac-real-disponible.util',
+  ),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // Dependencias de inyección que arrastran módulos pesados: fuera del spec.
 jest.mock('../pyservices/pyservices.service', () => ({
   PyservicesService: class {},
@@ -11,6 +20,11 @@ jest.mock('../conciliacion/conciliacion.service', () => ({
 
 import { Logger } from '@nestjs/common';
 import { ProfitSharingService } from './profit-sharing.service';
+import { afacRealDisponible } from '../../common/afac-real-disponible.util';
+
+const sondaAfac = afacRealDisponible as jest.MockedFunction<
+  typeof afacRealDisponible
+>;
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { ConciliacionService } from '../conciliacion/conciliacion.service';
 import {
@@ -954,5 +968,42 @@ describe('ProfitSharingService.preCierre — permisos sin avión (14-oct-2026, A
     expect(item).not.toHaveProperty('monto_usd');
     expect(r.items.find((i) => i.clave === 'gastos_sin_avion')?.count).toBe(2);
     expect(r.listo).toBe(true);
+  });
+
+  it('PAGO DE AFAC (16-oct-2026, invariante 90; con la migración): un permiso marcado sin avión NO bloquea ni está en la bandeja ni en «sin T.C.»; el detalle dice la salida nueva', async () => {
+    sondaAfac.mockResolvedValue(true);
+    try {
+      const { svc } = armar({
+        aeronave: AERONAVES,
+        cliente: CLIENTES,
+        vuelo: [],
+        gasto: [
+          permiso('p-marcado', { es_pago_afac: true, tc_gasto: null }),
+          permiso('p-sin-marca'),
+        ],
+      });
+      const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+      const item = r.items.find((i) => i.clave === ITEM)!;
+      expect(item).toEqual(
+        expect.objectContaining({
+          detalle:
+            'Un permiso sin avión no resta en ningún balance ni en el reparto. Asígnale el avión o el vuelo en Gastos; si es un pago a AFAC que paga VuelaTour, márcalo «Pago de AFAC».',
+          count: 1,
+          monto_mxn: 2549,
+          ids: ['p-sin-marca'],
+        }),
+      );
+      const bandeja = r.items.find(
+        (i) => i.clave === 'gastos_sin_avion',
+      ) as unknown as {
+        count: number;
+        ids?: string[];
+      };
+      expect(bandeja.count).toBe(1);
+      expect(bandeja.ids).toEqual(['p-sin-marca']);
+      expect(JSON.stringify(r.items)).not.toContain('p-marcado');
+    } finally {
+      sondaAfac.mockResolvedValue(false);
+    }
   });
 });

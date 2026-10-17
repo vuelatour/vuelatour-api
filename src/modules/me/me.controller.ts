@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, Query } from '@nestjs/common';
+import { Body, Controller, Get, Optional, Patch, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -19,6 +19,8 @@ import { PushService } from '../realtime/push.service';
 import { UpdateSelfDto } from '../users/dto/update-self.dto';
 import { UsersService } from '../users/users.service';
 import { inicioOficialDe } from '../../common/inicio-oficial.util';
+import { afacRealDisponible } from '../../common/afac-real-disponible.util';
+import { SupabaseService } from '../supabase/supabase.service';
 import { CapturasQuery } from './dto/capturas.dto';
 import { MeCapturasService } from './me-capturas.service';
 
@@ -34,7 +36,26 @@ export class MeController {
     private readonly calendar: CalendarService,
     private readonly push: PushService,
     private readonly cajaChica: CajaChicaService,
+    // AFAC por vuelo (16-oct-2026, invariante 90): solo la sonda de
+    // `config.afac_real`. @Optional: los specs que arman el controller a
+    // mano no lo pasan (la bandera sale false).
+    @Optional() private readonly supabase?: SupabaseService,
   ) {}
+
+  /**
+   * ¿Está aplicada la migración del costo real AFAC (20261016000005)?
+   * Best-effort: jamás tumba /me (sin servicio o con error ⇒ false). El
+   * panel ofrece la casilla «Es pago de AFAC» y la celda editable SOLO con
+   * `true` (con un API viejo, `forbidNonWhitelisted` daría 400 por la llave).
+   */
+  private async afacReal(): Promise<boolean> {
+    if (!this.supabase) return false;
+    try {
+      return await afacRealDisponible(this.supabase.service);
+    } catch {
+      return false;
+    }
+  }
 
   /** Dispositivos push del propio usuario (0 = este teléfono no recibe
    *  avisos; la app lo muestra en rojo en Perfil). Best-effort: nunca
@@ -64,6 +85,7 @@ export class MeController {
       pushDispositivos,
       permisos,
       inicioOficial,
+      afacReal,
     ] = await Promise.all([
       this.users.findByAuthId(current.authId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -72,6 +94,7 @@ export class MeController {
       this.misDispositivos(current.userId),
       this.configuracion.permisosDe(current.userId, current.rol),
       inicioOficialDe(this.configuracion),
+      this.afacReal(),
     ]);
     return {
       ...usuario,
@@ -93,6 +116,10 @@ export class MeController {
         // `AAAA-MM-DD` (día Cancún) o null = sin piso. El panel acota con
         // esto sus selectores de fecha; la app no lo usa todavía.
         inicio_oficial: inicioOficial,
+        // AFAC por vuelo (16-oct-2026, invariante 90, ADITIVO): la migración
+        // del costo real está aplicada. El panel muestra la celda editable y
+        // la casilla «Es pago de AFAC» solo con true.
+        afac_real: afacReal,
       },
     };
   }
@@ -114,6 +141,7 @@ export class MeController {
       pushDispositivos,
       permisos,
       inicioOficial,
+      afacReal,
     ] = await Promise.all([
       this.users.updateSelf(current.authId, body, current.userId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -122,6 +150,7 @@ export class MeController {
       this.misDispositivos(current.userId),
       this.configuracion.permisosDe(current.userId, current.rol),
       inicioOficialDe(this.configuracion),
+      this.afacReal(),
     ]);
     return {
       ...usuario,
@@ -134,6 +163,7 @@ export class MeController {
         // MISMO shape que el GET (ver nota de la llave de caché offline).
         gastos_sin_limite_hasta: sinLimiteHasta,
         inicio_oficial: inicioOficial,
+        afac_real: afacReal,
       },
     };
   }

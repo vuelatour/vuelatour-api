@@ -119,3 +119,28 @@ describe('dashboards.gastos — dos categorías del pago al vendedor (13-oct-202
     expect(r.resumen.gastos_sin_tc).toBe(1);
   });
 });
+
+/**
+ * PAGO DE AFAC (16-oct-2026, invariante 90): un PERMISO marcado lo paga
+ * VuelaTour — bloque de EMPRESA, fuera del gasto/costo por hora del avión
+ * (espejo de su hoja «permisos» del balance). Sin la marca, del avión.
+ */
+describe('dashboards.gastos — PERMISO marcado «Pago de AFAC» (invariante 90)', () => {
+  it('marcado ⇒ gastos_empresa_usd; sin marca ⇒ el avión; el total igual', async () => {
+    const sinMarca = await armar([
+      gasto('g-op', 'OPERACIONES', 100),
+      gasto('g-pe', 'PERMISO', 50),
+    ]).gastos({ desde: '2026-09-01', hasta: '2026-09-30' });
+    const marcado = await armar([
+      gasto('g-op', 'OPERACIONES', 100),
+      { ...gasto('g-pe', 'PERMISO', 50), es_pago_afac: true },
+    ]).gastos({ desde: '2026-09-01', hasta: '2026-09-30' });
+    expect(sinMarca.por_avion[0].gastos_usd).toBe(150);
+    expect(marcado.por_avion[0].gastos_usd).toBe(100);
+    expect(marcado.por_avion[0].costo_hora_usd).toBe(10);
+    expect(marcado.resumen.gastos_empresa_usd).toBe(50);
+    expect(marcado.resumen.gastos_totales_usd).toBe(
+      sinMarca.resumen.gastos_totales_usd,
+    );
+  });
+});

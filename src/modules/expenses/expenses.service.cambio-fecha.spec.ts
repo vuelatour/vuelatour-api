@@ -1,3 +1,12 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('../../common/afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/afac-real-disponible.util',
+  ),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // Módulos pesados que expenses.service importa solo para inyección (mismo
 // patrón que expenses.service.cas.spec): notifications arrastra el gateway y
 // `jose` (ESM puro, jest no lo transforma).

@@ -1,6 +1,14 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('./afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>('./afac-real-disponible.util'),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   GASTO_UBICACION_COLS,
+  gastoUbicacionCols,
   LOTE_UBICACION_BALANCE,
   leerUbicacionBalance,
 } from './ubicacion-balance-lector';
@@ -186,6 +194,20 @@ const IDS = ['g-430', 'g-otro', 'g-cramex', 'g-255', 'g-dueno'];
 function logger() {
   return { warn: jest.fn<void, [string]>() };
 }
+
+describe('gastoUbicacionCols — sondas (invariantes 89 y 90)', () => {
+  it('sin migraciones ⇒ GASTO_UBICACION_COLS; con la del AFAC la lectura trae `es_pago_afac` (regla R2b), con o sin la del cierre', () => {
+    expect(gastoUbicacionCols(false)).toBe(GASTO_UBICACION_COLS);
+    expect(gastoUbicacionCols(false, false)).toBe(GASTO_UBICACION_COLS);
+    for (const cierre of [false, true]) {
+      const cols = gastoUbicacionCols(cierre, true);
+      expect(cols).toContain('inventario_movimiento_id, es_pago_afac,');
+      expect(cols.replace(' es_pago_afac,', '')).toBe(
+        gastoUbicacionCols(cierre),
+      );
+    }
+  });
+});
 
 describe('leerUbicacionBalance — lector compartido (invariantes 72 y 82)', () => {
   it('PARIDAD con Conciliación: los mismos `balance` del spec de la bandeja', async () => {

@@ -6384,7 +6384,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `test_reparto_comisiones.py` y `test_vision_validaciones.py`.
 
 62. **PERMISOS AFAC COMO FILAS QUE SUMAN EN «OTROS MOVIMIENTOS» DEL
-    BALANCE GENERAL (13-oct-2026, API 0.0.74, SIN migración).** Decisión 2
+    BALANCE GENERAL (13-oct-2026, API 0.0.74, SIN migración).**
+    **SUPERSEDIDA el 16-oct-2026 (API 0.0.89, invariante 90)**: las filas
+    «AFAC · matrícula» por avión se reemplazaron por filas AFAC POR VUELO
+    (reservado en INGRESO, costo real en EGRESO) y los gastos marcados
+    «Pago de AFAC» ya NO restan al avión; los PERMISO sin marcar siguen
+    restando en su avión como abajo, pero ya no se citan en la pestaña.
+    `afac-otros-movimientos.util` se eliminó. Lo de abajo describe el
+    0.0.74–0.0.88. Decisión 2
     del lote del cliente del 13-oct-2026, textual: «AFAC en "otros
     movimientos" del Balance general: filas en la tabla principal que suman
     en TOTALES (provisión AFAC del periodo = ingreso de VuelaTour por avión;
@@ -10202,6 +10209,118 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       un cargo MXN (mueve la columna MXN del balance de un mes cerrado, no
       el reparto en USD).
 
+90. **AFAC POR VUELO: RESERVADO vs COSTO REAL, EDITABLE EN EL BALANCE
+    GENERAL; LOS «PAGO DE AFAC» NO RESTAN AL AVIÓN (16-oct-2026, API
+    0.0.89, migración `20261016000005` PENDIENTE).** Pedido del cliente: «lo
+    del AFAC … en balance general en la hoja de Otros movimientos para
+    poder confirmar el monto … 2 columnas juntas, una que sea lo reservado
+    … y otra de lo que realmente costó y que en esa celda poder poner el
+    monto y se registre sin tenerte que ir a otro lado» y después «la
+    columna nueva que te pedí mejor que sea en la columna de egreso».
+    Decisiones del 16-oct-2026 (NO se vuelven a preguntar): (1) filas UNA
+    POR VUELO; (2) el costo real es EGRESO DE VUELATOUR — el avión sigue
+    pagando lo RESERVADO (su columna T, PERMISO AFAC (PROVISIÓN)); (3) se
+    escribe SOLO el monto del vuelo (no crea gasto); (4) los gastos PAGO DE
+    AFAC se MARCAN y dejan de restarle al avión; aviso no bloqueante
+    Σ reales vs Σ pagos marcados. **SUPERSEDE la invariante 62** (filas
+    «AFAC · matrícula» y, SOLO para los gastos marcados, la decisión del
+    14-oct «el AFAC lo cargan al Avión»).
+    - **Modelo** (migración aditiva, sin backfill): `gasto.es_pago_afac
+      boolean not null default false` (+ índice parcial) que SOLO vive en
+      PERMISO (trigger `trg_gasto_pago_afac_solo_permiso`, `categoria::text`
+      — ENUM; cambiar la categoría la quita en la MISMA escritura;
+      `tg_gasto_bitacora` la audita); `afac_vuelo` (PK `vuelo_id` → vuelo
+      SIN cláusula de borrado, `costo_real_mxn numeric(14,2)` null = sin
+      capturar, CHECK ≥ 0, `notas` ≤ 500, quién/cuándo del valor VIGENTE,
+      RLS sin policies) y `afac_vuelo_bitacora` (ALTA/CAMBIO/QUITADO por
+      trigger, sin FK). «Quitar» = UPDATE a null, nunca borrado.
+    - **Sonda ÚNICA** `common/afac-real-disponible.util#afacRealDisponible`
+      (`gasto.es_pago_afac`, patrón `columnaOpcional`; el «sí» se memoriza:
+      tras la reversa, reiniciar el API) + `colPagoAfac` + 503
+      `AFAC_REAL_NO_DISPONIBLE`. REGLA DURA: todo lo que nombre
+      `es_pago_afac`, `afac_vuelo` o `afac_vuelo_bitacora` va detrás. Sin la
+      migración: ninguna marca, filas AFAC por vuelo SIN real y NO editables
+      («El costo real AFAC todavía no está habilitado.»), números = 0.0.88.
+    - **Fuente única de la marca** `common/afac-real.util#esPagoAfac`
+      (PERMISO ∧ `es_pago_afac === true`); en consultas,
+      `.eq('es_pago_afac', false)` (≡ esPagoAfac por el trigger). LECTORES
+      que excluyen al marcado del dinero del AVIÓN: hoja «permisos» del
+      libro (⇒ `permisos_usd` ⇒ cascada ⇒ socios; viaja aparte en el
+      ADITIVO `pagos_afac`, última llave del libro, MISMA conversión, solo
+      con ≥ 1); reparto (grupo EXCLUIDO, clave `PAGO_AFAC_CLAVE_DETALLE`
+      «Permiso (pago AFAC · VuelaTour)», fuera de `partesGastoCargadas`);
+      Libro Dinero (la fila sigue en «otros gastos» —es caja— con el sufijo
+      «pago de AFAC (lo paga VuelaTour; no se acredita al avión)», pero no
+      se acredita a `permisosPorAvion`); tablero de gastos (bloque EMPRESA);
+      ficha del avión (`metrics.finanzas`); pre-cierre (`gastos_sin_avion`,
+      `permisos_sin_avion` —detalle nuevo con la salida «márcalo Pago de
+      AFAC»— y `sinTc`); bandeja «sin avión», sugerencia IA y alerta diaria;
+      columna «Avión» de Gastos («VuelaTour · pago de AFAC» + « (ref.
+      N4142R)», paridad con el panel); texto de «corregir fecha» (no mueve
+      reparto); ubicación del gasto (regla R2b: Balance general, hoja
+      `otros_movimientos`, ningún avión; EJE y MES = los del PERMISO sin
+      marca). El T.C. de costos z del vuelo NO cambia (marcar no mueve lo
+      reservado). balance = reparto: el MISMO helper saca el gasto de los
+      dos (spec `profit-sharing/libros.afac-real.spec`).
+    - **«otros movimientos» del general** (`payloadGeneral`, fuente única
+      PURA `aircraft/afac-por-vuelo.util#filasAfacPorVuelo`; se ELIMINÓ
+      `afac-otros-movimientos.util`): UNA fila `seccion: 'AFAC_VUELO'` por
+      FILA DE LIBRO no sombra (aviones y EXTERNOS) con reservado ≠ 0 o con
+      real capturado: INGRESO (G) = `fila.permiso_afac_mxn` TAL CUAL, EGRESO
+      (D, la celda EDITABLE) = el real (null = «AFAC costo real · por
+      capturar»), remanente = reservado − real; `clave` = la del libro;
+      `afac` (última llave) con vuelo, horas, tarifa, z, reservado, real,
+      quién/cuándo, mes contable, `editable` y `motivo_no_editable` (sin
+      migración / fila no dueña de un multi-avión / EXTERNOS / mes CERRADO
+      con `textoMesCerrado`; el ROL lo decide el panel). Orden cronológico
+      entre aviones; al FINAL de `filas`, contiguas; T.C. = `tc_promedio`
+      del libro de su avión (sin reales el bloque VUELATOUR sale igual ±
+      0.01). Sombra fuera, «viene» dentro; multi-avión: el real en la fila
+      dueña. Banderas ADITIVAS asignadas al final: `afac_por_vuelo: true`
+      (penúltima, con ≥ 1 fila) y `afac_resumen` (última: reservado, real,
+      remanente, pagado con los marcados —recogidos de `pagos_afac` de CADA
+      libro construido ANTES de `registrar` + los marcados sin avión ni
+      vuelo de `gastosEmpresaYSueltos`, que ya no van a «otros gastos»—,
+      `pagos_sin_tc`, diferencia y la red `reales_fuera_de_libro_mxn`).
+      `afac_en_filas` YA NO viaja. Avisos «AFAC: …» en
+      `consolidado.pendientes` (vuelos sin real —solo con migración—,
+      diferencia pagado vs real, pagos USD sin T.C., reales fuera de libro).
+      Grupo: −reservado (avión) + reservado − real (VuelaTour) = −real, UNA
+      vez. Bloque VUELATOUR: insumo `afacPorVuelo` (sustituye a
+      `afacEnFilas`), solo la NOTA. Textos sin «sin TC» ni «· PROVISIÓN (».
+    - **Endpoints** `src/modules/afac/` (`AfacModule`): `PUT` y `DELETE
+      /v1/flights/:id/afac-real` (ADMIN, FACTURACION, COORDINADOR =
+      `ROLES_AFAC_REAL`; body `{costo_real_mxn, notas?}` CRUDO —un texto ⇒
+      400—). Orden: 503 → 404 `VUELO_NO_EXISTE` → 400
+      `AFAC_VUELO_SIN_AVION` → 400 `AFAC_VUELO_SIN_FECHA` → 400
+      `PERIODO_ANTES_DEL_INICIO` → 409 `MES_CERRADO` por el mes CONTABLE
+      (`RegistroCandado` 'afac_real'). Idempotente (`sin_cambios`), carrera
+      23505 ⇒ UPDATE, quién/cuándo solo cambian con el MONTO. Borrar un
+      vuelo: `deleteFlight` cuenta el real como actividad
+      (`details.afac_real`), `purgeFlight` ⇒ 409 `VUELO_CON_AFAC_REAL`; las
+      filas con costo null se limpian antes del DELETE.
+    - **Gasto**: `es_pago_afac` en el DTO (create/PATCH), solo oficina (403
+      `PAGO_AFAC_SOLO_OFICINA`; un eco igual se ignora), solo Permiso (400
+      `PAGO_AFAC_SOLO_PERMISO`), sin migración `true` ⇒ 503 y `false` se
+      ignora; entra a `CAMPOS_GASTO_CANDADO_MES` (marcar en un mes cerrado ⇒
+      409) y NO a `cambiaDineroDelGasto` (se marca un conciliado o de caja
+      chica). Lista/detalle la devuelven; filtro `?pago_afac=`. `GET/PATCH
+      /v1/me` ⇒ `config.afac_real` (el panel manda la llave SOLO con true:
+      `forbidNonWhitelisted`).
+    - **Deploy**: migración (dry-run `DRYRUN_OK 20261016000005` ⇒ apply ⇒
+      postcheck ⇒ advisors; inocua para el 0.0.88) ⇒ pyservices ⇒ API 0.0.89
+      ⇒ panel. Skew: pyservices viejo pinta las filas AFAC_VUELO como filas
+      normales y las SUMA (TOTALES y VUELATOUR correctos, sin celda
+      editable); panel viejo, solo lectura.
+    - Specs: `afac-real.util.spec`, `afac-real-disponible.util.spec`,
+      `afac-real.lector.spec`, `afac-por-vuelo.util.spec`,
+      `aircraft-balance.service.afac-om.spec` (reescrito),
+      `libros.afac-real.spec`, `afac-real.service.spec`,
+      `afac-real.controller.spec`, `expenses.service.afac.spec` y ajustes en
+      `bloque-empresa`, `clave-cliente`, `balance-empresa.util`,
+      `gasto-avion.util`, `ubicacion-balance-gasto.util`, `me.controller`,
+      pre-cierre y flights.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -11697,6 +11816,23 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   #343, #344, #351, COBRO_POSTERIOR, 16,199.76 USD); reparto de septiembre
   = el del 0.0.87 salvo XB-PEV ≈ +205 USD (el gasto del #190 de agosto,
   eje del gasto); (4) panel. El primer cierre lo ejecuta la oficina.
+- **16-oct-2026 — 0.0.89, migración `20261016000005` PENDIENTE** (AFAC por
+  vuelo: reservado vs costo real editable en el Balance general y la marca
+  «Pago de AFAC» del gasto, invariante 90; rama `afac-real` sobre
+  `96e06df1` = 0.0.88). Orden: (1) migración por MCP — dry-run
+  (`dryrun-mcp.sql` del paquete: contexto de solo lectura ⇒ CUERPO ⇒
+  filas de prueba DESPUÉS del DDL ⇒ C1–C8 con escrituras reales ⇒
+  `DRYRUN_OK 20261016000005`) ⇒ `apply_migration` (solo el CUERPO) ⇒
+  `postcheck-mcp.sql` ⇒ `get_advisors` (esperado: INFO «RLS sin
+  policies» también en `afac_vuelo` y `afac_vuelo_bitacora`); inocua para
+  el 0.0.88; (2) pyservices (aditivo; sin `afac_por_vuelo` byte a byte);
+  (3) API 0.0.89 (`GET /v1/version`); humo SOLO lecturas: `GET /v1/me` ⇒
+  `config.afac_real: true`, libro del general de septiembre ⇒ 75 filas
+  AFAC_VUELO, Σ G por avión = `totales.permiso_afac_mxn` (N4142R
+  85,000.09; N621TX 42,575.50; N990GG 33,577.99; XA-VGV ≈ 50,600.12;
+  XB-PEV 42,800.91) y TOTALES / RESULTADO VUELATOUR = 0.0.88 (± 0.01); (4)
+  panel. Rollback: panel ⇒ API 0.0.88 ⇒ reversa SOLO si no hay reales ni
+  marcas (SQL Editor, `reversa-20261016000005.sql`) y reiniciar el API.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
@@ -12914,6 +13050,19 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **AFAC por vuelo (16-oct-2026, invariante 90)**: (a) el reparto a socios
+  NO cobra lo RESERVADO (columna T) y, con los permisos marcados fuera, se
+  queda sin NINGÚN costo AFAC: preguntar «¿el reparto debe descontar lo
+  reservado (100 USD/hr × horas cobradas), como el balance?» (≈ US$14,843
+  de la flota en septiembre); (b) capturar los costos reales de septiembre
+  ANTES de cerrarlo (cerrado ⇒ 409 hasta reabrir); siguiente lote sugerido:
+  renglón informativo del pre-cierre `afac_sin_costo_real` (solo conteo);
+  (c) vuelos SIN reservado (XB-IJP sin tarifa, servicio/interno con 0 h,
+  cancelados) no tienen celda: si VuelaTour paga AFAC por ellos, ese pago
+  sigue en el avión (sin marcar); (d) las notas del costo real las acepta
+  el API, la pantalla solo captura el monto; (e) qué gastos de prod se
+  marcan lo decide la oficina (candidatos en el contrato del lote).
 
 - **Hueco del libro (13-oct-2026, invariante 72)**: el gasto 12f38801
   (OPERACIONES $283.15, vuelo #255 de XA-VGV, sellado a N4142R SIN tramo,

@@ -128,6 +128,7 @@ import {
 } from '../../common/participacion-aeronave.util';
 import {
   PyservicesService,
+  type BalanceAfacPagoPayload,
   type BalanceAvionCobroPayload,
   type BalanceAvionGastoFilaPayload,
   type BalanceAvionHojaGastosPayload,
@@ -140,7 +141,21 @@ import {
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 import type { LibroVista } from '../pyservices/libro-vista.types';
-import { filasAfacOtrosMovimientos } from './afac-otros-movimientos.util';
+// AFAC POR VUELO — reservado vs costo real (16-oct-2026, API 0.0.89,
+// invariante 90; SUPERSEDE las filas «AFAC · matrícula» de la invariante
+// 62): filas por vuelo (fuente única pura), la marca «Pago de AFAC» del
+// gasto y su lector, todo detrás de la sonda de la migración 20261016000005.
+import { filasAfacPorVuelo } from './afac-por-vuelo.util';
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import { esPagoAfac } from '../../common/afac-real.util';
+import {
+  leerAfacDeVuelos,
+  leerAfacRealesDelPeriodo,
+  leerMesContableDeVuelos,
+} from '../../common/afac-real.lector';
 import {
   cierreDelGeneral,
   aplicarFilaSombra,
@@ -174,6 +189,7 @@ import {
   vueloDiferido,
 } from '../../common/mes-contable.util';
 import {
+  cierresCerrados,
   leerCierresMes,
   leerDiferimientos,
 } from '../../common/cierre-mes.lector';
@@ -461,6 +477,13 @@ interface GastoRow {
    * la consulta de gastos de vuelos, detrás de la sonda.
    */
   tua_incluida?: string | number | null;
+  /**
+   * PAGO DE AFAC que paga VuelaTour (16-oct-2026, invariante 90; solo
+   * PERMISO, trigger de la BD): no resta en el avión. Solo lo traen las
+   * lecturas de gastos de vuelos y del avión sin vuelo y la de «otros
+   * gastos», detrás de la sonda `afacRealDisponible`.
+   */
+  es_pago_afac?: boolean | null;
   /** Clon parcial del reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
   /**
@@ -1090,16 +1113,39 @@ export class AircraftBalanceService {
       acc.porCobrar += t.por_cobrar_mxn ?? 0;
       acc.pendientes += p.pendientes.length;
     };
+    // AFAC POR VUELO (16-oct-2026, invariante 90): los gastos marcados «Pago
+    // de AFAC» de CADA libro construido se juntan ANTES de `registrar` — un
+    // avión cuyo único dinero del mes es un permiso marcado ya no tiene
+    // actividad (salió de su hoja «permisos») y su pago no puede perderse de
+    // la comparación del mes. Cada pago, en el libro/mes en que vivía sin la
+    // marca y con la conversión de su hoja (un gasto, una vez, un mes).
+    const pagosAfacLibros: BalanceAfacPagoPayload[] = [];
+    const juntarPagosAfac = (p: BalanceAvionPayload): BalanceAvionPayload => {
+      for (const f of p.pagos_afac?.filas ?? []) {
+        pagosAfacLibros.push({
+          gasto_id: f.gasto_id ?? null,
+          fecha: f.fecha,
+          detalle: `${f.detalle} · ${p.matricula}`,
+          matricula: p.matricula,
+          monto_mxn: f.monto_mxn,
+          moneda_original: f.moneda_original,
+          monto_original: f.monto_original,
+        });
+      }
+      return p;
+    };
     for (const a of aviones ?? []) {
       registrar(
-        await this.buildPayload(
-          a.id as string,
-          d,
-          h,
-          memoTc,
-          memoFactura,
-          vigenciaComisiones,
-          ingresosPartidos,
+        juntarPagosAfac(
+          await this.buildPayload(
+            a.id as string,
+            d,
+            h,
+            memoTc,
+            memoFactura,
+            vigenciaComisiones,
+            ingresosPartidos,
+          ),
         ),
         (a.color_calendario as string | null) ?? null,
         true,
@@ -1110,14 +1156,16 @@ export class AircraftBalanceService {
     // (maestra, cobranza, totales) y al RESUMEN como una fila más; no a los
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
     registrar(
-      await this.buildPayload(
-        null,
-        d,
-        h,
-        memoTc,
-        memoFactura,
-        vigenciaComisiones,
-        ingresosPartidos,
+      juntarPagosAfac(
+        await this.buildPayload(
+          null,
+          d,
+          h,
+          memoTc,
+          memoFactura,
+          vigenciaComisiones,
+          ingresosPartidos,
+        ),
       ),
       null,
       false,
@@ -1328,13 +1376,96 @@ export class AircraftBalanceService {
     // (`movimientosConTc` LANZA si se desalinean). La bandera se asigna
     // DESPUÉS de construir el objeto: queda como la ÚLTIMA llave y, sin
     // filas AFAC, el payload es byte-idéntico al 0.0.73.
-    const afac = filasAfacOtrosMovimientos(librosAviones);
+    //
+    // AFAC POR VUELO (16-oct-2026, API 0.0.89, invariante 90) — SUPERSEDE
+    // lo anterior: en lugar de UNA fila por avión, UNA fila por VUELO con
+    // AFAC (fuente única pura `filasAfacPorVuelo`, de TODOS los libros
+    // construidos —aviones y EXTERNOS—, ya calculados): INGRESO = lo
+    // RESERVADO (`permiso_afac_mxn` de la fila, TAL CUAL; el avión lo sigue
+    // cargando en su columna T), EGRESO = el COSTO REAL capturado por vuelo
+    // (lo paga VuelaTour; la celda editable del libro en pantalla). Siguen al
+    // FINAL de `filas`, contiguas, con su T.C. (el `tc_promedio` del libro de
+    // su avión, como la fila por avión: sin reales el bloque VUELATOUR sale
+    // igual) y su «por cobrar» 0 alineados en `tcFilasOM`, después de
+    // `buildOtrosMovimientos` y antes de `armarBalanceEmpresa`. Los gastos
+    // marcados «Pago de AFAC» van SOLO al resumen (`afac_resumen.pagos`):
+    // no egresan aquí ni restan en ningún avión. Banderas DESPUÉS de
+    // construir el objeto (últimas llaves); sin AFAC, byte a byte.
+    const sbAfac = this.supabase.service;
+    const afacDisponible = await afacRealDisponible(sbAfac);
+    const contableAfac = await cierreMesDisponible(sbAfac);
+    const vueloIdsAfac = [
+      ...new Set(
+        libros.flatMap((p) =>
+          p.vuelos
+            .filter((f) => f.fila_sombra !== true && f.vuelo_id)
+            .map((f) => f.vuelo_id as string),
+        ),
+      ),
+    ];
+    const realesAfac = await leerAfacDeVuelos(sbAfac, vueloIdsAfac);
+    const cerradosAfac = afacDisponible
+      ? await cierresCerrados(sbAfac)
+      : new Map<string, never>();
+    const mesesCerradosAfac = new Map(
+      [...cerradosAfac.values()].map((c) => [
+        c.periodo,
+        {
+          periodo: c.periodo,
+          cerrado_at: c.cerrado_at,
+          cerrado_por_nombre: c.cerrado_por?.nombre ?? null,
+        },
+      ]),
+    );
+    // Mes CONTABLE de cada vuelo (decide si su celda es editable): solo hace
+    // falta leerlo si hay meses cerrados (sin cierres no hay diferidos y el
+    // mes es el de `fila.fecha`).
+    const mesPorVueloAfac =
+      afacDisponible && mesesCerradosAfac.size > 0
+        ? await leerMesContableDeVuelos(sbAfac, vueloIdsAfac, contableAfac)
+        : new Map<string, string | null>();
+    // Pagos marcados SIN vuelo ni avión (los de «otros gastos»): MISMA
+    // conversión que esa hoja (T.C. promedio de la flota).
+    const pagosAfacSueltos = this.buildHoja(
+      empresaYSueltos.pagosAfac,
+      totalesFlota.tc_promedio,
+      0,
+      'pagos AFAC',
+      pendientesEmpresa,
+      { tcPorFila: true },
+    );
+    const afac = filasAfacPorVuelo({
+      libros,
+      reales: realesAfac,
+      mesPorVuelo: mesPorVueloAfac,
+      mesesCerrados: mesesCerradosAfac,
+      disponible: afacDisponible,
+      pagos: [
+        ...pagosAfacLibros,
+        ...pagosAfacSueltos.filas.map((f) => ({
+          gasto_id: f.gasto_id ?? null,
+          fecha: f.fecha,
+          detalle: f.detalle,
+          matricula: null,
+          monto_mxn: f.monto_mxn,
+          moneda_original: f.moneda_original,
+          monto_original: f.monto_original,
+        })),
+      ],
+      realesDelPeriodo: await leerAfacRealesDelPeriodo(
+        sbAfac,
+        d,
+        h,
+        contableAfac,
+      ),
+    });
     if (afac.filas.length > 0) {
       otrosMovimientos.filas.push(...afac.filas);
       tcFilasOM.filas.push(...afac.tcs);
       tcFilasOM.porCobrarVtUsd.push(...afac.filas.map(() => 0));
-      otrosMovimientos.afac_en_filas = true;
+      otrosMovimientos.afac_por_vuelo = true;
     }
+    if (afac.resumen) otrosMovimientos.afac_resumen = afac.resumen;
     // Hoja consolidada «otros ingresos aviones» (13-oct-2026, API 0.0.75,
     // invariante 67): las hojas «Otros ingresos» de los libros con filas,
     // fusionadas (cada fila con su matrícula y color). Sin filas en ningún
@@ -1420,6 +1551,10 @@ export class AircraftBalanceService {
         // gastos de empresa en USD sin ningún TC
         // (fila sin MXN) — mismos gritos que las hojas de gastos.
         ...pendientesEmpresa,
+        // AFAC por vuelo (invariante 90): vuelos con reservado sin costo
+        // real, diferencia contra los pagos marcados, pagos sin T.C. y
+        // reales fuera de libro. Avisos: no bloquean.
+        ...afac.pendientes,
         // Gastos de vuelos que no caen en NINGÚN libro (externo sin avión y
         // SIN fecha de vuelo): red de seguridad de la verificación 28-ago.
         ...(await this.pendienteGastosVueloSinLibro(d, h)),
@@ -1480,11 +1615,12 @@ export class AircraftBalanceService {
       pagoVendedorACargoDelAvion: [...comisionesAvionPorVuelo.values()].some(
         (partes) => partes.some((x) => x.vendedor_absorbido),
       ),
-      // Solo la NOTA (13-oct-2026, API 0.0.74, invariante 62): las filas
-      // «AFAC · matrícula» ya entran a la aritmética por `movimientos` (cada
-      // una ÷ el T.C. promedio de costos del libro de su avión); la señal
-      // solo hace que la nota lo diga.
-      afacEnFilas: afac.filas.length > 0,
+      // Solo la NOTA (16-oct-2026, API 0.0.89, invariante 90): las filas
+      // AFAC por vuelo ya entran a la aritmética por `movimientos` (cada una
+      // ÷ el T.C. promedio de costos del libro de su avión: reservado ⇒
+      // ingresos propios, costo real ⇒ egresos propios); la señal solo hace
+      // que la nota lo diga.
+      afacPorVuelo: afac.filas.length > 0,
     });
 
     const payload: BalanceGeneralPayload = {
@@ -2232,6 +2368,10 @@ export class AircraftBalanceService {
     const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
     // Tacómetro omitido (invariante 79): columnas solo con la migración.
     const colsOmitido = colsTacoOmitido(await tacoOmitidoDisponible(sb));
+    // Marca «Pago de AFAC» (invariante 90): solo con la migración; la leen
+    // las dos lecturas que alimentan la hoja «permisos» (GAS nunca se marca;
+    // los repartos tampoco: PERMISO no es repartible).
+    const colAfac = colPagoAfac(await afacRealDisponible(sb));
     const vacio = { data: [], error: null } as const;
     const [
       escalasRes,
@@ -2269,7 +2409,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}, created_at, proveedor:proveedor_id(nombre)`,
+              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}${colAfac}, created_at, proveedor:proveedor_id(nombre)`,
             )
             .in('vuelo_id', vueloIdsDinero)
             .order('fecha_gasto', { ascending: true })
@@ -2281,7 +2421,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colAfac}, proveedor:proveedor_id(nombre)`,
             )
             .eq('aeronave_id', aircraftId)
             .is('vuelo_id', null)
@@ -4738,10 +4878,30 @@ export class AircraftBalanceService {
         !HOJAS_APARTE.has(g.categoria),
     );
     // Permisos: pagos reales de PERMISO del avión, CON o SIN vuelo.
-    const filasPermisos = [
+    // AFAC POR VUELO (16-oct-2026, invariante 90; decisión 4 del cliente):
+    // los marcados «Pago de AFAC» (fuente única `esPagoAfac`) los paga
+    // VuelaTour — SALEN de la hoja «permisos» (⇒ `permisos_usd`, cascada,
+    // utilidad cobrada, socios) y viajan aparte en `pagos_afac` (mismas dos
+    // fuentes, mismo libro y mes en que vivían sin la marca: marcar no los
+    // mueve) para que el general los junte en su resumen AFAC.
+    const permisosTodos = [
       ...gastosAvion.filter((g) => g.categoria === 'PERMISO'),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'PERMISO'),
     ];
+    const filasPermisos = permisosTodos.filter((g) => !esPagoAfac(g));
+    const folioPorVuelo = new Map(vuelos.map((v) => [v.id, v.folio]));
+    const pagosAfac: GastoRow[] = permisosTodos
+      .filter((g) => esPagoAfac(g))
+      .map((g) => {
+        const folio = g.vuelo_id ? folioPorVuelo.get(g.vuelo_id) : undefined;
+        return g.vuelo_id
+          ? {
+              ...g,
+              referencia_detalle:
+                folio != null ? `vuelo #${String(folio)}` : 'vuelo sin folio',
+            }
+          : g;
+      });
     // TUAS sin vuelo (regla 7): no restan en ninguna hoja — se avisa para
     // que el dinero no parezca perdido (viven en "Otros movimientos").
     const tuasSinVuelo = gastosAvion.filter((g) => g.categoria === 'TUAS');
@@ -4838,6 +4998,9 @@ export class AircraftBalanceService {
         filasRefacciones,
         filasOtros,
         filasPermisos,
+        // Un pago de AFAC marcado se convierte IGUAL que sin la marca
+        // (invariante 90): el respaldo del T.C. también lo considera.
+        pagosAfac,
         gastosGas,
       ].some((l) => l.length > 0)
     ) {
@@ -4912,6 +5075,19 @@ export class AircraftBalanceService {
       pendientes,
       { tcPorFila: true },
     );
+    // Pagos de AFAC marcados (invariante 90): MISMA conversión que la hoja
+    // «permisos» (tc_gasto ?? T.C. de las hojas); NO entran a la cascada.
+    const hojaPagosAfac =
+      pagosAfac.length > 0
+        ? this.buildHoja(
+            pagosAfac,
+            tcHojas,
+            horasVoladas,
+            'pagos AFAC',
+            pendientes,
+            { tcPorFila: true },
+          )
+        : null;
     const hojaCombustibleBase = this.buildHoja(
       gastosGas,
       tcHojas,
@@ -5297,6 +5473,11 @@ export class AircraftBalanceService {
       // con la migración): estado del mes y los vuelos que pasan / vienen /
       // pasarían. Sin la migración la llave no viaja (0.0.87).
       ...(cierreLibro ? { cierre: cierreLibro } : {}),
+      // AFAC POR VUELO (16-oct-2026, API 0.0.89, invariante 90; ADITIVO,
+      // ÚLTIMA llave, SOLO con ≥ 1 gasto marcado «Pago de AFAC»): los PERMISO
+      // que paga VuelaTour, fuera de la hoja «permisos». Sin marcados la
+      // llave no viaja (libro byte a byte).
+      ...(hojaPagosAfac ? { pagos_afac: hojaPagosAfac } : {}),
     };
   }
 
@@ -5522,12 +5703,18 @@ export class AircraftBalanceService {
   private async gastosEmpresaYSueltos(
     desde: string,
     hasta: string,
-  ): Promise<{ empresa: GastoRow[]; tuasSueltos: GastoRow[] }> {
+  ): Promise<{
+    empresa: GastoRow[];
+    tuasSueltos: GastoRow[];
+    pagosAfac: GastoRow[];
+  }> {
     const sb = this.supabase.service;
     // `vuelo:vuelo_id(folio)` = solo traza para el detalle; `medio_pago` +
     // `tarjeta_terminacion` alimentan la columna PAGO de la hoja.
-    const COLS =
-      'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)';
+    // `es_pago_afac` (invariante 90) solo con la migración 20261016000005.
+    const COLS = `id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion${colPagoAfac(
+      await afacRealDisponible(sb),
+    )}, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)`;
     // PostgREST corta en `max-rows` (1000 en Supabase) SIN avisar: un
     // periodo largo dejaría gastos fuera de la hoja y el dinero
     // DESAPARECERÍA en silencio (lo contrario de la regla del libro). Las dos
@@ -5594,7 +5781,12 @@ export class AircraftBalanceService {
     );
     const empresa: GastoRow[] = [];
     const tuasSueltos: GastoRow[] = [];
-    if (sueltos.length === 0) return { empresa, tuasSueltos };
+    // PERMISO SIN vuelo ni avión marcado «Pago de AFAC» (invariante 90): el
+    // único marcado que llega a esta lectura. Lo paga VuelaTour como
+    // comprobante de los costos reales por vuelo: NO va a «otros gastos»
+    // (no egresa dos veces) sino al resumen AFAC de «otros movimientos».
+    const pagosAfac: GastoRow[] = [];
+    if (sueltos.length === 0) return { empresa, tuasSueltos, pagosAfac };
     // El reparto manual GANA: un gasto repartido ya vive en los libros de
     // sus aviones — aquí solo entra lo que nadie reclama.
     const repartos = await fetchRepartos(
@@ -5626,6 +5818,7 @@ export class AircraftBalanceService {
         // TUAS sin vuelo (regla 7): no restan en ninguna hoja — fila
         // suelta de "Otros movimientos" (su único lugar).
         if (fila.categoria === 'TUAS') tuasSueltos.push(fila);
+        else if (esPagoAfac(fila)) pagosAfac.push(fila);
         else empresa.push(fila);
         continue;
       }
@@ -5650,7 +5843,7 @@ export class AircraftBalanceService {
         });
       }
     }
-    return { empresa, tuasSueltos };
+    return { empresa, tuasSueltos, pagosAfac };
   }
 
   /**
@@ -5839,7 +6032,11 @@ export class AircraftBalanceService {
     memoTc: Map<string, Promise<TipoCambioDetalle | null>>,
     // Subconjuntos de gastosEmpresaYSueltos (lectura compartida con la hoja
     // "otros gastos" del general): aquí solo se pintan los TUAS sueltos.
-    empresaYSueltos: { empresa: GastoRow[]; tuasSueltos: GastoRow[] },
+    empresaYSueltos: {
+      empresa: GastoRow[];
+      tuasSueltos: GastoRow[];
+      pagosAfac?: GastoRow[];
+    },
     // Memo de etiquetas de factura que ya llenaron los libros del general
     // (30-sep-2026): aquí solo se consultan los vuelos que ningún libro
     // cargó — normalmente ninguno.
@@ -6998,8 +7195,8 @@ export class AircraftBalanceService {
       comision_vendedor_solo_gasto_real: true as const,
       // ADITIVA (13-oct-2026, API 0.0.75, invariante 67): los ingresos
       // asignados a un avión ya no están en las sueltas (cuentan en su
-      // libro). Viaja SIEMPRE; `afac_en_filas` la sigue anexando
-      // `payloadGeneral` DESPUÉS (pyservices cambia solo la fila 2).
+      // libro). Viaja SIEMPRE; `afac_por_vuelo` y `afac_resumen` (invariante
+      // 90) los anexa `payloadGeneral` DESPUÉS (pyservices cambia la fila 2).
       otros_ingresos_por_avion: true as const,
     };
   }

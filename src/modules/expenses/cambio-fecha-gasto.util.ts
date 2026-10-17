@@ -56,6 +56,7 @@ import {
   type RepartoDeGasto,
 } from '../../common/ubicacion-balance-gasto.util';
 import { CATEGORIAS_REPARTIBLES } from '../../common/gasto-reparto.util';
+import { esPagoAfac } from '../../common/afac-real.util';
 import {
   esMedioBancario,
   MEDIO_BODEGA,
@@ -118,13 +119,24 @@ export const GASTO_CAMBIO_FECHA_COLS =
  * `20261016000004` el embed del vuelo trae además su mes contable
  * (`periodo_contable`, `fecha_contable`). Sin ella, la de siempre.
  */
-export function gastoCambioFechaCols(cierreDisponible: boolean): string {
-  return cierreDisponible
+export function gastoCambioFechaCols(
+  cierreDisponible: boolean,
+  afacDisponible = false,
+): string {
+  const base = cierreDisponible
     ? GASTO_CAMBIO_FECHA_COLS.replace(
         'vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo)',
         'vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo, periodo_contable, fecha_contable)',
       )
     : GASTO_CAMBIO_FECHA_COLS;
+  // AFAC POR VUELO (16-oct-2026, invariante 90): con la migración
+  // 20261016000005 la lectura trae la marca «Pago de AFAC» (no mueve reparto).
+  return afacDisponible
+    ? base.replace(
+        'inventario_movimiento_id,',
+        'inventario_movimiento_id, es_pago_afac,',
+      )
+    : base;
 }
 
 /** Vuelo embebido (`vuelo:vuelo_id(…)`), con el folio para los textos. */
@@ -341,6 +353,8 @@ export function alcanceRepartoPorFecha(
 ): AlcanceRepartoPorFecha | null {
   const cat = g.categoria ?? '';
   if (cat === TUAS_CAT || categoriaEsPagoVendedor(cat)) return null;
+  // Pago de AFAC marcado (invariante 90): grupo EXCLUIDO del reparto.
+  if (esPagoAfac(g)) return null;
   if (repartos.length > 0 && CATEGORIAS_REPARTIBLES.has(cat)) {
     return {
       tipo: 'PARTES',

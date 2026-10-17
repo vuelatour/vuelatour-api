@@ -411,3 +411,31 @@ describe('cableado en el Excel de gastos', () => {
     expect(cuerpo).not.toContain('`Repartido(');
   });
 });
+
+describe('PAGO DE AFAC marcado (16-oct-2026, invariante 90)', () => {
+  it('PERMISO marcado ⇒ «VuelaTour · pago de AFAC» (+ « (ref. N4142R)» con avión sellado): lo paga VuelaTour, no le resta al avión', () => {
+    expect(
+      celdaAvionGasto(
+        gasto({ categoria: 'PERMISO', es_pago_afac: true, ...conAvion() }),
+      ),
+    ).toBe('VuelaTour · pago de AFAC (ref. N4142R)');
+    expect(
+      celdaAvionGasto(gasto({ categoria: 'PERMISO', es_pago_afac: true })),
+    ).toBe('VuelaTour · pago de AFAC');
+  });
+
+  it('sin la marca (o sin la migración: la lista no trae la llave) ⇒ la regla de siempre', () => {
+    expect(
+      celdaAvionGasto(gasto({ categoria: 'PERMISO', ...conAvion() })),
+    ).toBe('N4142R');
+    expect(
+      celdaAvionGasto(gasto({ categoria: 'PERMISO', es_pago_afac: false })),
+    ).toBe('Falta avión');
+    // La marca fuera de PERMISO no existe (trigger de la BD): defensa.
+    expect(
+      celdaAvionGasto(
+        gasto({ categoria: 'SERVICIOS', es_pago_afac: true, ...conAvion() }),
+      ),
+    ).toBe('N4142R');
+  });
+});

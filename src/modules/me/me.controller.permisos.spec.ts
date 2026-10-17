@@ -22,10 +22,15 @@ import type { ConfiguracionService } from '../configuracion/configuracion.servic
 import type { CalendarService } from '../calendar/calendar.service';
 import type { PushService } from '../realtime/push.service';
 import type { CajaChicaService } from '../caja-chica/caja-chica.service';
+import type { SupabaseService } from '../supabase/supabase.service';
 
 const ALE = 'c691cc8b-3034-4f04-a383-d0b25c1971ec';
 
-function armar(permiso: boolean, inicio?: string | null) {
+function armar(
+  permiso: boolean,
+  inicio?: string | null,
+  supabase?: SupabaseService,
+) {
   const permisosDe = jest.fn().mockResolvedValue({
     editar_cotizacion_cobrada: permiso,
   });
@@ -65,6 +70,7 @@ function armar(permiso: boolean, inicio?: string | null) {
     {} as CalendarService,
     push,
     {} as CajaChicaService,
+    supabase,
   );
   return { ctrl, permisosDe };
 }
@@ -90,6 +96,8 @@ describe('MeController — permisos por persona', () => {
       dias_gracia_gastos_semana: 1,
       gastos_sin_limite_hasta: null,
       inicio_oficial: null,
+      // AFAC por vuelo (invariante 90): sin Supabase inyectado ⇒ false.
+      afac_real: false,
     });
     expect(r.push_dispositivos).toBe(1);
   });
@@ -114,5 +122,42 @@ describe('MeController — inicio oficial (16-oct-2026, invariante 86)', () => {
     expect(g.config.inicio_oficial).toBe(inicio);
     // MISMO shape en las dos (la app cachea ambas en la misma llave).
     expect(p.config).toEqual(g.config);
+  });
+});
+
+describe('MeController — config.afac_real (16-oct-2026, invariante 90)', () => {
+  /** Supabase cuyo sondeo de `gasto.es_pago_afac` responde `error`. */
+  const sb = (error: { code: string; message: string } | null) =>
+    ({
+      service: {
+        from: () => ({
+          select: () => ({
+            limit: () => Promise.resolve({ data: error ? null : [], error }),
+          }),
+        }),
+      },
+    }) as unknown as SupabaseService;
+
+  it('con la migración ⇒ true en GET y PATCH (MISMO shape)', async () => {
+    const { ctrl } = armar(true, null, sb(null));
+    const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
+    const p = (await ctrl.update({}, yo)) as {
+      config: Record<string, unknown>;
+    };
+    expect(g.config.afac_real).toBe(true);
+    expect(p.config).toEqual(g.config);
+  });
+
+  it('sin la migración (42703) ⇒ false: el panel no ofrece la casilla ni la celda editable', async () => {
+    const { ctrl } = armar(
+      true,
+      null,
+      sb({
+        code: '42703',
+        message: 'column gasto.es_pago_afac does not exist',
+      }),
+    );
+    const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
+    expect(g.config.afac_real).toBe(false);
   });
 });

@@ -40,6 +40,19 @@ import {
   MIGRACION_TUA_INCLUIDA,
   tuaIncluidaDisponible,
 } from '../../common/tua-incluida-disponible.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90): la marca «Pago de AFAC» del
+// gasto (solo PERMISO, solo oficina) detrás de la sonda de la migración
+// 20261016000005; con ella los marcados salen de la bandeja «sin avión».
+import {
+  afacRealDisponible,
+  errorAfacRealNoDisponible,
+} from '../../common/afac-real-disponible.util';
+import {
+  CATEGORIA_PAGO_AFAC,
+  MENSAJE_PAGO_AFAC_SOLO_OFICINA,
+  MENSAJE_PAGO_AFAC_SOLO_PERMISO,
+  rolCapturaAfac,
+} from '../../common/afac-real.util';
 import {
   CODIGO_TUA_INCLUIDA,
   MENSAJE_TUA_INCLUIDA_NO_DISPONIBLE,
@@ -316,6 +329,9 @@ const CAMPOS_GASTO_CANDADO_MES = [
   'propina',
   'tua_incluida',
   'litros',
+  // Invariante 90: marcar/desmarcar «Pago de AFAC» mueve el dinero de un
+  // mes (sale o entra a la hoja «permisos» del avión y al reparto).
+  'es_pago_afac',
 ] as const;
 
 @Injectable()
@@ -380,20 +396,103 @@ export class ExpensesService {
    * literal (patrón `aeronaveCols()` de aircraft.service).
    */
   private async cols(): Promise<typeof COLS> {
-    return (
-      (await tuaIncluidaDisponible(this.supabase.service))
-        ? `${COLS}, tua_incluida`
-        : COLS
-    ) as typeof COLS;
+    const extra = await this.colsOpcionales();
+    return (extra ? `${COLS}${extra}` : COLS) as typeof COLS;
   }
 
   /** `LIST_COLS` con `tua_incluida` detrás de la sonda (ver `cols()`). */
   private async listCols(): Promise<typeof LIST_COLS> {
+    const extra = await this.colsOpcionales();
     return (
-      (await tuaIncluidaDisponible(this.supabase.service))
-        ? `${COLS}, tua_incluida${LIST_EMBEDS}`
-        : LIST_COLS
+      extra ? `${COLS}${extra}${LIST_EMBEDS}` : LIST_COLS
     ) as typeof LIST_COLS;
+  }
+
+  /**
+   * Columnas OPCIONALES de `gasto` (con coma inicial), cada una detrás de su
+   * sonda: `tua_incluida` (invariante 66) y `es_pago_afac` (invariante 90:
+   * la lista y el detalle devuelven la marca). Sin migraciones, ''.
+   */
+  private async colsOpcionales(): Promise<string> {
+    const sb = this.supabase.service;
+    const [tua, afac] = await Promise.all([
+      tuaIncluidaDisponible(sb),
+      afacRealDisponible(sb),
+    ]);
+    return `${tua ? ', tua_incluida' : ''}${afac ? ', es_pago_afac' : ''}`;
+  }
+
+  /**
+   * Marca «Pago de AFAC» (invariante 90) en el ALTA, ANTES de tocar la BD:
+   * sin la migración, `true` ⇒ 503 y `false` se ignora; un rol de campo que
+   * manda `true` ⇒ 403 (un `false` de campo se ignora); `true` fuera de
+   * Permiso ⇒ 400. Deja la llave en el DTO solo si debe escribirse.
+   */
+  private async validarPagoAfacAlta(
+    dto: CreateGastoDto,
+    rol: Rol | undefined,
+  ): Promise<void> {
+    if (dto.es_pago_afac === undefined) return;
+    if (dto.es_pago_afac !== true) {
+      // `false` = el default de la columna: nada que escribir.
+      delete dto.es_pago_afac;
+      return;
+    }
+    if (!(await afacRealDisponible(this.supabase.service))) {
+      throw errorAfacRealNoDisponible();
+    }
+    if (!rolCapturaAfac(rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_PAGO_AFAC_SOLO_OFICINA,
+        error: 'PAGO_AFAC_SOLO_OFICINA',
+      });
+    }
+    if ((dto.categoria as string) !== CATEGORIA_PAGO_AFAC) {
+      throw new BadRequestException({
+        message: MENSAJE_PAGO_AFAC_SOLO_PERMISO,
+        error: 'PAGO_AFAC_SOLO_PERMISO',
+      });
+    }
+  }
+
+  /**
+   * Marca «Pago de AFAC» (invariante 90) en el PATCH, con el gasto VIGENTE:
+   * igual al vigente ⇒ se quita del DTO (el diálogo «Verificar» y la app
+   * reenvían la fila; no escribe ni dispara el candado); distinta ⇒ sin la
+   * migración 503 (un `false` se ignora), rol de campo 403, `true` con
+   * categoría efectiva ≠ Permiso 400.
+   */
+  private async validarPagoAfacPatch(
+    dto: UpdateGastoDto,
+    rol: Rol | undefined,
+    actual: { categoria?: string; es_pago_afac?: boolean | null } | null,
+  ): Promise<void> {
+    if (dto.es_pago_afac === undefined) return;
+    const disponible = await afacRealDisponible(this.supabase.service);
+    if (!disponible) {
+      if (dto.es_pago_afac === true) throw errorAfacRealNoDisponible();
+      delete dto.es_pago_afac;
+      return;
+    }
+    const vigente = actual?.es_pago_afac === true;
+    if (dto.es_pago_afac === vigente) {
+      delete dto.es_pago_afac;
+      return;
+    }
+    if (!rolCapturaAfac(rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_PAGO_AFAC_SOLO_OFICINA,
+        error: 'PAGO_AFAC_SOLO_OFICINA',
+      });
+    }
+    const categoriaEf =
+      (dto.categoria as string | undefined) ?? actual?.categoria;
+    if (dto.es_pago_afac === true && categoriaEf !== CATEGORIA_PAGO_AFAC) {
+      throw new BadRequestException({
+        message: MENSAJE_PAGO_AFAC_SOLO_PERMISO,
+        error: 'PAGO_AFAC_SOLO_PERMISO',
+      });
+    }
   }
 
   /**
@@ -826,6 +925,18 @@ export class ExpensesService {
         .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`);
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
+    // Pagos de AFAC (invariante 90): un marcado lo paga VuelaTour — no es
+    // pendiente de avión (≡ esPagoAfac: el trigger
+    // trg_gasto_pago_afac_solo_permiso impide la marca fuera de PERMISO). El
+    // filtro `pago_afac` lista solo los marcados. Sin la migración, nada.
+    if (
+      (filters.pendientes === true || filters.pago_afac != null) &&
+      (await afacRealDisponible(this.supabase.service))
+    ) {
+      if (filters.pendientes === true) q = q.eq('es_pago_afac', false);
+      if (filters.pago_afac != null)
+        q = q.eq('es_pago_afac', filters.pago_afac);
+    }
     // Conciliación con el banco (9-oct-2026, pedido de oficina: «un apartado
     // que me diga si el gasto está conciliado»): `gasto.conciliado` lo
     // escribe solo la BD al cubrir el gasto con cargos (invariante de la
@@ -1265,6 +1376,11 @@ export class ExpensesService {
         'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
       );
     if (inicio) q = q.gte('fecha_gasto', inicio);
+    // Mismo universo que la bandeja (invariante 90): un pago de AFAC marcado
+    // no es pendiente de avión (≡ esPagoAfac, trigger de la BD).
+    if (await afacRealDisponible(this.supabase.service)) {
+      q = q.eq('es_pago_afac', false);
+    }
     const { data, error } = await q
       .is('aeronave_id', null)
       // Mismo universo que la bandeja (fuente única
@@ -2450,6 +2566,9 @@ export class ExpensesService {
         'La propina no puede ser mayor que el monto total pagado.',
       );
     }
+    // «Pago de AFAC» (16-oct-2026, invariante 90): oficina, solo Permiso,
+    // detrás de la sonda; ANTES de tocar la BD.
+    await this.validarPagoAfacAlta(dto, rol);
     // «TUA incluida en este gasto» (13-oct-2026, invariante 66; solo llega
     // de la oficina): sin la migración un NÚMERO es 409 (jamás un guardado
     // que se pierde) y un null se omite; con ella, solo en facturas de
@@ -2494,6 +2613,9 @@ export class ExpensesService {
       ...(dto.tua_incluida !== undefined
         ? { tua_incluida: dto.tua_incluida }
         : {}),
+      // Pago de AFAC (invariante 90): la llave SOLO viaja si quedó tras la
+      // validación (true de oficina en un Permiso, con la migración).
+      ...(dto.es_pago_afac === true ? { es_pago_afac: true } : {}),
       moneda: dto.moneda,
       // TC del gasto a 6 decimales (fuente única tc.util, 17-sep-2026): lo
       // que se guarda es lo que convierte. 0/negativo ⇒ null (el CHECK de la
@@ -3986,6 +4108,8 @@ export class ExpensesService {
       dto.tipo_combustible !== undefined ||
       // TUA de oficina (invariante 66): se valida sobre el estado FUSIONADO.
       dto.tua_incluida !== undefined ||
+      // Pago de AFAC (invariante 90): se compara contra el VIGENTE.
+      dto.es_pago_afac !== undefined ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
       // el gasto o se sella (voucher IA → tarjeta del capturador).
       (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
@@ -4005,8 +4129,22 @@ export class ExpensesService {
           valor_ia_extraido?: unknown;
           tipo_combustible?: string | null;
           tua_incluida?: string | number | null;
+          es_pago_afac?: boolean | null;
         })
       : null;
+    // «Pago de AFAC» (invariante 90): eco igual ⇒ fuera del DTO; cambio ⇒
+    // oficina, Permiso y la migración (403 / 400 / 503) ANTES de escribir.
+    await this.validarPagoAfacPatch(dto, rol, actual);
+    // Un PATCH que SOLO traía la marca, igual a la vigente: nada que escribir.
+    if (
+      camposNegocio.length === 1 &&
+      camposNegocio[0] === 'es_pago_afac' &&
+      dto.es_pago_afac === undefined &&
+      !lineaSello &&
+      Object.keys(sello).length === 0
+    ) {
+      return this.findById(id);
+    }
     // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.
     // Quitar el vuelo (null) sin decir nada del tramo también quita el
     // tramo: una escala no vive sin su vuelo. Un tramo (nuevo o ya ligado)
@@ -4574,6 +4712,9 @@ export class ExpensesService {
       .select(
         gastoCambioFechaCols(
           await cierreMesDisponible(this.supabase.service),
+          // Invariante 90: el texto del reparto que mueve la fecha sabe si
+          // el gasto es un pago de AFAC (no mueve ningún reparto).
+          await afacRealDisponible(this.supabase.service),
         ) as typeof GASTO_CAMBIO_FECHA_COLS,
       )
       .eq('id', id)

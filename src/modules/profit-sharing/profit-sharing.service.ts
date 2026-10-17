@@ -86,6 +86,18 @@ import {
   colTuaIncluida,
   tuaIncluidaDisponible,
 } from '../../common/tua-incluida-disponible.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90): la marca «Pago de AFAC» del
+// gasto (fuente única `esPagoAfac`) detrás de la sonda de la migración
+// 20261016000005. Un PERMISO marcado lo paga VuelaTour: grupo EXCLUIDO.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import {
+  DETALLE_PERMISOS_SIN_AVION_AFAC,
+  PAGO_AFAC_CLAVE_DETALLE,
+  esPagoAfac,
+} from '../../common/afac-real.util';
 import { cuadreSobre } from '../groups/particion-cobro.util';
 import {
   avionDelGasto,
@@ -531,6 +543,11 @@ interface GastoRow {
    * «TUA embebido (excluido)» y costo del avión). Detrás de la sonda.
    */
   tua_incluida?: string | number | null;
+  /**
+   * PAGO DE AFAC que paga VuelaTour (16-oct-2026, invariante 90): grupo
+   * EXCLUIDO (no resta al avión). Detrás de la sonda `afacRealDisponible`.
+   */
+  es_pago_afac?: boolean | null;
   /** Clon parcial generado por el reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
 }
@@ -2274,9 +2291,15 @@ export class ProfitSharingService {
       // por la lectura POR VUELO (`comisionesDelVuelo`); por fecha_gasto
       // JAMÁS suma (sería doble). La clave la decide `clavePagoVendedor`.
       const esPagoVendedor = categoriaEsPagoVendedor(g.categoria);
+      // PAGO DE AFAC (16-oct-2026, invariante 90; decisión 4 del cliente):
+      // un PERMISO marcado lo paga VuelaTour (comprobante de los costos
+      // reales por vuelo del Balance general): NO resta al avión, igual que
+      // en su hoja «permisos» del balance (fuente única `esPagoAfac`) — el
+      // delta balance↔reparto no cambia. Clave propia en el detalle.
+      const pagoAfac = esPagoAfac(g);
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
-        esTuas || esPagoVendedor
+        esTuas || esPagoVendedor || pagoAfac
           ? 'EXCLUIDO'
           : empresaSinReparto
             ? 'EXCLUIDO'
@@ -2305,9 +2328,11 @@ export class ProfitSharingService {
         ? TUAS_CLAVE_DETALLE
         : esPagoVendedor
           ? clavePagoVendedor(g)
-          : g.es_reparto_parcial
-            ? `${g.categoria} (repartido)`
-            : g.categoria;
+          : pagoAfac
+            ? PAGO_AFAC_CLAVE_DETALLE
+            : g.es_reparto_parcial
+              ? `${g.categoria} (repartido)`
+              : g.categoria;
       const acc = porCategoria.get(clave) ?? {
         grupo,
         categoria: g.categoria,
@@ -2903,6 +2928,9 @@ export class ProfitSharingService {
     // `fecha_vuelo`. Sin la migración, todo por `fecha_vuelo` (0.0.87).
     const contable = await cierreMesDisponible(sb);
     const colDinero = colPeriodoContable(contable);
+    // Marca «Pago de AFAC» (invariante 90): con la migración, un PERMISO
+    // marcado no es «sin avión» (lo paga VuelaTour) ni «sin T.C.».
+    const afacDisponible = await afacRealDisponible(sb);
 
     const [
       pendRes,
@@ -2970,7 +2998,7 @@ export class ProfitSharingService {
         .select(
           // escala embebida: avión RESOLUBLE del gasto (`avionDelGasto`) para
           // el bloqueante de combustible sin avión.
-          'id, vuelo_id, aeronave_id, escala_id, categoria, monto, moneda, tc_gasto, fecha_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula, escala:escala_id(aeronave_id), vuelo:vuelo_id(es_externo, aeronave_id)',
+          `id, vuelo_id, aeronave_id, escala_id, categoria, monto, moneda, tc_gasto, fecha_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado${colPagoAfac(afacDisponible)}, matricula_ia:valor_ia_extraido->>matricula, escala:escala_id(aeronave_id), vuelo:vuelo_id(es_externo, aeronave_id)` as 'id, vuelo_id, aeronave_id, escala_id, categoria, monto, moneda, tc_gasto, fecha_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula, escala:escala_id(aeronave_id), vuelo:vuelo_id(es_externo, aeronave_id)',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -3657,11 +3685,16 @@ export class ProfitSharingService {
     //  - INDIRECTO: sin avión por diseño (captura general, jul 2026).
     //  - PERSONAL_DUENO: jamás lleva avión (dinero personal del dueño).
     // SERVICIOS NO se exenta: sin avión SÍ bloquea (como REFACCION).
+    // PAGO DE AFAC (invariante 90): un PERMISO marcado lo paga VuelaTour —
+    // no le falta avión (ni bloquea `permisos_sin_avion`, que sale de aquí).
     const sinAvion = gastos.filter(
       (g) =>
         g.aeronave_id == null &&
         !CATEGORIAS_GASTO_SIN_AVION.includes(g.categoria as string) &&
-        !repartosPre.has(g.id as string),
+        !repartosPre.has(g.id as string) &&
+        !esPagoAfac(
+          g as { categoria?: string | null; es_pago_afac?: boolean | null },
+        ),
     );
     // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el
     // monto a la baja DESPUÉS de repartir) — el sobrante restaría dinero
@@ -3753,10 +3786,15 @@ export class ProfitSharingService {
     );
     const sinTc = gastos.filter(
       // PERSONAL_DUENO no entra al balance USD: su TC no bloquea el cierre.
+      // Un pago de AFAC marcado (invariante 90) tampoco: no entra a ningún
+      // USD de avión (su comparación del Balance general es en pesos).
       (g) =>
         g.moneda === 'MXN' &&
         !(Number(g.tc_gasto) > 0) &&
-        g.categoria !== 'PERSONAL_DUENO',
+        g.categoria !== 'PERSONAL_DUENO' &&
+        !esPagoAfac(
+          g as { categoria?: string | null; es_pago_afac?: boolean | null },
+        ),
     );
     // TC oficial del día del gasto (29-ago): los MXN sin TC que SÍ tienen
     // referencia oficial YA entran al reparto y al balance (informativo);
@@ -4089,8 +4127,11 @@ export class ProfitSharingService {
       {
         clave: 'permisos_sin_avion',
         titulo: 'Permisos sin avión',
-        detalle:
-          'El permiso lo carga el avión (decisión del cliente del 14-oct-2026): sin avión no resta en ningún balance ni en el reparto y el Balance general lo pondría como gasto de VuelaTour. Asígnale el avión o el vuelo en Gastos.',
+        // Con la marca «Pago de AFAC» (invariante 90) el texto dice la salida
+        // nueva; sin la migración, el de siempre.
+        detalle: afacDisponible
+          ? DETALLE_PERMISOS_SIN_AVION_AFAC
+          : 'El permiso lo carga el avión (decisión del cliente del 14-oct-2026): sin avión no resta en ningún balance ni en el reparto y el Balance general lo pondría como gasto de VuelaTour. Asígnale el avión o el vuelo en Gastos.',
         count: permisosSinAvion.length,
         monto_mxn: montoPermisosSinAvion('MXN'),
         // Solo si hay permisos en dólares (jamás se suman monedas).
@@ -5181,6 +5222,10 @@ export class ProfitSharingService {
     // vuelo (mes contable) y su tramo para decidir su EJE
     // (`diaContableDeGasto`, la regla de `ubicacionBalanceDeGasto`).
     const embedContable = contable ? GASTO_REPARTO_EMBED_CONTABLE : '';
+    // Marca «Pago de AFAC» (invariante 90): solo con la migración.
+    const colAfac = colPagoAfac(
+      await afacRealDisponible(this.supabase.service),
+    );
     const { data, error } = await this.supabase.service
       .from('gasto')
       // propina + valor_ia_extraido: para separar el TUA embebido en
@@ -5190,7 +5235,7 @@ export class ProfitSharingService {
       // fecha_gasto: día del TC oficial de respaldo (29-ago) en MXN sin TC.
       // tua_incluida (13-oct-2026): la TUA que fijó la oficina.
       .select(
-        `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${embedContable}`,
+        `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${colAfac}${embedContable}`,
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
@@ -5222,13 +5267,16 @@ export class ProfitSharingService {
     const colTua = colTuaIncluida(
       await tuaIncluidaDisponible(this.supabase.service),
     );
+    const colAfac = colPagoAfac(
+      await afacRealDisponible(this.supabase.service),
+    );
     const deVuelos = (await this.leerEnLotesPaginado(
       vueloIds,
       (lote, desde, hasta) =>
         this.supabase.service
           .from('gasto')
           .select(
-            `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${GASTO_REPARTO_EMBED_CONTABLE}`,
+            `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}${colAfac}${GASTO_REPARTO_EMBED_CONTABLE}`,
           )
           .in('vuelo_id', lote)
           .order('id', { ascending: true })

@@ -44,6 +44,7 @@ import {
 import { CATEGORIAS_REPARTIBLES } from './gasto-reparto.util';
 import { mesCalendarioDe } from './fecha-cancun.util';
 import { diaContableDeVuelo } from './fecha-contable.util';
+import { esPagoAfac } from './afac-real.util';
 
 type EscalaEmb = { aeronave_id?: string | null };
 type VueloEmb = {
@@ -73,6 +74,12 @@ export interface GastoParaUbicacion {
    * leer y no se verifica.
    */
   aviones_con_tramo_vivo?: readonly string[] | null;
+  /**
+   * Marca «Pago de AFAC» (16-oct-2026, invariante 90): solo la trae la
+   * lectura con la migración `20261016000005` (`gastoUbicacionCols(…,
+   * true)`). Ausente ⇒ la ubicación de siempre.
+   */
+  es_pago_afac?: boolean | null;
 }
 
 /** Una parte del reparto manual (`gasto_reparto`). */
@@ -95,7 +102,10 @@ export type HojaLibroGeneral =
   | 'combustible'
   | 'otros_gastos'
   | 'repartidos'
-  | 'inventario';
+  | 'inventario'
+  // Invariante 90: un PERMISO marcado «Pago de AFAC» vive SOLO ahí
+  // (resumen «AFAC DEL PERIODO» de la pestaña).
+  | 'otros_movimientos';
 
 /**
  * Dónde vive el gasto. Invariantes: `aviones.length > 0 ⇔ hoja_avion !=
@@ -186,6 +196,31 @@ function ubicar(
   // R2: las DOS categorías del pago al vendedor (invariantes 31 y 61)
   // restan en COMISIONES o en «otros movimientos»: celdas sin vínculos.
   if (categoriaEsPagoVendedor(cat)) return null;
+  // R2b (16-oct-2026, invariante 90): PERMISO marcado «Pago de AFAC» ⇒
+  // Balance general, hoja «otros movimientos» (resumen AFAC), NINGÚN avión.
+  // EJE y MES = los del PERMISO sin marca (marcar no lo mueve): con vuelo,
+  // el mes contable del vuelo y solo si un libro lo recoge (EXTERNOS sin
+  // avión, o avión resoluble que no sea el hueco #255 — `payloadGeneral`
+  // junta los `pagos_afac` de esos libros); sin vuelo, `fecha_gasto` (con
+  // avión: su libro; sin avión: la lectura de «otros gastos»).
+  if (esPagoAfac(g)) {
+    if (conVuelo) {
+      if (!vuelo || !diaVuelo) return null;
+      if (!esVueloExternoSinAvion(vuelo)) {
+        const avionAfac = avionDeGastoEmbebido(crudo);
+        if (!avionAfac) return null;
+        if (
+          necesitaTramosVivos(g) &&
+          Array.isArray(g.aviones_con_tramo_vivo) &&
+          !g.aviones_con_tramo_vivo.includes(avionAfac)
+        ) {
+          return null;
+        }
+      }
+      return armar('vuelo', diaVuelo, [], null, 'otros_movimientos');
+    }
+    return armar('gasto', diaGasto, [], null, 'otros_movimientos');
+  }
   // R3: GAS (hoja «combustible»; eje fecha_gasto con `avionDelGasto`).
   if (cat === 'GAS') {
     const avion = avionDeGastoEmbebido(crudo);

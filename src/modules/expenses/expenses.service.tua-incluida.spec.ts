@@ -1,3 +1,12 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('../../common/afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/afac-real-disponible.util',
+  ),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // Mismos stubs que expenses.service.sin-vuelo.spec: notifications arrastra
 // el gateway y `jose` (ESM puro), vision el SDK de IA y pyservices el
 // cliente HTTP.

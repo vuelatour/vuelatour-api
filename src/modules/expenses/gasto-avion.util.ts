@@ -29,6 +29,10 @@
  *     11-sep-2026).
  *     En 2 y 3, con avión sellado: « (ref. N4142R)» — solo referencia, no se
  *     le carga.
+ *  3b. PAGO DE AFAC marcado (16-oct-2026, invariante 90; `esPagoAfac`) ⇒
+ *     «VuelaTour · pago de AFAC» (+ « (ref. N4142R)» con avión sellado):
+ *     lo paga VuelaTour, no le resta al avión. Sin la migración la lista no
+ *     trae la marca y la regla no aplica.
  *  4. Con avión ⇒ su matrícula. Un INDIRECTO con UN avión dice la matrícula
  *     (resta en el balance de ese avión), no «VuelaTour».
  *  5. Resto de `CATEGORIAS_GASTO_SIN_AVION` (hoy solo INDIRECTO sin avión)
@@ -56,6 +60,12 @@ import {
   expandirConReparto,
   type GastoRepartoFila,
 } from '../../common/gasto-reparto.util';
+import {
+  ETIQUETA_AVION_PAGO_AFAC,
+  esPagoAfac,
+} from '../../common/afac-real.util';
+
+export { ETIQUETA_AVION_PAGO_AFAC };
 
 /** «Falta avión» (espejo de `ETIQUETA_FALTA_AVION` del panel). */
 export const ETIQUETA_FALTA_AVION = 'Falta avión';
@@ -92,7 +102,8 @@ export type EstadoAvionGasto =
       tipo: 'FUERA_DEL_AVION';
       etiqueta:
         | typeof ETIQUETA_AVION_VUELATOUR
-        | typeof ETIQUETA_AVION_PERSONAL;
+        | typeof ETIQUETA_AVION_PERSONAL
+        | typeof ETIQUETA_AVION_PAGO_AFAC;
       /** Matrícula sellada que NO se carga (solo referencia) o null. */
       referencia: string | null;
     }
@@ -166,6 +177,19 @@ export function estadoAvionGasto(
     return {
       tipo: 'FUERA_DEL_AVION',
       etiqueta: ETIQUETA_AVION_VUELATOUR,
+      referencia,
+    };
+  }
+  // 3b. Pago de AFAC (invariante 90): lo paga VuelaTour.
+  if (
+    esPagoAfac({
+      categoria,
+      es_pago_afac: fila.es_pago_afac === true,
+    })
+  ) {
+    return {
+      tipo: 'FUERA_DEL_AVION',
+      etiqueta: ETIQUETA_AVION_PAGO_AFAC,
       referencia,
     };
   }

@@ -47,6 +47,7 @@ import { DocumentTypesModule } from './modules/document-types/document-types.mod
 import { ExpirationsModule } from './modules/expirations/expirations.module';
 import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
 import { CierresModule } from './modules/cierres/cierres.module';
+import { AfacModule } from './modules/afac/afac.module';
 import { DashboardsModule } from './modules/dashboards/dashboards.module';
 import { GroupsModule } from './modules/groups/groups.module';
 import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emitidas.module';
@@ -126,6 +127,7 @@ import { StorageModule } from './modules/storage/storage.module';
     ExpirationsModule,
     ProfitSharingModule,
     CierresModule,
+    AfacModule,
     DashboardsModule,
     MultasModule,
     TipoCambioModule,

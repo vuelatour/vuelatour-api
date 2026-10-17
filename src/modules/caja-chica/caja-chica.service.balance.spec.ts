@@ -1,3 +1,12 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('../../common/afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/afac-real-disponible.util',
+  ),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 import { Logger } from '@nestjs/common';
 import { CajaChicaService } from './caja-chica.service';
 import type { SupabaseService } from '../supabase/supabase.service';

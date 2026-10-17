@@ -37,6 +37,17 @@ import {
   tuaIncluidaDisponible,
 } from '../../common/tua-incluida-disponible.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90): un PERMISO marcado «Pago de
+// AFAC» sigue en «otros gastos» del mes (es caja real) pero NO se acredita a
+// ningún avión en utilidades (lo paga VuelaTour). Detrás de la sonda.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import {
+  SUFIJO_DINERO_PAGO_AFAC,
+  esPagoAfac,
+} from '../../common/afac-real.util';
 import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 // ID de vuelo por cliente (13-oct-2026, invariante 68): solo la ETIQUETA de
 // la CLAVE (lector único best-effort + fuente pura); ningún importe.
@@ -288,6 +299,7 @@ export class DineroReportService {
     // TUA de oficina (13-oct-2026, invariante 66): UNA lectura de la sonda
     // antes del lote; solo la consulta de gastos de los vuelos la usa.
     const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
+    const colAfac = colPagoAfac(await afacRealDisponible(sb));
     const [
       aeronavesRes,
       clientesRes,
@@ -358,7 +370,7 @@ export class DineroReportService {
       sb
         .from('gasto')
         .select(
-          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, vuelo_id, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)',
+          `id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, vuelo_id${colAfac}, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)` as 'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, vuelo_id, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)',
         )
         .or(
           `vuelo_id.is.null,categoria.in.(${[...CATEGORIAS_GASTO_EMPRESA].join(',')})`,
@@ -1423,6 +1435,9 @@ export class DineroReportService {
       // pero no suma al acumulado ni se acredita a ningún avión en
       // utilidades. Los TUAS con vuelo ya se aparean en "otros ingresos".
       const esTuas = g.categoria === 'TUAS';
+      // Pago de AFAC marcado (invariante 90): se LISTA (caja real del mes)
+      // pero no se acredita a ningún avión (lo paga VuelaTour).
+      const pagoAfac = esPagoAfac(g);
       const monto = num(g.monto) ?? 0;
       const tcg = pos(g.tc_gasto);
       const mxn = g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
@@ -1450,6 +1465,7 @@ export class DineroReportService {
           : null,
         mxn == null ? '(USD sin TC — no suma)' : null,
         esTuas ? '(TUA pagado — no resta: Otros movimientos)' : null,
+        pagoAfac ? SUFIJO_DINERO_PAGO_AFAC : null,
       ]
         .filter(Boolean)
         .join(' · ');
@@ -1494,6 +1510,10 @@ export class DineroReportService {
       };
       if (esTuas) {
         // Regla 7: nunca se acredita a un avión (ver arriba).
+      } else if (pagoAfac) {
+        // Invariante 90: lo paga VuelaTour — fuera de `permisosPorAvion`
+        // (espejo de la hoja «permisos» del balance y del grupo PERMISO del
+        // reparto). Sigue en el acumulado de «otros gastos» (es caja).
       } else if (filasReparto && filasReparto.length > 0) {
         for (const r of filasReparto) {
           const mxnParcial =

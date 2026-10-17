@@ -1,3 +1,12 @@
+// AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
+// SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
+// specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).
+jest.mock('../../common/afac-real-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/afac-real-disponible.util',
+  ),
+  afacRealDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // Mismos stubs que flights.service.reserva.spec.ts: notifications arrastra el
 // gateway y `jose` (ESM), calendar-sync googleapis, vision el SDK de IA y
 // pilots calendar/users (push, firebase).
@@ -15,6 +24,11 @@ jest.mock('../pilots/pilots.service', () => ({ PilotsService: class {} }));
 
 import { HttpException } from '@nestjs/common';
 import { FlightsService } from './flights.service';
+import { afacRealDisponible } from '../../common/afac-real-disponible.util';
+
+const sondaAfac = afacRealDisponible as jest.MockedFunction<
+  typeof afacRealDisponible
+>;
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type { EmailService } from '../notifications/email.service';
@@ -131,6 +145,8 @@ interface Mundo {
   nCobros?: number;
   nGastos?: number;
   nTacos?: number;
+  /** Filas de `afac_vuelo` con costo (invariante 90; con la sonda). */
+  nAfac?: number;
   /** El DELETE de vuelo falla (revierte la bitácora). */
   deleteError?: boolean;
 }
@@ -158,6 +174,9 @@ function armar(m: Mundo) {
         return esHead(ops) ? { count: m.nCobros ?? 0 } : { data: [] };
       case 'gasto':
         return esHead(ops) ? { count: m.nGastos ?? 0 } : { data: [] };
+      case 'afac_vuelo':
+        if (tiene(ops, 'delete')) return {};
+        return esHead(ops) ? { count: m.nAfac ?? 0 } : { data: null };
       case 'escala':
         if (tiene(ops, 'delete')) return {};
         if (esHead(ops)) return { count: m.nTacos ?? 0 };
@@ -338,6 +357,37 @@ describe('deleteFlight — motivo desde la app', () => {
       (l) => l.tabla === 'vuelo_eliminado' && tiene(l.ops, 'delete'),
     );
     expect(rev).toBeDefined();
+  });
+});
+
+describe('deleteFlight — costo real AFAC (16-oct-2026, invariante 90; con la migración)', () => {
+  beforeEach(() => sondaAfac.mockResolvedValue(true));
+  afterEach(() => sondaAfac.mockResolvedValue(false));
+
+  it('con costo real capturado ⇒ 409 VUELO_CON_ACTIVIDAD con `details.afac_real` y su texto, sin borrar', async () => {
+    const w = armar({ nAfac: 1 });
+    const r = await rebote(w.service.deleteFlight(V1, USER));
+    expect(r.status).toBe(409);
+    expect(r.code).toBe('VUELO_CON_ACTIVIDAD');
+    expect(r.details).toEqual({ cobros: 0, gastos: 0, tacos: 0, afac_real: 1 });
+    expect(r.message).toContain('costo real AFAC');
+    expect(w.deletes).toEqual([]);
+  });
+
+  it('sin costo: borra ANTES las filas vacías de `afac_vuelo` (solo costo null) y luego el vuelo', async () => {
+    const w = armar({});
+    await w.service.deleteFlight(V1, USER);
+    expect(w.deletes.indexOf('afac_vuelo')).toBeGreaterThanOrEqual(0);
+    expect(w.deletes.indexOf('afac_vuelo')).toBeLessThan(
+      w.deletes.lastIndexOf('vuelo'),
+    );
+    const limpia = w.llamadas.find(
+      (l) => l.tabla === 'afac_vuelo' && tiene(l.ops, 'delete'),
+    )!;
+    expect(limpia.ops).toContainEqual({
+      m: 'is',
+      args: ['costo_real_mxn', null],
+    });
   });
 });
 

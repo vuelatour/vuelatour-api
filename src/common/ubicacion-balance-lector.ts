@@ -17,6 +17,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { cierreMesDisponible } from './cierre-mes-disponible.util';
+import { afacRealDisponible } from './afac-real-disponible.util';
 import { fetchRepartos, type GastoRepartoFila } from './gasto-reparto.util';
 import {
   necesitaTramosVivos,
@@ -44,11 +45,24 @@ export const GASTO_UBICACION_COLS =
 export const GASTO_UBICACION_COLS_CONTABLE =
   'id, categoria, fecha_gasto, monto, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(fecha_vuelo, aeronave_id, es_externo, periodo_contable, fecha_contable)';
 
-/** Columnas de la lectura según la sonda del cierre de mes. */
-export function gastoUbicacionCols(cierreDisponible: boolean): string {
-  return cierreDisponible
+/**
+ * Columnas de la lectura según la sonda del cierre de mes y la del costo
+ * real AFAC (16-oct-2026, invariante 90: `es_pago_afac` para la regla R2b).
+ * Sin ninguna migración, `GASTO_UBICACION_COLS` tal cual.
+ */
+export function gastoUbicacionCols(
+  cierreDisponible: boolean,
+  afacDisponible = false,
+): string {
+  const base = cierreDisponible
     ? GASTO_UBICACION_COLS_CONTABLE
     : GASTO_UBICACION_COLS;
+  return afacDisponible
+    ? base.replace(
+        'inventario_movimiento_id,',
+        'inventario_movimiento_id, es_pago_afac,',
+      )
+    : base;
 }
 
 /** Tamaño de lote de las lecturas `in (…)` (el de `leerPorLotes`). */
@@ -129,7 +143,10 @@ export async function leerUbicacionBalance(
   let gastos: GastoParaUbicacion[];
   let repartos: Map<string, GastoRepartoFila[]>;
   try {
-    const cols = gastoUbicacionCols(await cierreMesDisponible(sb));
+    const cols = gastoUbicacionCols(
+      await cierreMesDisponible(sb),
+      await afacRealDisponible(sb),
+    );
     const [filasGasto, deReparto] = await Promise.all([
       porLotes(ids, (lote) => sb.from('gasto').select(cols).in('id', lote)),
       fetchRepartos(sb, ids),

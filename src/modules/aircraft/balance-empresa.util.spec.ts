@@ -483,14 +483,14 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
 });
 
 /**
- * PERMISOS AFAC COMO FILAS QUE SUMAN (13-oct-2026, API 0.0.74, invariante
- * 62): las filas «AFAC · matrícula» de «otros movimientos» entran a la
- * aritmética como cualquier fila (cada una ÷ su T.C. = `totales.tc_promedio`
- * del libro de su avión); la señal `afacEnFilas` solo cambia la NOTA. Desde
- * la revisión del 13-oct-2026 su egreso es $0.00 informativo (los permisos
- * pagados ya restan en la cascada de su avión: un gasto, una vez).
+ * AFAC POR VUELO (16-oct-2026, API 0.0.89, invariante 90; sustituye la señal
+ * de las filas «AFAC · matrícula» de la invariante 62): las filas por vuelo
+ * de «otros movimientos» entran a la aritmética como cualquier fila (cada una
+ * ÷ su T.C. = `totales.tc_promedio` del libro de su avión: reservado ⇒
+ * ingresos, costo real ⇒ egresos); la señal `afacPorVuelo` solo cambia la
+ * NOTA.
  */
-describe('afacEnFilas (invariante 62)', () => {
+describe('afacPorVuelo (invariante 90)', () => {
   const baseAfac = {
     participaciones: [
       { matricula: 'N4142R', socio: EMPRESA, porcentaje: 29, monto_usd: 290 },
@@ -510,34 +510,34 @@ describe('afacEnFilas (invariante 62)', () => {
     'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
     'COTIZADO y RESERVA incluidos. ' +
     `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.`;
-  /** La misma frase CON filas AFAC (texto EXACTO del contrato). */
+  /** La misma frase CON filas AFAC por vuelo (texto EXACTO del contrato). */
   const fraseAfac = (pagoVendedor: string) =>
-    "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo, AFAC por avión y sueltas), " +
-    'cada fila a USD con el T.C. de su vuelo; las filas «AFAC · matrícula» con el T.C. promedio de costos del libro de su avión (sin vuelos, el oficial del cierre); ' +
+    "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo, AFAC por vuelo y sueltas), " +
+    'cada fila a USD con el T.C. de su vuelo; las filas AFAC con el T.C. promedio de costos del libro de su avión (sin vuelos, el oficial del cierre); ' +
     'las sueltas con su T.C. o el oficial del día. ' +
     'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
-    'COTIZADO y RESERVA incluidos, más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC). ' +
-    `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos; ` +
-    'los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).';
+    'COTIZADO y RESERVA incluidos, más el AFAC RESERVADO de cada vuelo (lo que su avión ya carga como costo en su columna PERMISO AFAC). ' +
+    `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria, gastos sueltos y el COSTO REAL AFAC capturado por vuelo (lo paga VuelaTour); ` +
+    'los gastos marcados «Pago de AFAC» no egresan aquí: son el comprobante de esos costos.';
   const PAGO_CORTO =
     'pago al vendedor (solo los gastos reales de comisión del vendedor capturados)';
   const PAGO_A_CARGO =
     'pago al vendedor (solo los gastos reales capturados: la «Comisión del vendedor (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en su columna COMISIONES aquí egresa $0.00)';
 
-  it('con la señal: la nota dice que el ingreso incluye la provisión AFAC, con su T.C., y que los permisos pagados van con egreso $0.00 (ya restan en el avión); el resto de la nota y TODOS los números, idénticos', () => {
+  it('con la señal: la nota dice reservado (ingreso) y costo real (egreso) por vuelo y que los marcados no egresan; el resto de la nota y TODOS los números, idénticos', () => {
     const hoy = armarBalanceEmpresa(baseAfac);
-    const afac = armarBalanceEmpresa({ ...baseAfac, afacEnFilas: true });
-    expect(afac.nota).toContain('(por vuelo, AFAC por avión y sueltas)');
+    const afac = armarBalanceEmpresa({ ...baseAfac, afacPorVuelo: true });
+    expect(afac.nota).toContain('(por vuelo, AFAC por vuelo y sueltas)');
+    expect(afac.nota).toContain('más el AFAC RESERVADO de cada vuelo');
     expect(afac.nota).toContain(
-      'las filas «AFAC · matrícula» con el T.C. promedio de costos del libro de su avión (sin vuelos, el oficial del cierre)',
+      'gastos sueltos y el COSTO REAL AFAC capturado por vuelo (lo paga VuelaTour)',
     );
     expect(afac.nota).toContain(
-      'más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC)',
+      'los gastos marcados «Pago de AFAC» no egresan aquí: son el comprobante de esos costos.',
     );
-    expect(afac.nota).toContain(
-      'comisión bancaria y gastos sueltos; los permisos pagados de cada avión van en su fila «AFAC · matrícula» con egreso $0.00: ya restan en el balance de su avión (hoja «permisos»).',
-    );
-    expect(afac.nota).not.toContain('permisos AFAC pagados y');
+    // Nada del texto de la invariante 62 (filas por avión).
+    expect(afac.nota).not.toContain('«AFAC · matrícula»');
+    expect(afac.nota).not.toContain('a cargo del avión');
     // La ÚNICA diferencia con la nota de hoy es esa frase, completa.
     expect(afac.nota).toContain(fraseAfac(PAGO_CORTO));
     expect(hoy.nota).toContain(fraseHoy(PAGO_CORTO));
@@ -551,7 +551,7 @@ describe('afacEnFilas (invariante 62)', () => {
   it('con el pago al vendedor «a cargo del avión» (invariante 61) el fragmento largo va TAL CUAL dentro del texto nuevo', () => {
     const b = armarBalanceEmpresa({
       ...baseAfac,
-      afacEnFilas: true,
+      afacPorVuelo: true,
       pagoVendedorACargoDelAvion: true,
     });
     expect(b.nota).toContain(fraseAfac(PAGO_A_CARGO));
@@ -560,7 +560,7 @@ describe('afacEnFilas (invariante 62)', () => {
 
   it('sin la llave o con false: la nota de hoy BYTE A BYTE (bloque idéntico)', () => {
     const hoy = armarBalanceEmpresa(baseAfac);
-    expect(armarBalanceEmpresa({ ...baseAfac, afacEnFilas: false })).toEqual(
+    expect(armarBalanceEmpresa({ ...baseAfac, afacPorVuelo: false })).toEqual(
       hoy,
     );
     expect(hoy.nota).toContain(fraseHoy(PAGO_CORTO));
@@ -568,10 +568,39 @@ describe('afacEnFilas (invariante 62)', () => {
     const aCargo = armarBalanceEmpresa({
       ...baseAfac,
       pagoVendedorACargoDelAvion: true,
-      afacEnFilas: false,
+      afacPorVuelo: false,
     });
     expect(aCargo.nota).toContain(fraseHoy(PAGO_A_CARGO));
     expect(aCargo.nota).not.toContain('AFAC');
+  });
+
+  it('ladoEnUsd con filas AFAC por vuelo: el reservado ÷ T.C. de la fila en ingresos; el real capturado ÷ el mismo T.C. en egresos; «por capturar» (egreso null) suma 0 y NUNCA vacía su lado', () => {
+    const sinReal = mov({
+      concepto_ingreso:
+        'AFAC reservado · N621TX · 2.60 h × 100.00 USD/hr × T.C. 17.030000',
+      ingreso_mxn: 4427.8,
+      concepto_egreso: 'AFAC costo real · por capturar',
+      egreso_mxn: null,
+      tc: 18.5,
+    });
+    const conReal = mov({
+      ...sinReal,
+      concepto_egreso: 'AFAC costo real · capturó Ale el 16/10/2026',
+      egreso_mxn: 4500,
+    });
+    expect(ladoEnUsd([sinReal], 'ingreso')).toEqual({ usd: 239.34, sinTc: 0 });
+    expect(ladoEnUsd([sinReal], 'egreso')).toEqual({ usd: 0, sinTc: 0 });
+    expect(ladoEnUsd([conReal], 'egreso')).toEqual({ usd: 243.24, sinTc: 0 });
+    // Libro sin T.C.: el reservado vacía ingresos (como la fila por avión del
+    // 0.0.88); sin real, egresos no pierde nada.
+    expect(ladoEnUsd([{ ...sinReal, tc: null }], 'egreso')).toEqual({
+      usd: 0,
+      sinTc: 0,
+    });
+    expect(ladoEnUsd([{ ...conReal, tc: null }], 'egreso')).toEqual({
+      usd: null,
+      sinTc: 1,
+    });
   });
 
   it('ladoEnUsd con una fila AFAC: el ingreso ÷ el T.C. de la fila; el egreso informativo $0.00 suma 0 y NUNCA vacía su lado (ni sin T.C. ni con permisos «USD sin T.C.», que no llevan la marca «sin TC»)', () => {

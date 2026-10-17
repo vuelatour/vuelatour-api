@@ -1637,15 +1637,112 @@ export interface BalanceOtroMovimientoFilaPayload {
    * pyservices nuevo pinta un encabezado de sección antes de la primera; un
    * pyservices previo la pinta como fila normal (suma igual). Las filas por
    * vuelo y las sueltas no la traen.
+   * DESDE EL 0.0.89 (16-oct-2026, invariante 90) el API manda
+   * 'AFAC_VUELO' = UNA fila por VUELO con AFAC: INGRESO (G) = lo RESERVADO
+   * (`permiso_afac_mxn` de la fila del libro, TAL CUAL), EGRESO (D) = el
+   * COSTO REAL que VuelaTour pagó a AFAC (null = sin capturar; es la celda
+   * EDITABLE del libro en pantalla), remanente = reservado − real. Al final
+   * de `filas`, contiguas, con `afac` como ÚLTIMA llave. 'AFAC' ya no se
+   * genera (pyservices la conserva por skew con un API 0.0.74–0.0.88).
    */
-  seccion?: 'AFAC';
+  seccion?: 'AFAC' | 'AFAC_VUELO';
   /**
    * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
    * SOLO en filas de un vuelo con ID (la CLAVE ya dice «#364 ·
    * beh05-011026»; sin ID, «vtbeh364» como siempre); pyservices no lo pinta,
    * solo decide el ancho de la columna A. Sueltas y AFAC no lo llevan.
+   * Las filas AFAC_VUELO la COPIAN de la fila del libro.
    */
   clave_cliente?: string;
+  /**
+   * ADITIVA (16-oct-2026, API 0.0.89, invariante 90), ÚLTIMA llave, SOLO en
+   * las filas `seccion: 'AFAC_VUELO'`: los datos del vuelo para pintar la
+   * fila y para la celda EDITABLE del costo real (columna D, EGRESO).
+   */
+  afac?: BalanceAfacVueloPayload;
+}
+
+/**
+ * Datos de una fila «AFAC por vuelo» (16-oct-2026, API 0.0.89, invariante
+ * 90). Los números son los de la fila del libro TAL CUAL (nadie recalcula):
+ * `reservado_mxn` = `permiso_afac_mxn` = round2(tarifa × tc_costos ×
+ * horas_cobradas). `editable` lo decide el API SIN conocer al usuario
+ * (migración aplicada, fila dueña, avión de la flota y mes contable
+ * ABIERTO); el ROL lo decide el panel (`ROLES_AFAC_REAL`) y el PUT lo vuelve
+ * a validar.
+ */
+export interface BalanceAfacVueloPayload {
+  vuelo_id: string;
+  matricula: string;
+  /** Horas cobradas de la parte de ESTE avión (exactas, sin redondear). */
+  horas_cobradas: number | null;
+  tarifa_usd_hr: number | null;
+  /** T.C. de costos (z) del vuelo, TAL CUAL multiplicó. */
+  tc_costos: number | null;
+  reservado_mxn: number | null;
+  /** null = sin capturar (o fila NO dueña de un vuelo multi-avión). */
+  costo_real_mxn: number | null;
+  remanente_mxn: number | null;
+  capturado_por_nombre: string | null;
+  /** ISO del momento en que se capturó el valor VIGENTE. */
+  capturado_at: string | null;
+  notas: string | null;
+  /** Mes CONTABLE 'YYYY-MM' del vuelo (invariante 89). */
+  mes_contable: string | null;
+  editable: boolean;
+  /** Por qué no se puede editar (es-MX), o null si es editable. */
+  motivo_no_editable: string | null;
+  /** «Viene de septiembre 2026» / «Pendiente de cobro: pasará a …». */
+  cierre_marca: string | null;
+}
+
+/**
+ * Un gasto marcado «Pago de AFAC» del periodo (16-oct-2026, invariante 90):
+ * NO resta en ningún avión ni egresa en VuelaTour (el egreso es el costo
+ * real por vuelo); va en el resumen para la comparación del mes. Cada pago
+ * cae en el libro/mes en que vivía sin la marca (marcar no lo mueve).
+ */
+export interface BalanceAfacPagoPayload {
+  gasto_id: string | null;
+  fecha: string | null;
+  /** Detalle del libro + « · XA-VGV» (con avión) — « · vuelo #280» ya viene en el detalle. */
+  detalle: string;
+  matricula: string | null;
+  /** null = USD sin T.C. (no suma: `pagos_sin_tc`). */
+  monto_mxn: number | null;
+  moneda_original: string | null;
+  monto_original: number | null;
+}
+
+/**
+ * Resumen «AFAC DEL PERIODO» de «otros movimientos» (16-oct-2026, API
+ * 0.0.89, invariante 90): para el bloque bajo TOTALES (FUERA de las sumas)
+ * y los avisos. Viaja con ≥ 1 fila AFAC_VUELO, con pagos marcados o con
+ * reales fuera de libro.
+ */
+export interface BalanceAfacResumenPayload {
+  /** Vuelos distintos con fila AFAC_VUELO. */
+  vuelos: number;
+  vuelos_con_reservado: number;
+  vuelos_con_real: number;
+  /** Con reservado > 0 y sin real (solo con la migración). */
+  vuelos_sin_real: number;
+  /** Σ reservado de las filas (round2). */
+  reservado_mxn: number;
+  /** Σ costo real capturado (una vez por vuelo). */
+  costo_real_mxn: number;
+  /** round2(reservado − real). */
+  remanente_mxn: number;
+  /** Σ pagos marcados con pesos. */
+  pagado_mxn: number;
+  /** Pagos marcados en USD sin T.C. (no suman). */
+  pagos_sin_tc: number;
+  /** round2(pagado − costo real). */
+  diferencia_pagado_mxn: number;
+  /** Red de seguridad: reales de vuelos sin fila en ningún libro (esperado 0). */
+  reales_fuera_de_libro_mxn: number;
+  /** Por `fecha`. */
+  pagos: BalanceAfacPagoPayload[];
 }
 
 export interface BalanceHojaOtrosMovimientosPayload {
@@ -1700,8 +1797,24 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * `afac` del 0.0.69–0.0.73 (que este API ya no manda —invariante 53 (2)
    * SUPERSEDIDA—; pyservices conserva su modelo por skew) y activa
    * encabezado, fila 2 y textos del bloque VUELATOUR.
+   * DESDE EL 0.0.89 (invariante 90) el API YA NO la manda: manda
+   * `afac_por_vuelo` (nunca las dos desde el mismo API).
    */
   afac_en_filas?: true;
+  /**
+   * ADITIVA (16-oct-2026, API 0.0.89, invariante 90), penúltima llave: viaja
+   * SOLO cuando `filas` termina con ≥ 1 fila `seccion: 'AFAC_VUELO'`. Con
+   * ella pyservices pinta esas filas en las columnas de siempre (D = costo
+   * real editable, G = reservado), la leyenda de la fila 2, el bloque «AFAC
+   * DEL PERIODO» y las etiquetas del bloque VUELATOUR.
+   */
+  afac_por_vuelo?: true;
+  /**
+   * ADITIVA (16-oct-2026, API 0.0.89, invariante 90), ÚLTIMA llave: resumen
+   * del periodo (con filas AFAC_VUELO, pagos marcados o reales fuera de
+   * libro). Informativo: NO entra a TOTALES ni al bloque VUELATOUR.
+   */
+  afac_resumen?: BalanceAfacResumenPayload;
 }
 
 export interface BalanceAvionPayload {
@@ -1804,6 +1917,14 @@ export interface BalanceAvionPayload {
    * `pasarian` (`BalanceCierre` de pyservices).
    */
   cierre?: BalanceCierrePayload;
+  /**
+   * ADITIVA (16-oct-2026, API 0.0.89, invariante 90), ÚLTIMA llave del
+   * libro, SOLO con ≥ 1 gasto marcado «Pago de AFAC»: esos PERMISO salen de
+   * la hoja «permisos» (no restan al avión: los paga VuelaTour) y viajan
+   * aquí con la MISMA conversión (`tc_por_fila`). El general los junta en
+   * `otros_movimientos.afac_resumen.pagos`. Sin marcados la llave no viaja.
+   */
+  pagos_afac?: BalanceAvionHojaGastosPayload;
 }
 
 export interface GastoVueloSugerenciaPayload {
