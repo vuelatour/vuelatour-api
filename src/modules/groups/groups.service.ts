@@ -19,6 +19,14 @@ import {
   avisoAvionOcupado,
 } from '../../common/avion-ocupado.util';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90; revisión adversaria): un
+// PERMISO marcado «Pago de AFAC» lo paga VuelaTour — fuera de los gastos del
+// hijo, igual que en el reporte por vuelo. Detrás de la sonda.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import { esPagoAfac } from '../../common/afac-real.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { cobroExigeFactura } from '../../common/cuentas-cobro';
 import { normalizarTc } from '../../common/tc.util';
@@ -1755,9 +1763,14 @@ export class GroupsService {
     const out = new Map<string, { usd: number; n: number; sin_tc: number }>();
     for (const id of ids) out.set(id, { usd: 0, n: 0, sin_tc: 0 });
     if (ids.length === 0) return out;
+    const colAfac = colPagoAfac(
+      await afacRealDisponible(this.supabase.service),
+    );
     const { data } = await this.supabase.service
       .from('gasto')
-      .select('vuelo_id, monto, moneda, tc_gasto, categoria')
+      .select(
+        `vuelo_id, monto, moneda, tc_gasto, categoria${colAfac}` as 'vuelo_id, monto, moneda, tc_gasto, categoria',
+      )
       .in('vuelo_id', ids)
       .limit(5000);
     const tcVuelo = new Map<string, number | null>();
@@ -1773,6 +1786,9 @@ export class GroupsService {
       // exactamente lo que rompe el cierre. COMISION_VENDEDOR (28-sep-2026,
       // invariante 31) tampoco es gasto del hijo (`categoriaFueraDelAvion`).
       if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
+      // Pago de AFAC marcado (invariante 90): lo paga VuelaTour (misma regla
+      // que el reporte por vuelo, fuente única `esPagoAfac`).
+      if (esPagoAfac(g)) continue;
       s.n += 1;
       const monto = num(g.monto);
       if (g.moneda === 'USD') {

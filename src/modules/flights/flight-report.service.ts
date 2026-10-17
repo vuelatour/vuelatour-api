@@ -27,6 +27,15 @@ import {
   textoTacoOmitido,
 } from '../../common/taco-omitido.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+// AFAC POR VUELO (16-oct-2026, invariante 90; revisión adversaria): un
+// PERMISO marcado «Pago de AFAC» lo paga VuelaTour — se LISTA pero no resta
+// en la economía del vuelo (como en el balance, el reparto y el Libro
+// Dinero). Detrás de la sonda de la migración 20261016000005.
+import {
+  afacRealDisponible,
+  colPagoAfac,
+} from '../../common/afac-real-disponible.util';
+import { esPagoAfac } from '../../common/afac-real.util';
 import {
   etiquetaGastoPagoOperador,
   pagoOperadorExternoEnGastos,
@@ -143,6 +152,8 @@ export class FlightReportService {
     if (!v) throw new NotFoundException(`Vuelo ${flightId} not found`);
     // Tacómetro omitido (invariante 79): columnas solo con la migración.
     const colsOmitido = colsTacoOmitido(await tacoOmitidoDisponible(sb));
+    // Marca «Pago de AFAC» (invariante 90): solo con la migración.
+    const colAfac = colPagoAfac(await afacRealDisponible(sb));
 
     const [
       { data: cliente },
@@ -186,7 +197,7 @@ export class FlightReportService {
       sb
         .from('gasto')
         .select(
-          'id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
+          `id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas${colAfac}, proveedor:proveedor_id(nombre)` as 'id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
         )
         .eq('vuelo_id', flightId)
         .order('fecha_gasto', { ascending: true }),
@@ -500,6 +511,13 @@ export class FlightReportService {
             categoriaEsPagoVendedor(g.categoria as string | null)
               ? 'pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)'
               : null,
+            // PAGO DE AFAC (invariante 90): lo paga VuelaTour (comprobante
+            // de los costos reales AFAC por vuelo del Balance general).
+            esPagoAfac(
+              g as { categoria?: string | null; es_pago_afac?: boolean | null },
+            )
+              ? 'pago de AFAC (lo paga VuelaTour) — no resta al vuelo'
+              : null,
             // Invariante 88: este gasto ES el pago al operador externo.
             g === gastoPagoOperador
               ? 'pago al operador externo — cubre el costo capturado (no se suma dos veces)'
@@ -589,6 +607,11 @@ export class FlightReportService {
       // la ganancia descuenta el pago al vendedor UNA vez, abajo (desde el
       // 13-oct-2026 el REAL de las dos categorías, invariante 73).
       if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
+      // PAGO DE AFAC marcado (16-oct-2026, invariante 90; decisión 4 del
+      // cliente): lo paga VuelaTour — fuera del costo del vuelo, como en la
+      // hoja «permisos» del balance y el grupo PERMISO del reparto (fuente
+      // única `esPagoAfac`). Se lista arriba con su nota.
+      if (esPagoAfac(g)) continue;
       const usd = gastoUsd(g);
       if (usd == null) {
         gastosSinTcCount += 1;
