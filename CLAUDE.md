@@ -10320,6 +10320,21 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `bloque-empresa`, `clave-cliente`, `balance-empresa.util`,
       `gasto-avion.util`, `ubicacion-balance-gasto.util`, `me.controller`,
       pre-cierre y flights.
+    - **Revisión adversaria (16-oct-2026)**: (a) el REPORTE POR VUELO
+      (`flight-report.service`) y los gastos por hijo del GRUPO
+      (`groups.service#gastosPorHijo`, que deben coincidir con él) también
+      sacan al marcado de la economía del vuelo (`esPagoAfac`, detrás de la
+      sonda): se LISTA con «pago de AFAC (lo paga VuelaTour) — no resta al
+      vuelo» (spec `flight-report.service.afac.spec`); (b) `deleteFlight` /
+      `purgeFlight` limpian las filas vacías de `afac_vuelo` ANTES de la
+      bitácora y de cualquier paso destructivo (antes: después de borrar los
+      tramos — un fallo dejaba el vuelo vivo sin tramos y la bitácora
+      «eliminado»); (c) PATCH de gasto con `es_pago_afac: null` = no tocar
+      (antes: null sobre la columna NOT NULL ⇒ 500); (d) caso real de prod
+      en `libros.afac-real.spec` («Permisos Vuelos Privados VGV» $5,000 SIN
+      `tc_gasto`, oficial 17.0077): cada libro suelta EXACTO su propia
+      conversión (reparto 293.98 USD) y `pagos_afac` conserva el T.C. que
+      tenía en «permisos».
 
 ## Convenciones NestJS
 

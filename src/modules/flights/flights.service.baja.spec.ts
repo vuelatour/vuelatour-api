@@ -147,6 +147,8 @@ interface Mundo {
   nTacos?: number;
   /** Filas de `afac_vuelo` con costo (invariante 90; con la sonda). */
   nAfac?: number;
+  /** La limpieza de las filas vacías de `afac_vuelo` falla. */
+  afacDeleteError?: boolean;
   /** El DELETE de vuelo falla (revierte la bitácora). */
   deleteError?: boolean;
 }
@@ -175,7 +177,10 @@ function armar(m: Mundo) {
       case 'gasto':
         return esHead(ops) ? { count: m.nGastos ?? 0 } : { data: [] };
       case 'afac_vuelo':
-        if (tiene(ops, 'delete')) return {};
+        if (tiene(ops, 'delete'))
+          return m.afacDeleteError
+            ? { error: { message: 'timeout afac_vuelo' } }
+            : {};
         return esHead(ops) ? { count: m.nAfac ?? 0 } : { data: null };
       case 'escala':
         if (tiene(ops, 'delete')) return {};
@@ -388,6 +393,29 @@ describe('deleteFlight — costo real AFAC (16-oct-2026, invariante 90; con la m
       m: 'is',
       args: ['costo_real_mxn', null],
     });
+    // Revisión 16-oct-2026: la limpieza va ANTES de cualquier paso
+    // destructivo (tramos, historial de cotización, bitácora).
+    expect(w.deletes.indexOf('afac_vuelo')).toBeLessThan(
+      w.deletes.indexOf('escala'),
+    );
+    expect(w.deletes.indexOf('afac_vuelo')).toBeLessThan(
+      w.deletes.indexOf('cotizacion_version_history'),
+    );
+    const iLimpia = w.llamadas.indexOf(limpia);
+    const iBitacora = w.llamadas.findIndex(
+      (l) => l.tabla === 'vuelo_eliminado' && tiene(l.ops, 'insert'),
+    );
+    expect(iBitacora).toBeGreaterThan(iLimpia);
+  });
+
+  it('REVISIÓN: si la limpieza de `afac_vuelo` falla, el vuelo queda INTACTO (sin bitácora, tramos ni calendario tocados)', async () => {
+    const w = armar({ afacDeleteError: true });
+    await expect(w.service.deleteFlight(V1, USER)).rejects.toThrow(
+      'timeout afac_vuelo',
+    );
+    expect(w.deletes).toEqual(['afac_vuelo']);
+    expect(w.inserts.vuelo_eliminado).toBeUndefined();
+    expect(w.removeFlight).not.toHaveBeenCalled();
   });
 });
 

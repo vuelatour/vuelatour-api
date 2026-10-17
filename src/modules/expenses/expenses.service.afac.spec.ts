@@ -388,6 +388,21 @@ describe('ExpensesService.update — es_pago_afac (invariante 90)', () => {
     });
   });
 
+  it('REVISIÓN: `null` = no tocar (jamás un null sobre la columna NOT NULL); solo null ⇒ no escribe nada', async () => {
+    const a = armar({ actual: permiso({ es_pago_afac: true }) });
+    await patch(a, {
+      es_pago_afac: null as unknown as boolean,
+      notas: 'nota nueva',
+    });
+    expect(cuerpoDe(a.consultas, 'update')).not.toHaveProperty('es_pago_afac');
+    expect(cuerpoDe(a.consultas, 'update')).toMatchObject({
+      notas: 'nota nueva',
+    });
+    const b = armar({ actual: permiso({ es_pago_afac: true }) });
+    await patch(b, { es_pago_afac: null as unknown as boolean });
+    expect(conOp(b.consultas, 'update')).toHaveLength(0);
+  });
+
   it('un rol de campo que la CAMBIA ⇒ 403; sin la migración true ⇒ 503 y false se ignora', async () => {
     const a = armar({ actual: permiso() });
     const r = await rebote(patch(a, { es_pago_afac: true }, Rol.PILOTO));

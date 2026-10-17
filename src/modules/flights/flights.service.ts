@@ -1479,6 +1479,14 @@ export class FlightsService {
     const tripulacion = await this.tripulacionDeVuelo(id, vuelo);
     // Hijo de GRUPO (4-sep): el contexto se resuelve ANTES de borrar.
     const ctxGrupo = await contextoGrupoDeVuelo(this.supabase.service, vuelo);
+    // Filas de `afac_vuelo` SIN costo (alguien lo capturó y lo quitó; la
+    // FK sin cláusula de borrado las haría estorbar): fuera ANTES de la
+    // bitácora y de cualquier paso destructivo (revisión 16-oct-2026: un
+    // fallo aquí después de borrar los tramos dejaba el vuelo vivo SIN
+    // tramos y la bitácora diciendo «eliminado»). Sin dinero: la historia
+    // vive en `afac_vuelo_bitacora`. Solo las vacías — un costo capturado
+    // en la carrera deja que la FK bloquee el borrado.
+    if (conAfac) await this.limpiarAfacVacio(id);
     // Bitácora forense ANTES de borrar (29-ago): snapshot CRUDO del vuelo y
     // sus tramos (montos y fechas incluidos). Sin bitácora no hay borrado;
     // si el DELETE falla, se revierte.
@@ -1518,10 +1526,6 @@ export class FlightsService {
     await this.calendar.removeFlight(id).catch(() => undefined);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
-    // Filas de `afac_vuelo` SIN costo (alguien lo capturó y lo quitó): el
-    // FK sin cláusula de borrado las haría estorbar. Solo las vacías — un
-    // costo capturado en la carrera deja que la FK bloquee el borrado.
-    if (conAfac) await this.limpiarAfacVacio(id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) {
       // Revertir la bitácora: el vuelo sigue existiendo.
@@ -1888,6 +1892,9 @@ export class FlightsService {
     // Facturas EMITIDAS ligadas (24-sep-2026): con una VIGENTE ⇒ 409 (antes
     // de la bitácora); las canceladas/borradas se desligan y quedan en ella.
     const desligadas = await this.ligasFacturaEmitidaParaBorrar(id, folio);
+    // `afac_vuelo` SIN costo (invariante 90): fuera ANTES de la bitácora y
+    // de cualquier paso destructivo (mismo orden que `deleteFlight`).
+    if (conAfac) await this.limpiarAfacVacio(id);
 
     // Bitácora forense ANTES de borrar (si el delete falla, se revierte).
     const bitacoraId = await this.escribirBitacoraVueloEliminado(
@@ -1919,7 +1926,6 @@ export class FlightsService {
       .eq('vuelo_id', id);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
-    if (conAfac) await this.limpiarAfacVacio(id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) {
       // Revertir la bitácora: el vuelo sigue existiendo.

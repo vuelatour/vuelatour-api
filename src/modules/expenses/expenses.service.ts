@@ -468,6 +468,13 @@ export class ExpensesService {
     actual: { categoria?: string; es_pago_afac?: boolean | null } | null,
   ): Promise<void> {
     if (dto.es_pago_afac === undefined) return;
+    // `null` (revisión 16-oct-2026): `@IsOptional` lo deja pasar y `cols =
+    // { ...dto }` lo escribiría sobre una columna NOT NULL (23502 ⇒ 500).
+    // null = «no tocar», como ausente.
+    if (dto.es_pago_afac === null) {
+      delete dto.es_pago_afac;
+      return;
+    }
     const disponible = await afacRealDisponible(this.supabase.service);
     if (!disponible) {
       if (dto.es_pago_afac === true) throw errorAfacRealNoDisponible();

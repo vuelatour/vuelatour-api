@@ -433,4 +433,115 @@ describe('PAGO DE AFAC marcado en los tres libros (invariante 90)', () => {
   });
 });
 
+/**
+ * REVISIÓN ADVERSARIA (16-oct-2026): el MISMO gasto con la forma REAL de
+ * prod (SELECT del 16-oct, id a03433b7…): «Permisos Vuelos Privados VGV»
+ * $5,000.00 MXN, PERMISO, SIN `tc_gasto`, sin vuelo, 1-sep-2026,
+ * TRANSFERENCIA conciliada; T.C. oficial del 1-sep = 17.0077. Sin T.C.
+ * propio cada libro lo convierte con SU regla (balance: T.C. de las hojas;
+ * reparto: oficial del día ⇒ 5000 / 17.0077 = 293.98 USD; Libro Dinero:
+ * pesos). Marcarlo debe sacar EXACTAMENTE esa conversión de cada uno (nada
+ * más se mueve) y `pagos_afac` lo lleva con la MISMA conversión que tenía
+ * en la hoja «permisos».
+ */
+describe('PAGO DE AFAC marcado — caso real de prod sin T.C. propio (revisión)', () => {
+  const PERMISO_REAL: Fila = { ...PERMISO_VGV, tc_gasto: null };
+  const tcOficial = {
+    oficialDetallePara: () =>
+      Promise.resolve({
+        tc: 17.0077,
+        fecha_dato: '2026-09-01',
+        fuente: 'OPEN_ER_API',
+      }),
+  };
+  function tablasReal(marcado: boolean | null): Record<string, Fila[]> {
+    const t = mundo({ diferido: false });
+    if (marcado != null) {
+      t.gasto = [...t.gasto, { ...PERMISO_REAL, es_pago_afac: marcado }];
+    }
+    return t;
+  }
+  async function libros(marcado: boolean | null) {
+    const t = tablasReal(marcado);
+    const fb = fakeCierre(t, {});
+    const b = await (
+      new AircraftBalanceService(
+        fb.supabase as unknown as SupabaseService,
+        {} as never,
+        { proximoServicio: () => null } as never,
+        tcOficial as never,
+        {} as never,
+        config as never,
+      ) as unknown as {
+        buildPayload: (
+          a: string | null,
+          d: string,
+          h: string,
+        ) => Promise<BalanceAvionPayload>;
+      }
+    ).buildPayload(AV, SEP.desde, SEP.hasta);
+    const fr = fakeCierre(t, {});
+    const r = await new ProfitSharingService(
+      fr.supabase as unknown as SupabaseService,
+      {} as never,
+      tcOficial as never,
+      {} as never,
+      config as never,
+    ).compute(SEP);
+    const d = await dinero(t).buildPayload(SEP.desde, SEP.hasta);
+    return { b, r: r.aviones[0], d };
+  }
+  const permisosDinero = (p: DineroXlsxPayload) =>
+    p.utilidades_aviones?.find((u) => u.matricula === 'XB-TST')?.permisos_mxn ??
+    0;
+
+  it('sin marca resta su conversión en cada libro; MARCADO sale EXACTO de los tres y viaja en `pagos_afac` con el MISMO T.C.', async () => {
+    const base = await libros(null);
+    const sin = await libros(false);
+    const con = await libros(true);
+    // Sin marca: 5,000 en la hoja (MXN: `tc_aplicado` null, la hoja pasa
+    // a USD con el T.C. de las hojas = 20 en este mundo); reparto 293.98 USD
+    // (oficial del día); Libro Dinero 5,000 pesos.
+    expect(sin.b.permisos.total_mxn).toBe(5000);
+    const filaPermiso = sin.b.permisos.filas.find(
+      (f) => f.gasto_id === PERMISO_REAL.id,
+    )!;
+    expect(filaPermiso).toMatchObject({ monto_mxn: 5000, tc_aplicado: null });
+    const deltaBalanceUsd = r2(
+      sin.b.balance.permisos_usd! - (base.b.balance.permisos_usd ?? 0),
+    );
+    expect(deltaBalanceUsd).toBe(250);
+    expect(r2(sin.r.gastos.permisos_usd - base.r.gastos.permisos_usd)).toBe(
+      293.98,
+    );
+    expect(r2(permisosDinero(sin.d) - permisosDinero(base.d))).toBe(5000);
+    // Marcado: los tres libros vuelven EXACTO a como estaban sin el gasto.
+    expect(con.b.permisos.total_mxn).toBe(base.b.permisos.total_mxn);
+    expect(con.b.balance.permisos_usd).toBe(base.b.balance.permisos_usd);
+    expect(con.b.balance.utilidad_cobrada_usd).toBe(
+      base.b.balance.utilidad_cobrada_usd,
+    );
+    expect(con.b.balance.socios).toEqual(base.b.balance.socios);
+    expect(con.r.gastos.permisos_usd).toBe(base.r.gastos.permisos_usd);
+    expect(con.r.saldo_disponible_usd).toBe(base.r.saldo_disponible_usd);
+    expect(permisosDinero(con.d)).toBe(permisosDinero(base.d));
+    // Viaja aparte con la MISMA conversión que tenía en «permisos».
+    expect(con.b.pagos_afac!.filas).toEqual([
+      expect.objectContaining({
+        gasto_id: PERMISO_REAL.id,
+        monto_mxn: 5000,
+        tc_aplicado: null,
+      }),
+    ]);
+    expect(con.b.pagos_afac!.total_mxn).toBe(5000);
+    expect(r2(con.b.pagos_afac!.usd ?? 0)).toBe(deltaBalanceUsd);
+    // El reparto lo lista EXCLUIDO con el oficial del día (transparencia).
+    expect(
+      con.r.detalle.gastos_por_categoria.find(
+        (c) => c.categoria === PAGO_AFAC_CLAVE_DETALLE,
+      ),
+    ).toMatchObject({ grupo: 'EXCLUIDO', count: 1, usd: 293.98 });
+  });
+});
+
 const r2 = (x: number) => Math.round(x * 100) / 100;
