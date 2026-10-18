@@ -196,6 +196,22 @@ export function diaCortoCancun(iso: string | null | undefined): string {
   return `${Number(dia.slice(8, 10))}-${MESES_CORTOS[Number(dia.slice(5, 7)) - 1]}`;
 }
 
+/** '30-sep' de un día de pared 'YYYY-MM-DD' (sin pasar por zona horaria). */
+export function diaCortoDeDia(dia: string | null | undefined): string {
+  if (typeof dia !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(dia)) return '';
+  const m = Number(dia.slice(5, 7));
+  if (m < 1 || m > 12) return '';
+  return `${Number(dia.slice(8, 10))}-${MESES_CORTOS[m - 1]}`;
+}
+
+/**
+ * Último día (YYYY-MM-DD) del mes ANTERIOR a `destino`: el corte con el que
+ * se midió «cobrado al cierre» de un vuelo que pasa a `destino`.
+ */
+export function corteDeDestino(destino: string): string {
+  return rangoDelMes(mesAnteriorDe(destino)).hasta;
+}
+
 /** '$2,076.40 USD' / '$36,632.89 MXN'. */
 export function dineroTexto(
   monto: number,
@@ -258,6 +274,12 @@ export interface DecisionDiferir {
   por_cobrar_usd: number;
   /** Cobrado con fecha POSTERIOR al mes (ya está pagado hoy). */
   cobrado_posterior_usd: number;
+  /**
+   * Día Cancún (YYYY-MM-DD) del cobro positivo MÁS RECIENTE con fecha
+   * posterior al corte; null si no hay (16-oct-2026: la leyenda de un
+   * COBRO_POSTERIOR dice «cobrado el 14-oct, después del 30-sep»).
+   */
+  fecha_cobro_posterior: string | null;
   /** Cobros MXN que no convirtieron (el pre-cierre los bloquea antes). */
   sin_tc_count: number;
 }
@@ -311,8 +333,31 @@ export function decisionDiferir(
     cobrado_usd: round2(alCorte.total_usd),
     por_cobrar_usd: round2(Math.max(0, venta - alCorte.total_usd)),
     cobrado_posterior_usd: posterior,
+    fecha_cobro_posterior:
+      posterior > 0 ? fechaCobroPosterior(cobros, ultimoDia) : null,
     sin_tc_count: alCorte.sin_tc_count,
   };
+}
+
+/** Día Cancún del cobro positivo más reciente con fecha > `ultimoDia`. */
+function fechaCobroPosterior(
+  cobros: ReadonlyArray<CobroParaCorte>,
+  ultimoDia: string,
+): string | null {
+  let max: string | null = null;
+  for (const c of cobros) {
+    const f = c.fecha_cobro;
+    if (typeof f !== 'string' || !f) continue;
+    if (!(Number(c.monto) > 0)) continue;
+    let dia: string;
+    try {
+      dia = diaCancun(f);
+    } catch {
+      continue;
+    }
+    if (dia > ultimoDia && (max == null || dia > max)) max = dia;
+  }
+  return max;
 }
 
 // ===== Mes contable de un GASTO =====
@@ -408,24 +453,97 @@ export function textoMesCerrado(c: CierreParaTexto): string {
   return `${etiqueta} ya está cerrado (${paren}). Reábrelo en Reportes para corregir.`;
 }
 
-/** Leyenda del mes de ORIGEN: «Pasa a octubre 2026 · pendiente de cobro: cobrado $0.00 de $2,076.40 USD». */
-export function leyendaPasaA(
-  destino: string,
-  d: Pick<DecisionDiferir, 'cobrado_usd' | 'venta_usd'>,
-): string {
+/**
+ * Lo que una leyenda del cierre sabe del vuelo: los montos AL CORTE y, si
+ * viene de la decisión o de la bitácora, el motivo y lo cobrado DESPUÉS.
+ */
+export type DatosLeyendaCierre = Pick<
+  DecisionDiferir,
+  'cobrado_usd' | 'venta_usd'
+> &
+  Partial<
+    Pick<
+      DecisionDiferir,
+      'motivo' | 'cobrado_posterior_usd' | 'fecha_cobro_posterior'
+    >
+  >;
+
+/** «cobrado el 14-oct, después del 30-sep» / «cobrado después del 30-sep». */
+function cobradoDespuesTexto(destino: string, d: DatosLeyendaCierre): string {
+  const corte = diaCortoDeDia(corteDeDestino(destino));
+  const cuando = diaCortoDeDia(d.fecha_cobro_posterior ?? null);
+  return cuando
+    ? `cobrado el ${cuando}, después del ${corte}`
+    : `cobrado después del ${corte}`;
+}
+
+/**
+ * Leyenda del mes de ORIGEN (mes cerrado):
+ *  - SIN_COBRO / COBRO_PARCIAL: «Pasa a octubre 2026 · pendiente de cobro:
+ *    cobrado $0.00 de $2,076.40 USD» (byte a byte la de siempre).
+ *  - COBRO_POSTERIOR (16-oct-2026, «aparece que aún no se cobran pero sí
+ *    están cobrados»): «Pasa a octubre 2026 · cobrado el 14-oct, después
+ *    del 30-sep (al 30-sep: $0.00 de $2,343.20 USD)». Sigue empezando con
+ *    «Pasa a» (el panel y pyservices colorean por el prefijo).
+ */
+export function leyendaPasaA(destino: string, d: DatosLeyendaCierre): string {
+  if (d.motivo === 'COBRO_POSTERIOR') {
+    const corte = diaCortoDeDia(corteDeDestino(destino));
+    return `Pasa a ${etiquetaMesMinuscula(destino)} · ${cobradoDespuesTexto(
+      destino,
+      d,
+    )} (al ${corte}: ${dineroTexto(d.cobrado_usd)} de ${dineroTexto(d.venta_usd)})`;
+  }
   return `Pasa a ${etiquetaMesMinuscula(destino)} · pendiente de cobro: cobrado ${dineroTexto(
     d.cobrado_usd,
   )} de ${dineroTexto(d.venta_usd)}`;
 }
 
-/** Leyenda en un mes ABIERTO: «Pendiente de cobro: pasará a octubre 2026 al cerrar (cobrado $0.00 de $2,076.40 USD)». */
-export function leyendaPasara(
-  destino: string,
-  d: Pick<DecisionDiferir, 'cobrado_usd' | 'venta_usd'>,
-): string {
+/**
+ * Leyenda en un mes ABIERTO:
+ *  - SIN_COBRO / COBRO_PARCIAL: «Pendiente de cobro: pasará a octubre 2026
+ *    al cerrar (cobrado $0.00 de $2,076.40 USD)»; si ya entró algo después
+ *    del corte, «… (al 30-sep: cobrado $500.00 de $2,076.40 USD; después:
+ *    $500.00 USD)».
+ *  - COBRO_POSTERIOR: «Pasará a octubre 2026 al cerrar · cobrado el 14-oct,
+ *    después del 30-sep (al 30-sep: $0.00 de $2,343.20 USD)».
+ */
+export function leyendaPasara(destino: string, d: DatosLeyendaCierre): string {
+  const corte = diaCortoDeDia(corteDeDestino(destino));
+  if (d.motivo === 'COBRO_POSTERIOR') {
+    return `Pasará a ${etiquetaMesMinuscula(destino)} al cerrar · ${cobradoDespuesTexto(
+      destino,
+      d,
+    )} (al ${corte}: ${dineroTexto(d.cobrado_usd)} de ${dineroTexto(d.venta_usd)})`;
+  }
+  const despues = d.cobrado_posterior_usd ?? 0;
+  if (despues > 0) {
+    return `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar (al ${corte}: cobrado ${dineroTexto(
+      d.cobrado_usd,
+    )} de ${dineroTexto(d.venta_usd)}; después: ${dineroTexto(despues)})`;
+  }
   return `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar (cobrado ${dineroTexto(
     d.cobrado_usd,
   )} de ${dineroTexto(d.venta_usd)})`;
+}
+
+/**
+ * Marca CORTA de una fila de un mes ABIERTO que pasaría al cerrar (balance,
+ * Libro Dinero): «Pendiente de cobro: pasará a octubre 2026 al cerrar» o,
+ * si ya se cobró después del corte, «Pasará a octubre 2026 al cerrar ·
+ * cobrado el 14-oct, después del 30-sep».
+ */
+export function marcaPasaraAlCerrar(
+  destino: string,
+  d?: Partial<Pick<DecisionDiferir, 'motivo' | 'fecha_cobro_posterior'>> | null,
+): string {
+  if (d?.motivo === 'COBRO_POSTERIOR') {
+    return `Pasará a ${etiquetaMesMinuscula(destino)} al cerrar · ${cobradoDespuesTexto(
+      destino,
+      { cobrado_usd: 0, venta_usd: 0, ...d },
+    )}`;
+  }
+  return `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar`;
 }
 
 /** Leyenda del mes DESTINO: «Viene de septiembre 2026». */
@@ -541,11 +659,15 @@ export function salidaDeVuelo(
   );
 }
 
-/** Pre-cierre: «Pasará a octubre 2026 al cerrar (cobrado $0.00 de $2,076.40 USD)». */
+/**
+ * Pre-cierre: «Pasará a octubre 2026 al cerrar (cobrado $0.00 de $2,076.40
+ * USD)»; con COBRO_POSTERIOR, la de `leyendaPasara` (dice cuándo se cobró).
+ */
 export function leyendaPasaraAlCerrar(
   destino: string,
-  d: Pick<DecisionDiferir, 'cobrado_usd' | 'venta_usd'>,
+  d: DatosLeyendaCierre,
 ): string {
+  if (d.motivo === 'COBRO_POSTERIOR') return leyendaPasara(destino, d);
   return `Pasará a ${etiquetaMesMinuscula(destino)} al cerrar (cobrado ${dineroTexto(
     d.cobrado_usd,
   )} de ${dineroTexto(d.venta_usd)})`;

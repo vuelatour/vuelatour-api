@@ -395,6 +395,8 @@ export interface CierreRepartoVuelo {
   /** Solo en los que la DECISIÓN manda (pasarían / excluidos). */
   motivo?: MotivoDiferir;
   cobrado_posterior_usd?: number;
+  /** Día Cancún del último cobro después del corte (16-oct-2026, ADITIVO). */
+  fecha_cobro_posterior?: string | null;
 }
 
 /** Bloque ADITIVO `cierre` de `GET /v1/profit-sharing` (invariante 89). */
@@ -1562,7 +1564,12 @@ export class ProfitSharingService {
     const item = (
       v: VueloRow,
       d: Pick<DecisionDiferir, 'venta_usd' | 'cobrado_usd' | 'por_cobrar_usd'> &
-        Partial<Pick<DecisionDiferir, 'motivo' | 'cobrado_posterior_usd'>>,
+        Partial<
+          Pick<
+            DecisionDiferir,
+            'motivo' | 'cobrado_posterior_usd' | 'fecha_cobro_posterior'
+          >
+        >,
     ) => ({
       id: v.id,
       folio: v.folio ?? null,
@@ -1578,6 +1585,9 @@ export class ProfitSharingService {
         ? {
             motivo: d.motivo,
             cobrado_posterior_usd: d.cobrado_posterior_usd ?? 0,
+            ...(d.fecha_cobro_posterior
+              ? { fecha_cobro_posterior: d.fecha_cobro_posterior }
+              : {}),
           }
         : {}),
     });

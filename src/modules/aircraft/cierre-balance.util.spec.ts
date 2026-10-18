@@ -185,6 +185,70 @@ describe('listas del bloque CIERRE DEL MES', () => {
     );
   });
 
+  it('COBRO_POSTERIOR (#351, «aparece que aún no se cobran pero sí están cobrados»): llaves aditivas y leyenda que dice cuándo se cobró', () => {
+    const f = fila({ tc_venta: 17.71, total_cotizacion_mxn: null });
+    const it = itemCierreDeFila(f, 'N621TX', {
+      venta_usd: 2343.2,
+      cobrado_usd: 0,
+      por_cobrar_usd: 2343.2,
+      destino: '2026-10',
+      leyenda: '',
+      motivo: 'COBRO_POSTERIOR',
+      cobrado_despues_usd: 2343.2,
+      fecha_cobro_despues: '2026-10-14',
+    });
+    expect(it).toMatchObject({
+      motivo: 'COBRO_POSTERIOR',
+      corte: '2026-09-30',
+      cobrado_despues_usd: 2343.2,
+      cobrado_despues_mxn: 41498.07,
+      fecha_cobro_despues: '2026-10-14',
+    });
+    // Las llaves nuevas van AL FINAL (después de `leyenda`).
+    const llaves = Object.keys(it);
+    expect(llaves.indexOf('motivo')).toBeGreaterThan(llaves.indexOf('leyenda'));
+    expect(leyendaSombraBalance('2026-10', it, 'COBRO_POSTERIOR')).toBe(
+      'Pasa a octubre 2026 (cobrado después del 30-sep; al cierre: $0.00 MXN de $41,498.07 MXN)',
+    );
+    expect(
+      leyendaPasariaBalance('2026-10', {
+        motivo: 'COBRO_POSTERIOR',
+        fecha_cobro_posterior: '2026-10-14',
+      }),
+    ).toBe(
+      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep',
+    );
+    // Sin motivo (bitácora vieja / API previo): ni una llave nueva.
+    const viejo = itemCierreDeFila(fila(), 'N621TX', {
+      venta_usd: 4931.16,
+      cobrado_usd: 0,
+      por_cobrar_usd: 4931.16,
+      destino: '2026-10',
+      leyenda: '',
+    });
+    for (const k of [
+      'motivo',
+      'corte',
+      'cobrado_despues_usd',
+      'cobrado_despues_mxn',
+      'fecha_cobro_despues',
+    ]) {
+      expect(viejo).not.toHaveProperty(k);
+    }
+    // Con motivo pero sin saber lo cobrado después (sombra de la bitácora):
+    // solo motivo + corte.
+    const sombra = itemCierreDeFila(fila(), 'N621TX', {
+      venta_usd: 4931.16,
+      cobrado_usd: 0,
+      por_cobrar_usd: 4931.16,
+      destino: '2026-10',
+      leyenda: '',
+      motivo: 'SIN_COBRO',
+    });
+    expect(sombra).toMatchObject({ motivo: 'SIN_COBRO', corte: '2026-09-30' });
+    expect(sombra).not.toHaveProperty('cobrado_despues_usd');
+  });
+
   it('pendiente del libro y resumen por matrícula (un multi-avión cuenta una vez por libro)', () => {
     const a = itemCierreDeFila(fila(), 'N621TX', {
       venta_usd: 4931.16,

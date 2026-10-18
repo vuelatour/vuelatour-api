@@ -343,7 +343,7 @@ describe('REPARTO con un vuelo diferido (septiembre ⇒ octubre)', () => {
         venta_usd: 1000,
         cobrado_usd: 0,
         leyenda:
-          'Pasa a octubre 2026 · pendiente de cobro: cobrado $0.00 USD de $1,000.00 USD',
+          'Pasa a octubre 2026 · cobrado después del 30-sep (al 30-sep: $0.00 USD de $1,000.00 USD)',
       }),
     ]);
   });
@@ -410,7 +410,7 @@ describe('BALANCE por avión con el vuelo diferido', () => {
       diferido_a: '2026-10',
     });
     expect(sombra?.cierre_marca).toBe(
-      'Pasa a octubre 2026 (pendiente de cobro: cobrado $0.00 MXN de $20,000.00 MXN)',
+      'Pasa a octubre 2026 (cobrado después del 30-sep; al cierre: $0.00 MXN de $20,000.00 MXN)',
     );
     expect(p.totales.total_mxn).toBe(40000);
     expect(p.totales.op_mxn).toBe(0);

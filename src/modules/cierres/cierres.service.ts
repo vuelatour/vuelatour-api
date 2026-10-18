@@ -122,6 +122,8 @@ export interface VueloDiferidoSalida {
   cobrado_usd: number;
   por_cobrar_usd: number;
   cobrado_posterior_usd: number;
+  /** Día Cancún del último cobro después del corte (ADITIVO 16-oct-2026). */
+  fecha_cobro_posterior: string | null;
   motivo: MotivoDiferir | null;
   destino?: string;
   origen?: string;
@@ -406,6 +408,7 @@ export class CierresService {
       cobrado_usd: d.cobrado_usd,
       por_cobrar_usd: d.por_cobrar_usd,
       cobrado_posterior_usd: d.cobrado_posterior_usd ?? 0,
+      fecha_cobro_posterior: d.fecha_cobro_posterior ?? null,
       motivo: d.motivo ?? null,
       ...(d.destino ? { destino: d.destino } : {}),
       ...(d.origen ? { origen: d.origen } : {}),

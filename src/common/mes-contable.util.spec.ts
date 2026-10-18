@@ -1,6 +1,8 @@
 import {
   cobradoAlCorte,
+  corteDeDestino,
   decisionDiferir,
+  diaCortoDeDia,
   diaContableDeGasto,
   ejeContableDeGasto,
   etiquetaMes,
@@ -8,6 +10,7 @@ import {
   leyendaPasara,
   leyendaPasaraAlCerrar,
   leyendaVieneDe,
+  marcaPasaraAlCerrar,
   mesAnteriorDe,
   mesCalendarioDeRango,
   mesContableDeGasto,
@@ -89,6 +92,39 @@ describe('decisionDiferir — los 5 vuelos de septiembre cobrados en octubre (pr
     );
   });
 
+  it('dice CUÁNDO se cobró: fecha del último cobro después del corte (día Cancún)', () => {
+    const d351 = decisionDiferir(
+      completado(2343.2),
+      [mxn(41498.07, 17.71, '2026-10-14T17:00:00Z')],
+      FIN_SEP,
+    );
+    expect(d351?.fecha_cobro_posterior).toBe('2026-10-14');
+    // Varios cobros después del corte: el más reciente; 1-oct 03:00Z es el
+    // 30-sep en Cancún (cuenta al corte, no después). Todo cubierto ⇒
+    // COBRO_POSTERIOR; con un faltante ⇒ COBRO_PARCIAL, también con fecha.
+    const d = decisionDiferir(
+      completado(1000),
+      [
+        usd(400, '2026-10-01T03:00:00Z'),
+        usd(300, '2026-10-02T17:00:00Z'),
+        usd(300, '2026-10-06T17:00:00Z'),
+      ],
+      FIN_SEP,
+    );
+    expect(d?.motivo).toBe('COBRO_POSTERIOR');
+    expect(d?.cobrado_usd).toBe(400);
+    expect(d?.fecha_cobro_posterior).toBe('2026-10-06');
+    const parcial = decisionDiferir(
+      completado(1000),
+      [usd(400, '2026-10-01T03:00:00Z'), usd(300, '2026-10-02T17:00:00Z')],
+      FIN_SEP,
+    );
+    expect(parcial?.motivo).toBe('COBRO_PARCIAL');
+    expect(parcial?.fecha_cobro_posterior).toBe('2026-10-02');
+    const sinNada = decisionDiferir(completado(1000), [], FIN_SEP);
+    expect(sinNada?.fecha_cobro_posterior).toBeNull();
+  });
+
   it('la suma de la venta de los 5 = 16,199.76 USD (QA-1)', () => {
     const totales = [2076.4, 4931.16, 2697, 4152, 2343.2];
     expect(Math.round(totales.reduce((a, b) => a + b, 0) * 100) / 100).toBe(
@@ -136,6 +172,7 @@ describe('decisionDiferir — reglas', () => {
       cobrado_usd: 500,
       por_cobrar_usd: 1500,
       cobrado_posterior_usd: 0,
+      fecha_cobro_posterior: null,
       sin_tc_count: 0,
     });
   });
@@ -442,6 +479,80 @@ describe('textos es-MX (fuente única; el panel y pyservices copian)', () => {
     );
     expect(leyendaVieneDe('2026-09')).toBe('Viene de septiembre 2026');
     expect(statusCobroSombra('2026-10')).toBe('Pasa a oct-2026');
+    expect(marcaPasaraAlCerrar('2026-10')).toBe(
+      'Pendiente de cobro: pasará a octubre 2026 al cerrar',
+    );
+  });
+
+  it('COBRO_POSTERIOR (caso #351, «aparece que aún no se cobran pero sí están cobrados»): las leyendas dicen cuándo se cobró, nunca «pendiente de cobro»', () => {
+    const d = {
+      motivo: 'COBRO_POSTERIOR' as const,
+      cobrado_usd: 0,
+      venta_usd: 2343.2,
+      cobrado_posterior_usd: 2343.2,
+      fecha_cobro_posterior: '2026-10-14',
+    };
+    expect(leyendaPasara('2026-10', d)).toBe(
+      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+    );
+    expect(leyendaPasaA('2026-10', d)).toBe(
+      'Pasa a octubre 2026 · cobrado el 14-oct, después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+    );
+    expect(leyendaPasaraAlCerrar('2026-10', d)).toBe(
+      leyendaPasara('2026-10', d),
+    );
+    expect(marcaPasaraAlCerrar('2026-10', d)).toBe(
+      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep',
+    );
+    // Desde la bitácora (mes ya cerrado) no se sabe la fecha:
+    expect(
+      leyendaPasaA('2026-10', {
+        motivo: 'COBRO_POSTERIOR',
+        cobrado_usd: 0,
+        venta_usd: 2343.2,
+      }),
+    ).toBe(
+      'Pasa a octubre 2026 · cobrado después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+    );
+    // Corte de febrero y de diciembre ⇒ enero.
+    expect(corteDeDestino('2027-03')).toBe('2027-02-28');
+    expect(corteDeDestino('2027-01')).toBe('2026-12-31');
+    expect(diaCortoDeDia('2026-12-31')).toBe('31-dic');
+    expect(diaCortoDeDia('nada')).toBe('');
+    for (const t of [
+      leyendaPasara('2026-10', d),
+      leyendaPasaA('2026-10', d),
+      marcaPasaraAlCerrar('2026-10', d),
+    ]) {
+      expect(t).not.toMatch(/pendiente de cobro/i);
+      expect(t).toMatch(/^(Pasa a|Pasará a) /);
+    }
+  });
+
+  it('pendiente con algo cobrado después del corte: lo dice sin cambiar el prefijo', () => {
+    expect(
+      leyendaPasara('2026-10', {
+        motivo: 'COBRO_PARCIAL',
+        cobrado_usd: 400,
+        venta_usd: 1000,
+        cobrado_posterior_usd: 300,
+        fecha_cobro_posterior: '2026-10-06',
+      }),
+    ).toBe(
+      'Pendiente de cobro: pasará a octubre 2026 al cerrar (al 30-sep: cobrado $400.00 USD de $1,000.00 USD; después: $300.00 USD)',
+    );
+    // Sin nada después: byte a byte la de siempre.
+    expect(
+      leyendaPasara('2026-10', {
+        motivo: 'SIN_COBRO',
+        cobrado_usd: 0,
+        venta_usd: 1000,
+        cobrado_posterior_usd: 0,
+        fecha_cobro_posterior: null,
+      }),
+    ).toBe(
+      'Pendiente de cobro: pasará a octubre 2026 al cerrar (cobrado $0.00 USD de $1,000.00 USD)',
+    );
     expect(etiquetaMes('2026-09', true)).toBe('sep-2026');
   });
 });

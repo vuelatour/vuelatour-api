@@ -21,10 +21,15 @@
  */
 import type { BalanceAvionVueloPayload } from '../pyservices/pyservices.service';
 import {
+  corteDeDestino,
+  diaCortoDeDia,
   dineroTexto,
   etiquetaMesMinuscula,
   leyendaVieneDe,
+  marcaPasaraAlCerrar,
   statusCobroSombra,
+  type DecisionDiferir,
+  type MotivoDiferir,
 } from '../../common/mes-contable.util';
 
 /** Un vuelo de las listas `cierre.pasan` / `vienen` / `pasarian` del libro. */
@@ -46,6 +51,18 @@ export interface BalanceCierreVueloPayload {
   /** 'YYYY-MM' (vienen). */
   origen?: string;
   leyenda: string;
+  /**
+   * ADITIVOS (16-oct-2026, «aparece que aún no se cobran pero sí están
+   * cobrados»): por qué pasa (`COBRO_POSTERIOR` = se cobró DESPUÉS del
+   * corte), el día del corte con el que se midió «cobrado» (YYYY-MM-DD) y,
+   * si se sabe, lo cobrado después del corte y la fecha del último cobro.
+   * Solo viajan cuando la lista los conoce (pasan / pasarían).
+   */
+  motivo?: MotivoDiferir;
+  corte?: string;
+  cobrado_despues_usd?: number | null;
+  cobrado_despues_mxn?: number | null;
+  fecha_cobro_despues?: string | null;
 }
 
 /** Bloque raíz `cierre` de los balances (avión y general). */
@@ -76,6 +93,9 @@ const r2 = (x: number): number => Math.round(x * 100) / 100;
 /**
  * Leyenda de la fila sombra (MXN): «Pasa a octubre 2026 (pendiente de
  * cobro: cobrado $0.00 de $36,632.89 MXN)». Sin monto MXN legible, en USD.
+ * Con `motivo` COBRO_POSTERIOR (se cobró después del corte): «Pasa a
+ * octubre 2026 (cobrado después del 30-sep; al cierre: $0.00 de
+ * $36,632.89 MXN)».
  */
 export function leyendaSombraBalance(
   destino: string,
@@ -85,19 +105,33 @@ export function leyendaSombraBalance(
     venta_usd: number | null;
     cobrado_usd: number | null;
   },
+  motivo?: MotivoDiferir | null,
 ): string {
   const enMxn = m.venta_mxn != null && Number.isFinite(m.venta_mxn);
   const venta = enMxn ? (m.venta_mxn as number) : (m.venta_usd ?? 0);
   const cobrado = enMxn ? (m.cobrado_mxn ?? 0) : (m.cobrado_usd ?? 0);
+  const moneda = enMxn ? 'MXN' : 'USD';
+  if (motivo === 'COBRO_POSTERIOR') {
+    return `Pasa a ${etiquetaMesMinuscula(destino)} (cobrado después del ${diaCortoDeDia(
+      corteDeDestino(destino),
+    )}; al cierre: ${dineroTexto(cobrado, moneda)} de ${dineroTexto(venta, moneda)})`;
+  }
   return `Pasa a ${etiquetaMesMinuscula(destino)} (pendiente de cobro: cobrado ${dineroTexto(
     cobrado,
-    enMxn ? 'MXN' : 'USD',
-  )} de ${dineroTexto(venta, enMxn ? 'MXN' : 'USD')})`;
+    moneda,
+  )} de ${dineroTexto(venta, moneda)})`;
 }
 
-/** Marca de una fila de un mes ABIERTO que pasaría al cerrar. */
-export function leyendaPasariaBalance(destino: string): string {
-  return `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar`;
+/**
+ * Marca de una fila de un mes ABIERTO que pasaría al cerrar: la de
+ * `marcaPasaraAlCerrar` (fuente única; con COBRO_POSTERIOR dice cuándo se
+ * cobró en vez de «pendiente de cobro»).
+ */
+export function leyendaPasariaBalance(
+  destino: string,
+  d?: Partial<Pick<DecisionDiferir, 'motivo' | 'fecha_cobro_posterior'>> | null,
+): string {
+  return marcaPasaraAlCerrar(destino, d);
 }
 
 /** Fila normal con la migración: las llaves del cierre en su valor neutro. */
@@ -206,6 +240,10 @@ export function itemCierreDeFila(
     destino?: string;
     origen?: string;
     leyenda: string;
+    /** ADITIVOS (16-oct-2026): ver `BalanceCierreVueloPayload`. */
+    motivo?: MotivoDiferir;
+    cobrado_despues_usd?: number | null;
+    fecha_cobro_despues?: string | null;
   },
 ): BalanceCierreVueloPayload {
   const k = fila.tc_venta != null && fila.tc_venta > 0 ? fila.tc_venta : null;
@@ -235,6 +273,22 @@ export function itemCierreDeFila(
     ...(extra.destino ? { destino: extra.destino } : {}),
     ...(extra.origen ? { origen: extra.origen } : {}),
     leyenda: extra.leyenda,
+    ...(extra.motivo
+      ? {
+          motivo: extra.motivo,
+          ...(extra.destino ? { corte: corteDeDestino(extra.destino) } : {}),
+          ...(extra.cobrado_despues_usd !== undefined
+            ? {
+                cobrado_despues_usd: extra.cobrado_despues_usd,
+                cobrado_despues_mxn:
+                  extra.cobrado_despues_usd != null && k != null
+                    ? r2(extra.cobrado_despues_usd * k)
+                    : null,
+                fecha_cobro_despues: extra.fecha_cobro_despues ?? null,
+              }
+            : {}),
+        }
+      : {}),
   };
 }
 

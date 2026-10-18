@@ -10213,6 +10213,44 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       incluido el `tc_gasto` DERIVADO que escribe al ligar un gasto USD con
       un cargo MXN (mueve la columna MXN del balance de un mes cerrado, no
       el reparto en USD).
+    - **Caso #351: «cobrado después», no «pendiente de cobro»
+      (16-oct-2026, API 0.0.91, SIN migración).** El cliente: «aparece que
+      aún no se cobran pero sí están cobrados». El cierre de septiembre
+      manda a octubre #316, #337, #343, #344 y #351 con motivo
+      `COBRO_POSTERIOR` (no cubiertos al 30-sep, cobrados en octubre) y las
+      leyendas decían «pendiente de cobro: cobrado $0.00 de …». La REGLA
+      no cambia (siguen pasando: decisión del 16-oct-2026); cambian los
+      TEXTOS y viajan datos ADITIVOS. Ningún número cambia. Fuente única
+      PURA `common/mes-contable.util`: `diaCortoDeDia` ('2026-10-04' ⇒
+      '4-oct'), `corteDeDestino` ('2026-10' ⇒ '2026-09-30'), y
+      `leyendaPasaA` / `leyendaPasara` / `marcaPasaraAlCerrar` con el
+      motivo: «Pasa a octubre 2026 · cobrado el 14-oct, después del 30-sep
+      (al 30-sep: $0.00 USD de $2,343.20 USD)», «Pasará a octubre 2026 al
+      cerrar · cobrado el 14-oct, después del 30-sep» y, en un parcial con
+      algo cobrado después, «Pendiente de cobro: pasará a octubre 2026 al
+      cerrar (al 30-sep: cobrado $500.00 USD de $2,076.40 USD; después:
+      $500.00 USD)». `decisionDiferir` gana `fecha_cobro_posterior` (día
+      Cancún del cobro positivo más reciente después del corte; null sin
+      cobro posterior). Fila sombra del balance (`leyendaSombraBalance(…,
+      motivo)`): «Pasa a octubre 2026 (cobrado después del 30-sep; al
+      cierre: $0.00 MXN de $36,632.89 MXN)». SIN_COBRO y COBRO_PARCIAL sin
+      cobro posterior conservan sus textos byte a byte, y todas las marcas
+      siguen arrancando con «Pasa a» / «Pasará a» / «Pendiente de cobro»
+      (el panel y pyservices colorean por el prefijo). Un mes CERRADO toma
+      el motivo de la bitácora (`cierre_mes_vuelo.motivo`, sin monto ni
+      fecha posterior ⇒ «cobrado después del 30-sep»); un mes abierto y la
+      previa, de la decisión (con monto y fecha). ADITIVOS: previa y cerrar
+      ⇒ `fecha_cobro_posterior` en cada vuelo que pasa; reparto ⇒
+      `fecha_cobro_posterior` en `pendientes_que_pasarian[]` (los
+      `diferidos_salen` / `diferidos_entran` ya traían `motivo` y
+      `cobrado_posterior_usd`); balances y Libro Dinero ⇒ en `cierre.pasan`
+      `motivo` + `corte` ('YYYY-MM-DD') y en `cierre.pasarian` además
+      `cobrado_despues_usd`, `cobrado_despues_mxn` (= r2(usd × tc_venta))
+      y `fecha_cobro_despues`; `vienen` no cambia. Deploy: pyservices
+      (rotula «al 30-sep» y «cobrado después» solo con `motivo`) ⇒ API
+      0.0.91 ⇒ panel; todo es aditivo y cualquier orden es seguro. Specs:
+      `mes-contable.util.spec`, `cierre-balance.util.spec` y
+      `libros.cierre-mes.spec`.
 
 90. **AFAC POR VUELO: RESERVADO vs COSTO REAL, EDITABLE EN EL BALANCE
     GENERAL; LOS «PAGO DE AFAC» NO RESTAN AL AVIÓN (16-oct-2026, API
@@ -11962,6 +12000,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   $109,921.46 y de septiembre 7 pagos $25,757.80 (bloqueante: `listo:
   false` hasta repartirlas). Rollback: API 0.0.89 (los repartos ya hechos
   son filas normales de `gasto_reparto`: el 0.0.89 los lee igual).
+- **16-oct-2026 — 0.0.91, SIN migración** (caso #351: leyendas del cierre
+  que dicen «cobrado después» en vez de «pendiente de cobro», invariante
+  89; sobre `e44c41d0` = 0.0.90). Orden: pyservices (push a `main`,
+  COMPUERTA `GET /version` = su commit) ⇒ API 0.0.91 (`GET /v1/version` =
+  `0.0.91`) ⇒ panel. Todo ADITIVO: un pyservices o un panel viejo ignoran
+  las llaves nuevas; las leyendas nuevas se pintan igual (mismo prefijo,
+  mismo color). Humo SOLO lecturas: `GET /v1/cierres/2026-09/previa`
+  (si septiembre sigue abierto) ⇒ los cinco con `motivo` COBRO_POSTERIOR,
+  `fecha_cobro_posterior` y la leyenda «… cobrado el …, después del
+  30-sep (…)»; si ya está cerrado, el balance de septiembre ⇒ fila sombra
+  «Pasa a octubre 2026 (cobrado después del 30-sep; al cierre: …)» y el
+  reparto ⇒ «Pasan a octubre 2026 (sin cobro completo al 30-sep, no se
+  reparten)». Rollback: API 0.0.90 (vuelven los textos de siempre).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera

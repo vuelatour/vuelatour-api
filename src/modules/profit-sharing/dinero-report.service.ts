@@ -58,11 +58,12 @@ import {
   colsVueloContable,
 } from '../../common/filtro-periodo-contable.util';
 import {
+  corteDeDestino,
   decisionDiferir,
-  etiquetaMesMinuscula,
   leyendaPasaA,
   leyendaPasara,
   leyendaVieneDe,
+  marcaPasaraAlCerrar,
   mesCalendarioDeRango,
   mesContableDeVuelo,
   mesRealDeVuelo,
@@ -71,6 +72,7 @@ import {
   papelContableEnPeriodo,
   rangoDelMes,
   salidaDeVuelo,
+  type MotivoDiferir,
 } from '../../common/mes-contable.util';
 import {
   leerCierresMes,
@@ -1788,7 +1790,15 @@ export class DineroReportService {
         cobrado_usd: number | null;
         por_cobrar_usd: number | null;
       },
-      extra: { destino?: string; origen?: string; leyenda: string },
+      extra: {
+        destino?: string;
+        origen?: string;
+        leyenda: string;
+        /** ADITIVOS (16-oct-2026): ver `BalanceCierreVueloPayload`. */
+        motivo?: MotivoDiferir;
+        cobrado_despues_usd?: number | null;
+        fecha_cobro_despues?: string | null;
+      },
     ): BalanceCierreVueloPayload => ({
       clave: ctx.claveDe(v),
       vuelo_id: v.id as string,
@@ -1812,6 +1822,19 @@ export class DineroReportService {
       ...(extra.destino ? { destino: extra.destino } : {}),
       ...(extra.origen ? { origen: extra.origen } : {}),
       leyenda: extra.leyenda,
+      ...(extra.motivo
+        ? {
+            motivo: extra.motivo,
+            ...(extra.destino ? { corte: corteDeDestino(extra.destino) } : {}),
+            ...(extra.cobrado_despues_usd !== undefined
+              ? {
+                  cobrado_despues_usd: extra.cobrado_despues_usd,
+                  cobrado_despues_mxn: mxn(extra.cobrado_despues_usd, v),
+                  fecha_cobro_despues: extra.fecha_cobro_despues ?? null,
+                }
+              : {}),
+          }
+        : {}),
     });
     const marcas = new Map<
       string,
@@ -1836,6 +1859,7 @@ export class DineroReportService {
         item(v, montos, {
           destino,
           leyenda: destino ? leyendaPasaA(destino, montos) : 'Pasa a otro mes',
+          ...(sal?.motivo ? { motivo: sal.motivo } : {}),
         }),
       );
     }
@@ -1907,10 +1931,16 @@ export class DineroReportService {
         );
         if (!d) continue;
         pasarian.push(
-          item(v, d, { destino, leyenda: leyendaPasara(destino, d) }),
+          item(v, d, {
+            destino,
+            leyenda: leyendaPasara(destino, d),
+            motivo: d.motivo,
+            cobrado_despues_usd: d.cobrado_posterior_usd,
+            fecha_cobro_despues: d.fecha_cobro_posterior,
+          }),
         );
         marcas.set(v.id as string, {
-          cierre_marca: `Pendiente de cobro: pasará a ${etiquetaMesMinuscula(destino)} al cerrar`,
+          cierre_marca: marcaPasaraAlCerrar(destino, d),
           diferido_de: null,
           diferido_a: destino,
         });

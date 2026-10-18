@@ -193,6 +193,7 @@ import {
   rangoDelMes,
   salidaDeVuelo,
   vueloDiferido,
+  type DecisionDiferir,
 } from '../../common/mes-contable.util';
 import {
   cierresCerrados,
@@ -2072,6 +2073,11 @@ export class AircraftBalanceService {
     const ultimo = mes ? rangoDelMes(mes).hasta : null;
     const destinoAbierto =
       mes && estado !== 'CERRADO' ? mesSiguienteDe(mes) : null;
+    // Decisión con la que cada fila pasaría (la marca corta la lee).
+    const decisionPasaria = new Map<
+      BalanceAvionVueloPayload,
+      DecisionDiferir
+    >();
     // Mes ABIERTO: ¿esta fila pasaría al cerrar? (la MISMA decisión del
     // cierre). Si sí, la agrega a `pasarian` y devuelve true.
     const pasariaAlCerrar = (
@@ -2107,8 +2113,12 @@ export class AircraftBalanceService {
           por_cobrar_usd: d.por_cobrar_usd,
           destino: destinoAbierto,
           leyenda: leyendaPasara(destinoAbierto, d),
+          motivo: d.motivo,
+          cobrado_despues_usd: d.cobrado_posterior_usd,
+          fecha_cobro_despues: d.fecha_cobro_posterior,
         }),
       );
+      decisionPasaria.set(f, d);
       return true;
     };
     for (const f of ctx.filasVuelo) {
@@ -2131,9 +2141,10 @@ export class AircraftBalanceService {
           por_cobrar_usd: sal?.por_cobrar_usd ?? round2(ventaUsd - cobradoUsd),
           destino,
           leyenda: '',
+          ...(sal?.motivo ? { motivo: sal.motivo } : {}),
         });
         const leyenda = destino
-          ? leyendaSombraBalance(destino, item)
+          ? leyendaSombraBalance(destino, item, sal?.motivo ?? null)
           : 'Pasa a otro mes';
         item.leyenda = leyenda;
         pasan.push(item);
@@ -2163,14 +2174,20 @@ export class AircraftBalanceService {
         // cobrar también pasaría al cerrar este mes (misma decisión que
         // una fila normal; la marca dice las dos cosas).
         if (pasariaAlCerrar(f, v)) {
-          f.cierre_marca = `${leyendaVieneDe(origen)} · ${leyendaPasariaBalance(destinoAbierto as string)}`;
+          f.cierre_marca = `${leyendaVieneDe(origen)} · ${leyendaPasariaBalance(
+            destinoAbierto as string,
+            decisionPasaria.get(f),
+          )}`;
           f.diferido_a = destinoAbierto;
         }
         continue;
       }
       marcarFilaNormal(f);
       if (pasariaAlCerrar(f, v)) {
-        f.cierre_marca = leyendaPasariaBalance(destinoAbierto as string);
+        f.cierre_marca = leyendaPasariaBalance(
+          destinoAbierto as string,
+          decisionPasaria.get(f),
+        );
         f.diferido_a = destinoAbierto;
       }
     }
