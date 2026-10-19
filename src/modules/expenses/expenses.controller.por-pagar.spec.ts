@@ -152,11 +152,13 @@ describe('Gastos «por pagar» — cableado HTTP', () => {
     it('dueño de campo: el PATCH MÍNIMO de marcar pagado pide la excepción de ventana', async () => {
       rol = Rol.PILOTO;
       expect((await patch({ por_pagar: false })).status).toBe(200);
+      // `porPagar` (revisión P7): el candado de reposición distingue un
+      // PATCH que marca pagado (mínimo o no) de uno que lo deja por pagar.
       expect(svc.assertOwnEnVentana).toHaveBeenLastCalledWith(
         GASTO,
         'u-1',
         undefined,
-        { marcarPagado: true, fechaPago: null },
+        { marcarPagado: true, fechaPago: null, porPagar: false },
       );
       const sello = '2026-10-19T10:00:00-05:00';
       expect(
@@ -173,11 +175,43 @@ describe('Gastos «por pagar» — cableado HTTP', () => {
         GASTO,
         'u-1',
         sello,
-        { marcarPagado: true, fechaPago: '2026-10-18' },
+        { marcarPagado: true, fechaPago: '2026-10-18', porPagar: false },
       );
       expect(
         (llamadas(svc.update)[1][1] as { por_pagar?: unknown }).por_pagar,
       ).toBe(false);
+    });
+
+    it('marcar pagado con OTRAS llaves: sin la excepción pero con `porPagar: false` para el candado de reposición', async () => {
+      rol = Rol.PILOTO;
+      expect((await patch({ por_pagar: false, notas: 'pagado' })).status).toBe(
+        200,
+      );
+      expect(svc.assertOwnEnVentana).toHaveBeenLastCalledWith(
+        GASTO,
+        'u-1',
+        undefined,
+        { marcarPagado: false, fechaPago: null, porPagar: false },
+      );
+      expect((await patch({ notas: 'solo notas' })).status).toBe(200);
+      expect(svc.assertOwnEnVentana).toHaveBeenLastCalledWith(
+        GASTO,
+        'u-1',
+        undefined,
+        { marcarPagado: false, fechaPago: null, porPagar: null },
+      );
+    });
+
+    it('VISITANTE: el PATCH MÍNIMO no lleva `categoria` (no reescribe la de la oficina); otra corrección sí fija VISITA', async () => {
+      rol = Rol.VISITANTE;
+      expect((await patch({ por_pagar: false })).status).toBe(200);
+      const minimo = llamadas(svc.update)[0][1] as Record<string, unknown>;
+      expect(minimo.categoria).toBeUndefined();
+      expect(minimo.por_pagar).toBe(false);
+      expect((await patch({ por_pagar: false, notas: 'x' })).status).toBe(200);
+      expect(
+        (llamadas(svc.update)[1][1] as { categoria?: unknown }).categoria,
+      ).toBe('VISITA');
     });
 
     it('cualquier otra llave ⇒ SIN la excepción (la ventana de siempre)', async () => {

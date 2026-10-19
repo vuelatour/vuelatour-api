@@ -499,14 +499,54 @@ describe('ExpensesService.assertOwnEnVentana — excepción del dueño al marcar
     expect(e.status).toBe(403);
   });
 
-  it('la excepción exige que el gasto VIGENTE esté por pagar (un pagado viejo ⇒ 403)', async () => {
+  it('la excepción exige que el gasto VIGENTE esté por pagar (un pagado viejo con OTRA fecha ⇒ 403)', async () => {
     const { service } = armar();
+    // Revisión P6: sin fecha (o con la misma) ya no es 403 sino réplica
+    // idempotente (caso de abajo); con otra fecha el PATCH sí cambiaría el
+    // gasto y la ventana manda.
     const e = await error(
       service.assertOwnEnVentana('g-pagado', PILOTO, undefined, {
         marcarPagado: true,
+        fechaPago: '2026-10-18',
       }),
     );
     expect(e.code).toBe('GASTO_FUERA_DE_VENTANA');
+  });
+
+  it('réplica de un «marcar pagado» ya aplicado (sin fecha o con la misma) ⇒ pasa sin ventana y el PATCH no escribe', async () => {
+    const { service, f } = armar();
+    for (const fechaPago of [undefined, null, '2026-10-14']) {
+      await expect(
+        service.assertOwnEnVentana('g-pagado', PILOTO, undefined, {
+          marcarPagado: true,
+          fechaPago,
+        }),
+      ).resolves.toBeUndefined();
+    }
+    const r = (await service.update(
+      'g-pagado',
+      {
+        por_pagar: false,
+        fecha_gasto: '2026-10-14',
+        if_updated_at: '2026-10-01T00:00:00.000Z',
+        capturado_en: '2026-10-17T09:00:00-05:00',
+      },
+      PILOTO,
+      Rol.PILOTO,
+    )) as Fila;
+    expect(r).toMatchObject({ id: 'g-pagado', estado_pago: 'PAGADO' });
+    // Ni la línea del sello tardío ni el CAS con la versión vieja (409).
+    expect(escrituras(f, 'g-pagado')).toHaveLength(0);
+  });
+
+  it('un CONCILIADO nunca es réplica (409 GASTO_CONCILIADO de siempre)', async () => {
+    const { service } = armar();
+    const e = await error(
+      service.assertOwnEnVentana('g-conc', PILOTO, undefined, {
+        marcarPagado: true,
+      }),
+    );
+    expect(e).toMatchObject({ status: 409, code: 'GASTO_CONCILIADO' });
   });
 
   it('AJENO ⇒ 403 GASTO_AJENO aunque sea marcar pagado', async () => {

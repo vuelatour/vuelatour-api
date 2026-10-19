@@ -250,6 +250,48 @@ export function fechaMarcarPagado(
 }
 
 /**
+ * RÉPLICA idempotente de un «marcar pagado» (revisión del 19-oct-2026, P6):
+ * el primer PATCH ya escribió `por_pagar = false`, la respuesta se perdió y
+ * el outbox de la app reenvía el MISMO cuerpo. Es réplica si el gasto
+ * VIGENTE ya está pagado por la bandera (`por_pagar` false, sin conciliar)
+ * con fecha ≤ hoy y el PATCH trae `por_pagar: false` sin fecha o con la
+ * MISMA: no cambiaría nada, así que se responde la fila tal cual (sin la
+ * ventana de corrección, sin CAS y sin línea de bitácora). Un PATCH que sí
+ * cambiaría algo (otra fecha) NO es réplica. Una fecha vigente futura con
+ * `por_pagar` false (dato previo a la migración) tampoco: «marcar pagado»
+ * nunca deja una fecha futura, así que eso no es un reenvío.
+ */
+export function esReplicaMarcarPagado(args: {
+  porPagarEnviado: unknown;
+  fechaEnviada?: string | null;
+  vigente: FilaEstadoPago;
+  hoy: string;
+}): boolean {
+  if (args.porPagarEnviado !== false) return false;
+  const v = args.vigente;
+  if (v.por_pagar !== false || v.conciliado === true) return false;
+  const dia = diaDe(v.fecha_gasto);
+  if (!RE_DIA.test(dia) || dia > args.hoy) return false;
+  return args.fechaEnviada == null || args.fechaEnviada.slice(0, 10) === dia;
+}
+
+/**
+ * 409 `GASTO_EN_REPOSICION` al MARCAR PAGADO un gasto en EFECTIVO con una
+ * fecha de pago que la última reposición de su caja chica ya cubrió
+ * (revisión del 19-oct-2026, P7). El gasto nunca entró a esa reposición (un
+ * por pagar está fuera del libro), así que el texto no dice «ya entró»:
+ * «La fecha del pago (19/10/2026) ya quedó cubierta por la reposición del
+ * 19/10/2026 de tu caja chica: usa una fecha posterior o pide a oficina que
+ * lo marque pagado.»
+ */
+export function mensajeFechaPagoYaRepuesta(
+  fechaPago: string,
+  reposicion: string,
+): string {
+  return `La fecha del pago (${fechaBonita(fechaPago)}) ya quedó cubierta por la reposición del ${fechaBonita(reposicion)} de tu caja chica: usa una fecha posterior o pide a oficina que lo marque pagado.`;
+}
+
+/**
  * Agrega `estado_pago` a una fila de gasto SOLO si trae la llave
  * `por_pagar` (= se leyó con la migración): sin ella la fila sale igual.
  */

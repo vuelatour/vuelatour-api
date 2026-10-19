@@ -75,12 +75,15 @@ import {
   celdaPagoExcel,
   conEstadoPago,
   esMarcarPagado,
+  esReplicaMarcarPagado,
   esRolCampo,
   fechaBonita,
   fechaMarcarPagado,
   fechaMaxGasto,
   mensajeFechaDespuesDeFinDeMes,
+  mensajeFechaPagoYaRepuesta,
   porPagarFinal,
+  porPagarVigente,
 } from './por-pagar.util';
 import {
   SEGUNDOS_URL_MINIATURA,
@@ -390,10 +393,27 @@ const CAMPOS_GASTO_CANDADO_MES = [
   // Invariante 90: marcar/desmarcar «Pago de AFAC» mueve el dinero de un
   // mes (sale o entra a la hoja «permisos» del avión y al reparto).
   'es_pago_afac',
-  // Invariante 93: poner o quitar «por pagar» mueve un EFECTIVO dentro o
-  // fuera del libro de caja chica (un mes cerrado no se toca).
+  // Invariante 93: RE-PROGRAMAR (`por_pagar` ⇒ true) saca un EFECTIVO del
+  // libro de caja chica: un mes cerrado no se toca. «Marcar pagado» SIN
+  // cambio de fecha (⇒ false) NO entra (acuerdo del 19-oct-2026: no mueve
+  // ningún libro; ver `tocaCandadoMesCerrado`); con otra fecha entra por
+  // `fecha_gasto`.
   'por_pagar',
 ] as const;
+
+/**
+ * ¿El UPDATE de un gasto pasa por el candado MES_CERRADO? Sí, si trae
+ * cualquiera de `CAMPOS_GASTO_CANDADO_MES`, salvo `por_pagar: false` (marcar
+ * pagado): esa bandera sola no mueve balance, reparto ni Libro Dinero (el
+ * gasto ya contaba en el mes de su fecha) y la caja chica no entra al
+ * snapshot del cierre (acuerdo entre repos del 19-oct-2026, revisión del
+ * lote «por pagar»).
+ */
+function tocaCandadoMesCerrado(cols: Record<string, unknown>): boolean {
+  return CAMPOS_GASTO_CANDADO_MES.some(
+    (k) => k in cols && !(k === 'por_pagar' && cols.por_pagar === false),
+  );
+}
 
 @Injectable()
 export class ExpensesService {
@@ -4033,10 +4053,15 @@ export class ExpensesService {
     // PATCH es EXCLUSIVAMENTE «marcar pagado» (`esPatchSoloMarcarPagado`).
     // Si el gasto vigente está por pagar, se SALTA la ventana semanal de
     // CORRECCIÓN (el piloto captura el lunes lo que paga el sábado de la otra
-    // semana) y el candado de reposición mira la fecha REAL del pago. Dueño
-    // y conciliado aplican igual; la semana de la fecha nueva la exige
-    // `update()` (`assertCapturaEnSemana`; hoy siempre pasa).
-    opts: { marcarPagado?: boolean; fechaPago?: string | null } = {},
+    // semana). Dueño y conciliado aplican igual; la semana de la fecha nueva
+    // la exige `update()` (`assertCapturaEnSemana`, medida con el sello).
+    // `porPagar` = el `por_pagar` CRUDO del PATCH (cualquier PATCH): decide
+    // si el gasto entra al libro de caja chica (revisión P7, abajo).
+    opts: {
+      marcarPagado?: boolean;
+      fechaPago?: string | null;
+      porPagar?: boolean | null;
+    } = {},
   ): Promise<void> {
     // 400 si el sello viene mal ANTES de tocar nada (misma regla del alta).
     const sello = resolverSelloCorreccion(capturadoEn);
@@ -4058,27 +4083,53 @@ export class ExpensesService {
     // de TIEMPO que siguen (reposición de caja chica y semana de edición).
     // Dueño y conciliado ya se validaron arriba y aplican SIEMPRE.
     if (await this.sinLimiteVigente(userId)) return;
-    const soloMarcarPagado =
+    const hoy = hoyCancun();
+    const diaVigente = String(gasto.fecha_gasto ?? '').slice(0, 10);
+    // RÉPLICA de un «Ya lo pagué» que ya se aplicó (revisión P6: respuesta
+    // perdida ⇒ el outbox reenvía el MISMO cuerpo): no cambiaría nada, así
+    // que no hay ventana ni candado que evaluar. Un 403 aquí la app lo toma
+    // como determinista y marcaba FALLIDO un pago que sí quedó.
+    if (
       opts.marcarPagado === true &&
-      (gasto as { por_pagar?: unknown }).por_pagar === true;
+      esReplicaMarcarPagado({
+        porPagarEnviado: false,
+        fechaEnviada: opts.fechaPago,
+        vigente: gasto,
+        hoy,
+      })
+    ) {
+      return;
+    }
+    const vigPorPagar = (gasto as { por_pagar?: unknown }).por_pagar === true;
+    const soloMarcarPagado = opts.marcarPagado === true && vigPorPagar;
+    // ¿Este PATCH lo marca pagado (mínimo o con más llaves)? Con él entra
+    // al libro de caja chica con la fecha REAL del pago.
+    const marcaPagado =
+      vigPorPagar && (opts.marcarPagado === true || opts.porPagar === false);
     // Candado "ya repuesto" (1-sep): un gasto EFECTIVO cuya fecha quedó
     // cubierta por la ÚLTIMA reposición de la caja chica del capturista ya
     // está saldado — tocarlo descuadraría un corte que ya se pagó, aunque
-    // siga dentro de la ventana de días. Al marcar pagado manda la fecha
-    // REAL del pago (con ella entra al libro, invariante 93).
-    if (gasto.medio_pago === MedioPago.EFECTIVO) {
+    // siga dentro de la ventana de días. Revisión P7 (invariante 93): un por
+    // pagar VIGENTE está FUERA del libro (no entró a ningún corte), así que
+    // corregirlo o borrarlo sin marcarlo pagado no choca; al marcarlo
+    // pagado se mide la fecha REAL del pago, con un texto que no dice «ya
+    // entró» (code `GASTO_EN_REPOSICION` de siempre).
+    if (
+      gasto.medio_pago === MedioPago.EFECTIVO &&
+      (marcaPagado || !porPagarVigente(gasto, hoy))
+    ) {
       const ultima = await this.cajaChica.fechaUltimaReposicionDe(
         gasto.usuario_captura_id as string,
         gasto.moneda as string,
       );
-      const diaVigente = String(gasto.fecha_gasto ?? '').slice(0, 10);
-      const diaGasto = soloMarcarPagado
-        ? fechaMarcarPagado(opts.fechaPago, diaVigente, hoyCancun())
+      const diaGasto = marcaPagado
+        ? fechaMarcarPagado(opts.fechaPago, diaVigente, hoy)
         : diaVigente;
       if (ultima && diaGasto && diaGasto <= ultima) {
         throw new ConflictException({
-          message:
-            'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
+          message: marcaPagado
+            ? mensajeFechaPagoYaRepuesta(diaGasto, ultima)
+            : 'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
           error: 'GASTO_EN_REPOSICION',
         });
       }
@@ -4181,6 +4232,11 @@ export class ExpensesService {
     fecha: string | undefined,
     rol?: Rol,
     userId?: string,
+    // GASTOS POR PAGAR (revisión P5, invariante 93): «Ya lo pagué» que la app
+    // encoló sin señal y el outbox sube días después se mide contra el día
+    // Cancún de SU sello (`diaReferenciaVentana`, ya acotado a ≤ ahora), la
+    // misma «ventana justa» B3 de `assertOwnEnVentana`. Omitido = hoy.
+    hoyRef?: string,
   ): Promise<void> {
     const esCampo =
       rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
@@ -4192,7 +4248,7 @@ export class ExpensesService {
     const gracia = graciaSaneada(
       await this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
     );
-    if (dia < limiteCapturaMin(hoyCancun(), gracia)) {
+    if (dia < limiteCapturaMin(hoyRef ?? hoyCancun(), gracia)) {
       throw new BadRequestException(
         gracia === 1
           ? 'Los gastos se capturan dentro de su semana (lunes a domingo). El lunes aún puedes capturar los de la semana pasada; después ya solo los de la semana en curso.'
@@ -4251,6 +4307,8 @@ export class ExpensesService {
     //    va a `dto.fecha_gasto` (mes cerrado, semana, auto-cruce) y la hora de
     //    la carga se mueve a la misma hora de pared del día nuevo;
     //  - `true` (re-programar): solo sin conciliar (409 GASTO_CONCILIADO);
+    //  - RÉPLICA de un «marcar pagado» ya aplicado (revisión P6): la fila
+    //    tal cual, sin escribir;
     //  - si no: `porPagarFinal` (una fecha > hoy lo pone por pagar solo).
     if (dto.por_pagar === null) delete dto.por_pagar;
     const conPorPagar =
@@ -4262,6 +4320,10 @@ export class ExpensesService {
       delete dto.por_pagar;
     }
     let porPagarEscribir: boolean | undefined;
+    // Este PATCH marca pagado un gasto por pagar (semana medida con el sello).
+    let marcandoPagado = false;
+    // Reenvío de un «marcar pagado» que ya quedó (nada que escribir).
+    let replicaPagado = false;
     if (conPorPagar) {
       const hoyPP = hoyCancun();
       const vig = (await this.findById(id)) as {
@@ -4273,6 +4335,7 @@ export class ExpensesService {
       const vigPorPagar = vig.por_pagar === true;
       const vigFecha = String(vig.fecha_gasto ?? '').slice(0, 10);
       if (esMarcarPagado(dto, vig)) {
+        marcandoPagado = true;
         const fechaPago = fechaMarcarPagado(dto.fecha_gasto, vigFecha, hoyPP);
         if (fechaPago > hoyPP) {
           throw new BadRequestException({
@@ -4300,6 +4363,17 @@ export class ExpensesService {
           });
         }
         if (!vigPorPagar) porPagarEscribir = true;
+      } else if (
+        esReplicaMarcarPagado({
+          porPagarEnviado: dto.por_pagar,
+          fechaEnviada: dto.fecha_gasto,
+          vigente: vig,
+          hoy: hoyPP,
+        })
+      ) {
+        // La misma fecha que ya tiene: no es un cambio de fecha.
+        delete dto.fecha_gasto;
+        replicaPagado = true;
       } else {
         const d = porPagarFinal({
           fechaFinal: String(dto.fecha_gasto ?? vigFecha).slice(0, 10),
@@ -4312,6 +4386,19 @@ export class ExpensesService {
       }
     }
     delete dto.por_pagar;
+    // RÉPLICA sin nada más que escribir (revisión P6): la fila tal cual, SIN
+    // la línea del sello tardío y SIN el CAS (su `if_updated_at` es el de
+    // ANTES del primer envío: daría 409 CONFLICTO_VERSION). Se decide por
+    // VALOR: la clase del DTO puede traer llaves en `undefined`.
+    if (
+      replicaPagado &&
+      Object.entries(dto).every(
+        ([k, v]) =>
+          v === undefined || k === 'capturado_en' || k === 'client_request_id',
+      )
+    ) {
+      return this.findById(id);
+    }
     if (dto.fecha_gasto !== undefined) {
       this.assertFechaRazonable(
         dto.fecha_gasto,
@@ -4321,8 +4408,16 @@ export class ExpensesService {
       );
       // Mover la fecha a una semana ya cerrada equivale a capturar en ella:
       // mismo candado semanal que en el alta (oficina exenta y permiso
-      // temporal `gastos_sin_limite_hasta` también).
-      await this.assertCapturaEnSemana(dto.fecha_gasto, rol, userId);
+      // temporal `gastos_sin_limite_hasta` también). Al MARCAR PAGADO la
+      // semana se mide con el día del sello de la corrección (revisión P5):
+      // un «Ya lo pagué» del sábado que el outbox sube el martes sigue
+      // valiendo con la fecha REAL del pago.
+      await this.assertCapturaEnSemana(
+        dto.fecha_gasto,
+        rol,
+        userId,
+        marcandoPagado ? diaReferenciaVentana(selloCorreccion) : undefined,
+      );
     }
     // «TUA incluida en este gasto» (13-oct-2026, invariante 66): campo de
     // OFICINA (un rol de campo la pierde, jamás un 400) y detrás de la
@@ -4836,8 +4931,9 @@ export class ExpensesService {
     // avión, categoría, medio, propina, TUA, litros), el estado de ANTES y
     // el de DESPUÉS deben caer en meses abiertos (409 MES_CERRADO). Solo
     // clasificación (proveedor, notas, facturación, visto bueno) no se
-    // bloquea.
-    if (CAMPOS_GASTO_CANDADO_MES.some((k) => k in cols)) {
+    // bloquea, y tampoco «marcar pagado» SIN cambio de fecha (invariante 93,
+    // acuerdo del 19-oct-2026: `tocaCandadoMesCerrado`).
+    if (tocaCandadoMesCerrado(cols)) {
       await this.candadoMesCerradoGasto(id, cols);
     }
     // CAS (B1): con `if_updated_at` el UPDATE solo aplica si updated_at sigue

@@ -498,24 +498,30 @@ export class ExpensesController {
     summary:
       'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana). ' +
       'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA. `tua_incluida` es de oficina (se ignora a piloto/mecánico/visitante). ' +
-      'Gastos por pagar (19-oct-2026): `{por_pagar: false, fecha_gasto?}` = «Marcar pagado» (fecha del pago ≤ hoy; sin fecha: hoy, o la suya si ya venció); el dueño de campo puede hacerlo fuera de su semana si el PATCH SOLO trae por_pagar, fecha_gasto, if_updated_at y capturado_en. 400 POR_PAGAR_FECHA_FUTURA; 503 POR_PAGAR_NO_DISPONIBLE sin la migración.',
+      'Gastos por pagar (19-oct-2026): `{por_pagar: false, fecha_gasto?}` = «Marcar pagado» (fecha del pago ≤ hoy; sin fecha: hoy, o la suya si ya venció); el dueño de campo puede hacerlo fuera de su semana si el PATCH SOLO trae por_pagar, fecha_gasto, if_updated_at y capturado_en (la semana de la fecha del pago se mide con el sello `capturado_en`; un VISITANTE no reescribe la categoría). Reenviar el mismo «marcar pagado» ya aplicado (sin fecha o con la misma) responde la fila sin escribir. Sin cambio de fecha no pasa por el candado MES_CERRADO. 400 POR_PAGAR_FECHA_FUTURA; 409 GASTO_EN_REPOSICION si la fecha del pago ya la cubrió una reposición de caja chica; 503 POR_PAGAR_NO_DISPONIBLE sin la migración.',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateGastoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): ¿el PATCH SOLO marca
+    // pagado? (llaves con valor ⊆ por_pagar, fecha_gasto, if_updated_at,
+    // capturado_en). Se decide UNA vez, antes de que los bloques por rol
+    // toquen el DTO.
+    const soloMarcarPagado = esPatchSoloMarcarPagado(dto);
     if (
       c.rol === Rol.PILOTO ||
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      // GASTOS POR PAGAR (19-oct-2026, invariante 93): un PATCH que SOLO
-      // marca pagado (llaves ⊆ por_pagar, fecha_gasto, if_updated_at,
-      // capturado_en) no está acotado a la semana de corrección.
+      // El PATCH mínimo no está acotado a la semana de corrección; `porPagar`
+      // (crudo) le dice al candado de reposición si el gasto entra al libro
+      // de caja chica (revisión P7).
       await this.expenses.assertOwnEnVentana(id, c.userId, dto.capturado_en, {
-        marcarPagado: esPatchSoloMarcarPagado(dto),
+        marcarPagado: soloMarcarPagado,
         fechaPago: dto.fecha_gasto ?? null,
+        porPagar: dto.por_pagar ?? null,
       });
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
@@ -533,8 +539,11 @@ export class ExpensesController {
     }
     if (c.rol === Rol.VISITANTE) {
       // El gasto del visitante ES de visita: no se reclasifica ni se liga a
-      // vuelo/avión/escala desde su sesión (candado espejo del create).
-      dto.categoria = CategoriaGasto.VISITA;
+      // vuelo/avión/escala desde su sesión (candado espejo del create). El
+      // PATCH mínimo de «marcar pagado» NO lleva categoría (revisión P8):
+      // fuera de su semana solo puede marcarlo pagado, jamás revertir la
+      // reclasificación que hizo la oficina.
+      if (!soloMarcarPagado) dto.categoria = CategoriaGasto.VISITA;
       delete dto.vuelo_id;
       delete dto.aeronave_id;
       delete dto.escala_id;
