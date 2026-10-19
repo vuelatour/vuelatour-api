@@ -31,6 +31,9 @@ import {
   type ExtraGastoXlsx,
   type ModoExcelCaja,
 } from './caja-chica-reposicion-xlsx';
+// Gastos por pagar (invariante 93, revisión P7): resalte en el Excel de UNA
+// reposición de los marcados pagados después de registrarla (best-effort).
+import { marcadosPagadosEnBitacora } from './gasto-marcado-pagado.lector';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import {
   leerUbicacionBalance,
@@ -1705,9 +1708,18 @@ export class CajaChicaService {
     }
     const origenId = (fondo as { fondo_origen_id?: string | null })
       .fondo_origen_id;
-    const [extras, madre] = await Promise.all([
-      this.extrasDeGastos(tramo.gastos.map((g) => g.id)),
+    const idsGastos = tramo.gastos.map((g) => g.id);
+    const [extras, madre, marcadosPagados] = await Promise.all([
+      this.extrasDeGastos(idsGastos),
       origenId ? this.nombreDeFondo(origenId) : Promise.resolve(null),
+      // Solo UNA reposición tiene contra qué comparar (lo pendiente, no).
+      modo === 'reposicion'
+        ? marcadosPagadosEnBitacora(
+            this.supabase.service,
+            idsGastos,
+            this.logger,
+          )
+        : Promise.resolve(new Map<string, string>()),
     ]);
     const monto = Number(fondo.monto_fondo ?? 0);
     const { payload, filename } = armarExcelCaja({
@@ -1723,6 +1735,7 @@ export class CajaChicaService {
       extras,
       hoy: hoyCancun(),
       ahora: new Date(),
+      marcadosPagados,
     });
     // Hoja dedicada de pyservices; si ese pyservices todavía no tiene el
     // endpoint (deploy desfasado ⇒ null), el MISMO contenido en el export

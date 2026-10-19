@@ -66,7 +66,10 @@ export interface FondoXlsx {
 
 export type ModoExcelCaja = 'reposicion' | 'pendiente';
 
-/** Color del resalte: gasto capturado DESPUÉS de registrar la reposición. */
+/**
+ * Color del resalte: gasto capturado DESPUÉS de registrar la reposición (o,
+ * desde el 19-oct-2026, un «por pagar» marcado pagado después: invariante 93).
+ */
 export const COLOR_CAPTURADO_DESPUES = 'ED7D31';
 
 /**
@@ -171,6 +174,14 @@ export interface ArmarExcelCajaInput<T extends EntradaLibroXlsx> {
   hoy: string;
   /** Instante de generación (texto «generado …»). */
   ahora: Date;
+  /**
+   * Gastos «por pagar» (invariante 93, revisión P7): `gasto_id` ⇒ instante
+   * de la ÚLTIMA vez que se marcó pagado (`marcadosPagadosEnBitacora`,
+   * best-effort). Uno marcado pagado DESPUÉS de registrar la reposición no
+   * estaba en la cuenta cuando se repuso: se resalta como el capturado
+   * después, con su propio aviso. Omitido o vacío = sin ese resalte.
+   */
+  marcadosPagados?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -178,7 +189,8 @@ export interface ArmarExcelCajaInput<T extends EntradaLibroXlsx> {
  * ENCABEZADO (datos de la reposición), FILAS del periodo en el orden del
  * libro con el saldo y lo por reponer que ya trae el historial, fila TOTAL,
  * TOTALES (Σ, reintegros/ajustes, repuesto, diferencia, saldo antes y
- * después) y AVISOS (gastos capturados después de reponer).
+ * después) y AVISOS (gastos capturados después de reponer y, aparte, los
+ * «por pagar» marcados pagados después).
  */
 export function armarExcelCaja<T extends EntradaLibroXlsx>(
   input: ArmarExcelCajaInput<T>,
@@ -187,16 +199,27 @@ export function armarExcelCaja<T extends EntradaLibroXlsx>(
   const repo = modo === 'reposicion' ? tramo.reposicion : null;
   const creadaRepo = repo ? Date.parse(repo.created_at) : NaN;
   let capturadosDespues = 0;
+  let pagadosDespues = 0;
 
   const filas: CajaChicaFilaPayload[] = tramo.entradas.map((e) => {
     if (e.origen === 'gasto') {
       const x = extras.get(e.id);
       const creado = Date.parse(x?.created_at ?? e.created_at);
-      const despues =
+      const capturadoDespues =
         Number.isFinite(creadaRepo) &&
         Number.isFinite(creado) &&
         creado > creadaRepo;
-      if (despues) capturadosDespues += 1;
+      // Por pagar (invariante 93): capturado ANTES pero marcado pagado
+      // DESPUÉS de registrar la reposición ⇒ tampoco estaba en la cuenta.
+      const pagado = Date.parse(input.marcadosPagados?.get(e.id) ?? '');
+      const pagadoDespues =
+        !capturadoDespues &&
+        Number.isFinite(creadaRepo) &&
+        Number.isFinite(pagado) &&
+        pagado > creadaRepo;
+      if (capturadoDespues) capturadosDespues += 1;
+      if (pagadoDespues) pagadosDespues += 1;
+      const despues = capturadoDespues || pagadoDespues;
       return {
         fecha: e.fecha,
         tipo: CONCEPTO_CAJA.GASTO,
@@ -370,12 +393,18 @@ export function armarExcelCaja<T extends EntradaLibroXlsx>(
       total_otros: tramo.otros.length > 0 ? tramo.total_otros : null,
       totales_titulo: 'Totales de la reposición',
       totales,
-      avisos:
-        capturadosDespues > 0
+      avisos: [
+        ...(capturadosDespues > 0
           ? [
               `${plural(capturadosDespues, 'gasto se capturó', 'gastos se capturaron')} DESPUÉS de registrar esta reposición (resaltados en naranja): no estaban en la cuenta cuando se repuso.`,
             ]
-          : [],
+          : []),
+        ...(pagadosDespues > 0
+          ? [
+              `${plural(pagadosDespues, 'gasto se marcó pagado', 'gastos se marcaron pagados')} DESPUÉS de registrar esta reposición (resaltados en naranja): no estaban en la cuenta cuando se repuso.`,
+            ]
+          : []),
+      ],
       sin_filas: 'Sin gastos entre la reposición anterior y esta.',
     };
   } else {

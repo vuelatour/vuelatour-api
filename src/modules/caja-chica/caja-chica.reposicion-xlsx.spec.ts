@@ -154,17 +154,39 @@ const fondoRow = (over: Fila = {}): Fila => ({
 });
 
 function armar(
-  opts: { fondo?: Fila; sinPyservices?: boolean; sinEndpoint?: boolean } = {},
+  opts: {
+    fondo?: Fila;
+    sinPyservices?: boolean;
+    sinEndpoint?: boolean;
+    /** Filas de `gasto_bitacora` (gastos por pagar, invariante 93). */
+    bitacora?: Fila[];
+    /** La lectura de la bitácora falla. */
+    bitacoraFalla?: boolean;
+    /** Sin la migración 20261019000001 (42703 al nombrar `por_pagar`). */
+    sinPorPagar?: boolean;
+  } = {},
 ) {
   const dedicados: CajaChicaReposicionPayload[] = [];
   const genericos: TablaXlsxPayload[] = [];
   const consultas: Array<{ tabla: string; select: string }> = [];
+  const filtrosBitacora: Array<Record<string, unknown>> = [];
   const from = (tabla: string) => {
     const filtros: Record<string, unknown> = {};
+    if (tabla === 'gasto_bitacora') filtrosBitacora.push(filtros);
     let inIds: unknown[] | null = null;
+    let error: { code: string; message: string } | null =
+      tabla === 'gasto_bitacora' && opts.bitacoraFalla
+        ? { code: '57014', message: 'canceling statement due to timeout' }
+        : null;
     const q: Record<string, unknown> = {};
     q.select = (s: string) => {
       consultas.push({ tabla, select: s });
+      if (opts.sinPorPagar && tabla === 'gasto' && /\bpor_pagar\b/.test(s)) {
+        error = {
+          code: '42703',
+          message: 'column gasto.por_pagar does not exist',
+        };
+      }
       return q;
     };
     q.eq = (c: string, v: unknown) => {
@@ -193,12 +215,21 @@ function armar(
         if (inIds) return extras.filter((x) => inIds!.includes(x.id));
         return gastos;
       }
+      if (tabla === 'gasto_bitacora') {
+        return (opts.bitacora ?? []).filter(
+          (b) => !inIds || inIds.includes(b.gasto_id),
+        );
+      }
       return [];
     };
     q.maybeSingle = () =>
-      Promise.resolve({ data: filas()[0] ?? null, error: null });
+      Promise.resolve(
+        error ? { data: null, error } : { data: filas()[0] ?? null, error },
+      );
     q.then = (res: (v: unknown) => unknown) =>
-      Promise.resolve({ data: filas(), error: null }).then(res);
+      Promise.resolve(
+        error ? { data: null, error } : { data: filas(), error: null },
+      ).then(res);
     return q;
   };
   const supabase = { service: { from } } as unknown as SupabaseService;
@@ -219,7 +250,7 @@ function armar(
     supabase,
     opts.sinPyservices ? undefined : pyservices,
   );
-  return { svc, dedicados, genericos, consultas };
+  return { svc, dedicados, genericos, consultas, filtrosBitacora };
 }
 
 /** Valor por etiqueta en el encabezado o en los totales. */
@@ -530,5 +561,112 @@ describe('nombre del archivo', () => {
       'attachment; filename="Reposicion caja Alexander E. Saab 2026-09-21.xlsx"; ' +
         "filename*=UTF-8''Reposicion%20caja%20Alexander%20E.%20Saab%202026-09-21.xlsx",
     );
+  });
+});
+
+describe('gastos «por pagar» marcados pagados DESPUÉS de la reposición (invariante 93, revisión P7)', () => {
+  // g2 (03-sep) se capturó POR PAGAR antes de r1 (05-sep, registrada a las
+  // 15:00 UTC) y la oficina lo marcó pagado con su fecha el 06-sep: r1 no
+  // lo contó (estaba fuera del libro), pero al regenerar su Excel ya cae en
+  // su tramo. Sin el resalte, la «Diferencia» cambiaba sin explicación.
+  const marcadoPagado = (gastoId: string, cuando: string): Fila => ({
+    gasto_id: gastoId,
+    accion: 'UPDATE',
+    created_at: cuando,
+    diff: { por_pagar: { antes: true, despues: false } },
+  });
+
+  it('r1: el marcado pagado DESPUÉS se resalta en naranja con su propio aviso', async () => {
+    const { svc, dedicados, filtrosBitacora } = armar({
+      bitacora: [marcadoPagado('g2', '2026-09-06T10:00:00+00:00')],
+    });
+    await svc.reposicionXlsx('r1');
+    const p = dedicados[0];
+    // g1, g2 (marcado pagado después) y g4 (capturado después).
+    expect(p.filas.map((f) => f.resaltar)).toEqual([false, true, true]);
+    expect(p.avisos).toEqual([
+      '1 gasto se capturó DESPUÉS de registrar esta reposición (resaltados en naranja): no estaban en la cuenta cuando se repuso.',
+      '1 gasto se marcó pagado DESPUÉS de registrar esta reposición (resaltados en naranja): no estaban en la cuenta cuando se repuso.',
+    ]);
+    // Solo las filas UPDATE que bajaron la bandera, en lote por gasto_id.
+    expect(filtrosBitacora).toEqual([
+      { accion: 'UPDATE', 'diff->por_pagar->>despues': 'false' },
+    ]);
+  });
+
+  it('marcado pagado ANTES de registrar la reposición ⇒ sin resalte (ya estaba en la cuenta)', async () => {
+    const { svc, dedicados } = armar({
+      bitacora: [marcadoPagado('g2', '2026-09-04T10:00:00+00:00')],
+    });
+    await svc.reposicionXlsx('r1');
+    expect(dedicados[0].filas.map((f) => f.resaltar)).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    expect(dedicados[0].avisos).toHaveLength(1);
+  });
+
+  it('re-programado y vuelto a marcar: cuenta la ÚLTIMA vez que se marcó pagado', async () => {
+    const { svc, dedicados } = armar({
+      bitacora: [
+        marcadoPagado('g2', '2026-09-04T10:00:00+00:00'),
+        marcadoPagado('g2', '2026-09-07T10:00:00+00:00'),
+      ],
+    });
+    await svc.reposicionXlsx('r1');
+    expect(dedicados[0].filas[1].resaltar).toBe(true);
+  });
+
+  it('el respaldo genérico resalta la fila igual (fecha y captura)', async () => {
+    const { svc, genericos } = armar({
+      sinEndpoint: true,
+      bitacora: [marcadoPagado('g2', '2026-09-06T10:00:00+00:00')],
+    });
+    await svc.reposicionXlsx('r1');
+    expect(genericos[0].resaltes).toEqual([
+      { fila: 1, col: 0, color: 'ED7D31' },
+      { fila: 1, col: col('Capturado (hora Cancún)'), color: 'ED7D31' },
+      { fila: 2, col: 0, color: 'ED7D31' },
+      { fila: 2, col: col('Capturado (hora Cancún)'), color: 'ED7D31' },
+    ]);
+  });
+
+  it('BEST-EFFORT: si la bitácora no se puede leer, el Excel sale igual, sin ese resalte', async () => {
+    const { svc, dedicados } = armar({
+      bitacoraFalla: true,
+      bitacora: [marcadoPagado('g2', '2026-09-06T10:00:00+00:00')],
+    });
+    const r = await svc.reposicionXlsx('r1');
+    expect(r.buffer.toString()).toBe('xlsx-dedicado');
+    expect(dedicados[0].filas.map((f) => f.resaltar)).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    expect(dedicados[0].avisos).toHaveLength(1);
+  });
+
+  it('lo PENDIENTE (sin reposición que comparar) y SIN la migración no leen la bitácora', async () => {
+    const pendiente = armar({
+      bitacora: [marcadoPagado('g6', '2026-09-12T10:00:00+00:00')],
+    });
+    await pendiente.svc.porReponerXlsx(FONDO);
+    expect(pendiente.consultas.some((c) => c.tabla === 'gasto_bitacora')).toBe(
+      false,
+    );
+    const sinMigracion = armar({
+      sinPorPagar: true,
+      bitacora: [marcadoPagado('g2', '2026-09-06T10:00:00+00:00')],
+    });
+    await sinMigracion.svc.reposicionXlsx('r1');
+    expect(
+      sinMigracion.consultas.some((c) => c.tabla === 'gasto_bitacora'),
+    ).toBe(false);
+    expect(sinMigracion.dedicados[0].filas.map((f) => f.resaltar)).toEqual([
+      false,
+      false,
+      true,
+    ]);
   });
 });
