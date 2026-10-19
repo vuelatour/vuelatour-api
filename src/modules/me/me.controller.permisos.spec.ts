@@ -98,6 +98,9 @@ describe('MeController — permisos por persona', () => {
       inicio_oficial: null,
       // AFAC por vuelo (invariante 90): sin Supabase inyectado ⇒ false.
       afac_real: false,
+      // Gastos por pagar (invariante 93): sin la capacidad, la ÚNICA llave
+      // nueva es `gastos_por_pagar: false` (sin `gasto_fecha_max`).
+      gastos_por_pagar: false,
     });
     expect(r.push_dispositivos).toBe(1);
   });
@@ -159,5 +162,70 @@ describe('MeController — config.afac_real (16-oct-2026, invariante 90)', () =>
     );
     const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
     expect(g.config.afac_real).toBe(false);
+  });
+});
+
+describe('MeController — config.gastos_por_pagar (19-oct-2026, invariante 93)', () => {
+  afterEach(() => jest.useRealTimers());
+
+  /** Supabase cuyo sondeo de CUALQUIER columna de `gasto` responde `error`. */
+  const sb = (
+    errores: Record<string, { code: string; message: string } | null>,
+  ) =>
+    ({
+      service: {
+        from: () => ({
+          select: (col: string) => ({
+            limit: () =>
+              Promise.resolve({
+                data: errores[col] ? null : [],
+                error: errores[col] ?? null,
+              }),
+          }),
+        }),
+      },
+    }) as unknown as SupabaseService;
+  const NO_EXISTE = { code: '42703', message: 'column does not exist' };
+
+  it('con la migración ⇒ true y `gasto_fecha_max` en GET y PATCH (MISMO shape); oficina +30', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-19T15:00:00Z'));
+    const { ctrl } = armar(true, null, sb({}));
+    const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
+    const p = (await ctrl.update({}, yo)) as {
+      config: Record<string, unknown>;
+    };
+    expect(g.config.gastos_por_pagar).toBe(true);
+    expect(g.config.gasto_fecha_max).toBe('2026-11-18');
+    expect(p.config).toEqual(g.config);
+    // Las llaves nuevas van al FINAL de `config`.
+    expect(Object.keys(g.config).slice(-2)).toEqual([
+      'gastos_por_pagar',
+      'gasto_fecha_max',
+    ]);
+  });
+
+  it('PILOTO con la migración ⇒ fin de mes; el último día del mes ⇒ mañana', async () => {
+    const piloto = { ...yo, rol: Rol.PILOTO };
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-19T15:00:00Z'));
+    let { ctrl } = armar(true, null, sb({}));
+    let g = (await ctrl.me(piloto)) as { config: Record<string, unknown> };
+    expect(g.config.gasto_fecha_max).toBe('2026-10-31');
+    jest.setSystemTime(new Date('2026-10-31T15:00:00Z'));
+    ({ ctrl } = armar(true, null, sb({})));
+    g = await ctrl.me(piloto);
+    expect(g.config.gasto_fecha_max).toBe('2026-11-01');
+  });
+
+  it('sin la migración (42703 en `por_pagar`) ⇒ `gastos_por_pagar: false` y SIN `gasto_fecha_max`', async () => {
+    const { ctrl } = armar(true, null, sb({ por_pagar: NO_EXISTE }));
+    const g = (await ctrl.me(yo)) as { config: Record<string, unknown> };
+    const p = (await ctrl.update({}, yo)) as {
+      config: Record<string, unknown>;
+    };
+    expect(g.config.gastos_por_pagar).toBe(false);
+    expect('gasto_fecha_max' in g.config).toBe(false);
+    expect(p.config).toEqual(g.config);
+    // La otra capacidad no se entera.
+    expect(g.config.afac_real).toBe(true);
   });
 });

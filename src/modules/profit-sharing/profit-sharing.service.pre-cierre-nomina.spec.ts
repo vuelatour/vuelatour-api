@@ -219,7 +219,11 @@ describe('ProfitSharingService.preCierre — `nomina_sin_repartir` (invariante 9
 
   it('es BLOQUEANTE (fuente única de `listo` y de la previa del cierre)', () => {
     expect(CLAVES_BLOQUEANTES_PRECIERRE).toContain('nomina_sin_repartir');
-    expect(CLAVES_BLOQUEANTES_PRECIERRE).toHaveLength(7);
+    // 8 desde el 0.0.95 (invariante 93): `gastos_por_pagar` justo después.
+    expect(CLAVES_BLOQUEANTES_PRECIERRE).toHaveLength(8);
+    expect(CLAVES_BLOQUEANTES_PRECIERRE.indexOf('gastos_por_pagar')).toBe(
+      CLAVES_BLOQUEANTES_PRECIERRE.indexOf('nomina_sin_repartir') + 1,
+    );
   });
 
   it('septiembre REAL sin repartir: 7 pagos, $25,757.80 MXN, sus ids como ÚLTIMA llave; bloquea `listo`', async () => {

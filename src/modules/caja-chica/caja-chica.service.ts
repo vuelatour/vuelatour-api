@@ -38,6 +38,18 @@ import {
 } from '../../common/ubicacion-balance-lector';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
 import { inicioOficialDe, pisoDia } from '../../common/inicio-oficial.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): un EFECTIVO por pagar
+// vigente NO es del libro (saldo, por reponer, reposición): entra con su
+// fecha real al marcarse pagado. Sonda ÚNICA de la columna y regla pura.
+import {
+  colsPorPagar,
+  porPagarDisponible,
+} from '../../common/por-pagar-disponible.util';
+import {
+  estadoPagoGasto,
+  porPagarVigente,
+  type EstadoPagoGasto,
+} from '../expenses/por-pagar.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import {
   CreateCajaMovimientoDto,
@@ -73,6 +85,68 @@ type FondoRow = Record<string, unknown> & {
   usuario?: unknown;
 };
 
+/**
+ * Gasto EFECTIVO «por pagar» vigente de la caja (invariante 93): aún no sale
+ * de la caja. Lista ADITIVA `por_pagar` del detalle y de `/caja-chica/me`.
+ */
+export type GastoPorPagarCaja = {
+  id: string;
+  fecha_gasto: string;
+  monto: number;
+  moneda: string;
+  categoria: string | null;
+  concepto: string;
+  estado_pago: EstadoPagoGasto;
+};
+
+/** Texto de un valor de PostgREST (texto o número); otro tipo ⇒ ''. */
+function txt(v: unknown): string {
+  return typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '';
+}
+
+/** Primera línea de las notas, el lugar o la etiqueta de la categoría. */
+function conceptoGastoCaja(g: Record<string, unknown>): string {
+  const linea = txt(g.notas).split('\n')[0].trim();
+  if (linea) return linea;
+  const lugar = txt(g.lugar).trim();
+  if (lugar) return lugar;
+  return etiquetaCategoriaGasto((g.categoria as string | null) ?? null);
+}
+
+/**
+ * Lista `por_pagar` (orden por fecha, luego captura e id) y su total en la
+ * moneda del fondo (centavos enteros).
+ */
+function listaPorPagarCaja(
+  gastos: Array<Record<string, unknown>>,
+  hoy: string,
+): { lista: GastoPorPagarCaja[]; total: number } {
+  const ordenados = [...gastos].sort((a, b) => {
+    const fa = txt(a.fecha_gasto);
+    const fb = txt(b.fecha_gasto);
+    if (fa !== fb) return fa < fb ? -1 : 1;
+    const ca = txt(a.created_at);
+    const cb = txt(b.created_at);
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    return txt(a.id) < txt(b.id) ? -1 : 1;
+  });
+  let cents = 0;
+  const lista = ordenados.map((g): GastoPorPagarCaja => {
+    const monto = Number(g.monto);
+    cents += Number.isFinite(monto) ? Math.round(monto * 100) : 0;
+    return {
+      id: txt(g.id),
+      fecha_gasto: txt(g.fecha_gasto).slice(0, 10),
+      monto: Number.isFinite(monto) ? monto : 0,
+      moneda: txt(g.moneda),
+      categoria: (g.categoria as string | null) ?? null,
+      concepto: conceptoGastoCaja(g),
+      estado_pago: estadoPagoGasto(g, hoy),
+    };
+  });
+  return { lista, total: cents / 100 };
+}
+
 /** Entrada del libro unificado (movimiento de caja o gasto en efectivo). */
 type EntradaLibro = EntradaHistorialCaja & {
   id: string;
@@ -88,6 +162,9 @@ type EntradaLibro = EntradaHistorialCaja & {
   vuelo_folio: number | null;
   registrado_por_nombre: string | null;
   autorizado_por_nombre: string | null;
+  /** Solo gastos y solo con la migración (invariante 93; en el libro, PAGADO). */
+  por_pagar?: boolean;
+  estado_pago?: EstadoPagoGasto;
 };
 
 /**
@@ -311,13 +388,26 @@ export class CajaChicaService {
   ): Promise<Map<string, { monto: number | string; moneda: string }[]>> {
     const map = new Map<string, { monto: number | string; moneda: string }[]>();
     if (usuarioIds.length === 0) return map;
+    // Invariante 93: con la migración, un EFECTIVO por pagar vigente no
+    // cuenta en el saldo (se filtra en JS sobre lo ya leído).
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select('usuario_captura_id, monto, moneda')
+      .select(
+        `usuario_captura_id, monto, moneda${conPorPagar ? ', fecha_gasto, por_pagar, conciliado' : ''}`,
+      )
       .eq('medio_pago', 'EFECTIVO')
       .in('usuario_captura_id', usuarioIds);
     if (error) throw new Error(error.message);
-    for (const g of data ?? []) {
+    const hoy = hoyCancun();
+    for (const g of (data ?? []) as unknown as Array<
+      Record<string, unknown> & {
+        usuario_captura_id: string;
+        monto: number | string;
+        moneda: string;
+      }
+    >) {
+      if (conPorPagar && porPagarVigente(g, hoy)) continue;
       const k = (g as { usuario_captura_id: string }).usuario_captura_id;
       if (!map.has(k)) map.set(k, []);
       map.get(k)!.push(g);
@@ -347,7 +437,13 @@ export class CajaChicaService {
     movs: Record<string, unknown>[];
     efectivo: { monto: number | string }[];
     historial: EntradaConSaldo<EntradaLibro>[];
+    /**
+     * EFECTIVO por pagar vigente de la moneda del fondo (invariante 93):
+     * FUERA del libro. null = sin la migración (la llave no viaja).
+     */
+    porPagar: { lista: GastoPorPagarCaja[]; total: number } | null;
   }> {
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
@@ -361,7 +457,7 @@ export class CajaChicaService {
         // oficina audita "¿de qué vuelo salió este efectivo?" sin buscarlo.
         // `created_at`: desempate dentro del día (orden de captura).
         .select(
-          'id, monto, moneda, fecha_gasto, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
+          `id, monto, moneda, fecha_gasto, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)${colsPorPagar(conPorPagar)}`,
         )
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', fondo.usuario_id),
@@ -370,9 +466,21 @@ export class CajaChicaService {
     if (movsRes.error) throw new Error(movsRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
     const movs = (movsRes.data ?? []) as Record<string, unknown>[];
-    const efectivo = (
-      (gastosRes.data ?? []) as Record<string, unknown>[]
+    const deLaMoneda = (
+      (gastosRes.data ?? []) as unknown as Record<string, unknown>[]
     ).filter((g) => g.moneda === fondo.moneda);
+    // GASTOS POR PAGAR (invariante 93): el vigente (estado ≠ PAGADO) NO es
+    // del libro; sin por pagar, el libro es byte a byte el de siempre.
+    const hoy = hoyCancun();
+    const efectivo = conPorPagar
+      ? deLaMoneda.filter((g) => !porPagarVigente(g, hoy))
+      : deLaMoneda;
+    const porPagar = conPorPagar
+      ? listaPorPagarCaja(
+          deLaMoneda.filter((g) => porPagarVigente(g, hoy)),
+          hoy,
+        )
+      : null;
     const duenoNombre = nombreEmbed(fondo.usuario);
 
     const entradas: EntradaLibro[] = [
@@ -439,6 +547,13 @@ export class CajaChicaService {
           created_at: gg.created_at ?? gg.fecha_gasto,
           registrado_por_nombre: duenoNombre,
           autorizado_por_nombre: null,
+          // Invariante 93 (con la migración): en el libro siempre PAGADO.
+          ...(conPorPagar
+            ? {
+                por_pagar: g.por_pagar === true,
+                estado_pago: estadoPagoGasto(g, hoy),
+              }
+            : {}),
         };
       }),
     ];
@@ -451,13 +566,15 @@ export class CajaChicaService {
       movs,
       efectivo: efectivo as { monto: number | string }[],
       historial,
+      porPagar,
     };
   }
 
   /** Detalle con historial unificado (movimientos + gastos efectivo) y saldo corrido. */
   async getFondoDetail(id: string) {
     const fondo = (await this.findFondo(id)) as FondoRow;
-    const { movs, efectivo, historial } = await this.cargarLibro(fondo);
+    const { movs, efectivo, historial, porPagar } =
+      await this.cargarLibro(fondo);
     const ultimo = historial[historial.length - 1];
     const esAcumulada = fondo.es_acumulada === true;
     const [balances, repuestoA, cajasFondeadas] = await Promise.all([
@@ -493,6 +610,11 @@ export class CajaChicaService {
           vuelo_folio: e.vuelo_folio,
           saldo: e.saldo,
           por_reponer: e.por_reponer,
+          // ADITIVO (19-oct-2026, invariante 93), solo gastos y solo con la
+          // migración: en el libro un gasto siempre está PAGADO.
+          ...(e.origen === 'gasto' && e.estado_pago
+            ? { por_pagar: e.por_pagar === true, estado_pago: e.estado_pago }
+            : {}),
           // ADITIVO (15-oct-2026, invariante 82), SIEMPRE la última llave y
           // solo en los GASTOS: en qué libro y en qué mes vive (enlaces «Ver
           // en balance…» del panel). Sin la llave = lectura caída o gasto
@@ -509,6 +631,12 @@ export class CajaChicaService {
         }))
         .reverse(),
       ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
+      // ADITIVO (19-oct-2026, invariante 93), solo con la migración: los
+      // EFECTIVO por pagar (aún no salen de la caja; FUERA del libro y del
+      // saldo) y su total en la moneda del fondo.
+      ...(porPagar
+        ? { por_pagar: porPagar.lista, por_pagar_total: porPagar.total }
+        : {}),
       // ADITIVO (15-oct-2026, invariante 83): cajas ACTIVAS que esta caja
       // fondea, con su por reponer. [] = no fondea ninguna; null = la lectura
       // cayó (jamás un [] falso).
@@ -1191,6 +1319,11 @@ export class CajaChicaService {
     // recortan a fecha ≥ inicio. El SALDO y la lectura del fondo salen del
     // libro COMPLETO (`allMovs` y `gastosRes`, sin piso).
     const inicio = await inicioOficialDe(this.configuracion);
+    // GASTOS POR PAGAR (invariante 93): con la migración, el EFECTIVO por
+    // pagar vigente sale del saldo, de la lectura y de la lista `gastos` y
+    // viaja aparte en `por_pagar`; sin por pagar, todo byte a byte igual.
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
+    const hoyPP = hoyCancun();
     let movsRecientesQ = this.supabase.service
       .from('caja_chica_movimiento')
       .select(MOV_COLS)
@@ -1199,7 +1332,7 @@ export class CajaChicaService {
     let gastosListaQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
+        `id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)${colsPorPagar(conPorPagar)}`,
       )
       .eq('medio_pago', 'EFECTIVO')
       .eq('usuario_captura_id', userId);
@@ -1211,7 +1344,11 @@ export class CajaChicaService {
         .limit(20),
       this.supabase.service
         .from('gasto')
-        .select('monto, moneda')
+        .select(
+          conPorPagar
+            ? 'id, monto, moneda, fecha_gasto, categoria, lugar, notas, created_at, por_pagar, conciliado'
+            : 'monto, moneda',
+        )
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', userId),
       // La LISTA visible de "mi caja" (la app la pinta agrupada por día,
@@ -1229,15 +1366,46 @@ export class CajaChicaService {
     if (gastosRes.error) throw new Error(gastosRes.error.message);
     if (gastosListaRes.error) throw new Error(gastosListaRes.error.message);
     const movs = movsRes.data;
-    const gastos = gastosRes.data;
-    const gastosLista = (gastosListaRes.data ?? []).map((g) => {
-      const vuelo = (Array.isArray(g.vuelo) ? g.vuelo[0] : g.vuelo) as {
-        folio?: number;
-      } | null;
-      const { vuelo: _omit, ...rest } = g as Record<string, unknown>;
-      void _omit;
-      return { ...rest, folio: vuelo?.folio ?? null };
-    });
+    const todosGastos = (gastosRes.data ?? []) as unknown as Array<
+      Record<string, unknown> & { monto: number | string; moneda: string }
+    >;
+    // El saldo y su lectura: sin los EFECTIVO por pagar vigentes.
+    const gastos = conPorPagar
+      ? todosGastos.filter((g) => !porPagarVigente(g, hoyPP))
+      : todosGastos;
+    const gastosLista = (
+      (gastosListaRes.data ?? []) as unknown as Array<Record<string, unknown>>
+    )
+      .filter((g) => !conPorPagar || !porPagarVigente(g, hoyPP))
+      .map((g) => {
+        const vuelo = (Array.isArray(g.vuelo) ? g.vuelo[0] : g.vuelo) as {
+          folio?: number;
+        } | null;
+        const { vuelo: _omit, conciliado: _conciliado, ...rest } = g;
+        void _omit;
+        void _conciliado;
+        return {
+          ...rest,
+          folio: vuelo?.folio ?? null,
+          // ADITIVO (invariante 93), solo con la migración.
+          ...(conPorPagar
+            ? {
+                por_pagar: g.por_pagar === true,
+                estado_pago: estadoPagoGasto(g, hoyPP),
+              }
+            : {}),
+        };
+      });
+    // Lista ADITIVA (invariante 93): EFECTIVO por pagar de la moneda del
+    // fondo, aún fuera de la caja.
+    const porPagar = conPorPagar
+      ? listaPorPagarCaja(
+          todosGastos.filter(
+            (g) => g.moneda === fo.moneda && porPagarVigente(g, hoyPP),
+          ),
+          hoyPP,
+        )
+      : null;
 
     const allMovs = await this.supabase.service
       .from('caja_chica_movimiento')
@@ -1303,6 +1471,10 @@ export class CajaChicaService {
       movimientos: movs ?? [],
       gastos: gastosLista,
       efectivo_otras_monedas: efectivoOtrasMonedas,
+      // ADITIVOS (19-oct-2026, invariante 93), solo con la migración.
+      ...(porPagar
+        ? { por_pagar: porPagar.lista, por_pagar_total: porPagar.total }
+        : {}),
     };
   }
 
@@ -1451,6 +1623,11 @@ export class CajaChicaService {
         por_reponer_despues: e.por_reponer,
         registrado_por_nombre: e.registrado_por_nombre,
         autorizado_por_nombre: e.autorizado_por_nombre,
+        // ADITIVO (19-oct-2026, invariante 93), solo gastos y con la
+        // migración: en el libro un gasto siempre está PAGADO.
+        ...(e.origen === 'gasto' && e.estado_pago
+          ? { por_pagar: e.por_pagar === true, estado_pago: e.estado_pago }
+          : {}),
       })),
     };
   }

@@ -62,6 +62,16 @@ import {
   detallePrecierreNominaSinRepartir,
   resumenNominaSinRepartir,
 } from '../../common/nomina-sin-repartir.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): renglón BLOQUEANTE del
+// pre-cierre (estado de pago, sumas y textos en la fuente única pura).
+import { porPagarDisponible } from '../../common/por-pagar-disponible.util';
+import {
+  CLAVE_PRECIERRE_GASTOS_POR_PAGAR,
+  TITULO_PRECIERRE_GASTOS_POR_PAGAR,
+  detallePrecierreGastosPorPagar,
+  porPagarVigente,
+  resumenGastosPorPagar,
+} from '../expenses/por-pagar.util';
 import {
   cobradoParteAvion,
   pagoVendedorUsd,
@@ -631,6 +641,9 @@ export const CLAVES_BLOQUEANTES_PRECIERRE = [
   // 16-oct-2026 (API 0.0.90, invariante 91): no se cierra un mes con
   // nómina sin repartir (no entra a ningún balance ni al reparto).
   'nomina_sin_repartir',
+  // 19-oct-2026 (API 0.0.95, invariante 93): no se cierra un mes con
+  // gastos «por pagar» sin confirmar (marcarlos pagados o eliminarlos).
+  'gastos_por_pagar',
 ] as const;
 
 @Injectable()
@@ -4032,6 +4045,15 @@ export class ProfitSharingService {
     const nominaSinRepartir = await this.nominaSinRepartirPrecierre(
       gastos.filter((g) => g.categoria === CATEGORIA_NOMINA),
     );
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): lectura propia del
+    // periodo (estado ≠ PAGADO), paginada y best-effort: caída ⇒ null ⇒
+    // count 0 + `lectura_fallida`; sin la migración ⇒ [] (count 0). BLOQUEA.
+    const hoyPorPagar = hoyCancun(this.ahora());
+    const gastosPorPagar = await this.gastosPorPagarPrecierre(
+      q.desde,
+      q.hasta,
+      hoyPorPagar,
+    );
     // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el
     // monto a la baja DESPUÉS de repartir) — el sobrante restaría dinero
     // inexistente a los aviones. Aviso para corregir en Otros gastos.
@@ -4492,6 +4514,8 @@ export class ProfitSharingService {
       },
       // Justo después de la bandeja (invariante 91): BLOQUEANTE.
       renglonNominaSinRepartir(nominaSinRepartir),
+      // Justo después de la nómina (invariante 93): BLOQUEANTE.
+      renglonGastosPorPagar(gastosPorPagar, hoyPorPagar),
       {
         clave: 'fijos_con_avion',
         titulo: 'Gastos FIJOS capturados con avión',
@@ -4774,6 +4798,53 @@ export class ProfitSharingService {
     } catch (err) {
       this.logger.warn(
         `pre-cierre: no se pudo verificar la nómina sin repartir: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pre-cierre · GASTOS «POR PAGAR» SIN CONFIRMAR (19-oct-2026, API 0.0.95,
+   * invariante 93): los gastos del periodo (`fecha_gasto`, ya con el inicio
+   * oficial) con estado ≠ PAGADO (`estadoPagoGasto`: `por_pagar` y sin
+   * conciliar). Lectura PROPIA filtrada por la columna (pocas filas), por
+   * páginas de 1000 ordenadas por id. Sin la migración ⇒ [] (no nombra la
+   * columna). Nunca lanza: un error ⇒ null (`lectura_fallida`).
+   */
+  private async gastosPorPagarPrecierre(
+    desde: string,
+    hasta: string,
+    hoy: string,
+  ): Promise<Array<Record<string, unknown>> | null> {
+    const sb = this.supabase.service;
+    try {
+      if (!(await porPagarDisponible(sb))) return [];
+      const out: Array<Record<string, unknown>> = [];
+      for (let pagina = 0; ; pagina += 1) {
+        if (pagina >= LOTE_PAGINADO_MAX_PAGINAS) {
+          throw new Error(
+            `más de ${LOTE_PAGINADO_MAX_PAGINAS * PAGINA_POSTGREST} gastos por pagar`,
+          );
+        }
+        const ini = pagina * PAGINA_POSTGREST;
+        const { data, error } = await sb
+          .from('gasto')
+          .select('id, monto, moneda, fecha_gasto, por_pagar, conciliado')
+          .eq('por_pagar', true)
+          .eq('conciliado', false)
+          .gte('fecha_gasto', desde)
+          .lte('fecha_gasto', hasta)
+          .order('id', { ascending: true })
+          .range(ini, ini + PAGINA_POSTGREST - 1);
+        if (error) throw new Error(error.message);
+        const filas = (data ?? []) as Array<Record<string, unknown>>;
+        out.push(...filas);
+        if (filas.length < PAGINA_POSTGREST) break;
+      }
+      return out.filter((g) => porPagarVigente(g, hoy));
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: no se pudieron verificar los gastos por pagar: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }
@@ -5840,6 +5911,30 @@ function renglonNominaSinRepartir(
     clave: CLAVE_PRECIERRE_NOMINA_SIN_REPARTIR,
     titulo: TITULO_PRECIERRE_NOMINA_SIN_REPARTIR,
     detalle: detallePrecierreNominaSinRepartir(r),
+    count: r?.n ?? 0,
+    monto_mxn: r?.mxn ?? 0,
+    ...(r && r.usd > 0 ? { monto_usd: r.usd } : {}),
+    ...(lista ? {} : { lectura_fallida: true as const }),
+    ...idsPrecierre(lista ?? []),
+  };
+}
+
+/**
+ * Renglón BLOQUEANTE `gastos_por_pagar` del pre-cierre (19-oct-2026, API
+ * 0.0.95, invariante 93): los gastos del periodo «por pagar» sin confirmar,
+ * su monto por moneda (`monto_usd` solo con dólares; jamás se suman monedas)
+ * y sus `ids` como ÚLTIMAS llaves (invariante 81). null (lectura caída) ⇒
+ * count 0 + `lectura_fallida: true` + «No se pudieron verificar…».
+ */
+function renglonGastosPorPagar(
+  lista: Array<Record<string, unknown>> | null,
+  hoy: string,
+) {
+  const r = lista ? resumenGastosPorPagar(lista, hoy) : null;
+  return {
+    clave: CLAVE_PRECIERRE_GASTOS_POR_PAGAR,
+    titulo: TITULO_PRECIERRE_GASTOS_POR_PAGAR,
+    detalle: detallePrecierreGastosPorPagar(r),
     count: r?.n ?? 0,
     monto_mxn: r?.mxn ?? 0,
     ...(r && r.usd > 0 ? { monto_usd: r.usd } : {}),

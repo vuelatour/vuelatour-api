@@ -174,7 +174,8 @@ const AERONAVES: Fila[] = [
 
 /**
  * Las 11 claves con `ids` (contrato del resolver §2.2) + `nomina_sin_repartir`
- * (16-oct-2026, API 0.0.90, invariante 91).
+ * (16-oct-2026, API 0.0.90, invariante 91) + `gastos_por_pagar` (19-oct-2026,
+ * API 0.0.95, invariante 93).
  */
 const CLAVES_CON_IDS = [
   'combustible_sin_avion',
@@ -182,6 +183,7 @@ const CLAVES_CON_IDS = [
   'repartos_incoherentes',
   'gastos_sin_avion',
   'nomina_sin_repartir',
+  'gastos_por_pagar',
   'fijos_con_avion',
   'matricula_recibo_distinta',
   'duplicados_sin_resolver',
@@ -235,6 +237,10 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
           moneda: 'MXN',
           tc_gasto: 17,
         }),
+        // Gasto «por pagar» (invariante 93; la BD en memoria contesta la
+        // sonda ⇒ con la migración) y uno por pagar YA conciliado (PAGADO).
+        gasto('g-por-pagar', { por_pagar: true }),
+        gasto('g-por-pagar-banco', { por_pagar: true, conciliado: true }),
         // Un banco ya conciliado y un gasto FUERA del periodo: no cuentan.
         gasto('g-banco-ok', { medio_pago: 'TRANSFERENCIA', conciliado: true }),
         gasto('g-otro-mes', {
@@ -288,6 +294,7 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
       repartos_incoherentes: ['g-reparto'],
       gastos_sin_avion: ['g-sin-avion', 'g-gas', 'g-permiso'],
       nomina_sin_repartir: ['g-nomina'],
+      gastos_por_pagar: ['g-por-pagar'],
       fijos_con_avion: ['g-fijo'],
       matricula_recibo_distinta: ['g-matricula'],
       duplicados_sin_resolver: ['g-duplicado'],

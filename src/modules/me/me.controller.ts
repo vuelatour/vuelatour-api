@@ -20,9 +20,31 @@ import { UpdateSelfDto } from '../users/dto/update-self.dto';
 import { UsersService } from '../users/users.service';
 import { inicioOficialDe } from '../../common/inicio-oficial.util';
 import { afacRealDisponible } from '../../common/afac-real-disponible.util';
+import { porPagarDisponible } from '../../common/por-pagar-disponible.util';
+import { hoyCancun } from '../../common/fecha-cancun.util';
+import { fechaMaxGasto } from '../expenses/por-pagar.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CapturasQuery } from './dto/capturas.dto';
 import { MeCapturasService } from './me-capturas.service';
+
+/**
+ * `config.gastos_por_pagar` + `config.gasto_fecha_max` (invariante 93): la
+ * MISMA forma en GET y PATCH /me (la app los cachea juntos). La fecha es
+ * `fechaMaxGasto(hoy Cancún, rol)` (campo: max(fin de mes, mañana);
+ * oficina: +30). Sin la migración la ÚNICA llave nueva es
+ * `gastos_por_pagar: false` (contrato §1): la app y el panel usan su tope de
+ * siempre (mañana / +30).
+ */
+function configPorPagar(
+  disponible: boolean,
+  rol: AuthenticatedUser['rol'] | undefined,
+): { gastos_por_pagar: boolean; gasto_fecha_max?: string } {
+  if (!disponible) return { gastos_por_pagar: false };
+  return {
+    gastos_por_pagar: true,
+    gasto_fecha_max: fechaMaxGasto(hoyCancun(), rol, true),
+  };
+}
 
 @ApiTags('Me')
 @ApiBearerAuth()
@@ -57,6 +79,21 @@ export class MeController {
     }
   }
 
+  /**
+   * ¿Está aplicada la migración de gastos «por pagar» (20261019000001)?
+   * Best-effort como `afacReal` (sin servicio o con error ⇒ false). Con
+   * `true`, el panel y la app dejan capturar fechas hasta
+   * `config.gasto_fecha_max` y ofrecen «Marcar pagado» (invariante 93).
+   */
+  private async gastosPorPagar(): Promise<boolean> {
+    if (!this.supabase) return false;
+    try {
+      return await porPagarDisponible(this.supabase.service);
+    } catch {
+      return false;
+    }
+  }
+
   /** Dispositivos push del propio usuario (0 = este teléfono no recibe
    *  avisos; la app lo muestra en rojo en Perfil). Best-effort: nunca
    *  tumba /me. */
@@ -86,6 +123,7 @@ export class MeController {
       permisos,
       inicioOficial,
       afacReal,
+      gastosPorPagar,
     ] = await Promise.all([
       this.users.findByAuthId(current.authId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -95,6 +133,7 @@ export class MeController {
       this.configuracion.permisosDe(current.userId, current.rol),
       inicioOficialDe(this.configuracion),
       this.afacReal(),
+      this.gastosPorPagar(),
     ]);
     return {
       ...usuario,
@@ -120,6 +159,10 @@ export class MeController {
         // del costo real está aplicada. El panel muestra la celda editable y
         // la casilla «Es pago de AFAC» solo con true.
         afac_real: afacReal,
+        // GASTOS «POR PAGAR» (19-oct-2026, invariante 93, ADITIVOS): la
+        // capacidad (true solo con la migración) y la fecha máxima de un
+        // gasto para ESTE rol (`fechaMaxGasto` con la disponibilidad).
+        ...configPorPagar(gastosPorPagar, current.rol),
       },
     };
   }
@@ -142,6 +185,7 @@ export class MeController {
       permisos,
       inicioOficial,
       afacReal,
+      gastosPorPagar,
     ] = await Promise.all([
       this.users.updateSelf(current.authId, body, current.userId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
@@ -151,6 +195,7 @@ export class MeController {
       this.configuracion.permisosDe(current.userId, current.rol),
       inicioOficialDe(this.configuracion),
       this.afacReal(),
+      this.gastosPorPagar(),
     ]);
     return {
       ...usuario,
@@ -164,6 +209,8 @@ export class MeController {
         gastos_sin_limite_hasta: sinLimiteHasta,
         inicio_oficial: inicioOficial,
         afac_real: afacReal,
+        // MISMO shape que el GET (invariante 93).
+        ...configPorPagar(gastosPorPagar, current.rol),
       },
     };
   }

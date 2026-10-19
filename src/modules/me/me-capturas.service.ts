@@ -5,11 +5,25 @@ import {
   pisoDia,
 } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
-import { diaCancun, fechaCortaCancun } from '../../common/fecha-cancun.util';
+import {
+  diaCancun,
+  fechaCortaCancun,
+  hoyCancun,
+} from '../../common/fecha-cancun.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CapturasQuery } from './dto/capturas.dto';
 import { soloPendientes } from '../../common/taco-motivo.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): con la migración cada
+// gasto/combustible trae `por_pagar` y `estado_pago` (aditivos).
+import {
+  colsPorPagar,
+  porPagarDisponible,
+} from '../../common/por-pagar-disponible.util';
+import {
+  estadoPagoGasto,
+  type EstadoPagoGasto,
+} from '../expenses/por-pagar.util';
 
 /**
  * Historial de capturas del usuario de campo (piloto/mecánico/apoyo).
@@ -72,6 +86,9 @@ export interface CapturaItem {
   compra?: { id: string; folio: number } | null;
   /** MERCANCIA | ENVIO | IMPUESTOS | OTRO; null sin compra. */
   compra_rol?: string | null;
+  /** Solo GASTO/COMBUSTIBLE y solo con la migración (invariante 93). */
+  por_pagar?: boolean;
+  estado_pago?: EstadoPagoGasto;
 }
 
 type Row = Record<string, unknown>;
@@ -148,10 +165,11 @@ export class MeCapturasService {
     const desdeMs = desdeIso ? new Date(desdeIso).getTime() : null;
 
     // ===== 4 fuentes en paralelo, cada una ya filtrada por el usuario =====
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
     let gastosQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, vuelo_id, categoria, monto, moneda, medio_pago, litros, lugar, notas, duplicado_sospechado, created_at, capturado_en, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
+        `id, vuelo_id, categoria, monto, moneda, medio_pago, litros, lugar, notas, duplicado_sospechado, created_at, capturado_en, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)${colsPorPagar(conPorPagar)}`,
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
@@ -217,7 +235,7 @@ export class MeCapturasService {
     for (const r of [gastos, cobros, tacos, mants, vuelos]) {
       if (r.error) throw new Error(r.error.message);
     }
-    const gastoRows = (gastos.data ?? []) as Row[];
+    const gastoRows = (gastos.data ?? []) as unknown as Row[];
     const cobroRows = (cobros.data ?? []) as Row[];
     const tacoRows = (tacos.data ?? []) as Row[];
     const mantRows = (mants.data ?? []) as Row[];
@@ -239,8 +257,9 @@ export class MeCapturasService {
     const { folios, rutas } = await this.vuelosLookup(vueloIds);
 
     // ===== Unificar =====
+    const hoyPP = hoyCancun();
     const items: CapturaItem[] = [
-      ...gastoRows.map((g) => this.itemGasto(g, folios, rutas)),
+      ...gastoRows.map((g) => this.itemGasto(g, folios, rutas, hoyPP)),
       ...cobroRows.map((c) => this.itemCobro(c, folios, rutas)),
       ...tacoRows.map((e) => this.itemTaco(e, folios)),
       ...mantRows.map((m) => this.itemMantenimiento(m)),
@@ -338,6 +357,7 @@ export class MeCapturasService {
     g: Row,
     folios: Map<string, number>,
     rutas: Map<string, string>,
+    hoy: string = hoyCancun(),
   ): CapturaItem {
     const categoria = (g.categoria as string) ?? 'GASTO';
     // Etiqueta humana homologada (fuente única categoria-gasto.util); la
@@ -379,6 +399,13 @@ export class MeCapturasService {
       moneda: (g.moneda as string | null) ?? null,
       compra,
       compra_rol: compra ? ((g.compra_rol as string | null) ?? null) : null,
+      // ADITIVO (invariante 93): solo si la fila se leyó con la migración.
+      ...('por_pagar' in g
+        ? {
+            por_pagar: g.por_pagar === true,
+            estado_pago: estadoPagoGasto(g, hoy),
+          }
+        : {}),
     };
   }
 

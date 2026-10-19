@@ -60,6 +60,28 @@ import {
   decidirTuaIncluidaEnUpdate,
   errorTuaIncluidaAlta,
 } from './tua-incluida.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): sonda ÚNICA de la
+// columna `gasto.por_pagar` y reglas puras (tope de fecha, bandera al
+// escribir, estado de pago, «marcar pagado», textos).
+import {
+  errorPorPagarNoDisponible,
+  porPagarDisponible,
+} from '../../common/por-pagar-disponible.util';
+import {
+  CODIGO_POR_PAGAR_FECHA_FUTURA,
+  MENSAJE_POR_PAGAR_CONCILIADO,
+  MENSAJE_POR_PAGAR_FECHA_FUTURA,
+  anexarEstadoPago,
+  celdaPagoExcel,
+  conEstadoPago,
+  esMarcarPagado,
+  esRolCampo,
+  fechaBonita,
+  fechaMarcarPagado,
+  fechaMaxGasto,
+  mensajeFechaDespuesDeFinDeMes,
+  porPagarFinal,
+} from './por-pagar.util';
 import {
   SEGUNDOS_URL_MINIATURA,
   SEGUNDOS_URL_PUNTUAL,
@@ -72,6 +94,7 @@ import {
   avionesParaTextos,
   decidirCambioFechaGasto,
   errorDeFechasCambio,
+  fechaHoraCargaAlDia,
   type CambioFechaGastoRespuesta,
   type ErrorCambioFecha,
   type GastoCambioFecha,
@@ -283,6 +306,18 @@ function quitarAvisoAvionTramo(
 }
 
 /**
+ * Día Cancún del `capturado_en` CRUDO de un alta (gastos por pagar,
+ * invariante 93): solo decide si hay que consultar la sonda. null si no
+ * viene o no se puede leer (el 400 lo da `resolverCapturadoEn`).
+ */
+function diaCapturaApp(valor: string | null | undefined): string | null {
+  if (valor == null || valor === '') return null;
+  const ms = Date.parse(String(valor).trim());
+  if (!Number.isFinite(ms)) return null;
+  return hoyCancun(new Date(ms));
+}
+
+/**
  * Rechazo de la FECHA DEL PAGO desde Conciliación (invariante 74) con su
  * `code` y `details` estables: el AllExceptionsFilter expone `error` como
  * `code` y `details` tal cual (400 fechas; 409 los candados).
@@ -355,6 +390,9 @@ const CAMPOS_GASTO_CANDADO_MES = [
   // Invariante 90: marcar/desmarcar «Pago de AFAC» mueve el dinero de un
   // mes (sale o entra a la hoja «permisos» del avión y al reparto).
   'es_pago_afac',
+  // Invariante 93: poner o quitar «por pagar» mueve un EFECTIVO dentro o
+  // fuera del libro de caja chica (un mes cerrado no se toca).
+  'por_pagar',
 ] as const;
 
 @Injectable()
@@ -433,16 +471,18 @@ export class ExpensesService {
 
   /**
    * Columnas OPCIONALES de `gasto` (con coma inicial), cada una detrás de su
-   * sonda: `tua_incluida` (invariante 66) y `es_pago_afac` (invariante 90:
-   * la lista y el detalle devuelven la marca). Sin migraciones, ''.
+   * sonda: `tua_incluida` (invariante 66), `es_pago_afac` (invariante 90:
+   * la lista y el detalle devuelven la marca) y `por_pagar` (invariante 93:
+   * con ella cada fila gana además `estado_pago`). Sin migraciones, ''.
    */
   private async colsOpcionales(): Promise<string> {
     const sb = this.supabase.service;
-    const [tua, afac] = await Promise.all([
+    const [tua, afac, porPagar] = await Promise.all([
       tuaIncluidaDisponible(sb),
       afacRealDisponible(sb),
+      porPagarDisponible(sb),
     ]);
-    return `${tua ? ', tua_incluida' : ''}${afac ? ', es_pago_afac' : ''}`;
+    return `${tua ? ', tua_incluida' : ''}${afac ? ', es_pago_afac' : ''}${porPagar ? ', por_pagar' : ''}`;
   }
 
   /**
@@ -540,6 +580,11 @@ export class ExpensesService {
     opts: { detalleBanco?: boolean } = {},
   ): Promise<Buffer> {
     const { data, count, truncado } = await this.listParaXlsx(filters);
+    // GASTOS POR PAGAR (invariante 93): columna FINAL «Pago» SOLO con la
+    // migración (sin ella el libro sale byte a byte). La sonda ya la resolvió
+    // `list()` (memoria): no agrega consultas.
+    const conPago = await porPagarDisponible(this.supabase.service);
+    const hoyPago = hoyCancun();
     // Etiquetas legibles (el reporte lo lee gente de oficina, no la BD).
     // Medio de pago: fuente única `etiquetaMedioPago` (medio-tarjeta.util).
     // Comprobante = qué entregó el piloto (documento físico); Facturación =
@@ -573,6 +618,9 @@ export class ExpensesService {
       // Momento REAL de captura (7-sep-2026), hora Cancún — aparte de la
       // fecha del consumo. Texto ya formateado: pyservices no formatea fechas.
       { label: 'Capturado' },
+      // «Pago» (19-oct-2026, invariante 93): «Por pagar · vence 20-oct-2026»
+      // / «Vencido desde 20-oct-2026» / vacía (pagado). Solo con la migración.
+      ...(conPago ? [{ label: 'Pago' }] : []),
     ];
     const filas = data.map((g) => {
       const x = g;
@@ -605,6 +653,7 @@ export class ExpensesService {
         fechaHoraCancun(
           (x.capturado_en as string | null) ?? (x.created_at as string),
         ),
+        ...(conPago ? [celdaPagoExcel(x, hoyPago)] : []),
       ];
     });
     // Resumen del periodo por categoría (y moneda: un total MXN+USD mezclado
@@ -873,6 +922,22 @@ export class ExpensesService {
   }
 
   async list(filters: ListGastosQuery) {
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): `?por_pagar` filtra por
+    // el estado de pago (≠ PAGADO = `por_pagar` y sin conciliar). Sin la
+    // migración ningún gasto está por pagar: `true` ⇒ lista vacía SIN leer
+    // nada y `false` ⇒ todos (la consulta no nombra la columna).
+    const filtroPorPagar =
+      filters.por_pagar != null
+        ? await porPagarDisponible(this.supabase.service)
+        : false;
+    if (filters.por_pagar === true && !filtroPorPagar) {
+      return {
+        data: [] as Array<Record<string, unknown>>,
+        count: 0,
+        limit: filters.limit,
+        offset: filters.offset,
+      };
+    }
     let q = this.supabase.service
       .from('gasto')
       .select(await this.listCols(), { count: 'exact' });
@@ -983,10 +1048,20 @@ export class ExpensesService {
     // escribe solo la BD al cubrir el gasto con cargos (invariante de la
     // conciliación); false incluye los cubiertos a medias.
     if (filters.conciliado != null) q = q.eq('conciliado', filters.conciliado);
+    // Estado de pago (invariante 93; la regla vive en `estadoPagoGasto`:
+    // conciliado ⇒ PAGADO aunque la columna siga en true).
+    if (filtroPorPagar && filters.por_pagar === true) {
+      q = q.eq('por_pagar', true).eq('conciliado', false);
+    } else if (filtroPorPagar && filters.por_pagar === false) {
+      q = q.or('por_pagar.eq.false,conciliado.eq.true');
+    }
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as Array<Record<string, unknown>>;
+    // ADITIVO (invariante 93): `estado_pago` solo en filas leídas con la
+    // columna `por_pagar` (sin la migración, la fila sale igual).
+    anexarEstadoPago(rows, hoyCancun());
     await this.anexarPagosDeCompra(rows);
     await this.anexarConciliacionParcial(rows);
     // ADITIVO (16-oct-2026, invariante 87): cuántas facturas recibidas
@@ -1205,11 +1280,15 @@ export class ExpensesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Gasto ${id} not found`);
-    // ADITIVO (13-oct-2026): la TUA que detecta la lectura de la IA.
-    return {
-      ...data,
-      tua_detectada_ia: tuaDetectadaIa(data),
-    };
+    // ADITIVO (13-oct-2026): la TUA que detecta la lectura de la IA; y
+    // (19-oct-2026, invariante 93) `estado_pago` con la migración.
+    return conEstadoPago(
+      {
+        ...data,
+        tua_detectada_ia: tuaDetectadaIa(data),
+      },
+      hoyCancun(),
+    );
   }
 
   /**
@@ -1885,7 +1964,7 @@ export class ExpensesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Gasto ${id} not found`);
-    return data;
+    return conEstadoPago(data, hoyCancun());
   }
 
   /**
@@ -2168,7 +2247,8 @@ export class ExpensesService {
       .select(await this.cols())
       .eq('id', id)
       .maybeSingle();
-    return data ?? null;
+    // Invariante 93: `estado_pago` con la migración (alta por la suma, replay).
+    return data ? conEstadoPago(data, hoyCancun()) : null;
   }
 
   private async crearGasto(
@@ -2200,7 +2280,9 @@ export class ExpensesService {
     dto: CreateGastoDto,
     userId: string,
     rol: Rol | undefined,
-    opts: { notificar?: boolean; autoCruce?: boolean },
+    // `sinPorPagar` (INTERNO, invariante 93): el alta por la suma de cargos
+    // del banco (invariante 76) nunca nace «por pagar»: el cargo ES el pago.
+    opts: { notificar?: boolean; autoCruce?: boolean; sinPorPagar?: boolean },
   ) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
@@ -2291,15 +2373,52 @@ export class ExpensesService {
     // "26/08/2025" en un ticket de la visita de 2026 y el gasto quedó un año
     // atrás, invisible en el panel. En vez de guardar en silencio, se rechaza
     // con el dato a la vista para que corrijan el año en la app.
+    // GASTOS «POR PAGAR» (19-oct-2026, invariante 93): la sonda SOLO se
+    // consulta cuando decide algo (llega la llave, o la fecha queda después
+    // del día de captura); sin la migración `true` ⇒ 503 ANTES de tocar la
+    // BD y `false` se ignora. `null` = ausente.
+    const hoyAlta = hoyCancun();
+    const fechaAlta = String(dto.fecha_gasto ?? '').slice(0, 10);
+    if (dto.por_pagar === null) delete dto.por_pagar;
+    if (opts.sinPorPagar) delete dto.por_pagar;
+    const diaCapturaCrudo = diaCapturaApp(dto.capturado_en);
+    const conPorPagar =
+      !opts.sinPorPagar &&
+      (dto.por_pagar !== undefined ||
+        fechaAlta > hoyAlta ||
+        (diaCapturaCrudo != null && fechaAlta > diaCapturaCrudo))
+        ? await porPagarDisponible(this.supabase.service)
+        : false;
+    if (!conPorPagar && dto.por_pagar !== undefined) {
+      if (dto.por_pagar === true) throw errorPorPagarNoDisponible();
+      delete dto.por_pagar;
+    }
     this.assertFechaRazonable(
       dto.fecha_gasto,
       rol,
       dto.permitir_fecha_antigua === true,
+      conPorPagar,
     );
     // Momento REAL de captura (7-sep): lo manda la app al guardar (aunque
     // esté sin señal); panel/masivo/backfill lo dejan = ahora. Se valida
     // ANTES de cualquier consulta (400 claro con el valor a la vista).
     const capturadoEn = resolverCapturadoEn(dto.capturado_en);
+    // La bandera que se ESCRIBE (fuente única `porPagarFinal`): fecha > hoy
+    // ⇒ por pagar (con `false` explícito ⇒ 400 POR_PAGAR_FECHA_FUTURA); un
+    // gasto capturado en la app CON fecha a futuro que llega cuando esa fecha
+    // ya pasó sigue por pagar (VENCIDO): jamás se afirma pagado.
+    let porPagarAlta = false;
+    if (conPorPagar) {
+      const d = porPagarFinal({
+        fechaFinal: fechaAlta,
+        hoy: hoyAlta,
+        enviado: dto.por_pagar,
+        diaCaptura: diaCancun(capturadoEn),
+      });
+      if (!d.ok) throw new BadRequestException(d.error);
+      porPagarAlta = d.por_pagar;
+    }
+    delete dto.por_pagar;
     // Regla SEMANAL de captura (1-sep): solo roles de CAMPO — la oficina
     // (vuelos pasados, cargas masivas, cargas históricas) queda exenta, y un
     // permiso temporal `gastos_sin_limite_hasta` vigente también exime.
@@ -2657,6 +2776,9 @@ export class ExpensesService {
       // Pago de AFAC (invariante 90): la llave SOLO viaja si quedó tras la
       // validación (true de oficina en un Permiso, con la migración).
       ...(dto.es_pago_afac === true ? { es_pago_afac: true } : {}),
+      // Por pagar (invariante 93): la llave SOLO viaja en `true` (con la
+      // migración); un gasto pagado deja el default de la columna (false).
+      ...(porPagarAlta ? { por_pagar: true } : {}),
       moneda: dto.moneda,
       // TC del gasto a 6 decimales (fuente única tc.util, 17-sep-2026): lo
       // que se guarda es lo que convierte. 0/negativo ⇒ null (el CHECK de la
@@ -2774,7 +2896,7 @@ export class ExpensesService {
               `Gasto idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el gasto existente ${existente.id as string} (sin duplicar).`,
             );
             return {
-              data: existente,
+              data: conEstadoPago(existente, hoyAlta),
               despues: [] as Array<() => void>,
               replay: true,
             };
@@ -2877,7 +2999,8 @@ export class ExpensesService {
       });
     }
 
-    return { data: data!, despues, replay: false };
+    // Invariante 93: la fila con `por_pagar` + `estado_pago` (con la migración).
+    return { data: conEstadoPago(data!, hoyAlta), despues, replay: false };
   }
 
   // =====================================================================
@@ -2930,6 +3053,20 @@ export class ExpensesService {
     // o «vuelve a pulsar Guardar» tras un GASTO_SIN_VINCULAR).
     const previo = await this.gastoPorLlave(llave);
     if (previo) return this.replayAltaConCargos(previo, dto, ids, userId);
+    // GASTOS POR PAGAR (invariante 93): un cargo del banco YA es el pago:
+    // con la migración, una fecha futura ⇒ 400 POR_PAGAR_FECHA_FUTURA sin
+    // crear nada, y el alta nunca nace «por pagar» (`sinPorPagar`).
+    const fechaCargos = String(dto.fecha_gasto ?? '').slice(0, 10);
+    if (
+      fechaCargos > hoyCancun() &&
+      (await porPagarDisponible(this.supabase.service))
+    ) {
+      throw new BadRequestException({
+        message: MENSAJE_POR_PAGAR_FECHA_FUTURA,
+        error: CODIGO_POR_PAGAR_FECHA_FUTURA,
+        details: { fecha_gasto: fechaCargos, hoy: hoyCancun() },
+      });
+    }
     // (5) Prevalidación SIN crear (la RPC lo vuelve a validar todo).
     await conciliacion.prevalidarCargosParaGastoNuevo(ids, {
       moneda: String(dto.moneda ?? ''),
@@ -2940,6 +3077,7 @@ export class ExpensesService {
     // (6) Alta sin auto-cruce; avisos, lectura IA y demás DIFERIDOS.
     const creado = await this.crearGastoInterno(dto, userId, rol, {
       autoCruce: false,
+      sinPorPagar: true,
     });
     const gasto = creado.data as Record<string, unknown>;
     // Carrera de la llave (23505): otro intento ya lo había creado.
@@ -3891,6 +4029,14 @@ export class ExpensesService {
     id: string,
     userId: string,
     capturadoEn?: string,
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): `marcarPagado` = el
+    // PATCH es EXCLUSIVAMENTE «marcar pagado» (`esPatchSoloMarcarPagado`).
+    // Si el gasto vigente está por pagar, se SALTA la ventana semanal de
+    // CORRECCIÓN (el piloto captura el lunes lo que paga el sábado de la otra
+    // semana) y el candado de reposición mira la fecha REAL del pago. Dueño
+    // y conciliado aplican igual; la semana de la fecha nueva la exige
+    // `update()` (`assertCapturaEnSemana`; hoy siempre pasa).
+    opts: { marcarPagado?: boolean; fechaPago?: string | null } = {},
   ): Promise<void> {
     // 400 si el sello viene mal ANTES de tocar nada (misma regla del alta).
     const sello = resolverSelloCorreccion(capturadoEn);
@@ -3912,16 +4058,23 @@ export class ExpensesService {
     // de TIEMPO que siguen (reposición de caja chica y semana de edición).
     // Dueño y conciliado ya se validaron arriba y aplican SIEMPRE.
     if (await this.sinLimiteVigente(userId)) return;
+    const soloMarcarPagado =
+      opts.marcarPagado === true &&
+      (gasto as { por_pagar?: unknown }).por_pagar === true;
     // Candado "ya repuesto" (1-sep): un gasto EFECTIVO cuya fecha quedó
     // cubierta por la ÚLTIMA reposición de la caja chica del capturista ya
     // está saldado — tocarlo descuadraría un corte que ya se pagó, aunque
-    // siga dentro de la ventana de días.
+    // siga dentro de la ventana de días. Al marcar pagado manda la fecha
+    // REAL del pago (con ella entra al libro, invariante 93).
     if (gasto.medio_pago === MedioPago.EFECTIVO) {
       const ultima = await this.cajaChica.fechaUltimaReposicionDe(
         gasto.usuario_captura_id as string,
         gasto.moneda as string,
       );
-      const diaGasto = String(gasto.fecha_gasto ?? '').slice(0, 10);
+      const diaVigente = String(gasto.fecha_gasto ?? '').slice(0, 10);
+      const diaGasto = soloMarcarPagado
+        ? fechaMarcarPagado(opts.fechaPago, diaVigente, hoyCancun())
+        : diaVigente;
       if (ultima && diaGasto && diaGasto <= ultima) {
         throw new ConflictException({
           message:
@@ -3930,6 +4083,9 @@ export class ExpensesService {
         });
       }
     }
+    // Marcar pagado un gasto por pagar NO está acotado a la semana de
+    // CORRECCIÓN (invariante 93).
+    if (soloMarcarPagado) return;
     // Semana de edición: la semana (lunes→domingo, pared Cancún) es la de la
     // CAPTURA (created_at) + días de gracia. Cálculo en el helper puro
     // `semana-gastos.util` (patrón en-CA + T12:00:00Z, con spec propio).
@@ -3964,10 +4120,13 @@ export class ExpensesService {
     fecha: string | undefined,
     rol?: Rol,
     permitirAntigua = false,
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): con la migración el
+    // tope de CAMPO es `fechaMaxGasto` (max(fin de mes, mañana)); sin ella,
+    // mañana con el texto de siempre. La oficina no cambia (+30).
+    conPorPagar = false,
   ): void {
     if (!fecha) return;
-    const esCampo =
-      rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
+    const esCampo = esRolCampo(rol);
     const hoy = new Date().toLocaleDateString('en-CA', {
       timeZone: 'America/Cancun',
     });
@@ -3975,9 +4134,12 @@ export class ExpensesService {
     const ms = Date.parse(`${dia}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`);
     if (!Number.isFinite(ms)) return;
     const dias = Math.round(ms / 86_400_000);
-    const bonita = dia.split('-').reverse().join('/');
+    const bonita = fechaBonita(dia);
     if (esCampo) {
-      if (dias > 1) {
+      if (conPorPagar && dia > fechaMaxGasto(hoy, rol, true)) {
+        throw new BadRequestException(mensajeFechaDespuesDeFinDeMes(dia, hoy));
+      }
+      if (!conPorPagar && dias > 1) {
         throw new BadRequestException(
           `La fecha del gasto (${bonita}) está en el futuro: revísala antes de guardar.`,
         );
@@ -4079,11 +4241,83 @@ export class ExpensesService {
     // solo cuando llegó tarde (> 2 min). La columna capturado_en NO se toca.
     const selloCorreccion = resolverSelloCorreccion(dto.capturado_en);
     const lineaSello = lineaSelloCorreccion('Corrección', selloCorreccion);
+    // GASTOS «POR PAGAR» (19-oct-2026, invariante 93). `null` = ausente. La
+    // sonda solo se consulta si el PATCH trae `por_pagar` o `fecha_gasto`;
+    // sin la migración `true` ⇒ 503 y `false` se ignora (todo como 0.0.94).
+    // Con ella se decide contra el gasto VIGENTE, ANTES de las reglas de
+    // fecha (así «marcar pagado» pasa por las MISMAS que un cambio de fecha):
+    //  - marcar pagado (vigente por pagar + `false`): fecha final = la
+    //    enviada ?? (vigente > hoy ? hoy : vigente); > hoy ⇒ 400; si cambia,
+    //    va a `dto.fecha_gasto` (mes cerrado, semana, auto-cruce) y la hora de
+    //    la carga se mueve a la misma hora de pared del día nuevo;
+    //  - `true` (re-programar): solo sin conciliar (409 GASTO_CONCILIADO);
+    //  - si no: `porPagarFinal` (una fecha > hoy lo pone por pagar solo).
+    if (dto.por_pagar === null) delete dto.por_pagar;
+    const conPorPagar =
+      dto.por_pagar !== undefined || dto.fecha_gasto !== undefined
+        ? await porPagarDisponible(this.supabase.service)
+        : false;
+    if (!conPorPagar && dto.por_pagar !== undefined) {
+      if (dto.por_pagar === true) throw errorPorPagarNoDisponible();
+      delete dto.por_pagar;
+    }
+    let porPagarEscribir: boolean | undefined;
+    if (conPorPagar) {
+      const hoyPP = hoyCancun();
+      const vig = (await this.findById(id)) as {
+        por_pagar?: boolean | null;
+        conciliado?: boolean | null;
+        fecha_gasto?: string | null;
+        fecha_hora_carga?: string | null;
+      };
+      const vigPorPagar = vig.por_pagar === true;
+      const vigFecha = String(vig.fecha_gasto ?? '').slice(0, 10);
+      if (esMarcarPagado(dto, vig)) {
+        const fechaPago = fechaMarcarPagado(dto.fecha_gasto, vigFecha, hoyPP);
+        if (fechaPago > hoyPP) {
+          throw new BadRequestException({
+            message: MENSAJE_POR_PAGAR_FECHA_FUTURA,
+            error: CODIGO_POR_PAGAR_FECHA_FUTURA,
+            details: { fecha_gasto: fechaPago, hoy: hoyPP },
+          });
+        }
+        if (fechaPago !== vigFecha) {
+          dto.fecha_gasto = fechaPago;
+          if (dto.fecha_hora_carga === undefined) {
+            const fhc = fechaHoraCargaAlDia(vig.fecha_hora_carga, fechaPago);
+            if (fhc) dto.fecha_hora_carga = fhc;
+          }
+        } else if (dto.fecha_gasto !== undefined) {
+          // La misma fecha que ya tenía: no es un cambio de fecha.
+          delete dto.fecha_gasto;
+        }
+        porPagarEscribir = false;
+      } else if (dto.por_pagar === true) {
+        if (vig.conciliado === true) {
+          throw new ConflictException({
+            message: MENSAJE_POR_PAGAR_CONCILIADO,
+            error: 'GASTO_CONCILIADO',
+          });
+        }
+        if (!vigPorPagar) porPagarEscribir = true;
+      } else {
+        const d = porPagarFinal({
+          fechaFinal: String(dto.fecha_gasto ?? vigFecha).slice(0, 10),
+          hoy: hoyPP,
+          enviado: dto.por_pagar,
+          vigente: vigPorPagar,
+        });
+        if (!d.ok) throw new BadRequestException(d.error);
+        if (d.por_pagar !== vigPorPagar) porPagarEscribir = d.por_pagar;
+      }
+    }
+    delete dto.por_pagar;
     if (dto.fecha_gasto !== undefined) {
       this.assertFechaRazonable(
         dto.fecha_gasto,
         rol,
         dto.permitir_fecha_antigua === true,
+        conPorPagar,
       );
       // Mover la fecha a una semana ya cerrada equivale a capturar en ella:
       // mismo candado semanal que en el alta (oficina exenta y permiso
@@ -4112,7 +4346,12 @@ export class ExpensesService {
     const camposNegocio = Object.keys(dto).filter(
       (k) => k !== 'capturado_en' && k !== 'client_request_id',
     );
-    if (camposNegocio.length === 0 && !lineaSello) return this.findById(id);
+    if (
+      camposNegocio.length === 0 &&
+      !lineaSello &&
+      porPagarEscribir === undefined
+    )
+      return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
     // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
     // el sello se LIMPIA (la información cambió: oficina debe re-confirmar).
@@ -4491,6 +4730,8 @@ export class ExpensesService {
 
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
+    // Por pagar (invariante 93): SOLO si cambia (con la migración).
+    if (porPagarEscribir !== undefined) cols.por_pagar = porPagarEscribir;
     // Mismo TC de 6 decimales que en el alta (tc.util): corregir el tipo de
     // cambio por PATCH no puede dejar un número distinto al que convierte.
     if (cols.tc_gasto !== undefined)
@@ -4660,7 +4901,8 @@ export class ExpensesService {
     ) {
       this.cruzarConBancoBestEffort(data, userId);
     }
-    return data;
+    // Invariante 93: `estado_pago` con la migración.
+    return conEstadoPago(data, hoyCancun());
   }
 
   /**
@@ -5120,6 +5362,8 @@ export class ExpensesService {
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
     const gastos = (data ?? []) as Array<Record<string, unknown>>;
+    // ADITIVO (invariante 93): `estado_pago` con la migración.
+    anexarEstadoPago(gastos, hoyCancun());
     const r2 = (n: number) => Math.round(n * 100) / 100;
     const resumen = new Map<
       string,

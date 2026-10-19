@@ -14,6 +14,7 @@ import { CombustibleMasivoService } from './combustible-masivo.service';
 import { ExpensesController } from './expenses.controller';
 import { ExpensesService } from './expenses.service';
 import { FolioRelecturaService } from './folio-relectura.service';
+import { GastosPorPagarService } from './gastos-por-pagar.service';
 
 @Module({
   imports: [
@@ -32,7 +33,14 @@ import { FolioRelecturaService } from './folio-relectura.service';
   ],
   controllers: [ExpensesController],
   // FolioRelecturaService (6-oct-2026): cron `gastos-releer-folio`.
-  providers: [ExpensesService, CombustibleMasivoService, FolioRelecturaService],
+  // GastosPorPagarService (19-oct-2026, invariante 93): recordatorio diario
+  // de gastos «por pagar» (09:00 Cancún).
+  providers: [
+    ExpensesService,
+    CombustibleMasivoService,
+    FolioRelecturaService,
+    GastosPorPagarService,
+  ],
   exports: [ExpensesService],
 })
 export class ExpensesModule {}

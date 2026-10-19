@@ -49,6 +49,7 @@ import {
   ROLES_CONCILIACION,
 } from '../conciliacion/roles-conciliacion';
 import { MENSAJE_CONCILIAR_SOLO_ADMIN_FACTURACION } from '../conciliacion/cargos-a-gasto.util';
+import { esPatchSoloMarcarPagado } from './por-pagar.util';
 
 @ApiTags('Expenses')
 @ApiBearerAuth()
@@ -62,7 +63,7 @@ export class ExpensesController {
   @Get()
   @ApiOperation({
     summary:
-      'List gastos (with filters). Pilotos see only own captures. Los gastos de medio BANCARIO traen los aditivos monto_vinculado / faltante / parcial (pagos parciales, 14-sep-2026) y los NO bancarios (salvo bodega) que tengan algún cargo ligado (efectivo con justificación) traen los aditivos monto_vinculado / faltante / parcial (13-oct-2026, invariante 71). Orden con desempate por id.',
+      'List gastos (with filters). Pilotos see only own captures. Los gastos de medio BANCARIO traen los aditivos monto_vinculado / faltante / parcial (pagos parciales, 14-sep-2026) y los NO bancarios (salvo bodega) que tengan algún cargo ligado (efectivo con justificación) traen los aditivos monto_vinculado / faltante / parcial (13-oct-2026, invariante 71). Orden con desempate por id. Con la migración 20261019000001 cada gasto trae `por_pagar` y `estado_pago` (PAGADO | POR_PAGAR | VENCIDO) y `?por_pagar=1` filtra los no pagados (invariante 93).',
   })
   async list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
@@ -496,7 +497,8 @@ export class ExpensesController {
   @ApiOperation({
     summary:
       'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana). ' +
-      'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA. `tua_incluida` es de oficina (se ignora a piloto/mecánico/visitante).',
+      'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA. `tua_incluida` es de oficina (se ignora a piloto/mecánico/visitante). ' +
+      'Gastos por pagar (19-oct-2026): `{por_pagar: false, fecha_gasto?}` = «Marcar pagado» (fecha del pago ≤ hoy; sin fecha: hoy, o la suya si ya venció); el dueño de campo puede hacerlo fuera de su semana si el PATCH SOLO trae por_pagar, fecha_gasto, if_updated_at y capturado_en. 400 POR_PAGAR_FECHA_FUTURA; 503 POR_PAGAR_NO_DISPONIBLE sin la migración.',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -508,7 +510,13 @@ export class ExpensesController {
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      await this.expenses.assertOwnEnVentana(id, c.userId, dto.capturado_en);
+      // GASTOS POR PAGAR (19-oct-2026, invariante 93): un PATCH que SOLO
+      // marca pagado (llaves ⊆ por_pagar, fecha_gasto, if_updated_at,
+      // capturado_en) no está acotado a la semana de corrección.
+      await this.expenses.assertOwnEnVentana(id, c.userId, dto.capturado_en, {
+        marcarPagado: esPatchSoloMarcarPagado(dto),
+        fechaPago: dto.fecha_gasto ?? null,
+      });
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
       // «TUA incluida en este gasto» (13-oct-2026): campo de OFICINA.

@@ -322,6 +322,25 @@ export class CreateGastoDto {
   @IsBoolean()
   es_pago_afac?: boolean;
 
+  @ApiPropertyOptional({
+    type: Boolean,
+    nullable: true,
+    description:
+      'Gasto «por pagar» (19-oct-2026, invariante 93; migración 20261019000001). El servidor decide: una fecha_gasto después de hoy (Cancún) nace por pagar aunque no se mande. true con fecha ≤ hoy = «lo anoto hoy y lo pago al rato». En el PATCH, false sobre un gasto por pagar = «Marcar pagado» (fecha_gasto = la del pago, ≤ hoy; sin fecha: hoy, o la suya si ya venció). false con una fecha futura ⇒ 400 POR_PAGAR_FECHA_FUTURA. Sin la migración: true ⇒ 503 POR_PAGAR_NO_DISPONIBLE y false se ignora. Booleano ESTRICTO: el texto "false" ⇒ 400; null = ausente.',
+  })
+  @IsOptional()
+  // Booleano ESTRICTO sobre el valor CRUDO del cuerpo (patrón de
+  // `solo_enriquecer` / `simular`): con `enableImplicitConversion` el texto
+  // «"false"» llegaría como Boolean('false') = true.
+  @Transform(({ obj, key, value }): unknown => {
+    const fuente = obj as Record<string, unknown> | null | undefined;
+    return fuente && typeof fuente === 'object' && key in fuente
+      ? fuente[key]
+      : (value as unknown);
+  })
+  @IsBoolean({ message: 'por_pagar debe ser true o false' })
+  por_pagar?: boolean | null;
+
   @ApiProperty({ enum: Moneda })
   @IsEnum(Moneda)
   moneda!: Moneda;
@@ -992,6 +1011,15 @@ export class ListGastosQuery {
   @ToBooleanQuery()
   @IsBoolean()
   conciliado?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Gastos «por pagar» (19-oct-2026, invariante 93): true|1 = estado ≠ PAGADO (por_pagar y sin conciliar: por pagar y vencidos); false|0 = los demás. Sin la migración 20261019000001: true ⇒ lista vacía; false ⇒ todos.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  por_pagar?: boolean;
 
   @ApiPropertyOptional({
     enum: EstatusComprobante,

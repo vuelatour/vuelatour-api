@@ -1,3 +1,12 @@
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): este spec congela la
+// conducta SIN la migración 20261019000001 (0.0.94: ninguna consulta nombra
+// `gasto.por_pagar`); la conducta con ella vive en los `*.por-pagar.spec.ts`.
+jest.mock('../../common/por-pagar-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/por-pagar-disponible.util',
+  ),
+  porPagarDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // AFAC POR VUELO (16-oct-2026, invariante 90): este spec congela la conducta
 // SIN la migración 20261016000005 (0.0.88); la conducta con ella vive en los
 // specs `*.afac*.spec.ts` (o en los casos que la encienden abajo).

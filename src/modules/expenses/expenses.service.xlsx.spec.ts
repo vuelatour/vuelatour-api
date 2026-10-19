@@ -1,3 +1,12 @@
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): este spec congela la
+// conducta SIN la migración 20261019000001 (0.0.94: ninguna consulta nombra
+// `gasto.por_pagar`); la conducta con ella vive en los `*.por-pagar.spec.ts`.
+jest.mock('../../common/por-pagar-disponible.util', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/por-pagar-disponible.util',
+  ),
+  porPagarDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 // Mismos stubs que expenses.service.spec.ts: notifications arrastra el
 // gateway y `jose` (ESM puro), vision el SDK de IA y pyservices el cliente.
 jest.mock('../realtime/notifications.service', () => ({

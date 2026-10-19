@@ -292,7 +292,13 @@ import {
   motivoDirecto,
   soloPendientes,
 } from '../../common/taco-motivo.util';
-import { fechaHoraCancun } from '../../common/fecha-cancun.util';
+import { fechaHoraCancun, hoyCancun } from '../../common/fecha-cancun.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93): gastos del vuelo.
+import {
+  colsPorPagar,
+  porPagarDisponible,
+} from '../../common/por-pagar-disponible.util';
+import { estadoPagoGasto } from '../expenses/por-pagar.util';
 import {
   MIGRACION_TACO_OMITIDO,
   colsTacoOmitido,
@@ -7796,14 +7802,22 @@ export class FlightsService {
    * que el enum de la BD no conoce revienta la LECTURA (22P02).
    */
   async gastosResumen(vueloId: string, rol?: Rol) {
-    const { data, error } = await this.supabase.service
+    // GASTOS «POR PAGAR» (19-oct-2026, invariante 93): con la migración
+    // cada gasto trae `por_pagar` y `estado_pago` (aditivos, al final).
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
+    const hoyPP = hoyCancun();
+    const { data: dataCruda, error } = await this.supabase.service
       .from('gasto')
       .select(
-        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, capturado_en, origen, usuario_captura_id, usuario:usuario_captura_id(nombre)',
+        `id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, capturado_en, origen, usuario_captura_id, usuario:usuario_captura_id(nombre)${colsPorPagar(conPorPagar)}`,
       )
       .eq('vuelo_id', vueloId)
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
+    // Select dinámico (con o sin la columna): se tipa a mano.
+    const data = (dataCruda ?? []) as unknown as Array<
+      Record<string, unknown> & { usuario?: unknown }
+    >;
     const ocultarPagoVendedor = rol === Rol.PILOTO || rol === Rol.MECANICO;
     const filas = ocultarPagoVendedor
       ? (data ?? []).filter(
@@ -7811,7 +7825,9 @@ export class FlightsService {
         )
       : (data ?? []);
     return filas.map((g) => {
-      const usuario = Array.isArray(g.usuario) ? g.usuario[0] : g.usuario;
+      const usuario: unknown = Array.isArray(g.usuario)
+        ? (g.usuario as unknown[])[0]
+        : g.usuario;
       return {
         id: g.id as string,
         categoria: g.categoria as string,
@@ -7835,6 +7851,13 @@ export class FlightsService {
         capturado_en: ((g.capturado_en as string | null) ??
           g.created_at) as string,
         origen: (g.origen as string | null) ?? null,
+        // ADITIVO (invariante 93), solo con la migración.
+        ...(conPorPagar
+          ? {
+              por_pagar: g.por_pagar === true,
+              estado_pago: estadoPagoGasto(g, hoyPP),
+            }
+          : {}),
       };
     });
   }
