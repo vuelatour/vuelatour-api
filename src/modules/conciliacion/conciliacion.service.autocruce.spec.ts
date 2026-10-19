@@ -988,4 +988,113 @@ describe('auto-cruce y gastos POR PAGAR (P14 b)', () => {
     expect(data[0].motivo_pendiente).toBe('SIN_CANDIDATOS');
     expect(data[0].candidatos_n).toBe(0);
   });
+
+  /*
+   * Segunda pasada de la revisión: los dos lugares de la regla que no tenían
+   * prueba (el paso 2, FALTANTE, y el motivo USD de la lista).
+   */
+  it('FALTANTE (paso 2): a un por pagar de $500 capturado el 19-oct con $288 ya ligados NO se le liga el cargo de $212 del 18-oct; ya pagado, sí (criterio FALTANTE)', async () => {
+    const mundoFaltante = (extra: Row = {}) =>
+      mundo({
+        gasto: [
+          gastoBase('g-pp', 500, {
+            medio_pago: 'TRANSFERENCIA',
+            lugar: 'Renta hangar',
+            fecha_gasto: '2026-10-20',
+            por_pagar: true,
+            capturado_en: '2026-10-19T15:00:00Z',
+            created_at: '2026-10-19T15:00:00Z',
+            ...extra,
+          }),
+        ],
+        // El primer pago ($288) ya ligado: la puente lo trae (`sembrarPartes`),
+        // así que el faltante del gasto es $212 (`sumasLigadasDe` > 0).
+        movimiento_bancario: [
+          {
+            id: 'm-288',
+            cuenta_bancaria_id: CTA,
+            fecha: '2026-10-19',
+            tipo: TipoMovimientoBancario.CARGO,
+            monto: 288,
+            descripcion: 'SPEI RENTA HANGAR 1 DE 2',
+            referencia: null,
+            conciliado: true,
+            gasto_id: 'g-pp',
+            notas: null,
+          },
+        ],
+      });
+    const importar212 = (db: Tablas) =>
+      armar(db).importar(
+        {
+          cuenta_bancaria_id: CTA,
+          movimientos: [
+            cargo('2026-10-18', 212, {
+              descripcion: 'SPEI RENTA HANGAR 2 DE 2',
+            }),
+          ],
+        },
+        USER,
+      ) as Promise<Record<string, unknown>>;
+
+    const db = mundoFaltante();
+    const r = await importar212(db);
+    expect(r.conciliados).toBe(0);
+    expect(r.sin_candidato).toBe(1);
+    expect(db.gasto[0].conciliado).toBe(false);
+    const nuevo = db.movimiento_bancario.find((m) => m.id !== 'm-288')!;
+    expect(nuevo.gasto_id ?? null).toBeNull();
+    expect(
+      db.movimiento_bancario_gasto.filter((p) => p.gasto_id === 'g-pp'),
+    ).toHaveLength(1);
+
+    // Control: el MISMO gasto ya pagado ⇒ el cargo cubre su faltante.
+    const dbPagado = mundoFaltante({ por_pagar: false });
+    const pagado = await importar212(dbPagado);
+    expect(pagado.conciliados).toBe(1);
+    expect((pagado.por_criterio as Record<string, number>).FALTANTE).toBe(1);
+    expect(dbPagado.gasto[0].conciliado).toBe(true);
+  });
+
+  it('lista, cruce USD (`anotarMotivoUsd`): un gasto USD por pagar capturado después del cargo no lo deja «Se puede cruzar»; ya pagado, sí', async () => {
+    const mundoUsd = (extra: Row = {}) =>
+      mundo({
+        movimiento_bancario: [
+          {
+            id: 'm-usd',
+            cuenta_bancaria_id: CTA,
+            fecha: '2026-10-18',
+            tipo: TipoMovimientoBancario.CARGO,
+            monto: 2000,
+            descripcion: 'AIRCRAFT SPRUCE AND SP',
+            referencia: null,
+            conciliado: false,
+            gasto_id: null,
+            notas: null,
+          },
+        ],
+        gasto: [
+          gastoBase('g-usd', 100, {
+            moneda: 'USD',
+            notas: 'Aircraft Spruce & Specialty Co. · Michelin Tube',
+            fecha_gasto: '2026-10-20',
+            por_pagar: true,
+            capturado_en: '2026-10-19T15:00:00Z',
+            created_at: '2026-10-19T15:00:00Z',
+            ...extra,
+          }),
+        ],
+      });
+    // T.C. implícito 2,000 ÷ 100 = 20.00 = el oficial; leyenda que coincide.
+    const pendiente = async (db: Tablas) =>
+      (await armar(db, {}, oficialFijo(20)).list({ limit: 100, offset: 0 }))
+        .data[0];
+    const posterior = await pendiente(mundoUsd());
+    expect(posterior.motivo_pendiente).toBe('SIN_CANDIDATOS');
+    expect(posterior.candidatos_n).toBe(0);
+    // Control: el MISMO gasto ya pagado sí es su candidato.
+    const pagado = await pendiente(mundoUsd({ por_pagar: false }));
+    expect(pagado.motivo_pendiente).toBe('SE_PUEDE_CRUZAR');
+    expect(pagado.candidatos_n).toBe(1);
+  });
 });
