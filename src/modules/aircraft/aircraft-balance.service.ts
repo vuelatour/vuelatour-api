@@ -1678,6 +1678,10 @@ export class AircraftBalanceService {
       // «Balance mensual» o «Balance general» (6-oct-2026, API 0.0.64): AL
       // FINAL (aditivo). Solo elige la presentación en pyservices.
       variante: modo,
+      // BALANCE EN PESOS (18-oct-2026, API 0.0.94, invariante 92; ADITIVA):
+      // cada bloque de avión y el de la empresa traen su cascada en pesos;
+      // con esta bandera pyservices los pinta como lo principal.
+      balance_en_pesos: true as const,
       // CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVOS al
       // final, solo con la migración): las listas de TODOS los libros y el
       // resumen por matrícula para el bloque «CIERRE DEL MES» del RESUMEN.
@@ -5316,6 +5320,66 @@ export class AircraftBalanceService {
         ? round2(utilidadDespues - porCobrarUsdTotal)
         : null;
 
+    // ===== Balance EN PESOS (18-oct-2026, API 0.0.94, invariante 92) =====
+    // Pedido del cliente: «en los balances debe venir todo en pesos porque
+    // casi siempre se les transfiere a los socios en pesos». PESOS REALES:
+    // la MISMA cascada con lo que el libro YA tiene en pesos (GANANCIA MXN
+    // de las filas —venta del avión al T.C. de la cotización menos sus
+    // costos en pesos—, el TOTAL MXN de cada hoja y el POR COBRAR MXN), sin
+    // convertir el resultado USD con un T.C. único. Nada se recalcula: cada
+    // término es una celda que el libro ya pinta. null se propaga igual que
+    // en USD (una hoja con una fila sin pesos deja la cascada vacía).
+    const mxnDeHoja = (h: {
+      filas: ReadonlyArray<{ monto_mxn: number | null }>;
+      total_mxn: number;
+    }): number | null =>
+      h.filas.some((f) => f.monto_mxn == null) ? null : round2(h.total_mxn);
+    const utilidadAntesMxn = totales.ganancia_mxn;
+    const combustibleMxn = mxnDeHoja(hojaCombustible);
+    const indirectosMxn = mxnDeHoja(hojaIndirectos);
+    const refaccionesMxn = mxnDeHoja(hojaRefacciones);
+    const otrosMxn = mxnDeHoja(hojaOtros);
+    const permisosMxn = mxnDeHoja(hojaPermisos);
+    const otrosIngresosAvionMxn = hojaOtrosIngresos.filas.some(
+      (f) => f.neto_mxn == null,
+    )
+      ? null
+      : round2(hojaOtrosIngresos.total_mxn);
+    const utilidadDespuesMxn =
+      combustibleMxn != null &&
+      indirectosMxn != null &&
+      refaccionesMxn != null &&
+      otrosMxn != null &&
+      permisosMxn != null &&
+      otrosIngresosAvionMxn != null
+        ? round2(
+            utilidadAntesMxn -
+              combustibleMxn -
+              indirectosMxn -
+              refaccionesMxn -
+              otrosMxn -
+              permisosMxn +
+              otrosIngresosAvionMxn,
+          )
+        : null;
+    const porCobrarMxnTotal = totales.por_cobrar_mxn;
+    const utilidadCobradaMxn =
+      utilidadDespuesMxn != null
+        ? round2(utilidadDespuesMxn - porCobrarMxnTotal)
+        : null;
+    // Σ de las COMISIONES en pesos que restaron las filas (solo las que
+    // tienen GANANCIA MXN: sin ella la fila no restó nada). Mismo criterio
+    // que `comisionesUsdPeriodo` en USD; las sombras ya no las traen.
+    const comisionesMxnPeriodo = round2(
+      filasVuelo.reduce(
+        (acc, r) =>
+          r.ganancia_mxn != null && r.comisiones_mxn != null
+            ? acc + r.comisiones_mxn
+            : acc,
+        0,
+      ),
+    );
+
     // Socios vigentes en el periodo (mismo criterio de vigencia que el módulo
     // de reparto) con nombre real desde usuario.
     const socios = sociosAll
@@ -5338,6 +5402,12 @@ export class AircraftBalanceService {
           // ADITIVO (6-oct-2026, API 0.0.59): la empresa como socia. El
           // bloque «VUELATOUR (empresa)» del general suma ESTE monto.
           es_empresa: u?.es_empresa === true,
+          // ADITIVO (18-oct-2026, API 0.0.94, invariante 92): lo que le toca
+          // EN PESOS de la utilidad cobrada en pesos (lo que se transfiere).
+          monto_mxn:
+            utilidadCobradaMxn != null
+              ? round2((pct / 100) * utilidadCobradaMxn)
+              : null,
         };
       });
 
@@ -5459,6 +5529,31 @@ export class AircraftBalanceService {
         por_cobrar_usd: porCobrarUsdTotal,
         utilidad_cobrada_usd: utilidadCobrada,
         socios,
+        // LA CASCADA EN PESOS (18-oct-2026, API 0.0.94, invariante 92),
+        // ADITIVA: la misma cascada con lo que el libro ya tiene en pesos.
+        // pyservices la pinta como la PRINCIPAL (con `balance_en_pesos`) y
+        // deja la USD como informativa. Va ANTES de las llaves que los specs
+        // fijan como las últimas del bloque (`comisiones_usd`,
+        // `utilidad_antes_comisiones_usd` y `otros_ingresos_avion_usd`):
+        // pydantic no depende del orden.
+        utilidad_antes_mxn: utilidadAntesMxn,
+        combustible_mxn: combustibleMxn,
+        gastos_indirectos_mxn: indirectosMxn,
+        refacciones_mxn: refaccionesMxn,
+        otros_mxn: otrosMxn,
+        permisos_mxn: permisosMxn,
+        otros_ingresos_avion_mxn: otrosIngresosAvionMxn,
+        utilidad_despues_mxn: utilidadDespuesMxn,
+        por_cobrar_mxn: porCobrarMxnTotal,
+        utilidad_cobrada_mxn: utilidadCobradaMxn,
+        ...(libroConReglaComisiones
+          ? {
+              comisiones_mxn: comisionesMxnPeriodo,
+              utilidad_antes_comisiones_mxn: round2(
+                utilidadAntesMxn + comisionesMxnPeriodo,
+              ),
+            }
+          : {}),
         // COMISIONES EN LA CASCADA DEL GENERAL (7-oct-2026, API 0.0.66,
         // ADITIVOS al final, SOLO con filas de la vigencia): el general ya
         // no pinta la columna COMISIONES en su hoja de vuelos (viven en
@@ -5498,6 +5593,14 @@ export class AircraftBalanceService {
       // (sin ella, las dos notas de siempre). Viaja SIEMPRE (libro
       // individual, `aviones[]` y, aparte, el consolidado FLOTA).
       factura_vuelatour_devolucion: true as const,
+      // ADITIVA (18-oct-2026, API 0.0.94, invariante 92): el bloque
+      // `balance` trae su cascada EN PESOS (`*_mxn` y `socios[].monto_mxn`);
+      // con esta bandera pyservices pinta los pesos como lo principal y los
+      // dólares como informativos. Viaja SIEMPRE (libro individual y cada
+      // `aviones[]` del general; el consolidado FLOTA no la lleva: su bloque
+      // `balance` no se pinta). Va ANTES de las llaves que los specs fijan
+      // como últimas.
+      balance_en_pesos: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real (COMISIONES = banco + pago real
       // capturado; sin gasto, solo la bancaria). pyservices cambia con ella

@@ -1,0 +1,2214 @@
+{
+  "reparto_oficial": {
+    "periodo": {
+      "desde": "2026-09-01",
+      "hasta": "2026-09-30"
+    },
+    "gastos_sin_tc": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "gastos_tc_oficial": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "tc_oficial": {
+      "vuelos": 0,
+      "gastos": {
+        "count": 2,
+        "monto_mxn": 4500
+      },
+      "fuentes": [
+        "open.er-api"
+      ],
+      "leyenda": "Cobros y gastos en MXN sin tipo de cambio capturado se convierten con el TC oficial de referencia (open.er-api / BCE) del día de la cotización o del gasto; capturar el TC en el vuelo o en el gasto lo sustituye.",
+      "ingresos": {
+        "count": 1,
+        "monto_mxn": 46550.8
+      }
+    },
+    "externos": {
+      "vuelos": 0,
+      "cobrado_usd": 0,
+      "costo_usd": 0,
+      "comisiones_vendedor_usd": 0,
+      "utilidad_usd": 0,
+      "sin_costo_count": 0,
+      "cobros_sin_tc_mxn": 0,
+      "cobros_tc_oficial_count": 0
+    },
+    "otros_ingresos_vuelatour": {
+      "vuelos": 1,
+      "cobrado_usd": 206.28,
+      "pendiente_usd": 23.72,
+      "desglose": {
+        "tuas_usd": 100,
+        "extras_usd": 50,
+        "pernocta_usd": 0,
+        "comision_usd": 80,
+        "iva_usd": 0
+      },
+      "leyenda": "Ingreso de VuelaTour (TUAS, extras, pernocta y comisión del vendedor cobrados con su IVA): vive en Otros movimientos del Balance general; no se reparte."
+    },
+    "aviones": [
+      {
+        "aeronave": {
+          "id": "av-2",
+          "matricula": "XB-DOS",
+          "modelo": "C206"
+        },
+        "ingresos": {
+          "cobrado_usd": 0,
+          "cobrado_bruto_usd": 0,
+          "otros_ingresos_vuelatour_usd": 0,
+          "otros_ingresos_vuelatour_pendiente_usd": 0,
+          "comisiones_venta_usd": 0,
+          "pendiente_cobro_usd": 0,
+          "pendiente_bruto_usd": 0,
+          "vuelos_cobrados": 0,
+          "vuelos_pendientes": 0,
+          "cobros_sin_tc_mxn": 0,
+          "cobros_tc_oficial_count": 0,
+          "otros_ingresos_avion_usd": 0,
+          "otros_ingresos_avion_sin_tc_mxn": 0,
+          "otros_ingresos_avion_tc_oficial_count": 0
+        },
+        "horas_voladas_hr": 0,
+        "gastos": {
+          "directos_usd": 0,
+          "indirectos_usd": 0,
+          "permisos_usd": 0,
+          "otros_prorrateados_usd": 350,
+          "gastos_sin_tc_count": 0,
+          "gastos_sin_tc_mxn": 0,
+          "gastos_tc_oficial": {
+            "count": 0,
+            "monto_mxn": 0
+          }
+        },
+        "reserva_overhaul_usd": 0,
+        "reserva_overhaul_incompleta": false,
+        "saldo_disponible_usd": -350,
+        "reparto": [
+          {
+            "socio_id": "u-mau",
+            "socio_nombre": "Mauricio Roque",
+            "porcentaje": 100,
+            "monto_usd": -350
+          }
+        ],
+        "reparto_porcentaje_total": 100,
+        "detalle": {
+          "vuelos": [],
+          "gastos_por_categoria": [],
+          "reserva": {
+            "horas_hr": 0,
+            "tarifa_hora_usd": 0,
+            "monto_usd": 0
+          },
+          "otros_ingresos_vuelatour": {
+            "vuelos": 0,
+            "desglose": {
+              "tuas_usd": 0,
+              "extras_usd": 0,
+              "pernocta_usd": 0,
+              "comision_usd": 0,
+              "iva_usd": 0
+            }
+          },
+          "otros_ingresos_avion": []
+        }
+      },
+      {
+        "aeronave": {
+          "id": "av-1",
+          "matricula": "XB-TST",
+          "modelo": "C206"
+        },
+        "ingresos": {
+          "cobrado_usd": 2793.72,
+          "cobrado_bruto_usd": 3000,
+          "otros_ingresos_vuelatour_usd": 206.28,
+          "otros_ingresos_vuelatour_pendiente_usd": 23.72,
+          "comisiones_venta_usd": 45.7,
+          "pendiente_cobro_usd": 706.28,
+          "pendiente_bruto_usd": 730,
+          "vuelos_cobrados": 0,
+          "vuelos_pendientes": 2,
+          "cobros_sin_tc_mxn": 0,
+          "cobros_tc_oficial_count": 0,
+          "otros_ingresos_avion_usd": 2586.16,
+          "otros_ingresos_avion_sin_tc_mxn": 0,
+          "otros_ingresos_avion_tc_oficial_count": 1
+        },
+        "horas_voladas_hr": 3.5,
+        "gastos": {
+          "directos_usd": 367.6,
+          "indirectos_usd": 100,
+          "permisos_usd": 27.78,
+          "otros_prorrateados_usd": 350,
+          "gastos_sin_tc_count": 0,
+          "gastos_sin_tc_mxn": 0,
+          "gastos_tc_oficial": {
+            "count": 2,
+            "monto_mxn": 4500
+          }
+        },
+        "reserva_overhaul_usd": 140,
+        "reserva_overhaul_incompleta": false,
+        "saldo_disponible_usd": 4348.8,
+        "reparto": [
+          {
+            "socio_id": "u-hernan",
+            "socio_nombre": "Hernán Pérez",
+            "porcentaje": 40.92,
+            "monto_usd": 1779.53
+          },
+          {
+            "socio_id": "u-acc",
+            "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
+            "porcentaje": 59.08,
+            "monto_usd": 2569.27
+          }
+        ],
+        "reparto_porcentaje_total": 100,
+        "detalle": {
+          "vuelos": [
+            {
+              "id": "v-1",
+              "folio": 501,
+              "cliente": "Leticia León Alvarado",
+              "estado": "COMPLETADO",
+              "fecha": "2026-09-10",
+              "ruta": "CUN → MID",
+              "es_externo": false,
+              "total_usd": 2230,
+              "cobrado_usd": 2000,
+              "pendiente_usd": 230,
+              "venta_avion_usd": 2000,
+              "cobrado_avion_usd": 1793.72,
+              "pendiente_avion_usd": 206.28,
+              "otros_ingresos_vuelatour_usd": 206.28,
+              "otros_ingresos_vuelatour_cotizado_usd": 230,
+              "otros_ingresos_vuelatour_pendiente_usd": 23.72,
+              "cobrado_bruto_usd": 2000,
+              "particion_fuente": "columnas",
+              "particion_inconsistente": false,
+              "comision_vendedor_usd": 0,
+              "cobrado": false,
+              "cobros_sin_tc_mxn": 0,
+              "cancelado": false,
+              "participacion": 1,
+              "multi_avion": false,
+              "participacion_fuente": "unico",
+              "comisiones_avion_usd": 15.7,
+              "comision_banco_avion_usd": 15.7,
+              "comision_vendedor_prov_usd": 0,
+              "comision_vendedor_real_usd": 0
+            },
+            {
+              "id": "v-3",
+              "folio": 502,
+              "cliente": "Leticia León Alvarado",
+              "estado": "COMPLETADO",
+              "fecha": "2026-09-15",
+              "ruta": "CUN → CZM",
+              "es_externo": false,
+              "total_usd": 1500,
+              "cobrado_usd": 1000,
+              "pendiente_usd": 500,
+              "venta_avion_usd": 1500,
+              "cobrado_avion_usd": 1000,
+              "pendiente_avion_usd": 500,
+              "otros_ingresos_vuelatour_usd": 0,
+              "otros_ingresos_vuelatour_cotizado_usd": 0,
+              "otros_ingresos_vuelatour_pendiente_usd": 0,
+              "cobrado_bruto_usd": 1000,
+              "particion_fuente": "columnas",
+              "particion_inconsistente": false,
+              "comision_vendedor_usd": 0,
+              "cobrado": false,
+              "cobros_sin_tc_mxn": 0,
+              "cancelado": false,
+              "participacion": 1,
+              "multi_avion": false,
+              "participacion_fuente": "unico",
+              "comisiones_avion_usd": 30,
+              "comision_banco_avion_usd": 30,
+              "comision_vendedor_prov_usd": 0,
+              "comision_vendedor_real_usd": 0
+            }
+          ],
+          "gastos_por_categoria": [
+            {
+              "categoria": "OPERACIONES",
+              "etiqueta": "Operaciones",
+              "grupo": "DIRECTO",
+              "count": 1,
+              "usd": 200,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "GAS",
+              "etiqueta": "Gasavión / Turbosina",
+              "grupo": "DIRECTO",
+              "count": 1,
+              "usd": 167.6,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 1,
+              "tc_oficial_mxn": 3000
+            },
+            {
+              "categoria": "REFACCION",
+              "etiqueta": "Refacción",
+              "grupo": "INDIRECTO",
+              "count": 1,
+              "usd": 100,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "TUAS (egreso VuelaTour — Otros movimientos)",
+              "etiqueta": "TUAS (egreso VuelaTour — Otros movimientos)",
+              "grupo": "EXCLUIDO",
+              "count": 1,
+              "usd": 83.8,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 1,
+              "tc_oficial_mxn": 1500
+            },
+            {
+              "categoria": "PERMISO",
+              "etiqueta": "Permiso",
+              "grupo": "PERMISO",
+              "count": 1,
+              "usd": 27.78,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            }
+          ],
+          "reserva": {
+            "horas_hr": 3.5,
+            "tarifa_hora_usd": 40,
+            "monto_usd": 140
+          },
+          "otros_ingresos_vuelatour": {
+            "vuelos": 1,
+            "desglose": {
+              "tuas_usd": 100,
+              "extras_usd": 50,
+              "pernocta_usd": 0,
+              "comision_usd": 80,
+              "iva_usd": 0
+            }
+          },
+          "otros_ingresos_avion": [
+            {
+              "id": "i-av",
+              "clave": "ING-14",
+              "fecha": "2026-09-04",
+              "categoria": "REEMBOLSO_DEVOLUCION",
+              "categoria_etiqueta": "Reembolsos y devoluciones recibidos",
+              "concepto": "TRANSF INTERBANCARIA SPEI · angel alvarez",
+              "moneda": "MXN",
+              "monto": 46550.8,
+              "comision": null,
+              "neto": 46550.8,
+              "usd": 2586.16,
+              "tc": 18,
+              "tc_oficial": true,
+              "tc_origen": "OFICIAL_DEL_DIA",
+              "tc_aviso": null
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "reparto_sin_oficial": {
+    "periodo": {
+      "desde": "2026-09-01",
+      "hasta": "2026-09-30"
+    },
+    "gastos_sin_tc": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "gastos_tc_oficial": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "tc_oficial": {
+      "vuelos": 0,
+      "gastos": {
+        "count": 0,
+        "monto_mxn": 0
+      },
+      "fuentes": [],
+      "leyenda": "Cobros y gastos en MXN sin tipo de cambio capturado se convierten con el TC oficial de referencia (open.er-api / BCE) del día de la cotización o del gasto; capturar el TC en el vuelo o en el gasto lo sustituye.",
+      "ingresos": {
+        "count": 0,
+        "monto_mxn": 0
+      }
+    },
+    "externos": {
+      "vuelos": 0,
+      "cobrado_usd": 0,
+      "costo_usd": 0,
+      "comisiones_vendedor_usd": 0,
+      "utilidad_usd": 0,
+      "sin_costo_count": 0,
+      "cobros_sin_tc_mxn": 0,
+      "cobros_tc_oficial_count": 0
+    },
+    "otros_ingresos_vuelatour": {
+      "vuelos": 1,
+      "cobrado_usd": 206.28,
+      "pendiente_usd": 23.72,
+      "desglose": {
+        "tuas_usd": 100,
+        "extras_usd": 50,
+        "pernocta_usd": 0,
+        "comision_usd": 80,
+        "iva_usd": 0
+      },
+      "leyenda": "Ingreso de VuelaTour (TUAS, extras, pernocta y comisión del vendedor cobrados con su IVA): vive en Otros movimientos del Balance general; no se reparte."
+    },
+    "aviones": [
+      {
+        "aeronave": {
+          "id": "av-2",
+          "matricula": "XB-DOS",
+          "modelo": "C206"
+        },
+        "ingresos": {
+          "cobrado_usd": 0,
+          "cobrado_bruto_usd": 0,
+          "otros_ingresos_vuelatour_usd": 0,
+          "otros_ingresos_vuelatour_pendiente_usd": 0,
+          "comisiones_venta_usd": 0,
+          "pendiente_cobro_usd": 0,
+          "pendiente_bruto_usd": 0,
+          "vuelos_cobrados": 0,
+          "vuelos_pendientes": 0,
+          "cobros_sin_tc_mxn": 0,
+          "cobros_tc_oficial_count": 0,
+          "otros_ingresos_avion_usd": 0,
+          "otros_ingresos_avion_sin_tc_mxn": 0,
+          "otros_ingresos_avion_tc_oficial_count": 0
+        },
+        "horas_voladas_hr": 0,
+        "gastos": {
+          "directos_usd": 0,
+          "indirectos_usd": 0,
+          "permisos_usd": 0,
+          "otros_prorrateados_usd": 350,
+          "gastos_sin_tc_count": 0,
+          "gastos_sin_tc_mxn": 0,
+          "gastos_tc_oficial": {
+            "count": 0,
+            "monto_mxn": 0
+          }
+        },
+        "reserva_overhaul_usd": 0,
+        "reserva_overhaul_incompleta": false,
+        "saldo_disponible_usd": -350,
+        "reparto": [
+          {
+            "socio_id": "u-mau",
+            "socio_nombre": "Mauricio Roque",
+            "porcentaje": 100,
+            "monto_usd": -350
+          }
+        ],
+        "reparto_porcentaje_total": 100,
+        "detalle": {
+          "vuelos": [],
+          "gastos_por_categoria": [],
+          "reserva": {
+            "horas_hr": 0,
+            "tarifa_hora_usd": 0,
+            "monto_usd": 0
+          },
+          "otros_ingresos_vuelatour": {
+            "vuelos": 0,
+            "desglose": {
+              "tuas_usd": 0,
+              "extras_usd": 0,
+              "pernocta_usd": 0,
+              "comision_usd": 0,
+              "iva_usd": 0
+            }
+          },
+          "otros_ingresos_avion": []
+        }
+      },
+      {
+        "aeronave": {
+          "id": "av-1",
+          "matricula": "XB-TST",
+          "modelo": "C206"
+        },
+        "ingresos": {
+          "cobrado_usd": 2793.72,
+          "cobrado_bruto_usd": 3000,
+          "otros_ingresos_vuelatour_usd": 206.28,
+          "otros_ingresos_vuelatour_pendiente_usd": 23.72,
+          "comisiones_venta_usd": 45.7,
+          "pendiente_cobro_usd": 706.28,
+          "pendiente_bruto_usd": 730,
+          "vuelos_cobrados": 0,
+          "vuelos_pendientes": 2,
+          "cobros_sin_tc_mxn": 0,
+          "cobros_tc_oficial_count": 0,
+          "otros_ingresos_avion_usd": 0,
+          "otros_ingresos_avion_sin_tc_mxn": 46550.8,
+          "otros_ingresos_avion_tc_oficial_count": 0
+        },
+        "horas_voladas_hr": 3.5,
+        "gastos": {
+          "directos_usd": 200,
+          "indirectos_usd": 100,
+          "permisos_usd": 27.78,
+          "otros_prorrateados_usd": 350,
+          "gastos_sin_tc_count": 2,
+          "gastos_sin_tc_mxn": 4500,
+          "gastos_tc_oficial": {
+            "count": 0,
+            "monto_mxn": 0
+          }
+        },
+        "reserva_overhaul_usd": 140,
+        "reserva_overhaul_incompleta": false,
+        "saldo_disponible_usd": 1930.24,
+        "reparto": [
+          {
+            "socio_id": "u-hernan",
+            "socio_nombre": "Hernán Pérez",
+            "porcentaje": 40.92,
+            "monto_usd": 789.85
+          },
+          {
+            "socio_id": "u-acc",
+            "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
+            "porcentaje": 59.08,
+            "monto_usd": 1140.39
+          }
+        ],
+        "reparto_porcentaje_total": 100,
+        "detalle": {
+          "vuelos": [
+            {
+              "id": "v-1",
+              "folio": 501,
+              "cliente": "Leticia León Alvarado",
+              "estado": "COMPLETADO",
+              "fecha": "2026-09-10",
+              "ruta": "CUN → MID",
+              "es_externo": false,
+              "total_usd": 2230,
+              "cobrado_usd": 2000,
+              "pendiente_usd": 230,
+              "venta_avion_usd": 2000,
+              "cobrado_avion_usd": 1793.72,
+              "pendiente_avion_usd": 206.28,
+              "otros_ingresos_vuelatour_usd": 206.28,
+              "otros_ingresos_vuelatour_cotizado_usd": 230,
+              "otros_ingresos_vuelatour_pendiente_usd": 23.72,
+              "cobrado_bruto_usd": 2000,
+              "particion_fuente": "columnas",
+              "particion_inconsistente": false,
+              "comision_vendedor_usd": 0,
+              "cobrado": false,
+              "cobros_sin_tc_mxn": 0,
+              "cancelado": false,
+              "participacion": 1,
+              "multi_avion": false,
+              "participacion_fuente": "unico",
+              "comisiones_avion_usd": 15.7,
+              "comision_banco_avion_usd": 15.7,
+              "comision_vendedor_prov_usd": 0,
+              "comision_vendedor_real_usd": 0
+            },
+            {
+              "id": "v-3",
+              "folio": 502,
+              "cliente": "Leticia León Alvarado",
+              "estado": "COMPLETADO",
+              "fecha": "2026-09-15",
+              "ruta": "CUN → CZM",
+              "es_externo": false,
+              "total_usd": 1500,
+              "cobrado_usd": 1000,
+              "pendiente_usd": 500,
+              "venta_avion_usd": 1500,
+              "cobrado_avion_usd": 1000,
+              "pendiente_avion_usd": 500,
+              "otros_ingresos_vuelatour_usd": 0,
+              "otros_ingresos_vuelatour_cotizado_usd": 0,
+              "otros_ingresos_vuelatour_pendiente_usd": 0,
+              "cobrado_bruto_usd": 1000,
+              "particion_fuente": "columnas",
+              "particion_inconsistente": false,
+              "comision_vendedor_usd": 0,
+              "cobrado": false,
+              "cobros_sin_tc_mxn": 0,
+              "cancelado": false,
+              "participacion": 1,
+              "multi_avion": false,
+              "participacion_fuente": "unico",
+              "comisiones_avion_usd": 30,
+              "comision_banco_avion_usd": 30,
+              "comision_vendedor_prov_usd": 0,
+              "comision_vendedor_real_usd": 0
+            }
+          ],
+          "gastos_por_categoria": [
+            {
+              "categoria": "OPERACIONES",
+              "etiqueta": "Operaciones",
+              "grupo": "DIRECTO",
+              "count": 1,
+              "usd": 200,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "REFACCION",
+              "etiqueta": "Refacción",
+              "grupo": "INDIRECTO",
+              "count": 1,
+              "usd": 100,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "PERMISO",
+              "etiqueta": "Permiso",
+              "grupo": "PERMISO",
+              "count": 1,
+              "usd": 27.78,
+              "sin_tc_count": 0,
+              "sin_tc_mxn": 0,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "TUAS (egreso VuelaTour — Otros movimientos)",
+              "etiqueta": "TUAS (egreso VuelaTour — Otros movimientos)",
+              "grupo": "EXCLUIDO",
+              "count": 0,
+              "usd": 0,
+              "sin_tc_count": 1,
+              "sin_tc_mxn": 1500,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            },
+            {
+              "categoria": "GAS",
+              "etiqueta": "Gasavión / Turbosina",
+              "grupo": "DIRECTO",
+              "count": 0,
+              "usd": 0,
+              "sin_tc_count": 1,
+              "sin_tc_mxn": 3000,
+              "tc_oficial_count": 0,
+              "tc_oficial_mxn": 0
+            }
+          ],
+          "reserva": {
+            "horas_hr": 3.5,
+            "tarifa_hora_usd": 40,
+            "monto_usd": 140
+          },
+          "otros_ingresos_vuelatour": {
+            "vuelos": 1,
+            "desglose": {
+              "tuas_usd": 100,
+              "extras_usd": 50,
+              "pernocta_usd": 0,
+              "comision_usd": 80,
+              "iva_usd": 0
+            }
+          },
+          "otros_ingresos_avion": [
+            {
+              "id": "i-av",
+              "clave": "ING-14",
+              "fecha": "2026-09-04",
+              "categoria": "REEMBOLSO_DEVOLUCION",
+              "categoria_etiqueta": "Reembolsos y devoluciones recibidos",
+              "concepto": "TRANSF INTERBANCARIA SPEI · angel alvarez",
+              "moneda": "MXN",
+              "monto": 46550.8,
+              "comision": null,
+              "neto": 46550.8,
+              "usd": null,
+              "tc": null,
+              "tc_oficial": false,
+              "tc_origen": null,
+              "tc_aviso": null
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "reparto_vacio": {
+    "periodo": {
+      "desde": "2026-09-01",
+      "hasta": "2026-09-30"
+    },
+    "gastos_sin_tc": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "gastos_tc_oficial": {
+      "count": 0,
+      "monto_mxn": 0
+    },
+    "tc_oficial": {
+      "vuelos": 0,
+      "gastos": {
+        "count": 0,
+        "monto_mxn": 0
+      },
+      "fuentes": [],
+      "leyenda": "Cobros y gastos en MXN sin tipo de cambio capturado se convierten con el TC oficial de referencia (open.er-api / BCE) del día de la cotización o del gasto; capturar el TC en el vuelo o en el gasto lo sustituye.",
+      "ingresos": {
+        "count": 0,
+        "monto_mxn": 0
+      }
+    },
+    "externos": {
+      "vuelos": 0,
+      "cobrado_usd": 0,
+      "costo_usd": 0,
+      "comisiones_vendedor_usd": 0,
+      "utilidad_usd": 0,
+      "sin_costo_count": 0,
+      "cobros_sin_tc_mxn": 0,
+      "cobros_tc_oficial_count": 0
+    },
+    "otros_ingresos_vuelatour": {
+      "vuelos": 0,
+      "cobrado_usd": 0,
+      "pendiente_usd": 0,
+      "desglose": {
+        "tuas_usd": 0,
+        "extras_usd": 0,
+        "pernocta_usd": 0,
+        "comision_usd": 0,
+        "iva_usd": 0
+      },
+      "leyenda": "Ingreso de VuelaTour (TUAS, extras, pernocta y comisión del vendedor cobrados con su IVA): vive en Otros movimientos del Balance general; no se reparte."
+    },
+    "aviones": []
+  },
+  "payload_oficial": {
+    "periodo_desde": "2026-09-01",
+    "periodo_hasta": "2026-09-30",
+    "otros_ingresos_vuelatour_total_usd": 206.28,
+    "otros_ingresos_vuelatour_desglose": {
+      "tuas_usd": 100,
+      "extras_usd": 50,
+      "pernocta_usd": 0,
+      "comision_usd": 80,
+      "iva_usd": 0
+    },
+    "tc_oficial": {
+      "vuelos": 0,
+      "gastos": {
+        "count": 2,
+        "monto_mxn": 4500
+      },
+      "fuentes": [
+        "open.er-api"
+      ],
+      "leyenda": "Cobros y gastos en MXN sin tipo de cambio capturado se convierten con el TC oficial de referencia (open.er-api / BCE) del día de la cotización o del gasto; capturar el TC en el vuelo o en el gasto lo sustituye.",
+      "ingresos": {
+        "count": 1,
+        "monto_mxn": 46550.8
+      }
+    },
+    "aviones": [
+      {
+        "matricula": "XB-DOS",
+        "modelo": "C206",
+        "ingresos_cobrado_usd": 0,
+        "otros_ingresos_vuelatour_usd": 0,
+        "otros_ingresos_vuelatour_desglose": {
+          "tuas_usd": 0,
+          "extras_usd": 0,
+          "pernocta_usd": 0,
+          "comision_usd": 0,
+          "iva_usd": 0
+        },
+        "comisiones_venta_usd": 0,
+        "pendiente_cobro_usd": 0,
+        "pendiente_bruto_usd": 0,
+        "horas_voladas_hr": 0,
+        "gastos_directos_usd": 0,
+        "gastos_indirectos_usd": 0,
+        "permisos_usd": 0,
+        "otros_usd": 350,
+        "reserva_overhaul_usd": 0,
+        "saldo_usd": -350,
+        "gastos_sin_tc_mxn": 0,
+        "cobros_sin_tc_mxn": 0,
+        "gastos_tc_oficial": {
+          "count": 0,
+          "monto_mxn": 0
+        },
+        "cobros_tc_oficial_count": 0,
+        "reserva_incompleta": false,
+        "reparto_porcentaje_total": 100,
+        "reparto": [
+          {
+            "socio_nombre": "Mauricio Roque",
+            "porcentaje": 100,
+            "monto_usd": -350
+          }
+        ],
+        "vuelos": [],
+        "otros_ingresos_avion_usd": 0,
+        "otros_ingresos_avion_sin_tc_mxn": 0,
+        "otros_ingresos_avion": []
+      },
+      {
+        "matricula": "XB-TST",
+        "modelo": "C206",
+        "ingresos_cobrado_usd": 2793.72,
+        "otros_ingresos_vuelatour_usd": 206.28,
+        "otros_ingresos_vuelatour_desglose": {
+          "tuas_usd": 100,
+          "extras_usd": 50,
+          "pernocta_usd": 0,
+          "comision_usd": 80,
+          "iva_usd": 0
+        },
+        "comisiones_venta_usd": 45.7,
+        "pendiente_cobro_usd": 706.28,
+        "pendiente_bruto_usd": 730,
+        "horas_voladas_hr": 3.5,
+        "gastos_directos_usd": 367.6,
+        "gastos_indirectos_usd": 100,
+        "permisos_usd": 27.78,
+        "otros_usd": 350,
+        "reserva_overhaul_usd": 140,
+        "saldo_usd": 4348.8,
+        "gastos_sin_tc_mxn": 0,
+        "cobros_sin_tc_mxn": 0,
+        "gastos_tc_oficial": {
+          "count": 2,
+          "monto_mxn": 4500
+        },
+        "cobros_tc_oficial_count": 0,
+        "reserva_incompleta": false,
+        "reparto_porcentaje_total": 100,
+        "reparto": [
+          {
+            "socio_nombre": "Hernán Pérez",
+            "porcentaje": 40.92,
+            "monto_usd": 1779.53
+          },
+          {
+            "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
+            "porcentaje": 59.08,
+            "monto_usd": 2569.27
+          }
+        ],
+        "vuelos": [
+          {
+            "folio": 501,
+            "cliente": "Leticia León Alvarado",
+            "fecha": "2026-09-10",
+            "estado": "COMPLETADO",
+            "cobrado_usd": 1793.72,
+            "pendiente_usd": 206.28,
+            "participacion": 1,
+            "multi_avion": false,
+            "tramos_avion": null
+          },
+          {
+            "folio": 502,
+            "cliente": "Leticia León Alvarado",
+            "fecha": "2026-09-15",
+            "estado": "COMPLETADO",
+            "cobrado_usd": 1000,
+            "pendiente_usd": 500,
+            "participacion": 1,
+            "multi_avion": false,
+            "tramos_avion": null
+          }
+        ],
+        "otros_ingresos_avion_usd": 2586.16,
+        "otros_ingresos_avion_sin_tc_mxn": 0,
+        "otros_ingresos_avion": [
+          {
+            "clave": "ING-14",
+            "fecha": "2026-09-04",
+            "categoria": "Reembolsos y devoluciones recibidos",
+            "concepto": "TRANSF INTERBANCARIA SPEI · angel alvarez",
+            "monto": 46550.8,
+            "moneda": "MXN",
+            "comision": null,
+            "usd": 2586.16
+          }
+        ]
+      }
+    ],
+    "comision_vendedor_solo_gasto_real": true
+  },
+  "balance_individual": {
+    "matricula": "XB-TST",
+    "modelo": "C206",
+    "periodo_desde": "2026-09-01",
+    "periodo_hasta": "2026-09-30",
+    "permiso_afac_usd_hr": null,
+    "tc_promedio": 19.13,
+    "horas_voladas_hr": 3.5,
+    "vuelos": [
+      {
+        "clave": "#501 · Leticia León Alvarado",
+        "vuelo_id": "v-1",
+        "folio": "501",
+        "cliente": "Leticia León Alvarado",
+        "estado": "COMPLETADO",
+        "cancelado": false,
+        "es_externo": false,
+        "operador_externo": null,
+        "fecha": "2026-09-10",
+        "orden_ts": "2026-09-10T15:00:00.000Z",
+        "fecha_fin": null,
+        "ruta": "CUN-MID",
+        "participacion": 1,
+        "multi_avion": false,
+        "participacion_fuente": "unico",
+        "horas_cobradas": 2,
+        "tarifa_usd": 1000,
+        "iva_hr_usd": 0,
+        "total_usd": 2000,
+        "iva_usd": 0,
+        "tc_venta": 20,
+        "tc_venta_oficial": false,
+        "total_mxn": 40000,
+        "iva_mxn": 0,
+        "subtotal_mxn": 40000,
+        "total_cotizacion_usd": 2230,
+        "total_cotizacion_mxn": 44600,
+        "venta_factor": 0.8968609865470852,
+        "otros_ingresos_usd": 230,
+        "tua_pagado_mxn": 1500,
+        "tiempo_vuelo": 2,
+        "taco_inicio": 100,
+        "taco_inicio_obs": [],
+        "taco_fin_obs": [],
+        "taco_fin": 102,
+        "salto_taco_interno": false,
+        "salto_taco_interno_detalle": null,
+        "gas_mxn": null,
+        "gas_litros": null,
+        "gas_precio_litro": null,
+        "op_mxn": 3900,
+        "piloto_mxn": null,
+        "otros_mxn": null,
+        "gas_detalle": [],
+        "op_detalle": [
+          "Op (sin aeropuerto) $3,900.00",
+          "TUAS — TUA $1,500.00**",
+          "Operaciones — $3,900.00"
+        ],
+        "piloto_detalle": [],
+        "otros_detalle": [],
+        "op_vinculos": [
+          {
+            "id": "g-tuas",
+            "rol": "nota",
+            "monto_mxn": null,
+            "gasto_mxn": 1500
+          },
+          {
+            "id": "g-op-usd",
+            "rol": "suma",
+            "monto_mxn": 3900
+          }
+        ],
+        "piloto_vinculos": [],
+        "otros_vinculos": [],
+        "permiso_afac_mxn": null,
+        "permiso_afac_usd_hr": null,
+        "costo_total_mxn": 3900,
+        "tc_costos": 20,
+        "costo_usd": 195,
+        "costo_usd_siva": 168.1,
+        "iva_pagado_usd": 26.9,
+        "iva_pagado_mxn": 537.93,
+        "remanente_mxn": 36100,
+        "dif_iva_mxn": -537.93,
+        "comision_vendedor_mxn": null,
+        "ganancia_mxn": 35786.1,
+        "ganancia_usd": 1789.3,
+        "costo_hr_usd": 97.5,
+        "costo_hr_usd_siva": 84.05,
+        "status_cobro": "Parcial",
+        "cobros": [
+          {
+            "fecha": "2026-09-10",
+            "monto_mxn": 20000,
+            "metodo": null,
+            "comision_mxn": 350,
+            "cuenta": null,
+            "metodo_etiqueta": null,
+            "registro": null,
+            "cobrado_con": "Bruto $20,000.00 · comisión banco $350.00 · neto $19,650.00",
+            "neto_mxn": 19650
+          },
+          {
+            "fecha": "2026-09-12",
+            "monto_mxn": 20000,
+            "metodo": null,
+            "comision_mxn": null,
+            "cuenta": null,
+            "metodo_etiqueta": null,
+            "registro": null,
+            "cobrado_con": null,
+            "neto_mxn": 20000
+          }
+        ],
+        "cobrado_mxn": 35874.4,
+        "cobrado_real_mxn": 39650,
+        "por_cobrar_mxn": 4125.6,
+        "por_cobrar_usd": 206.28,
+        "factura_vuelatour": "No lleva factura",
+        "comisiones_mxn": 313.9,
+        "comisiones_detalle": [
+          "Comisión bancaria · $350.00 (parte del avión 89.69 %: $313.90)"
+        ],
+        "comision_banco_avion_mxn": 313.9,
+        "comision_vendedor_prov_mxn": 0,
+        "comision_vendedor_real_mxn": 0,
+        "comision_vendedor_real_pagos": 0
+      },
+      {
+        "clave": "#502 · Leticia León Alvarado",
+        "vuelo_id": "v-3",
+        "folio": "502",
+        "cliente": "Leticia León Alvarado",
+        "estado": "COMPLETADO",
+        "cancelado": false,
+        "es_externo": false,
+        "operador_externo": null,
+        "fecha": "2026-09-15",
+        "orden_ts": "2026-09-15T15:00:00.000Z",
+        "fecha_fin": null,
+        "ruta": "CUN-CZM",
+        "participacion": 1,
+        "multi_avion": false,
+        "participacion_fuente": "unico",
+        "horas_cobradas": 1.5,
+        "tarifa_usd": 1000,
+        "iva_hr_usd": 0,
+        "total_usd": 1500,
+        "iva_usd": 0,
+        "tc_venta": 18.25,
+        "tc_venta_oficial": true,
+        "tc_venta_oficial_fuente": "open.er-api",
+        "tc_venta_oficial_fecha": "2026-09-14",
+        "total_mxn": 27375,
+        "iva_mxn": 0,
+        "subtotal_mxn": 27375,
+        "total_cotizacion_usd": 1500,
+        "total_cotizacion_mxn": 27375,
+        "venta_factor": 1,
+        "otros_ingresos_usd": 0,
+        "tua_pagado_mxn": null,
+        "tiempo_vuelo": 1.5,
+        "taco_inicio": 200,
+        "taco_inicio_obs": [],
+        "taco_fin_obs": [],
+        "taco_fin": 201.5,
+        "salto_taco_interno": false,
+        "salto_taco_interno_detalle": null,
+        "gas_mxn": null,
+        "gas_litros": null,
+        "gas_precio_litro": null,
+        "op_mxn": null,
+        "piloto_mxn": null,
+        "otros_mxn": null,
+        "gas_detalle": [],
+        "op_detalle": [],
+        "piloto_detalle": [],
+        "otros_detalle": [],
+        "op_vinculos": [],
+        "piloto_vinculos": [],
+        "otros_vinculos": [],
+        "permiso_afac_mxn": null,
+        "permiso_afac_usd_hr": null,
+        "costo_total_mxn": 0,
+        "tc_costos": 18.25,
+        "costo_usd": 0,
+        "costo_usd_siva": 0,
+        "iva_pagado_usd": 0,
+        "iva_pagado_mxn": 0,
+        "remanente_mxn": 27375,
+        "dif_iva_mxn": 0,
+        "comision_vendedor_mxn": null,
+        "ganancia_mxn": 26827.5,
+        "ganancia_usd": 1470,
+        "costo_hr_usd": 0,
+        "costo_hr_usd_siva": 0,
+        "status_cobro": "Parcial",
+        "cobros": [
+          {
+            "fecha": "2026-09-15",
+            "monto_mxn": 18250,
+            "metodo": null,
+            "comision_mxn": 547.5,
+            "cuenta": null,
+            "metodo_etiqueta": null,
+            "registro": null,
+            "cobrado_con": "Bruto $18,250.00 · comisión banco $547.50 · neto $17,702.50",
+            "neto_mxn": 17702.5
+          }
+        ],
+        "cobrado_mxn": 18250,
+        "cobrado_real_mxn": 17702.5,
+        "por_cobrar_mxn": 9125,
+        "por_cobrar_usd": 500,
+        "factura_vuelatour": "No lleva factura",
+        "comisiones_mxn": 547.5,
+        "comisiones_detalle": [
+          "Comisión bancaria · $30.00 USD = $547.50 (parte del avión 100 %)"
+        ],
+        "comision_banco_avion_mxn": 547.5,
+        "comision_vendedor_prov_mxn": 0,
+        "comision_vendedor_real_mxn": 0,
+        "comision_vendedor_real_pagos": 0,
+        "salto_taco_inicio": true,
+        "salto_taco_esperado": 102
+      }
+    ],
+    "totales": {
+      "horas_cobradas": 3.5,
+      "tiempo_vuelo": 3.5,
+      "total_mxn": 67375,
+      "iva_mxn": 0,
+      "subtotal_mxn": 67375,
+      "gas_mxn": 0,
+      "gas_litros": 0,
+      "op_mxn": 3900,
+      "piloto_mxn": 0,
+      "otros_mxn": 0,
+      "permiso_afac_mxn": 0,
+      "costo_total_mxn": 3900,
+      "remanente_mxn": 63475,
+      "dif_iva_mxn": -537.93,
+      "comision_vendedor_mxn": 0,
+      "ganancia_mxn": 62613.6,
+      "ganancia_usd": 3259.3,
+      "cobrado_mxn": 54124.4,
+      "cobrado_real_mxn": 57352.5,
+      "total_cotizacion_mxn": 71975,
+      "por_cobrar_mxn": 13250.6,
+      "por_cobrar_usd": 706.28,
+      "tc_promedio": 19.13,
+      "costo_hr_prom_usd": 97.5,
+      "otros_ingresos_usd": 230,
+      "tua_pagado_mxn": 1500,
+      "comision_banco_mxn": 897.5,
+      "comisiones_mxn": 861.4,
+      "comision_banco_avion_mxn": 861.4,
+      "comision_vendedor_prov_mxn": 0,
+      "comision_vendedor_real_mxn": 0
+    },
+    "gastos_indirectos": {
+      "filas": [
+        {
+          "fecha": "2026-09-20",
+          "categoria": "Refacción",
+          "detalle": "REFACCION",
+          "pago": "Transferencia",
+          "monto_mxn": 1912.5,
+          "moneda_original": "USD",
+          "monto_original": 100,
+          "gasto_id": "g-ref-usd"
+        }
+      ],
+      "total_mxn": 1912.5,
+      "usd": 100,
+      "usd_hr": 28.57
+    },
+    "refacciones": {
+      "filas": [],
+      "total_mxn": 0,
+      "usd": 0,
+      "usd_hr": 0
+    },
+    "otros_gastos": {
+      "filas": [],
+      "total_mxn": 0,
+      "usd": 0,
+      "usd_hr": 0
+    },
+    "permisos": {
+      "filas": [
+        {
+          "fecha": "2026-09-10",
+          "categoria": "Permiso",
+          "detalle": "PERMISO",
+          "pago": "Transferencia",
+          "monto_mxn": 500,
+          "moneda_original": null,
+          "monto_original": null,
+          "tc_aplicado": null,
+          "gasto_id": "g-permiso"
+        }
+      ],
+      "total_mxn": 500,
+      "usd": 26.14,
+      "usd_hr": 7.47,
+      "tc_por_fila": true
+    },
+    "combustible": {
+      "filas": [
+        {
+          "fecha": "2026-09-10",
+          "categoria": "Gasavión / Turbosina",
+          "detalle": "GAS",
+          "pago": "Transferencia",
+          "monto_mxn": 3000,
+          "moneda_original": null,
+          "monto_original": null,
+          "gasto_id": "g-gas",
+          "litros": 100
+        }
+      ],
+      "total_mxn": 3000,
+      "usd": 156.86,
+      "usd_hr": 44.82,
+      "litros_total": 100,
+      "precio_litro_prom": 30
+    },
+    "balance": {
+      "utilidad_antes_usd": 3259.3,
+      "combustible_usd": 156.86,
+      "gastos_indirectos_usd": 100,
+      "refacciones_usd": 0,
+      "otros_usd": 0,
+      "permisos_usd": 26.14,
+      "utilidad_despues_usd": 5562.46,
+      "por_cobrar_usd": 706.28,
+      "utilidad_cobrada_usd": 4856.18,
+      "socios": [
+        {
+          "nombre": "Aero Charter Cancun S.A. de C.V.",
+          "porcentaje": 59.08,
+          "monto_usd": 2869.03,
+          "es_empresa": true
+        },
+        {
+          "nombre": "Hernán Pérez",
+          "porcentaje": 40.92,
+          "monto_usd": 1987.15,
+          "es_empresa": false
+        }
+      ],
+      "comisiones_usd": 45.7,
+      "utilidad_antes_comisiones_usd": 3305,
+      "otros_ingresos_avion_usd": 2586.16
+    },
+    "pendientes": [
+      "FLOTA: 1 carga(s) de combustible SIN avión por $250.00 MXN — no aparecen en el balance de ningún avión ni en el reparto; asígnales aeronave en Combustibles",
+      "Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas",
+      "Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour ('otros movimientos' del Balance general)",
+      "Avión XB-TST: provisión permiso AFAC no configurada (campo \"Aportación AFAC USD/hr\" en la ficha del avión) — columna PERMISO AFAC vacía",
+      "Avión XB-TST: 1 vuelo(s) sin tipo de cambio en la cotización — se usó el TC oficial de referencia (open.er-api / BCE) del día de la cotización (fuente: open.er-api); celdas marcadas en azul claro en la hoja maestra",
+      "Socios: porcentajes registrados Aero Charter Cancun S.A. de C.V. 59.08% / Hernán Pérez 40.92% — verificar contra el reparto real del avión",
+      "Avión XB-TST: sin programa de servicio por horas configurado (ficha del avión → Programa de servicio)"
+    ],
+    "sin_provision_vendedor": true,
+    "factura_vuelatour_segun_cobros": true,
+    "factura_vuelatour_devolucion": true,
+    "comision_vendedor_solo_gasto_real": true,
+    "otros_ingresos_avion": {
+      "filas": [
+        {
+          "ingreso_id": "i-av",
+          "clave": "ING-14",
+          "fecha": "2026-09-04",
+          "categoria": "Reembolsos y devoluciones recibidos",
+          "detalle": "ING-14 · TRANSF INTERBANCARIA SPEI · angel alvarez",
+          "moneda_original": "MXN",
+          "monto_original": 46550.8,
+          "tc_aplicado": null,
+          "ingreso_mxn": 46550.8,
+          "comision_mxn": null,
+          "neto_mxn": 46550.8,
+          "cuenta": "EJE SCOTIA · Scotiabank",
+          "notas": null,
+          "tc_usd": 18,
+          "neto_usd": 2586.16,
+          "tc_usd_origen": "OFICIAL_DEL_DIA",
+          "tc_usd_nota": "T.C. oficial de referencia del día del ingreso (open.er-api, dato del 2026-09-04): el ingreso en pesos no traía tipo de cambio."
+        }
+      ],
+      "total_mxn": 46550.8,
+      "usd": 2586.16,
+      "usd_por_ingreso": true
+    }
+  },
+  "balance_general": {
+    "periodo_desde": "2026-09-01",
+    "periodo_hasta": "2026-09-30",
+    "resumen": [
+      {
+        "matricula": "XB-TST",
+        "color": "#3B82F6",
+        "vuelos": 2,
+        "horas": 3.5,
+        "horas_cobradas": 3.5,
+        "venta_mxn": 67375,
+        "costo_mxn": 3900,
+        "combustible_mxn": 3000,
+        "comisiones_mxn": 861.4,
+        "ganancia_mxn": 59613.6,
+        "cobrado_mxn": 54124.4,
+        "por_cobrar_mxn": 13250.6,
+        "pendientes": 6
+      }
+    ],
+    "resumen_totales": {
+      "matricula": "TOTALES",
+      "color": null,
+      "vuelos": 2,
+      "horas": 3.5,
+      "horas_cobradas": 3.5,
+      "venta_mxn": 67375,
+      "costo_mxn": 3900,
+      "combustible_mxn": 3000,
+      "comisiones_mxn": 861.4,
+      "ganancia_mxn": 59613.6,
+      "cobrado_mxn": 54124.4,
+      "por_cobrar_mxn": 13250.6,
+      "pendientes": 6
+    },
+    "consolidado": {
+      "matricula": "FLOTA",
+      "modelo": null,
+      "avion_color": null,
+      "periodo_desde": "2026-09-01",
+      "periodo_hasta": "2026-09-30",
+      "permiso_afac_usd_hr": null,
+      "tc_promedio": 19.13,
+      "horas_voladas_hr": 3.5,
+      "vuelos": [
+        {
+          "clave": "#501 · Leticia León Alvarado",
+          "vuelo_id": "v-1",
+          "folio": "501",
+          "cliente": "Leticia León Alvarado",
+          "estado": "COMPLETADO",
+          "cancelado": false,
+          "es_externo": false,
+          "operador_externo": null,
+          "fecha": "2026-09-10",
+          "orden_ts": "2026-09-10T15:00:00.000Z",
+          "fecha_fin": null,
+          "ruta": "CUN-MID",
+          "participacion": 1,
+          "multi_avion": false,
+          "participacion_fuente": "unico",
+          "horas_cobradas": 2,
+          "tarifa_usd": 1000,
+          "iva_hr_usd": 0,
+          "total_usd": 2000,
+          "iva_usd": 0,
+          "tc_venta": 20,
+          "tc_venta_oficial": false,
+          "total_mxn": 40000,
+          "iva_mxn": 0,
+          "subtotal_mxn": 40000,
+          "total_cotizacion_usd": 2230,
+          "total_cotizacion_mxn": 44600,
+          "venta_factor": 0.8968609865470852,
+          "otros_ingresos_usd": 230,
+          "tua_pagado_mxn": 1500,
+          "tiempo_vuelo": 2,
+          "taco_inicio": 100,
+          "taco_inicio_obs": [],
+          "taco_fin_obs": [],
+          "taco_fin": 102,
+          "salto_taco_interno": false,
+          "salto_taco_interno_detalle": null,
+          "gas_mxn": null,
+          "gas_litros": null,
+          "gas_precio_litro": null,
+          "op_mxn": 3900,
+          "piloto_mxn": null,
+          "otros_mxn": null,
+          "gas_detalle": [],
+          "op_detalle": [
+            "Op (sin aeropuerto) $3,900.00",
+            "TUAS — TUA $1,500.00**",
+            "Operaciones — $3,900.00"
+          ],
+          "piloto_detalle": [],
+          "otros_detalle": [],
+          "op_vinculos": [
+            {
+              "id": "g-tuas",
+              "rol": "nota",
+              "monto_mxn": null,
+              "gasto_mxn": 1500
+            },
+            {
+              "id": "g-op-usd",
+              "rol": "suma",
+              "monto_mxn": 3900
+            }
+          ],
+          "piloto_vinculos": [],
+          "otros_vinculos": [],
+          "permiso_afac_mxn": null,
+          "permiso_afac_usd_hr": null,
+          "costo_total_mxn": 3900,
+          "tc_costos": 20,
+          "costo_usd": 195,
+          "costo_usd_siva": 168.1,
+          "iva_pagado_usd": 26.9,
+          "iva_pagado_mxn": 537.93,
+          "remanente_mxn": 36100,
+          "dif_iva_mxn": -537.93,
+          "comision_vendedor_mxn": null,
+          "ganancia_mxn": 35786.1,
+          "ganancia_usd": 1789.3,
+          "costo_hr_usd": 97.5,
+          "costo_hr_usd_siva": 84.05,
+          "status_cobro": "Parcial",
+          "cobros": [
+            {
+              "fecha": "2026-09-10",
+              "monto_mxn": 20000,
+              "metodo": null,
+              "comision_mxn": 350,
+              "cuenta": null,
+              "metodo_etiqueta": null,
+              "registro": null,
+              "cobrado_con": "Bruto $20,000.00 · comisión banco $350.00 · neto $19,650.00",
+              "neto_mxn": 19650
+            },
+            {
+              "fecha": "2026-09-12",
+              "monto_mxn": 20000,
+              "metodo": null,
+              "comision_mxn": null,
+              "cuenta": null,
+              "metodo_etiqueta": null,
+              "registro": null,
+              "cobrado_con": null,
+              "neto_mxn": 20000
+            }
+          ],
+          "cobrado_mxn": 35874.4,
+          "cobrado_real_mxn": 39650,
+          "por_cobrar_mxn": 4125.6,
+          "por_cobrar_usd": 206.28,
+          "factura_vuelatour": "No lleva factura",
+          "comisiones_mxn": 313.9,
+          "comisiones_detalle": [
+            "Comisión bancaria · $350.00 (parte del avión 89.69 %: $313.90)"
+          ],
+          "comision_banco_avion_mxn": 313.9,
+          "comision_vendedor_prov_mxn": 0,
+          "comision_vendedor_real_mxn": 0,
+          "comision_vendedor_real_pagos": 0,
+          "avion_color": "#3B82F6"
+        },
+        {
+          "clave": "#502 · Leticia León Alvarado",
+          "vuelo_id": "v-3",
+          "folio": "502",
+          "cliente": "Leticia León Alvarado",
+          "estado": "COMPLETADO",
+          "cancelado": false,
+          "es_externo": false,
+          "operador_externo": null,
+          "fecha": "2026-09-15",
+          "orden_ts": "2026-09-15T15:00:00.000Z",
+          "fecha_fin": null,
+          "ruta": "CUN-CZM",
+          "participacion": 1,
+          "multi_avion": false,
+          "participacion_fuente": "unico",
+          "horas_cobradas": 1.5,
+          "tarifa_usd": 1000,
+          "iva_hr_usd": 0,
+          "total_usd": 1500,
+          "iva_usd": 0,
+          "tc_venta": 18.25,
+          "tc_venta_oficial": true,
+          "tc_venta_oficial_fuente": "open.er-api",
+          "tc_venta_oficial_fecha": "2026-09-14",
+          "total_mxn": 27375,
+          "iva_mxn": 0,
+          "subtotal_mxn": 27375,
+          "total_cotizacion_usd": 1500,
+          "total_cotizacion_mxn": 27375,
+          "venta_factor": 1,
+          "otros_ingresos_usd": 0,
+          "tua_pagado_mxn": null,
+          "tiempo_vuelo": 1.5,
+          "taco_inicio": 200,
+          "taco_inicio_obs": [],
+          "taco_fin_obs": [],
+          "taco_fin": 201.5,
+          "salto_taco_interno": false,
+          "salto_taco_interno_detalle": null,
+          "gas_mxn": null,
+          "gas_litros": null,
+          "gas_precio_litro": null,
+          "op_mxn": null,
+          "piloto_mxn": null,
+          "otros_mxn": null,
+          "gas_detalle": [],
+          "op_detalle": [],
+          "piloto_detalle": [],
+          "otros_detalle": [],
+          "op_vinculos": [],
+          "piloto_vinculos": [],
+          "otros_vinculos": [],
+          "permiso_afac_mxn": null,
+          "permiso_afac_usd_hr": null,
+          "costo_total_mxn": 0,
+          "tc_costos": 18.25,
+          "costo_usd": 0,
+          "costo_usd_siva": 0,
+          "iva_pagado_usd": 0,
+          "iva_pagado_mxn": 0,
+          "remanente_mxn": 27375,
+          "dif_iva_mxn": 0,
+          "comision_vendedor_mxn": null,
+          "ganancia_mxn": 26827.5,
+          "ganancia_usd": 1470,
+          "costo_hr_usd": 0,
+          "costo_hr_usd_siva": 0,
+          "status_cobro": "Parcial",
+          "cobros": [
+            {
+              "fecha": "2026-09-15",
+              "monto_mxn": 18250,
+              "metodo": null,
+              "comision_mxn": 547.5,
+              "cuenta": null,
+              "metodo_etiqueta": null,
+              "registro": null,
+              "cobrado_con": "Bruto $18,250.00 · comisión banco $547.50 · neto $17,702.50",
+              "neto_mxn": 17702.5
+            }
+          ],
+          "cobrado_mxn": 18250,
+          "cobrado_real_mxn": 17702.5,
+          "por_cobrar_mxn": 9125,
+          "por_cobrar_usd": 500,
+          "factura_vuelatour": "No lleva factura",
+          "comisiones_mxn": 547.5,
+          "comisiones_detalle": [
+            "Comisión bancaria · $30.00 USD = $547.50 (parte del avión 100 %)"
+          ],
+          "comision_banco_avion_mxn": 547.5,
+          "comision_vendedor_prov_mxn": 0,
+          "comision_vendedor_real_mxn": 0,
+          "comision_vendedor_real_pagos": 0,
+          "salto_taco_inicio": true,
+          "salto_taco_esperado": 102,
+          "avion_color": "#3B82F6"
+        }
+      ],
+      "totales": {
+        "horas_cobradas": 3.5,
+        "tiempo_vuelo": 3.5,
+        "total_mxn": 67375,
+        "iva_mxn": 0,
+        "subtotal_mxn": 67375,
+        "gas_mxn": 0,
+        "gas_litros": 0,
+        "op_mxn": 3900,
+        "piloto_mxn": 0,
+        "otros_mxn": 0,
+        "permiso_afac_mxn": 0,
+        "costo_total_mxn": 3900,
+        "remanente_mxn": 63475,
+        "dif_iva_mxn": -537.93,
+        "comision_vendedor_mxn": 0,
+        "ganancia_mxn": 62613.6,
+        "ganancia_usd": 3259.3,
+        "cobrado_mxn": 54124.4,
+        "por_cobrar_mxn": 13250.6,
+        "por_cobrar_usd": 706.28,
+        "tc_promedio": 19.13,
+        "costo_hr_prom_usd": 97.5,
+        "otros_ingresos_usd": 230,
+        "cobrado_real_mxn": 57352.5,
+        "total_cotizacion_mxn": 71975,
+        "tua_pagado_mxn": 1500,
+        "comision_banco_mxn": 897.5,
+        "comisiones_mxn": 861.4,
+        "comision_banco_avion_mxn": 861.4,
+        "comision_vendedor_prov_mxn": 0,
+        "comision_vendedor_real_mxn": 0
+      },
+      "gastos_indirectos": {
+        "filas": [
+          {
+            "fecha": "2026-09-20",
+            "categoria": "Refacción",
+            "detalle": "XB-TST · REFACCION",
+            "pago": "Transferencia",
+            "monto_mxn": 1912.5,
+            "moneda_original": "USD",
+            "monto_original": 100,
+            "gasto_id": "g-ref-usd",
+            "avion_color": "#3B82F6",
+            "matricula": "XB-TST"
+          }
+        ],
+        "total_mxn": 1912.5,
+        "usd": 100,
+        "usd_hr": 28.57
+      },
+      "refacciones": {
+        "filas": [],
+        "total_mxn": 0,
+        "usd": 0,
+        "usd_hr": null
+      },
+      "otros_gastos": {
+        "filas": [],
+        "total_mxn": 0,
+        "usd": 0,
+        "usd_hr": null
+      },
+      "permisos": {
+        "filas": [
+          {
+            "fecha": "2026-09-10",
+            "categoria": "Permiso",
+            "detalle": "XB-TST · PERMISO",
+            "pago": "Transferencia",
+            "monto_mxn": 500,
+            "moneda_original": null,
+            "monto_original": null,
+            "tc_aplicado": null,
+            "gasto_id": "g-permiso",
+            "avion_color": "#3B82F6",
+            "matricula": "XB-TST"
+          }
+        ],
+        "total_mxn": 500,
+        "usd": 26.14,
+        "usd_hr": 7.47
+      },
+      "combustible": {
+        "filas": [
+          {
+            "fecha": "2026-09-10",
+            "categoria": "Gasavión / Turbosina",
+            "detalle": "XB-TST · GAS",
+            "pago": "Transferencia",
+            "monto_mxn": 3000,
+            "moneda_original": null,
+            "monto_original": null,
+            "gasto_id": "g-gas",
+            "litros": 100,
+            "avion_color": "#3B82F6",
+            "matricula": "XB-TST"
+          }
+        ],
+        "total_mxn": 3000,
+        "usd": 156.86,
+        "usd_hr": 44.82,
+        "litros_total": 100,
+        "precio_litro_prom": 30
+      },
+      "balance": {
+        "utilidad_antes_usd": 0,
+        "combustible_usd": null,
+        "gastos_indirectos_usd": null,
+        "otros_usd": null,
+        "permisos_usd": null,
+        "utilidad_despues_usd": null,
+        "por_cobrar_usd": 0,
+        "utilidad_cobrada_usd": null,
+        "socios": []
+      },
+      "otros_movimientos": {
+        "filas": [
+          {
+            "clave": "vtleticia501",
+            "avion_color": "#3B82F6",
+            "estado": "COMPLETADO",
+            "fecha_vuelo": "2026-09-10",
+            "factura": "No lleva factura",
+            "concepto_ingreso": "comisión vendedor + TUAs con IVA · 2 conceptos (ver nota)",
+            "ingreso_mxn": 4600,
+            "fecha_ingreso": "2026-09-10",
+            "nota_ingreso": "comisión vendedor (Vendedor Uno) = $1,600.00\ntuas/extras/pernocta cobrados + iva (sin desglose canónico: estimado con columnas) = $3,000.00",
+            "concepto_egreso": "TUAs + comisión bancaria · 2 conceptos (ver nota)",
+            "egreso_mxn": 1536.1,
+            "fecha_egreso": "2026-09-10",
+            "nota_egreso": "tuas pagadas = $1,500.00\ncomisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES) = $36.10",
+            "remanente_mxn": 3063.9
+          }
+        ],
+        "filas_sueltas": [
+          {
+            "clave": "tuas sin vuelo",
+            "avion_color": null,
+            "fecha_vuelo": null,
+            "concepto_egreso": "TUAS",
+            "egreso_mxn": 80,
+            "fecha_egreso": "2026-09-10",
+            "concepto_ingreso": null,
+            "ingreso_mxn": null,
+            "fecha_ingreso": null,
+            "remanente_mxn": -80,
+            "factura": null
+          },
+          {
+            "clave": "gas sin avión",
+            "avion_color": null,
+            "fecha_vuelo": null,
+            "concepto_egreso": "Gasavión / Turbosina",
+            "egreso_mxn": 250,
+            "fecha_egreso": "2026-09-10",
+            "concepto_ingreso": null,
+            "ingreso_mxn": null,
+            "fecha_ingreso": null,
+            "remanente_mxn": -250,
+            "factura": null
+          }
+        ],
+        "sin_provision_vendedor": true,
+        "comision_vendedor_solo_gasto_real": true,
+        "otros_ingresos_por_avion": true
+      },
+      "pendientes": [
+        "FLOTA: 1 carga(s) de combustible SIN avión por $250.00 MXN — no aparecen en el balance de ningún avión ni en el reparto; asígnales aeronave en Combustibles",
+        "XB-TST: Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas",
+        "XB-TST: Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour ('otros movimientos' del Balance general)",
+        "XB-TST: Avión XB-TST: provisión permiso AFAC no configurada (campo \"Aportación AFAC USD/hr\" en la ficha del avión) — columna PERMISO AFAC vacía",
+        "XB-TST: Avión XB-TST: 1 vuelo(s) sin tipo de cambio en la cotización — se usó el TC oficial de referencia (open.er-api / BCE) del día de la cotización (fuente: open.er-api); celdas marcadas en azul claro en la hoja maestra",
+        "XB-TST: Socios: porcentajes registrados Aero Charter Cancun S.A. de C.V. 59.08% / Hernán Pérez 40.92% — verificar contra el reparto real del avión",
+        "XB-TST: Avión XB-TST: sin programa de servicio por horas configurado (ficha del avión → Programa de servicio)"
+      ],
+      "factura_vuelatour_segun_cobros": true,
+      "factura_vuelatour_devolucion": true,
+      "comision_vendedor_solo_gasto_real": true,
+      "otros_ingresos_avion": {
+        "filas": [
+          {
+            "ingreso_id": "i-av",
+            "clave": "ING-14",
+            "fecha": "2026-09-04",
+            "categoria": "Reembolsos y devoluciones recibidos",
+            "detalle": "XB-TST · ING-14 · TRANSF INTERBANCARIA SPEI · angel alvarez",
+            "moneda_original": "MXN",
+            "monto_original": 46550.8,
+            "tc_aplicado": null,
+            "ingreso_mxn": 46550.8,
+            "comision_mxn": null,
+            "neto_mxn": 46550.8,
+            "cuenta": "EJE SCOTIA · Scotiabank",
+            "notas": null,
+            "tc_usd": 18,
+            "neto_usd": 2586.16,
+            "tc_usd_origen": "OFICIAL_DEL_DIA",
+            "tc_usd_nota": "T.C. oficial de referencia del día del ingreso (open.er-api, dato del 2026-09-04): el ingreso en pesos no traía tipo de cambio.",
+            "matricula": "XB-TST",
+            "avion_color": "#3B82F6"
+          }
+        ],
+        "total_mxn": 46550.8,
+        "usd": 2586.16,
+        "usd_por_ingreso": true
+      }
+    },
+    "aviones": [
+      {
+        "matricula": "XB-TST",
+        "modelo": "C206",
+        "periodo_desde": "2026-09-01",
+        "periodo_hasta": "2026-09-30",
+        "permiso_afac_usd_hr": null,
+        "tc_promedio": 19.13,
+        "horas_voladas_hr": 3.5,
+        "vuelos": [
+          {
+            "clave": "#501 · Leticia León Alvarado",
+            "vuelo_id": "v-1",
+            "folio": "501",
+            "cliente": "Leticia León Alvarado",
+            "estado": "COMPLETADO",
+            "cancelado": false,
+            "es_externo": false,
+            "operador_externo": null,
+            "fecha": "2026-09-10",
+            "orden_ts": "2026-09-10T15:00:00.000Z",
+            "fecha_fin": null,
+            "ruta": "CUN-MID",
+            "participacion": 1,
+            "multi_avion": false,
+            "participacion_fuente": "unico",
+            "horas_cobradas": 2,
+            "tarifa_usd": 1000,
+            "iva_hr_usd": 0,
+            "total_usd": 2000,
+            "iva_usd": 0,
+            "tc_venta": 20,
+            "tc_venta_oficial": false,
+            "total_mxn": 40000,
+            "iva_mxn": 0,
+            "subtotal_mxn": 40000,
+            "total_cotizacion_usd": 2230,
+            "total_cotizacion_mxn": 44600,
+            "venta_factor": 0.8968609865470852,
+            "otros_ingresos_usd": 230,
+            "tua_pagado_mxn": 1500,
+            "tiempo_vuelo": 2,
+            "taco_inicio": 100,
+            "taco_inicio_obs": [],
+            "taco_fin_obs": [],
+            "taco_fin": 102,
+            "salto_taco_interno": false,
+            "salto_taco_interno_detalle": null,
+            "gas_mxn": null,
+            "gas_litros": null,
+            "gas_precio_litro": null,
+            "op_mxn": 3900,
+            "piloto_mxn": null,
+            "otros_mxn": null,
+            "gas_detalle": [],
+            "op_detalle": [
+              "Op (sin aeropuerto) $3,900.00",
+              "TUAS — TUA $1,500.00**",
+              "Operaciones — $3,900.00"
+            ],
+            "piloto_detalle": [],
+            "otros_detalle": [],
+            "op_vinculos": [
+              {
+                "id": "g-tuas",
+                "rol": "nota",
+                "monto_mxn": null,
+                "gasto_mxn": 1500
+              },
+              {
+                "id": "g-op-usd",
+                "rol": "suma",
+                "monto_mxn": 3900
+              }
+            ],
+            "piloto_vinculos": [],
+            "otros_vinculos": [],
+            "permiso_afac_mxn": null,
+            "permiso_afac_usd_hr": null,
+            "costo_total_mxn": 3900,
+            "tc_costos": 20,
+            "costo_usd": 195,
+            "costo_usd_siva": 168.1,
+            "iva_pagado_usd": 26.9,
+            "iva_pagado_mxn": 537.93,
+            "remanente_mxn": 36100,
+            "dif_iva_mxn": -537.93,
+            "comision_vendedor_mxn": null,
+            "ganancia_mxn": 35786.1,
+            "ganancia_usd": 1789.3,
+            "costo_hr_usd": 97.5,
+            "costo_hr_usd_siva": 84.05,
+            "status_cobro": "Parcial",
+            "cobros": [
+              {
+                "fecha": "2026-09-10",
+                "monto_mxn": 20000,
+                "metodo": null,
+                "comision_mxn": 350,
+                "cuenta": null,
+                "metodo_etiqueta": null,
+                "registro": null,
+                "cobrado_con": "Bruto $20,000.00 · comisión banco $350.00 · neto $19,650.00",
+                "neto_mxn": 19650
+              },
+              {
+                "fecha": "2026-09-12",
+                "monto_mxn": 20000,
+                "metodo": null,
+                "comision_mxn": null,
+                "cuenta": null,
+                "metodo_etiqueta": null,
+                "registro": null,
+                "cobrado_con": null,
+                "neto_mxn": 20000
+              }
+            ],
+            "cobrado_mxn": 35874.4,
+            "cobrado_real_mxn": 39650,
+            "por_cobrar_mxn": 4125.6,
+            "por_cobrar_usd": 206.28,
+            "factura_vuelatour": "No lleva factura",
+            "comisiones_mxn": 313.9,
+            "comisiones_detalle": [
+              "Comisión bancaria · $350.00 (parte del avión 89.69 %: $313.90)"
+            ],
+            "comision_banco_avion_mxn": 313.9,
+            "comision_vendedor_prov_mxn": 0,
+            "comision_vendedor_real_mxn": 0,
+            "comision_vendedor_real_pagos": 0
+          },
+          {
+            "clave": "#502 · Leticia León Alvarado",
+            "vuelo_id": "v-3",
+            "folio": "502",
+            "cliente": "Leticia León Alvarado",
+            "estado": "COMPLETADO",
+            "cancelado": false,
+            "es_externo": false,
+            "operador_externo": null,
+            "fecha": "2026-09-15",
+            "orden_ts": "2026-09-15T15:00:00.000Z",
+            "fecha_fin": null,
+            "ruta": "CUN-CZM",
+            "participacion": 1,
+            "multi_avion": false,
+            "participacion_fuente": "unico",
+            "horas_cobradas": 1.5,
+            "tarifa_usd": 1000,
+            "iva_hr_usd": 0,
+            "total_usd": 1500,
+            "iva_usd": 0,
+            "tc_venta": 18.25,
+            "tc_venta_oficial": true,
+            "tc_venta_oficial_fuente": "open.er-api",
+            "tc_venta_oficial_fecha": "2026-09-14",
+            "total_mxn": 27375,
+            "iva_mxn": 0,
+            "subtotal_mxn": 27375,
+            "total_cotizacion_usd": 1500,
+            "total_cotizacion_mxn": 27375,
+            "venta_factor": 1,
+            "otros_ingresos_usd": 0,
+            "tua_pagado_mxn": null,
+            "tiempo_vuelo": 1.5,
+            "taco_inicio": 200,
+            "taco_inicio_obs": [],
+            "taco_fin_obs": [],
+            "taco_fin": 201.5,
+            "salto_taco_interno": false,
+            "salto_taco_interno_detalle": null,
+            "gas_mxn": null,
+            "gas_litros": null,
+            "gas_precio_litro": null,
+            "op_mxn": null,
+            "piloto_mxn": null,
+            "otros_mxn": null,
+            "gas_detalle": [],
+            "op_detalle": [],
+            "piloto_detalle": [],
+            "otros_detalle": [],
+            "op_vinculos": [],
+            "piloto_vinculos": [],
+            "otros_vinculos": [],
+            "permiso_afac_mxn": null,
+            "permiso_afac_usd_hr": null,
+            "costo_total_mxn": 0,
+            "tc_costos": 18.25,
+            "costo_usd": 0,
+            "costo_usd_siva": 0,
+            "iva_pagado_usd": 0,
+            "iva_pagado_mxn": 0,
+            "remanente_mxn": 27375,
+            "dif_iva_mxn": 0,
+            "comision_vendedor_mxn": null,
+            "ganancia_mxn": 26827.5,
+            "ganancia_usd": 1470,
+            "costo_hr_usd": 0,
+            "costo_hr_usd_siva": 0,
+            "status_cobro": "Parcial",
+            "cobros": [
+              {
+                "fecha": "2026-09-15",
+                "monto_mxn": 18250,
+                "metodo": null,
+                "comision_mxn": 547.5,
+                "cuenta": null,
+                "metodo_etiqueta": null,
+                "registro": null,
+                "cobrado_con": "Bruto $18,250.00 · comisión banco $547.50 · neto $17,702.50",
+                "neto_mxn": 17702.5
+              }
+            ],
+            "cobrado_mxn": 18250,
+            "cobrado_real_mxn": 17702.5,
+            "por_cobrar_mxn": 9125,
+            "por_cobrar_usd": 500,
+            "factura_vuelatour": "No lleva factura",
+            "comisiones_mxn": 547.5,
+            "comisiones_detalle": [
+              "Comisión bancaria · $30.00 USD = $547.50 (parte del avión 100 %)"
+            ],
+            "comision_banco_avion_mxn": 547.5,
+            "comision_vendedor_prov_mxn": 0,
+            "comision_vendedor_real_mxn": 0,
+            "comision_vendedor_real_pagos": 0,
+            "salto_taco_inicio": true,
+            "salto_taco_esperado": 102
+          }
+        ],
+        "totales": {
+          "horas_cobradas": 3.5,
+          "tiempo_vuelo": 3.5,
+          "total_mxn": 67375,
+          "iva_mxn": 0,
+          "subtotal_mxn": 67375,
+          "gas_mxn": 0,
+          "gas_litros": 0,
+          "op_mxn": 3900,
+          "piloto_mxn": 0,
+          "otros_mxn": 0,
+          "permiso_afac_mxn": 0,
+          "costo_total_mxn": 3900,
+          "remanente_mxn": 63475,
+          "dif_iva_mxn": -537.93,
+          "comision_vendedor_mxn": 0,
+          "ganancia_mxn": 62613.6,
+          "ganancia_usd": 3259.3,
+          "cobrado_mxn": 54124.4,
+          "cobrado_real_mxn": 57352.5,
+          "total_cotizacion_mxn": 71975,
+          "por_cobrar_mxn": 13250.6,
+          "por_cobrar_usd": 706.28,
+          "tc_promedio": 19.13,
+          "costo_hr_prom_usd": 97.5,
+          "otros_ingresos_usd": 230,
+          "tua_pagado_mxn": 1500,
+          "comision_banco_mxn": 897.5,
+          "comisiones_mxn": 861.4,
+          "comision_banco_avion_mxn": 861.4,
+          "comision_vendedor_prov_mxn": 0,
+          "comision_vendedor_real_mxn": 0
+        },
+        "gastos_indirectos": {
+          "filas": [
+            {
+              "fecha": "2026-09-20",
+              "categoria": "Refacción",
+              "detalle": "REFACCION",
+              "pago": "Transferencia",
+              "monto_mxn": 1912.5,
+              "moneda_original": "USD",
+              "monto_original": 100,
+              "gasto_id": "g-ref-usd"
+            }
+          ],
+          "total_mxn": 1912.5,
+          "usd": 100,
+          "usd_hr": 28.57
+        },
+        "refacciones": {
+          "filas": [],
+          "total_mxn": 0,
+          "usd": 0,
+          "usd_hr": 0
+        },
+        "otros_gastos": {
+          "filas": [],
+          "total_mxn": 0,
+          "usd": 0,
+          "usd_hr": 0
+        },
+        "permisos": {
+          "filas": [
+            {
+              "fecha": "2026-09-10",
+              "categoria": "Permiso",
+              "detalle": "PERMISO",
+              "pago": "Transferencia",
+              "monto_mxn": 500,
+              "moneda_original": null,
+              "monto_original": null,
+              "tc_aplicado": null,
+              "gasto_id": "g-permiso"
+            }
+          ],
+          "total_mxn": 500,
+          "usd": 26.14,
+          "usd_hr": 7.47,
+          "tc_por_fila": true
+        },
+        "combustible": {
+          "filas": [
+            {
+              "fecha": "2026-09-10",
+              "categoria": "Gasavión / Turbosina",
+              "detalle": "GAS",
+              "pago": "Transferencia",
+              "monto_mxn": 3000,
+              "moneda_original": null,
+              "monto_original": null,
+              "gasto_id": "g-gas",
+              "litros": 100
+            }
+          ],
+          "total_mxn": 3000,
+          "usd": 156.86,
+          "usd_hr": 44.82,
+          "litros_total": 100,
+          "precio_litro_prom": 30
+        },
+        "balance": {
+          "utilidad_antes_usd": 3259.3,
+          "combustible_usd": 156.86,
+          "gastos_indirectos_usd": 100,
+          "refacciones_usd": 0,
+          "otros_usd": 0,
+          "permisos_usd": 26.14,
+          "utilidad_despues_usd": 5562.46,
+          "por_cobrar_usd": 706.28,
+          "utilidad_cobrada_usd": 4856.18,
+          "socios": [
+            {
+              "nombre": "Aero Charter Cancun S.A. de C.V.",
+              "porcentaje": 59.08,
+              "monto_usd": 2869.03,
+              "es_empresa": true
+            },
+            {
+              "nombre": "Hernán Pérez",
+              "porcentaje": 40.92,
+              "monto_usd": 1987.15,
+              "es_empresa": false
+            }
+          ],
+          "comisiones_usd": 45.7,
+          "utilidad_antes_comisiones_usd": 3305,
+          "otros_ingresos_avion_usd": 2586.16
+        },
+        "pendientes": [
+          "Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas",
+          "Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour ('otros movimientos' del Balance general)",
+          "Avión XB-TST: provisión permiso AFAC no configurada (campo \"Aportación AFAC USD/hr\" en la ficha del avión) — columna PERMISO AFAC vacía",
+          "Avión XB-TST: 1 vuelo(s) sin tipo de cambio en la cotización — se usó el TC oficial de referencia (open.er-api / BCE) del día de la cotización (fuente: open.er-api); celdas marcadas en azul claro en la hoja maestra",
+          "Socios: porcentajes registrados Aero Charter Cancun S.A. de C.V. 59.08% / Hernán Pérez 40.92% — verificar contra el reparto real del avión",
+          "Avión XB-TST: sin programa de servicio por horas configurado (ficha del avión → Programa de servicio)"
+        ],
+        "sin_provision_vendedor": true,
+        "factura_vuelatour_segun_cobros": true,
+        "factura_vuelatour_devolucion": true,
+        "comision_vendedor_solo_gasto_real": true,
+        "otros_ingresos_avion": {
+          "filas": [
+            {
+              "ingreso_id": "i-av",
+              "clave": "ING-14",
+              "fecha": "2026-09-04",
+              "categoria": "Reembolsos y devoluciones recibidos",
+              "detalle": "ING-14 · TRANSF INTERBANCARIA SPEI · angel alvarez",
+              "moneda_original": "MXN",
+              "monto_original": 46550.8,
+              "tc_aplicado": null,
+              "ingreso_mxn": 46550.8,
+              "comision_mxn": null,
+              "neto_mxn": 46550.8,
+              "cuenta": "EJE SCOTIA · Scotiabank",
+              "notas": null,
+              "tc_usd": 18,
+              "neto_usd": 2586.16,
+              "tc_usd_origen": "OFICIAL_DEL_DIA",
+              "tc_usd_nota": "T.C. oficial de referencia del día del ingreso (open.er-api, dato del 2026-09-04): el ingreso en pesos no traía tipo de cambio."
+            }
+          ],
+          "total_mxn": 46550.8,
+          "usd": 2586.16,
+          "usd_por_ingreso": true
+        },
+        "avion_color": "#3B82F6"
+      }
+    ],
+    "gastos_empresa": {
+      "filas": [
+        {
+          "fecha": "2026-09-10",
+          "categoria": "Gasto fijo",
+          "detalle": "FIJO",
+          "pago": "Transferencia",
+          "monto_mxn": 7000,
+          "moneda_original": null,
+          "monto_original": null,
+          "gasto_id": "g-fijo"
+        },
+        {
+          "fecha": "2026-09-10",
+          "categoria": "Gasto fijo",
+          "detalle": "FIJO",
+          "pago": "Transferencia",
+          "monto_mxn": 5739,
+          "moneda_original": "USD",
+          "monto_original": 300,
+          "gasto_id": "g-fijo-usd"
+        },
+        {
+          "fecha": "2026-09-10",
+          "categoria": "Otros gastos VuelaTour",
+          "detalle": "Papelería",
+          "pago": "Transferencia",
+          "monto_mxn": 700,
+          "moneda_original": null,
+          "monto_original": null,
+          "gasto_id": "g-otro"
+        }
+      ],
+      "total_mxn": 13439,
+      "usd": 702.51,
+      "usd_hr": null
+    },
+    "inventario": {
+      "items": []
+    },
+    "empresa": {
+      "participaciones": [
+        {
+          "matricula": "XB-TST",
+          "socio": "Aero Charter Cancun S.A. de C.V.",
+          "porcentaje": 59.08,
+          "monto_usd": 2869.03
+        }
+      ],
+      "participacion_usd": 2869.03,
+      "ingresos_propios_usd": 230,
+      "pagos_vendedor_usd": 95.24,
+      "otros_gastos_empresa_usd": 702.51,
+      "tc_usado": 19.13,
+      "tienda_utilidad_usd": null,
+      "resultado_usd": 2301.28,
+      "tc_promedio": 19.13,
+      "nota": "Participación: utilidad COBRADA de XB-TST × % de la empresa como socia. Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, COTIZADO y RESERVA incluidos. Egresos = pago al vendedor (solo los gastos reales de comisión del vendedor capturados), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos. De esos ingresos, $23.72 USD de 1 vuelo(s) aún están por cobrar. Otros gastos: hoja 'otros gastos' ($13,439.00 MXN ÷ T.C. promedio de la flota 19.13). Tienda: sin inventario en el periodo. Los gastos personales del dueño no entran.",
+      "movimientos_sin_tc": 0,
+      "ingresos_por_cobrar_usd": 23.72,
+      "vuelos_por_cobrar": 1
+    },
+    "variante": "mensual"
+  }
+}

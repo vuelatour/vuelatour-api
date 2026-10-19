@@ -587,6 +587,12 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
         'balance.utilidad_antes_usd',
         'balance.utilidad_cobrada_usd',
         'balance.utilidad_despues_usd',
+        // API 0.0.94 (invariante 92): la MISMA cascada en pesos (aditiva).
+        'balance.comisiones_mxn',
+        'balance.utilidad_antes_comisiones_mxn',
+        'balance.utilidad_antes_mxn',
+        'balance.utilidad_cobrada_mxn',
+        'balance.utilidad_despues_mxn',
         'totales.cobrado_real_mxn',
         'totales.comision_banco_avion_mxn',
         'totales.comision_vendedor_prov_mxn',

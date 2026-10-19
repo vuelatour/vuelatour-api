@@ -77,6 +77,11 @@ export interface LibroParaEmpresa {
       nombre: string;
       porcentaje: number;
       monto_usd: number | null;
+      /**
+       * ADITIVO (18-oct-2026, API 0.0.94, invariante 92): utilidad COBRADA
+       * EN PESOS × % (la del bloque del avión). Ausente = libro sin pesos.
+       */
+      monto_mxn?: number | null;
       es_empresa?: boolean;
     }>;
   };
@@ -98,6 +103,10 @@ export function participacionesEmpresa(
         socio: s.nombre,
         porcentaje: s.porcentaje,
         monto_usd: s.monto_usd,
+        // ADITIVO (18-oct-2026, API 0.0.94, invariante 92): la celda MONTO
+        // MXN del socio-empresa en el bloque del avión, TAL CUAL. Solo si el
+        // libro la trae (un libro sin pesos no agrega la llave).
+        ...(s.monto_mxn !== undefined ? { monto_mxn: s.monto_mxn } : {}),
       })),
   );
 }
@@ -193,12 +202,50 @@ export function ladoEnUsd(
   return { usd: sinTc > 0 ? null : round2(suma), sinTc };
 }
 
+/**
+ * BALANCE EN PESOS (18-oct-2026, API 0.0.94, invariante 92): un lado
+ * (ingreso o egreso) de «otros movimientos» EN PESOS = Σ de la columna MXN
+ * tal cual (la que la hoja YA pinta), redondeado al final. Una fila cuyo
+ * concepto dice «sin TC» no llegó (o llegó a medias) a pesos ⇒ el lado
+ * queda en `null` (mismo criterio que `ladoEnUsd`; aquí NO hace falta T.C.
+ * para regresar a USD).
+ */
+export function ladoEnMxn(
+  movimientos: ReadonlyArray<MovimientoParaEmpresa>,
+  lado: 'ingreso' | 'egreso',
+): number | null {
+  let suma = 0;
+  for (const m of movimientos) {
+    const concepto =
+      lado === 'ingreso' ? m.concepto_ingreso : m.concepto_egreso;
+    if (concepto != null && MARCA_SIN_TC.test(concepto)) return null;
+    const mxn = lado === 'ingreso' ? m.ingreso_mxn : m.egreso_mxn;
+    if (mxn == null || mxn === 0) continue;
+    suma += mxn;
+  }
+  return round2(suma);
+}
+
+/** Texto corto de la base EN PESOS del bloque (la `nota` explica el USD). */
+export const NOTA_PESOS_BALANCE_EMPRESA =
+  'En pesos: participación = utilidad COBRADA en pesos de cada avión × % de la empresa como socia; ' +
+  "ingresos y egresos propios = la columna MXN de 'otros movimientos' tal cual; " +
+  "otros gastos = TOTAL MXN de 'otros gastos'; tienda = utilidad MXN de 'inventario'. " +
+  'Los dólares son informativos.';
+
 /** Insumos del bloque (todo lo calcula el general ANTES). */
 export interface InsumosBalanceEmpresa {
   participaciones: BalanceEmpresaParticipacionPayload[];
   movimientos: ReadonlyArray<MovimientoParaEmpresa>;
-  /** Hoja «otros gastos» del general (`gastos_empresa`). */
-  otrosGastos: { total_mxn: number; usd: number | null };
+  /**
+   * Hoja «otros gastos» del general (`gastos_empresa`). `filas` (opcional)
+   * solo decide si su TOTAL MXN es completo (una fila sin pesos ⇒ null).
+   */
+  otrosGastos: {
+    total_mxn: number;
+    usd: number | null;
+    filas?: ReadonlyArray<{ monto_mxn: number | null }>;
+  };
   /** T.C. promedio de la flota (`consolidado.totales.tc_promedio`). */
   tcPromedio: number | null;
   /** Hoja «inventario» (tienda); null/ausente = sin inventario. */
@@ -269,6 +316,30 @@ export function armarBalanceEmpresa(
     else tiendaSinTc = true;
   }
 
+  // ===== EN PESOS (18-oct-2026, API 0.0.94, invariante 92) =====
+  // Mismas fuentes, en su columna MXN: ningún T.C. de por medio.
+  const participacionMxn = e.participaciones.some((p) => p.monto_mxn == null)
+    ? null
+    : round2(e.participaciones.reduce((a, p) => a + (p.monto_mxn ?? 0), 0));
+  const ingresosMxn = ladoEnMxn(e.movimientos, 'ingreso');
+  const egresosMxn = ladoEnMxn(e.movimientos, 'egreso');
+  const otrosMxn = (e.otrosGastos.filas ?? []).some((f) => f.monto_mxn == null)
+    ? null
+    : round2(e.otrosGastos.total_mxn);
+  const resultadoMxn =
+    participacionMxn != null &&
+    ingresosMxn != null &&
+    egresosMxn != null &&
+    otrosMxn != null
+      ? round2(
+          participacionMxn +
+            ingresosMxn -
+            egresosMxn -
+            otrosMxn +
+            (utilidadTiendaMxn ?? 0),
+        )
+      : null;
+
   const resultado =
     participacionUsd != null &&
     ingresos.usd != null &&
@@ -312,6 +383,16 @@ export function armarBalanceEmpresa(
     movimientos_sin_tc: movimientosSinTc,
     ingresos_por_cobrar_usd: ingresosPorCobrarUsd,
     vuelos_por_cobrar: porCobrar.length,
+    // ADITIVAS (18-oct-2026, API 0.0.94, invariante 92): el bloque EN
+    // PESOS. pyservices las pinta como la columna principal solo con
+    // `balance_en_pesos`; `nota` sigue explicando el USD.
+    participacion_mxn: participacionMxn,
+    ingresos_propios_mxn: ingresosMxn,
+    pagos_vendedor_mxn: egresosMxn,
+    otros_gastos_empresa_mxn: otrosMxn,
+    tienda_utilidad_mxn: utilidadTiendaMxn,
+    resultado_mxn: resultadoMxn,
+    nota_pesos: NOTA_PESOS_BALANCE_EMPRESA,
   };
 }
 

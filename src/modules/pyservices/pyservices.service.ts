@@ -1259,6 +1259,12 @@ export interface BalanceAvionSocioPayload {
   porcentaje: number;
   monto_usd: number | null;
   /**
+   * ADITIVO (18-oct-2026, API 0.0.94, invariante 92): round2(pct/100 ×
+   * `utilidad_cobrada_mxn`) — lo que se le transfiere en PESOS; null si la
+   * utilidad cobrada en pesos es null. Va después de `monto_usd`.
+   */
+  monto_mxn?: number | null;
+  /**
    * ADITIVO (6-oct-2026, API 0.0.59): `usuario.es_empresa` del socio — la
    * propia empresa (Aero Charter Cancún) como socia del avión. El general
    * cita ESA celda MONTO USD en el bloque «VUELATOUR (empresa)» de la hoja
@@ -1275,6 +1281,8 @@ export interface BalanceEmpresaParticipacionPayload {
   porcentaje: number;
   /** = `monto_usd` de ese socio en el bloque del avión (utilidad COBRADA × %). */
   monto_usd: number | null;
+  /** ADITIVO (18-oct-2026, invariante 92): el `monto_mxn` de ese socio. */
+  monto_mxn?: number | null;
 }
 
 /**
@@ -1327,6 +1335,19 @@ export interface BalanceEmpresaBloquePayload {
   ingresos_por_cobrar_usd?: number;
   /** ADITIVO: vuelos con parte de VuelaTour por cobrar (> 0). */
   vuelos_por_cobrar?: number;
+  /**
+   * ADITIVAS (18-oct-2026, API 0.0.94, invariante 92): el bloque EN PESOS,
+   * con las MISMAS fuentes en su columna MXN (ningún T.C.). `null` se
+   * propaga como en USD. `nota_pesos` = la base en pesos (la `nota` sigue
+   * explicando el USD).
+   */
+  participacion_mxn?: number | null;
+  ingresos_propios_mxn?: number | null;
+  pagos_vendedor_mxn?: number | null;
+  otros_gastos_empresa_mxn?: number | null;
+  tienda_utilidad_mxn?: number | null;
+  resultado_mxn?: number | null;
+  nota_pesos?: string;
 }
 
 export interface BalanceAvionBalancePayload {
@@ -1385,6 +1406,26 @@ export interface BalanceAvionBalancePayload {
    * `otros_ingresos_usd` de los vuelos/totales (TUAs/extras de VuelaTour).
    */
   otros_ingresos_avion_usd?: number | null;
+  /**
+   * ADITIVAS (18-oct-2026, API 0.0.94, invariante 92) — la MISMA cascada EN
+   * PESOS, con las celdas MXN de cada hoja (null si alguna fila de la hoja
+   * no tiene pesos; null se propaga). Viajan siempre en los libros de avión;
+   * pyservices las pinta como columna principal solo con `balance_en_pesos`.
+   * `comisiones_mxn` y `utilidad_antes_comisiones_mxn` SOLO cuando viaja
+   * `comisiones_usd`.
+   */
+  utilidad_antes_mxn?: number;
+  combustible_mxn?: number | null;
+  gastos_indirectos_mxn?: number | null;
+  refacciones_mxn?: number | null;
+  otros_mxn?: number | null;
+  permisos_mxn?: number | null;
+  otros_ingresos_avion_mxn?: number | null;
+  utilidad_despues_mxn?: number | null;
+  por_cobrar_mxn?: number;
+  utilidad_cobrada_mxn?: number | null;
+  comisiones_mxn?: number;
+  utilidad_antes_comisiones_mxn?: number;
 }
 
 /** Fila del RESUMEN del balance general (= totales del libro de un avión). */
@@ -1583,6 +1624,13 @@ export interface BalanceGeneralPayload {
    * PRESENTACIÓN: ningún número del payload depende de la variante.
    */
   variante: VarianteBalanceGeneral;
+  /**
+   * ADITIVA (18-oct-2026, API 0.0.94, invariante 92): balance EN PESOS — la
+   * columna principal es la MXN y el USD queda informativo. Viaja SIEMPRE
+   * desde el 0.0.94 (raíz del general y cada `aviones[i]`; el consolidado
+   * NO la lleva). Sin ella (API previo) pyservices pinta lo de siempre.
+   */
+  balance_en_pesos?: true;
   /** CIERRE DE MES (invariante 89; ADITIVO, solo con la migración). */
   cierre?: BalanceCierrePayload;
   /** Por matrícula: cuántos vuelos pasan / vienen y sus montos MXN. */
@@ -1889,6 +1937,13 @@ export interface BalanceAvionPayload {
    * dos notas de siempre.
    */
   factura_vuelatour_devolucion?: true;
+  /**
+   * ADITIVA (18-oct-2026, API 0.0.94, invariante 92): balance EN PESOS. Viaja
+   * en el libro individual y en cada `aviones[]` del general (NO en el
+   * consolidado FLOTA, cuyo bloque `balance` no se pinta). pyservices pinta
+   * la cascada, los socios y el bloque VUELATOUR con la MXN como principal.
+   */
+  balance_en_pesos?: true;
   /**
    * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): «0.0.74: comisión del
    * vendedor solo como gasto real, en dos categorías» (COMISIONES = parte

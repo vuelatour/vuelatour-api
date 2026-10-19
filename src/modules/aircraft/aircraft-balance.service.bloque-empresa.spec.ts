@@ -253,6 +253,8 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
           socio: s.nombre,
           porcentaje: s.porcentaje,
           monto_usd: s.monto_usd,
+          // API 0.0.94 (invariante 92): la celda en pesos, tal cual.
+          monto_mxn: s.monto_mxn,
         })),
     );
     expect(celdas).toHaveLength(2);

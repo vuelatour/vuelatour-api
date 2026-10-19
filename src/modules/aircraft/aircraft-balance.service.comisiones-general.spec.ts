@@ -472,9 +472,29 @@ const MATRICULAS = ['XB-TST', 'XB-DOS'] as const;
 function sinOtrosIngresosAvion(
   b: BalanceAvionPayload['balance'],
 ): Record<string, unknown> {
-  const resto: Record<string, unknown> = { ...b };
+  const resto: Record<string, unknown> = sinCascadaPesos(b);
   expect(resto.otros_ingresos_avion_usd).toBe(0);
   delete resto.otros_ingresos_avion_usd;
+  return resto;
+}
+
+/**
+ * El bloque sin la cascada EN PESOS del 0.0.94 (invariante 92: las llaves
+ * `*_mxn` del bloque y `monto_mxn` de cada socio, ADITIVAS): lo de antes
+ * sale intacto. Sus números los prueba `aircraft-balance.service.pesos.spec`.
+ */
+function sinCascadaPesos(
+  b: BalanceAvionPayload['balance'],
+): Record<string, unknown> {
+  const resto: Record<string, unknown> = { ...b };
+  for (const k of Object.keys(resto)) {
+    if (k.endsWith('_mxn')) delete resto[k];
+  }
+  resto.socios = b.socios.map((s) => {
+    const c: Record<string, unknown> = { ...s };
+    delete c.monto_mxn;
+    return c;
+  });
   return resto;
 }
 

@@ -311,6 +311,12 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
         'balance.socios.1.monto_usd',
         'balance.utilidad_cobrada_usd',
         'balance.utilidad_despues_usd',
+        // API 0.0.94 (invariante 92): la MISMA cascada en pesos (aditiva).
+        'balance.otros_ingresos_avion_mxn',
+        'balance.socios.0.monto_mxn',
+        'balance.socios.1.monto_mxn',
+        'balance.utilidad_cobrada_mxn',
+        'balance.utilidad_despues_mxn',
         'otros_ingresos_avion.filas.0',
         'otros_ingresos_avion.total_mxn',
         'otros_ingresos_avion.usd',

@@ -144,7 +144,13 @@ describe('Balance general — `modo` ⇒ `variante` del payload (6-oct-2026, API
   it('`variante` es ADITIVA: va al final y lo de antes es prefijo exacto', async () => {
     const { service, generales } = armar();
     await service.xlsxGeneral(DESDE, HASTA, 'general');
-    expect(Object.keys(generales[0])).toEqual([...LLAVES_PREVIAS, 'variante']);
+    // … seguida SOLO por la bandera del balance en pesos (API 0.0.94,
+    // invariante 92), también aditiva y al final.
+    expect(Object.keys(generales[0])).toEqual([
+      ...LLAVES_PREVIAS,
+      'variante',
+      'balance_en_pesos',
+    ]);
   });
 
   it('otro modo ⇒ 400 con el texto es-MX, ANTES de leer la BD o llamar a pyservices', async () => {
