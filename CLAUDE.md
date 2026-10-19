@@ -10671,7 +10671,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de objetos completos y las llaves de la raíz del general).
 
 93. **GASTOS «POR PAGAR» (FECHA A FUTURO) (19-oct-2026, API 0.0.95,
-    migración `20261019000001` PENDIENTE).** Pedido del cliente (app y
+    migración `20261019000001` APLICADA el 19-oct-2026).** Pedido del cliente (app y
     panel, PLAN_COMPLETITUD E5): capturar hoy un gasto que se pagará
     después. La regla de fondo NO cambia: la fecha del gasto es la del PAGO
     (decisión del 13-oct-2026). Por eso un gasto con fecha futura nace «por
@@ -12561,9 +12561,18 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   (snapshot del cierre); los pesos son la pantalla y los documentos.
   Rollback: API ⇒ 0.0.93 (sin banderas, pyservices y panel nuevos pintan lo
   de siempre).
-- **PENDIENTE (19-oct-2026) — `20261019000001_gasto_por_pagar.sql`**
-  (invariante 93, gastos por pagar; NO aplicada: la aplica el orquestador
-  por MCP). `gasto.por_pagar` + índice parcial `gasto_por_pagar_idx` +
+- **APLICADA (19-oct-2026, ~15:14 Cancún, por MCP `apply_migration`;
+  historial `20261019201426 · 20261019000001_gasto_por_pagar`) —
+  `20261019000001_gasto_por_pagar.sql`** (invariante 93, gastos por
+  pagar). Antes, el dry-run se REPITIÓ en prod (1,205 gastos): `ERROR:
+  P0001: DRYRUN_OK 20261019000001 · A–C6 · base
+  a8250db3-fbb7-4028-9124-f8b97574dc26 · alta de prueba
+  e701f2e6-a2b0-4311-9342-397d888847b5 · todo se revierte` y, por SELECT,
+  columna 0, índice 0, residuos 0, alta y bitácora de prueba 0, función
+  sin `por_pagar` (md5 sin cambio). POSTCHECK: columna 1, índice 1
+  (`CREATE INDEX gasto_por_pagar_idx ON public.gasto USING btree
+  (fecha_gasto) WHERE por_pagar`), por_pagar 0, función 510, 1,205 gastos.
+  `get_advisors` (security y performance): nada nuevo. `gasto.por_pagar` + índice parcial `gasto_por_pagar_idx` +
   `tg_gasto_bitacora` reemplazada (el texto de PROD de `20261016000005` +
   `'por_pagar'` en su lista; la rama del borrado escribe `tg_op`) +
   verificación `do $ver$`. El CUERPO no lleva palabras que el MCP decline.
