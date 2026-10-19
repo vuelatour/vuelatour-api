@@ -10709,13 +10709,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       escribe; uno CONCILIADO ⇒ 409 `GASTO_CONCILIADO` «Este gasto ya está
       conciliado con el banco: el cargo es su pago y no se pone «por pagar».
       …». Mover la fecha de un pagado a > hoy lo pone por pagar solo.
-      `por_pagar` entra a `CAMPOS_GASTO_CANDADO_MES` (invariante 89).
+      `por_pagar` entra a `CAMPOS_GASTO_CANDADO_MES` (invariante 89) SALVO
+      `false` sola: marcar pagado sin cambio de fecha no pasa por
+      MES_CERRADO (`tocaCandadoMesCerrado`, acuerdo del 19-oct-2026);
+      re-programar (`true`), cambiar la fecha y eliminar, sí.
     - **Excepción de ventana** (invariante 13): el dueño de campo, fuera de
       su semana, SOLO puede mandar el PATCH mínimo (llaves con valor ⊆
       `por_pagar`, `fecha_gasto`, `if_updated_at`, `capturado_en`:
       `esPatchSoloMarcarPagado`) y SOLO si el gasto VIGENTE está por pagar.
       Ajeno ⇒ 403 `GASTO_AJENO`. En caja chica, la reposición se mide con la
-      fecha REAL del pago (409 `GASTO_EN_REPOSICION`).
+      fecha REAL del pago (409 `GASTO_EN_REPOSICION` con su texto propio,
+      abajo); la semana de la fecha del pago, con el sello `capturado_en`.
     - **Lecturas** (ADITIVAS, solo con la migración): cada gasto de
       `/expenses` (lista, detalle, alta, PATCH, Verificar, otros gastos) trae
       `por_pagar` y `estado_pago`. `?por_pagar=1|true` = estado ≠ PAGADO (sin
@@ -10733,28 +10737,108 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de `cajas_fondeadas`; en `/caja-chica/me`, al final). En `/caja-chica/me`
       tampoco cuenta en `gastos` ni en `efectivo_otras_monedas`. Sin por
       pagar, todo byte a byte igual.
-    - **Libros** (balance, reparto, Libro Dinero, conciliación): NO cambian.
-      Un gasto por pagar cuenta en el mes de su fecha.
+      - La regla de qué EFECTIVO cuenta en la caja es UNA (revisión P13):
+        `efectivoQueCuentaEnCaja(gastos, hoy, conPorPagar)` /
+        `efectivoPorPagarDeCaja` (`common/caja-chica-saldo.util.ts`,
+        PURAS). La usan `CajaChicaService` (lista de fondos, libro, Mi caja)
+        Y la alerta diaria `caja_negativa` (`alerts.checkCajaNegativa`, que
+        lee `fecha_gasto, por_pagar, conciliado` solo con la sonda). Así el
+        saldo de la alerta = el de la pantalla; antes restaba el por pagar
+        y avisaba «Saldo -300.00 MXN» con $200 en pantalla.
+    - **Libros** (balance, reparto, Libro Dinero): NO cambian. Un gasto por
+      pagar cuenta en su MES CONTABLE, como cualquier gasto (invariantes 72
+      y 89): eje vuelo ⇒ el mes contable de su vuelo; eje gasto ⇒ su
+      `fecha_gasto`.
+      - **T.C. de un MXN por pagar sin `tc_gasto` y con fecha futura**
+        (revisión P4, corregida en la segunda pasada): la regla de siempre,
+        el servicio de T.C. busca en [fecha − 7, fecha]. Hasta hoy + 7
+        encuentra el oficial de HOY: el reparto lo convierte y lo resta, y
+        el pre-cierre lo lista en el informativo `gastos_tc_oficial`. Más
+        allá de hoy + 7 todavía no hay oficial: el reparto lo expone en
+        `gastos_sin_tc_*` y, con la migración, el pre-cierre NO lo cuenta en
+        el BLOQUEANTE `gastos_sin_tc` (ya lo señala `gastos_por_pagar`).
+        Nunca toca un mes cerrable (sus días no han pasado). Sin la
+        migración, como el 0.0.94.
+    - **Conciliación, auto-cruce desde el banco** (revisión P14 b): en la
+      importación y «Cruzar pendientes» (`autoMatchCargo`: paso 1 monto,
+      paso 2 faltante y paso 3 USD) y en el motivo de los pendientes de la
+      lista (`anotarMotivoPendiente`/`anotarMotivoUsd`).
+      - Regla: un por pagar VIGENTE cuyo día de captura
+        (`capturado_en ?? created_at`, día Cancún) es POSTERIOR al día del
+        cargo NO es candidato: ese cargo no puede ser su pago. Fuente única
+        PURA `conciliacion/por-pagar-cruce.util.ts` (`cargoPuedePagarGasto`);
+        si la captura o el cargo no se pueden leer, sigue siendo candidato.
+      - Si así no queda ningún candidato en el paso por monto, el motivo
+        suma «1 gasto «por pagar» del mismo monto se capturó después de este
+        cargo: no puede ser su pago.» (plural: «N gastos «por pagar» del
+        mismo monto se capturaron después de este cargo: ninguno puede ser
+        su pago.»).
+      - Detrás de la sonda: `por_pagar, conciliado, capturado_en,
+        created_at` se piden solo con ella. Sin la migración, el 0.0.94 byte
+        a byte.
+      - **LÍMITE CONOCIDO** (decisión del 19-oct-2026): al ligar, el
+        auto-cruce NO escribe la fecha del cargo. Un por pagar que el banco
+        liga queda PAGADO (conciliado ⇒ PAGADO) con su fecha PROGRAMADA,
+        como cualquier gasto a ±3 días del cargo; si las dos fechas cruzan
+        fin de mes, cuenta en el mes de la programada. «Marcar pagado» con
+        la fecha real sí deja la fecha del pago.
     - **Pre-cierre**: renglón BLOQUEANTE `gastos_por_pagar` («Gastos por
       pagar sin confirmar»; en `CLAVES_BLOQUEANTES_PRECIERRE`, justo después
-      de `nomina_sin_repartir`). Usa su propia lectura PAGINADA (`por_pagar`
-      ∧ ¬`conciliado`, fecha dentro del periodo). Forma `{clave, titulo,
-      detalle, count, monto_mxn, monto_usd? (> 0), lectura_fallida?, ids,
-      ids_truncado?}` (13.º renglón con `ids`, invariante 81). Detalle: «3
-      gastos siguen «por pagar» (1 vencido): márcalos pagados con la fecha
-      real del pago, o elimínalos si no se pagaron.». Lectura caída ⇒ count
-      0 + `lectura_fallida`; sin la migración ⇒ count 0 sin ella.
+      de `nomina_sin_repartir`; 13.º renglón con `ids`, invariante 81).
+      - **Lectura** (revisión P1): TODOS los por pagar vigentes
+        (`por_pagar` ∧ ¬`conciliado`), PAGINADO por id, con `categoria,
+        vuelo_id, aeronave_id, escala_id` y el embed `vuelo:vuelo_id(
+        fecha_vuelo, aeronave_id, es_externo[, periodo_contable,
+        fecha_contable])` (las columnas del cierre, con su sonda). La
+        pertenencia al periodo se decide en JS por MES CONTABLE, con la
+        MISMA regla del candado de mes cerrado (`gastoDelCandado` +
+        `diaContableDeGasto`; fuente única
+        `profit-sharing/gastos-por-pagar-precierre.util.ts`): eje vuelo ⇒
+        el mes contable del vuelo (un diferido cuenta en el destino; sin la
+        migración del cierre, `fecha_vuelo` en día Cancún); eje gasto ⇒
+        `fecha_gasto`. Caso: un TAXI por pagar del vuelo del 30-sep fechado
+        el 1-oct frena el cierre de SEPTIEMBRE (antes frenaba el de octubre
+        y, cerrado septiembre, marcarlo pagado o borrarlo daba 409
+        MES_CERRADO). Borde conservador: un por pagar de un vuelo que ESE
+        cierre va a diferir frena el mes de origen.
+      - **Forma** `{clave, titulo, detalle, count, monto_mxn, monto_usd?
+        (> 0), lectura_fallida?, ids_nomina, ids, ids_truncado?}`.
+        `ids_nomina` (ADITIVO, revisión P2; JUSTO antes de `ids`; `[]` sin
+        nómina) = el subconjunto de `ids` cuya categoría es NOMINA, en el
+        orden de `ids`: Gastos excluye la nómina (invariante 91) y el panel
+        la resuelve en Nómina. Detalle: «3 gastos siguen «por pagar» (1
+        vencido): márcalos pagados con la fecha real del pago, o elimínalos
+        si no se pagaron.»
+      - **Lectura caída** ⇒ count 0 + `lectura_fallida` Y `listo: false`
+        (revisión P3): un renglón BLOQUEANTE sin verificar deja `listo:
+        false` (vale también para `nomina_sin_repartir`). La previa del
+        cierre lo lista en `bloqueantes` con `lectura_fallida: true` (y
+        `ids_nomina` si viene; los dos ADITIVOS) y el 409
+        `PRECIERRE_NO_LISTO` dice «Gastos por pagar sin confirmar: no se
+        pudo verificar» en vez de «: 0» (`textoBloqueantePrevia`,
+        `TEXTO_BLOQUEANTE_SIN_VERIFICAR`, cierres.service).
+      - **Sin la migración** ⇒ count 0 sin `lectura_fallida` (no bloquea).
     - **Recordatorio**: `GastosPorPagarService`, `@Cron('0 9 * * *')`
       Cancún. Toma los por pagar sin conciliar con fecha HOY («Gasto por
-      pagar hoy») o AYER («Gasto por pagar vencido») y manda un push
-      `notifyUser(created_by)` tipo `gasto_registrado`. Cuerpo «Taxi /
-      estacionamiento · $500 MXN · vuelo #436 — cuando lo pagues, márcalo
-      pagado (Mis registros en la app, o Gastos en el panel).»
-      (`fmtDineroTexto`), `data {gasto_id, motivo: 'gasto_por_pagar',
-      fecha_gasto}`, link `/admin/expenses?por_pagar=1`. Dedupe
-      `gasto_por_pagar:<gasto>:<día>` en `alerta_emitida`, marcado DESPUÉS de
-      entregar. Sin `created_by` o con el usuario inactivo, se salta. Sin
-      fila en `alerta_config`.
+      pagar hoy») o AYER («Gasto por pagar vencido»). Sin fila en
+      `alerta_config`.
+      - **Destinatarios** (revisión P15): push tipo `gasto_registrado`
+        (`destinatariosRecordatorioPorPagar`, pura) al DUEÑO del gasto
+        (`usuario_captura_id ?? created_by`, el mismo criterio de Mis
+        registros, Mi caja y la ventana de «Ya lo pagué») si está activo; si
+        `created_by` es OTRA persona, activa y de OFICINA (la que lo registró
+        a nombre del piloto), también a ella. Un rol de campo distinto del
+        dueño no recibe nada.
+      - **Cuerpo** «Taxi / estacionamiento · $500 MXN · vuelo #436 — cuando
+        lo pagues, márcalo pagado (Mis registros en la app, o Gastos en el
+        panel).» (`fmtDineroTexto`), `data {gasto_id, motivo:
+        'gasto_por_pagar', fecha_gasto}`, link `/admin/expenses?por_pagar=1`.
+        Una NÓMINA (revisión P2) termina «— cuando lo pagues, márcalo
+        pagado (Nómina en el panel).» y enlaza a `/admin/nomina?mes=<YYYY-MM
+        de su fecha_gasto>` (`LINK_NOMINA`, `linkRecordatorioPorPagar`).
+      - **Dedupe** POR DESTINATARIO: `gasto_por_pagar:<gasto>:<día>:<usuario>`
+        en `alerta_emitida`, marcado DESPUÉS de entregar a esa persona. Sin
+        destinatario activo, se salta.
     - **Sonda ÚNICA** `common/por-pagar-disponible.util.ts`
       (`columnaOpcional(gasto.por_pagar)`, `colsPorPagar`). REGLA DURA: todo
       lo que nombre `por_pagar` va detrás. Sin la migración = 0.0.94 byte a
@@ -10764,17 +10848,149 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`details.migracion`); `false` se ignora. El «sí» se memoriza: tras la
       reversa, reiniciar el API. Los specs viejos con fakes en cola fijan la
       sonda en false (`jest.mock(…/por-pagar-disponible.util)`).
+      - **ROLLBACK del API a ≤ 0.0.94 PROHIBIDO con gastos por pagar
+        vivos** (revisión P16). El 0.0.94 no lee la columna: un por pagar
+        vivo le cuenta como PAGADO (en caja chica baja el saldo, sube el
+        «por reponer» y puede entrar a una reposición), su pre-cierre no lo
+        bloquea (se podría CERRAR el mes con él) y su DTO rechaza la llave
+        `por_pagar`. Antes del rollback, `select count(*) from public.gasto
+        where por_pagar and not conciliado` debe dar 0 (márcalos pagados o
+        elimínalos).
     - **Skew**: un panel o una app viejos ni mandan la llave ni ven las
       nuevas. Con la migración, una app vieja de campo con fecha futura solo
       choca con el 400 pasado fin de mes (antes: pasado mañana).
+    - **Revisión adversaria del 19-oct-2026 (antes del deploy)**:
+      - **«Ya lo pagué» tardío (P5)**: al marcar pagado, la semana de
+        captura de la fecha del pago (`assertCapturaEnSemana`, 4.º
+        parámetro `hoyRef`) se mide con el día Cancún del sello
+        `capturado_en` de la corrección (`diaReferenciaVentana`, acotado a ≤
+        ahora: la ventana justa B3). Sin sello, hoy. `fechaPago ≤ hoy` y
+        los 120 días atrás siguen con el reloj del servidor.
+      - **Réplica idempotente (P6)**: `esReplicaMarcarPagado` (pura) =
+        `por_pagar: false` sin fecha o con la MISMA sobre un gasto pagado
+        por la bandera (`false`, fecha ≤ hoy), CONCILIADO O NO (marcar
+        pagado dispara el auto-cruce —P14 a— y el banco, o la oficina en
+        Conciliación, puede ligarlo entre los dos envíos; el candado de
+        conciliado protege escrituras y la réplica no escribe).
+        `assertOwnEnVentana` la evalúa DESPUÉS de `GASTO_AJENO` y ANTES del
+        409 `GASTO_CONCILIADO` y la deja pasar (solo el PATCH mínimo) sin
+        ventana ni candado; `update()` la decide ANTES de la rama del
+        conciliado (P9) y responde `findById` SIN escribir (sin la línea
+        del sello tardío ni el CAS, que daba 409 `CONFLICTO_VERSION`,
+        también a la oficina). Con otra fecha NO es réplica (403 de
+        siempre; sobre un conciliado, 409 `GASTO_CONCILIADO`) y un PATCH con
+        más llaves sigue con el candado de conciliado. Un conciliado con la
+        bandera todavía en `true` (el banco lo ligó ANTES de marcarlo) no es
+        réplica: ese «Ya lo pagué» recibe 409 `GASTO_CONCILIADO` (residual
+        aceptado: ya está pagado por el banco). Un pagado con fecha futura
+        (dato previo a la migración) tampoco (`false` ⇒ 400 de siempre).
+      - **Caja chica (P7)**: un por pagar VIGENTE está fuera del libro:
+        corregirlo o borrarlo NO pasa por `GASTO_EN_REPOSICION`. Marcarlo
+        pagado (PATCH mínimo o con más llaves: el controller manda
+        `porPagar` = `dto.por_pagar` crudo en las opciones de
+        `assertOwnEnVentana`) mide la fecha REAL del pago contra la última
+        reposición, mismo code, texto «La fecha del pago (19/10/2026) ya
+        quedó cubierta por la reposición del 19/10/2026 de tu caja chica:
+        usa una fecha posterior o pide a oficina que lo marque pagado.»
+        (`mensajeFechaPagoYaRepuesta`). Un pagado conserva el candado y el
+        texto «ya entró». La oficina no tiene candado: el Excel de UNA
+        reposición (`armarExcelCaja`, entrada opcional `marcadosPagados`)
+        resalta en naranja, con su aviso «N gasto(s) se marcó/marcaron
+        pagado(s) DESPUÉS de registrar esta reposición (resaltados en
+        naranja): no estaban en la cuenta cuando se repuso.», los gastos
+        cuya ÚLTIMA bajada `por_pagar` true ⇒ false es posterior al
+        `created_at` de la reposición. Lector BEST-EFFORT
+        `caja-chica/gasto-marcado-pagado.lector` (`gasto_bitacora` UPDATE
+        con `diff->por_pagar->>despues = false`, lotes de 150, detrás de la
+        sonda; si cae, mapa vacío + warn). Lo pendiente no lo lee.
+      - **VISITANTE (P8)**: el PATCH mínimo NO lleva `categoria = VISITA`
+        (el controller decide `esPatchSoloMarcarPagado` UNA vez, antes de
+        tocar el DTO): fuera de su semana solo marca pagado.
+      - **Conciliado (P9)**: la bandera de un CONCILIADO jamás cambia por la
+        puerta implícita. Moverle la fecha a futuro ⇒ 409
+        `GASTO_CONCILIADO` «Este gasto ya está conciliado con el banco: su
+        fecha es la del cargo y no puede quedar en el futuro (quedaría «por
+        pagar»). Si ese cargo no es su pago, desvincúlalo primero en
+        Conciliación.» (`MENSAJE_FECHA_FUTURA_CONCILIADO`), sin escribir.
+      - **Pistas (P11)**: `generarPistas` (insert directo) aplica
+        `porPagarFinal`: aterrizaje FUTURO ⇒ `por_pagar: true` (sonda solo
+        si algún renglón es futuro). Sin tope de +30 por renglón (como
+        antes).
+      - **Refacción a Inventario/Tienda (P12)**: con la migración, bloque
+        `inventario` + fecha futura ⇒ 400 `INVENTARIO_FECHA_FUTURA` «Una
+        refacción con fecha futura queda «por pagar»: guárdala sin entrada a
+        Inventario/Tienda y registra la entrada desde Inventario/Tienda
+        (Compras) el día que llegue la pieza.» ANTES de insertar o tocar
+        compras/inventario (`errorRefaccionInventario(dto, inv, hoy)`; sin
+        la migración, como el 0.0.94). El panel lo PREVIENE con el MISMO
+        texto (copia en `MSG_INVENTARIO_FECHA_FUTURA` de
+        `lib/admin/refaccion-inventario.ts`): si cambia aquí, cambia allá.
+      - **Auto-cruce (P14 a)**: `cruzarConBancoBestEffort` no cruza un por
+        pagar VIGENTE (alta con fecha futura, «lo pago al rato»,
+        re-programar, mover a futuro). Marcarlo pagado sí cruza, con la
+        fecha real, también un vencido que conserva su fecha (el PATCH lo
+        dispara con `porPagarEscribir === false`). La parte (b), arriba.
+    - **Lo que el panel y la app esperan de este contrato** (19-oct-2026):
+      - Panel: el «Resolver →» del renglón `gastos_por_pagar` va a
+        `/admin/expenses?por_pagar=1` SIN desde/hasta (el renglón cuenta por
+        mes contable) con el foco de `ids`; lee `ids_nomina`: todos de
+        nómina ⇒ `/admin/nomina?mes=<YYYY-MM del periodo>`; mezcla ⇒ Gastos
+        con los no-nómina + aviso «N son de Nómina: resuélvelos en Nómina».
+        Sin la llave, Gastos con todos los ids. «Marcar pagado» se esconde a
+        quien el `@Roles` de `PATCH /v1/expenses/:id` no admite (SOCIO,
+        ANALISTA): espejo `ROLES_MARCAN_PAGADO_GASTO` con prueba de paridad
+        que lee el controlador; cambiar esos roles obliga a tocar el espejo.
+        El freno de «Guardar» del alta es la regla PURA
+        `errorFechaAlGuardarAlta`: solo REFACCION «A Inventario/Tienda» con
+        fecha futura muestra el texto EXACTO de `INVENTARIO_FECHA_FUTURA` y,
+        con cargos, el de `POR_PAGAR_FECHA_FUTURA`. La bitácora de
+        `por_pagar` se pinta «Pago: Por pagar → Pagado». La previa del
+        cierre pinta un bloqueante con `lectura_fallida` «· sin verificar»,
+        jamás «· 0».
+      - App 1.1.3+86: «Ya lo pagué» viaja SIEMPRE con el cuerpo mínimo
+        `{por_pagar:false, fecha_gasto, if_updated_at?, capturado_en}` y en
+        la cola nunca se fusiona con una corrección del mismo gasto (PATCH
+        separados, en orden, cada uno con su sello; el segundo puede traer
+        como `if_updated_at` el `updated_at` que devolvió el anterior, o
+        venir SIN él). Por eso la fila que responde `PATCH
+        /expenses/:id` debe seguir incluyendo `updated_at` y el API debe
+        seguir aceptando el cuerpo mínimo sin `if_updated_at`
+        (`kLlavesSoloMarcarPagado` de la app = `LLAVES_PATCH_MARCAR_PAGADO`).
+        «Lo pagué el día que vencía» manda la fecha VIGENTE: depende de que
+        `fechaPago === vigFecha` cuente como «sin cambio de fecha» y de la
+        réplica P6. «Guardar cambios» ya no manda `fecha_gasto` si no se
+        cambió. Una fecha de «Ya lo pagué» que sube tarde trae el
+        `capturado_en` del tap (P5).
     - Specs: `por-pagar.util.spec`, `por-pagar-disponible.util.spec`,
       `expenses.service.por-pagar.spec` (BD en memoria: alta, fin de mes,
-      +30, marcar pagado, ventana, conciliado, sin migración),
+      +30, marcar pagado, ventana, conciliado, sin migración; y la réplica
+      —también sobre un conciliado—, P9, P11, P14 a),
       `expenses.controller.por-pagar.spec` (HTTP: «"false"», ventana,
-      `?por_pagar`), `caja-chica.service.por-pagar.spec`,
-      `profit-sharing.service.pre-cierre-por-pagar.spec`,
-      `gastos-por-pagar.service.spec` y `me.controller.permisos.spec`
-      (`config`).
+      `?por_pagar`, `porPagar`, VISITANTE), `caja-chica.service.por-pagar.spec`,
+      `profit-sharing.service.pre-cierre-por-pagar.spec` (su fake PROYECTA
+      las filas de `gasto` como PostgREST —solo lo que el select nombra y el
+      embed reducido a sus columnas—, así queda fijada la LECTURA de P1;
+      casos P1–P4, con P4: fecha futura sin oficial fuera de `gastos_sin_tc`
+      y hoy + 3 con el oficial de hoy sigue en `gastos_tc_oficial`),
+      `gastos-por-pagar.service.spec` (P15/P2), `me.controller.permisos.spec`
+      (`config`), `expenses.controller.por-pagar-app.spec` (controller y
+      servicio REALES: P5 a P8 y P6 + P14 a: un mock de conciliación liga el
+      cargo en el primer «Ya lo pagué» y el reenvío idéntico responde 200
+      sin escribir, también a la oficina),
+      `expenses.service.por-pagar-cierre.spec` (septiembre cerrado, eje
+      gasto y eje vuelo), `por-pagar.util.correcciones.spec`,
+      `caja-chica/gasto-marcado-pagado.lector.spec`,
+      `expenses.service.inventario.spec`, `refaccion-inventario.util.spec`,
+      `caja-chica.reposicion-xlsx.spec`,
+      `gastos-por-pagar-precierre.util.spec` (paridad con
+      `mesCandadoDeGasto`), `por-pagar-cruce.util.spec`,
+      `por-pagar.recordatorio.spec`,
+      `alerts.service.caja-negativa-por-pagar.spec` (paridad alerta = lista
+      de fondos = detalle = Mi caja), `caja-chica-saldo.util.spec`, P3 de
+      `pre-cierre-nomina.spec` y `cierres.service.spec`, y P14 b de
+      `conciliacion.service.autocruce.spec` (paso por monto, FALTANTE con un
+      pago parcial previo, cruce USD y el motivo de la lista, también el USD
+      con `anotarMotivoUsd`).
 
 ## Convenciones NestJS
 
@@ -12372,9 +12588,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   siga siendo la de `20261016000005`). **Sin dependencia dura** (el API la
   sondea y se enciende sola ≤ 10 min después). Orden: migración ⇒ API
   0.0.95 (`GET /v1/version`) ⇒ panel ⇒ APK +86 (seguro en cualquier orden
-  por la sonda; aplicada antes, el API nace encendido). Reversa SOLO por el
-  SQL Editor (pie del archivo), exportando antes los por pagar vivos, y
-  reiniciar el API.
+  por la sonda; aplicada antes, el API nace encendido).
+  - **ROLLBACK del API a ≤ 0.0.94 PROHIBIDO con gastos por pagar vivos.**
+    Antes, `select count(*) from public.gasto where por_pagar and not
+    conciliado` debe dar 0 (márcalos pagados con la fecha real del pago, o
+    elimínalos). Con por pagar vivos, el 0.0.94 los cuenta como PAGADOS en
+    caja chica, su pre-cierre no los bloquea y nadie los puede marcar.
+  - **Reversa de la migración** SOLO por el SQL Editor y con confirmación
+    (pie del archivo), en este orden: (1) dejar ese conteo en 0 (antes,
+    exportar para el registro `select id, fecha_gasto, monto, moneda,
+    created_by from public.gasto where por_pagar`); (2) solo entonces bajar
+    el API a ≤ 0.0.94 (si se queda en 0.0.95, reiniciarlo DESPUÉS del paso
+    3: la sonda memoriza el «sí»); (3) correr el bloque del pie.
+  - La cabecera y el pie del archivo se corrigieron el 19-oct-2026
+    (revisión P16, solo comentarios). El CUERPO no cambió: el dry-run del
+    19-oct sigue valiendo.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
