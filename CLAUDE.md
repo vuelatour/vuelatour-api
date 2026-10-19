@@ -10544,6 +10544,132 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `cambio-fecha-gasto.util`, `aircraft-balance.service.empresa` y
       `pre-cierre-ids` (12 renglones con `ids`).
 
+92. **BALANCES Y REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, SIN
+    migración).** Pedido del cliente: «En los balances (balance general y
+    por avión) debe venir todo en pesos porque casi siempre se les transfiere
+    a los socios en pesos mexicanos, por favor, y que los dólares solo sean
+    informativos». Decisiones del 18-oct-2026 (no se vuelven a preguntar):
+    PESOS REALES —la cascada se calcula en MXN con lo que el libro ya tiene
+    en pesos (venta del avión al T.C. de su cotización, gastos MXN tal cual,
+    USD a su T.C.), NUNCA el resultado USD × un T.C. único— y alcance =
+    balance por avión y general (Excel y pantalla: el MISMO libro,
+    invariante 52) + reparto a socios (pantalla, PDF y XLSX). La cuenta
+    corriente de «Pagos a socios» (invariante 38) SE QUEDA EN USD; tableros,
+    Libro Dinero y reporte por vuelo NO cambian.
+    - **Regla de oro**: todo número USD sale BYTE A BYTE como en el 0.0.93;
+      todo `*_mxn` es ADITIVO y el API decide TODOS los números (pyservices y
+      el panel solo pintan: con la bandera, pesos = cifra principal y dólares
+      informativos). Sin cálculos paralelos: cada término en pesos sale de la
+      MISMA fuente que su dólar.
+    - **Balance** (`aircraft-balance.service#buildPayload`): el bloque
+      `balance` suma `utilidad_antes_mxn` (= `totales.ganancia_mxn`),
+      `combustible_mxn`, `gastos_indirectos_mxn`, `refacciones_mxn`,
+      `otros_mxn`, `permisos_mxn` (el TOTAL MXN de su hoja; null si alguna
+      fila de la hoja no trae pesos), `otros_ingresos_avion_mxn` (TOTAL MXN
+      de «Otros ingresos»; null si una fila no trae NETO MXN),
+      `utilidad_despues_mxn` (la misma cascada; null se propaga),
+      `por_cobrar_mxn` (= `totales.por_cobrar_mxn`), `utilidad_cobrada_mxn` y,
+      SOLO cuando viaja `comisiones_usd`, `comisiones_mxn` (Σ COMISIONES MXN
+      de las filas con GANANCIA MXN) y `utilidad_antes_comisiones_mxn`. Van
+      después de `socios` y ANTES de `comisiones_usd` /
+      `utilidad_antes_comisiones_usd` / `otros_ingresos_avion_usd`, que los
+      specs fijan como las últimas (desviación consciente del contrato, que
+      las ponía después: pydantic no depende del orden). `socios[i].monto_mxn`
+      = round2(pct/100 × `utilidad_cobrada_mxn`) (null si la cobrada es
+      null). Bandera `balance_en_pesos: true` en el libro individual, en cada
+      `aviones[i]` y en la RAÍZ del general (`payloadGeneral`, después de
+      `variante`); el consolidado FLOTA no la lleva.
+    - **Bloque VUELATOUR** (`balance-empresa.util#armarBalanceEmpresa`,
+      invariante 47), con las MISMAS fuentes en su columna MXN (ningún T.C.):
+      `participaciones[i].monto_mxn` (la celda del socio `es_empresa` tal
+      cual; la llave solo si el libro la trae), `participacion_mxn`,
+      `ingresos_propios_mxn` / `pagos_vendedor_mxn` (`ladoEnMxn`: Σ de la
+      columna MXN de «otros movimientos», filas + sueltas; null si una fila
+      del lado dice «sin TC»), `otros_gastos_empresa_mxn` (TOTAL MXN de «otros
+      gastos»; null si una fila no trae pesos), `tienda_utilidad_mxn` (=
+      utilidad MXN del inventario; null = celda vacía y NO anula el
+      resultado), `resultado_mxn` (null se propaga) y `nota_pesos`
+      (`NOTA_PESOS_BALANCE_EMPRESA`; la `nota` sigue explicando el USD).
+    - **Reparto** (`profit-sharing.service#compute`/`computeAvion`, en los
+      MISMOS loops): raíz `reparto_en_pesos: true` (también en la respuesta
+      vacía). Por avión: `ingresos.cobrado_mxn` y
+      `ingresos.pendiente_cobro_mxn` = Σ por vuelo de round2(parte del avión
+      USD × K), K = `tc_usd_mxn` ?? oficial del día de la COTIZACIÓN (el
+      MISMO K del balance, `tcPesosVuelo`, para TODO vuelo sin tc_usd_mxn);
+      `ingresos.comisiones_venta_mxn` = Σ `comisionesDelVuelo(...).total_mxn`
+      con ESE K (si el K de los dólares —restringido como hoy— es otro, una
+      segunda llamada a la MISMA fuente única con el K del balance: los pesos
+      = la columna COMISIONES del balance y los dólares no se mueven);
+      `ingresos.otros_ingresos_avion_mxn` = Σ
+      `filaLibroDeIngreso(i).remanente_mxn` (la MISMA fila de la hoja «Otros
+      ingresos» del balance); `gastos.directos_mxn` / `indirectos_mxn` /
+      `permisos_mxn` = los MISMOS grupos con cada gasto en pesos (`toMxn`:
+      MXN tal cual —menos TUA/extensión embebidas—, también SIN T.C.; USD ×
+      `tc_gasto` ?? oficial del día del gasto, a centavos);
+      `gastos.otros_prorrateados_mxn` = pool de FIJOS en pesos ÷ activos +
+      FIJO manual; `reserva_overhaul_mxn` = round2(reserva USD × oficial del
+      cierre, día min(hasta, hoy Cancún)); `saldo_disponible_mxn` = cobrado −
+      comisiones − directos − indirectos − permisos − otros − reserva + otros
+      ingresos; `reparto[i].monto_mxn` por RESIDUO MAYOR sobre el saldo en
+      pesos (`centavosPorResiduoMayor`, la regla de siempre extraída tal
+      cual: Σ partes == saldo al centavo); `pesos_sin_tc_usd` = dólares que
+      SÍ entraron al saldo USD sin llegar a pesos (venta de un vuelo sin
+      ningún K, comisiones —`banco_sin_pesos_usd` / `vendedor_sin_pesos_usd`
+      de `comisionesDelVuelo`, ADITIVAS y solo > 0—, gastos USD sin ningún
+      T.C. que restan, su parte del pool, la reserva sin oficial, ingresos USD
+      sin T.C.): > 0 ⇒ el saldo en pesos está INCOMPLETO y panel y PDF lo
+      avisan. Detalle: `vuelos[i].cobrado_avion_mxn` / `pendiente_avion_mxn`
+      / `tc_pesos` (null sin K), `gastos_por_categoria[i].mxn` (después de
+      `usd`), `reserva.monto_mxn` / `reserva.tc`,
+      `otros_ingresos_avion[i].mxn` (después de `usd`).
+    - **Asimetrías documentadas**: los gastos MXN sin T.C. y los otros
+      ingresos MXN sin T.C. SÍ cuentan en pesos (no en dólares); los cobros
+      MXN sin ningún T.C. (`cobros_sin_tc_mxn`) quedan FUERA de los pesos
+      igual que de los dólares (sin K no hay parte del avión). El reparto
+      pasa los gastos USD con el oficial de SU día (como `toUsd` con los MXN)
+      y el balance con `tc_gasto` ?? el T.C. de sus hojas: en pesos pueden
+      diferir por lo mismo que ya difieren en dólares (invariante 67).
+    - **Sin mover dólares**: `resolverTcOficial` gana un 4.º parámetro
+      OPCIONAL (`{gastosUsd, dias}` ⇒ `gastoUsd`, `porDia`; los demás
+      llamadores no lo mandan) y `compute()` le pasa TODOS los vuelos, pero
+      `tcOficial.vuelo` (cobros) y `tcKComisionesVuelo` (comisiones y
+      externos) siguen restringidos a los vuelos que ya lo pedían. Los
+      ingresos USD no piden oficial: su T.C. propio (`filaLibroDeIngreso`; el
+      CHECK de la BD exige T.C. a un USD de resultado).
+    - **Payload del PDF/XLSX** (`buildRepartoPayload`; nombres EXACTOS de
+      `RepartoAvion` de pyservices 16d6e2f): raíz `reparto_en_pesos: true`
+      (antes de `comision_vendedor_solo_gasto_real`); por avión
+      `ingresos_cobrado_mxn`, `comisiones_venta_mxn`, `pendiente_cobro_mxn`,
+      `gastos_directos_mxn`, `gastos_indirectos_mxn`, `permisos_mxn`,
+      `otros_mxn` (= otros prorrateados), `reserva_overhaul_mxn`,
+      `otros_ingresos_avion_mxn`, `saldo_mxn` (= `saldo_disponible_mxn`),
+      `pesos_sin_tc_usd` y `reserva_tc` (antes de las llaves del 0.0.75, que
+      siguen al final); `reparto[i].monto_mxn`; `vuelos[i].cobrado_mxn` /
+      `pendiente_mxn`; `otros_ingresos_avion[i].mxn`. pyservices acepta
+      además `gastos_por_categoria[i].mxn`, pero el API NO manda
+      `gastos_por_categoria` al PDF (nunca lo mandó).
+    - **Skew**: pyservices nuevo + API ≤ 0.0.93 ⇒ sin banderas, libros y PDF
+      byte a byte; API 0.0.94 + pyservices viejo ⇒ `extra="ignore"`, los de
+      siempre; panel nuevo + API viejo ⇒ sin `reparto_en_pesos`, la pantalla
+      de siempre; panel viejo + API nuevo ⇒ ignora las llaves.
+    - **Deploy**: pyservices 16d6e2f (COMPUERTA `GET /version` = su commit)
+      ⇒ API 0.0.94 ⇒ panel 944f208. SIN migración. Septiembre ya CERRADO
+      conserva la cuenta corriente de los socios en USD (su snapshot): los
+      pesos cambian la pantalla y los documentos, no lo entregado.
+    - Specs: `aircraft-balance.service.pesos.spec` (golden del 0.0.93 sin
+      las llaves nuevas, banderas, cascada e identidades, comisiones, orden
+      de llaves, null que se propaga, bloque VUELATOUR),
+      `balance-empresa.util.pesos.spec`,
+      `profit-sharing.service.reparto-pesos.spec` (golden de la respuesta y
+      del payload, oficiales por día, el K del balance sin mover dólares,
+      categorías, avión sin vuelos, residuo mayor, sin T.C., cobros sin T.C.
+      fuera, ingreso USD, payload §2b) y `comisiones-avion.util.pesos.spec`;
+      mundo en `profit-sharing/reparto-pesos.fixture-spec.ts`, golden en
+      `profit-sharing/libros-pesos.golden-0093.json` (capturado con el
+      código del 0.0.93 sobre ese mundo). Los specs previos se ajustaron
+      SOLO para tolerar las llaves aditivas (listas de diferencias, `toEqual`
+      de objetos completos y las llaves de la raíz del general).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12097,6 +12223,22 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   «Pasa a octubre 2026 (cobrado después del 30-sep; al cierre: …)» y el
   reparto ⇒ «Pasan a octubre 2026 (sin cobro completo al 30-sep, no se
   reparten)». Rollback: API 0.0.90 (vuelven los textos de siempre).
+- **18/19-oct-2026 — 0.0.94, SIN migración** (balances y reparto en pesos,
+  invariante 92; rama `balances-pesos` sobre `ddde6ff4` = 0.0.93 en prod).
+  Orden: pyservices `16d6e2f` (push a `main`; COMPUERTA: `GET
+  <PYSERVICES_BASE_URL>/version` = `16d6e2f…` o el deployment ACTIVO en ese
+  commit) ⇒ API 0.0.94 (`GET /v1/version` = `0.0.94`) ⇒ panel `944f208`.
+  Con un pyservices viejo el API 0.0.94 sale con los libros y el PDF de
+  siempre (ignora las llaves); con el panel viejo, la pantalla de siempre.
+  Humo SOLO lecturas: `GET /v1/profit-sharing?desde=2026-10-01&hasta=2026-10-31`
+  ⇒ `reparto_en_pesos: true`, cada avión con `saldo_disponible_mxn` y Σ
+  `reparto[].monto_mxn` == ese saldo; `pesos_sin_tc_usd` en 0 (si > 0, el
+  aviso de la card dice cuánto); el balance general de octubre en pantalla
+  con la columna PESOS y los dólares en gris. Aviso a la oficina:
+  septiembre ya CERRADO conserva la cuenta corriente de los socios en USD
+  (snapshot del cierre); los pesos son la pantalla y los documentos.
+  Rollback: API ⇒ 0.0.93 (sin banderas, pyservices y panel nuevos pintan lo
+  de siempre).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
