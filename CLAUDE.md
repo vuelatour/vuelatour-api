@@ -10992,6 +10992,18 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       pago parcial previo, cruce USD y el motivo de la lista, también el USD
       con `anotarMotivoUsd`).
 
+94. **FECHA DEL VUELO EN LA LISTA DE GASTOS (19-oct-2026, API 0.0.96, SIN
+    migración).** Pedido del cliente (captura de la tabla de Gastos con
+    «Vuelo #375»): ver la fecha del vuelo al que está ligado cada gasto. El
+    embed del vuelo de `LIST_EMBEDS` (lista `GET /v1/expenses`, visto bueno
+    y «Otros gastos», los tres por `listCols()`) pasa de
+    `vuelo:vuelo!vuelo_id(folio)` a `vuelo:vuelo!vuelo_id(folio,
+    fecha_vuelo)`: llave ADITIVA dentro del embed, el `timestamptz` de la
+    salida TAL CUAL (el día Cancún lo pinta el panel con `fmtDate`; aquí no
+    se recalcula nada). Un panel previo la ignora; un API previo no la manda
+    y el panel no pinta la línea. Spec: `expenses.service.fecha-vuelo.spec`
+    (el select de la consulta que pagina y la fila sin tocar).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

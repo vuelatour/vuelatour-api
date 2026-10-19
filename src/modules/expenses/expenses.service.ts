@@ -343,8 +343,10 @@ function excepcionCambioFecha(
 // capturó y folio del vuelo (para linkear al detalle). `compra` = la compra
 // de refacciones de la que este gasto es un PAGO (28-ago): el equipo la ve
 // como "un solo gasto"; se liga/desliga SOLO desde /v1/compras.
+// `vuelo.fecha_vuelo` (ADITIVO, 19-oct-2026, API 0.0.96, invariante 94): el
+// panel pinta la fecha del vuelo bajo «Vuelo #375» en la tabla de Gastos.
 const LIST_EMBEDS =
-  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
+  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
 const LIST_COLS = `${COLS}${LIST_EMBEDS}`;
 
 /**

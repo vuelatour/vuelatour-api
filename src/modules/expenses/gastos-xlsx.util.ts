@@ -205,7 +205,7 @@ const COL_DIFERENCIA_LOTE = COLUMNAS_HOJA_CARGOS_BANCO.findIndex(
   (c) => c.label === 'Diferencia del lote',
 );
 
-/** Folio del vuelo de la fila de `list()` (`vuelo:vuelo!vuelo_id(folio)`). */
+/** Folio del vuelo de la fila de `list()` (`vuelo:vuelo!vuelo_id(folio, fecha_vuelo)`). */
 function folioVuelo(x: Record<string, unknown>): number | null {
   const raw = x.vuelo as
     | { folio?: unknown }
