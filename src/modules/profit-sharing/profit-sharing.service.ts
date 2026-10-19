@@ -4154,16 +4154,6 @@ export class ProfitSharingService {
         g.categoria === 'FIJO' &&
         !repartosPre.has(g.id as string),
     );
-    // GASTOS POR PAGAR (revisión P4, 19-oct-2026, invariante 93): con la
-    // migración, un gasto con fecha FUTURA (por pagar por construcción) aún
-    // no tiene T.C. oficial de SU día —el servicio de T.C. solo mira 7 días
-    // hacia atrás— y ya lo señala `gastos_por_pagar`: no cuenta «sin T.C.» ni
-    // se busca su oficial. Nunca toca un mes cerrable (sus días ya pasaron).
-    // Sin la migración, como el 0.0.94.
-    const esFechaFuturaPorPagar = (g: Record<string, unknown>): boolean =>
-      porPagarPre.disponible &&
-      typeof g.fecha_gasto === 'string' &&
-      g.fecha_gasto.slice(0, 10) > hoyPorPagar;
     const sinTc = gastos.filter(
       // PERSONAL_DUENO no entra al balance USD: su TC no bloquea el cierre.
       // Un pago de AFAC marcado (invariante 90) tampoco: no entra a ningún
@@ -4174,8 +4164,7 @@ export class ProfitSharingService {
         g.categoria !== 'PERSONAL_DUENO' &&
         !esPagoAfac(
           g as { categoria?: string | null; es_pago_afac?: boolean | null },
-        ) &&
-        !esFechaFuturaPorPagar(g),
+        ),
     );
     // TC oficial del día del gasto (29-ago): los MXN sin TC que SÍ tienen
     // referencia oficial YA entran al reparto y al balance (informativo);
@@ -4200,8 +4189,24 @@ export class ProfitSharingService {
     const sinTcConOficial = sinTc.filter((g) =>
       tcOficialGastosPre.gasto.has(g.id as string),
     );
+    // GASTOS POR PAGAR (revisión P4, 19-oct-2026, invariante 93): con la
+    // migración, un MXN sin T.C. con fecha FUTURA (por pagar por
+    // construcción) que tampoco tiene oficial NO bloquea como «sin T.C.»: ya
+    // lo señala `gastos_por_pagar`. El servicio de T.C. busca en [fecha − 7,
+    // fecha]: hasta hoy + 7 encuentra el de hoy y el gasto se convierte
+    // (sigue en el informativo `gastos_tc_oficial`, como en el reparto, que
+    // lo resta); más allá todavía no hay dato. Nunca toca un mes cerrable
+    // (sus días no han pasado). Sin la migración, como el 0.0.94. Segunda
+    // pasada de la revisión: antes salía de `sinTc` entero y el informativo
+    // dejaba de listar los de hasta hoy + 7 que el reparto sí resta.
+    const esFechaFuturaPorPagar = (g: Record<string, unknown>): boolean =>
+      porPagarPre.disponible &&
+      typeof g.fecha_gasto === 'string' &&
+      g.fecha_gasto.slice(0, 10) > hoyPorPagar;
     const sinTcSinOficial = sinTc.filter(
-      (g) => !tcOficialGastosPre.gasto.has(g.id as string),
+      (g) =>
+        !tcOficialGastosPre.gasto.has(g.id as string) &&
+        !esFechaFuturaPorPagar(g),
     );
     const sumaMxn = (lista: Array<Record<string, unknown>>) =>
       round2(lista.reduce((acc, g) => acc + Number(g.monto), 0));

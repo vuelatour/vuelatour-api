@@ -470,8 +470,11 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
  *    vuelo de septiembre fechado en octubre no frenaba el cierre de
  *    septiembre y, cerrado éste, quedaba atrapado (409 MES_CERRADO).
  *  - P2: `ids_nomina` (subconjunto de `ids`) justo antes de `ids`.
- *  - P4: un gasto MXN sin T.C. con fecha FUTURA (por pagar) no cuenta en
- *    `gastos_sin_tc` ni se busca su oficial (con la migración).
+ *  - P4: un gasto MXN sin T.C. con fecha FUTURA (por pagar) y SIN oficial
+ *    no BLOQUEA como `gastos_sin_tc` (con la migración). Con oficial —el
+ *    servicio mira 7 días atrás: hasta hoy + 7 encuentra el de hoy— sigue en
+ *    el informativo `gastos_tc_oficial`, como en el reparto, que lo resta
+ *    (segunda pasada de la revisión).
  */
 describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE (P1), `ids_nomina` (P2) y sin T.C. futuro (P4)', () => {
   beforeAll(() => {
@@ -649,7 +652,7 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE
     expect(Object.keys(i).slice(-2)).toEqual(['ids_nomina', 'ids']);
   });
 
-  it('P4: un MXN sin T.C. por pagar con fecha FUTURA no cuenta «sin T.C.» ni se busca su oficial; sin la migración, como el 0.0.94', async () => {
+  it('P4: un MXN sin T.C. por pagar con fecha FUTURA y SIN oficial no BLOQUEA como «sin T.C.» (ya lo señala `gastos_por_pagar`); sin la migración, como el 0.0.94', async () => {
     const tablas = (): Record<string, Fila[]> => ({
       aeronave: AERONAVES,
       gasto: [
@@ -660,23 +663,16 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE
         }),
       ],
     });
-    const svc = armar(tablas());
-    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    // El fake no tiene oficial para ningún día (`oficialDetallePara` ⇒ null).
+    const r = (await armar(tablas()).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
     expect(item(r, 'gastos_sin_tc')).toMatchObject({ count: 0, ids: [] });
+    expect(item(r, 'gastos_tc_oficial')).toMatchObject({ count: 0 });
     expect(item(r, 'gastos_por_pagar')).toMatchObject({
       count: 1,
       ids: ['g-futuro'],
     });
-    const tc = (
-      svc as unknown as {
-        tipoCambio: { oficialDetallePara: jest.Mock };
-      }
-    ).tipoCambio.oficialDetallePara;
-    expect(
-      (tc.mock.calls as unknown[][]).some((c) =>
-        String(c[0]).startsWith('2026-10-28'),
-      ),
-    ).toBe(false);
 
     // Sin la migración: el gasto (que nadie marcó por pagar) sigue «sin T.C.».
     const viejo = (await armar(tablas(), { sinPorPagar: true }).preCierre(
@@ -685,6 +681,76 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE
     expect(item(viejo, 'gastos_sin_tc')).toMatchObject({
       count: 1,
       ids: ['g-futuro'],
+    });
+  });
+
+  it('P4 (segunda pasada): a hoy + 3 SÍ hay oficial (el servicio mira 7 días atrás) ⇒ sigue en `gastos_tc_oficial`, como en el reparto que lo resta; a hoy + 10, sin oficial, fuera del bloqueante', async () => {
+    const tablas = (): Record<string, Fila[]> => ({
+      aeronave: AERONAVES,
+      gasto: [
+        gasto('g-hoy3', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-22',
+          monto: '700.00',
+        }),
+        gasto('g-hoy10', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-29',
+          monto: '300.00',
+        }),
+      ],
+    });
+    /**
+     * `oficialDetallePara(dia)` busca en [dia − 7, dia] y el último dato es
+     * el de HOY (19-oct): lo encuentra para un día ≤ 26-oct, no después.
+     */
+    const conOficialDeHoy = (svc: ProfitSharingService) => {
+      (
+        svc as unknown as { tipoCambio: { oficialDetallePara: jest.Mock } }
+      ).tipoCambio.oficialDetallePara.mockImplementation((dia: string) =>
+        Promise.resolve(
+          dia <= '2026-10-26'
+            ? { tc: 18.25, fecha_dato: '2026-10-19', fuente: 'open.er-api' }
+            : null,
+        ),
+      );
+      return svc;
+    };
+    const r = (await conOficialDeHoy(armar(tablas())).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
+    // El de hoy + 3 se convierte con el oficial de hoy: informativo, como
+    // en el reparto (antes de la segunda pasada salía con count 0).
+    expect(item(r, 'gastos_tc_oficial')).toMatchObject({
+      count: 1,
+      monto_mxn: 700,
+    });
+    // El de hoy + 10 no tiene oficial todavía: no bloquea como «sin T.C.».
+    expect(item(r, 'gastos_sin_tc')).toMatchObject({
+      count: 0,
+      monto_mxn: 0,
+      ids: [],
+    });
+    expect(item(r, 'gastos_por_pagar')).toMatchObject({
+      count: 2,
+      monto_mxn: 1000,
+    });
+
+    // Sin la migración (0.0.94): el de hoy + 3 igual de convertido y el de
+    // hoy + 10 «sin T.C.».
+    const viejo = (await conOficialDeHoy(
+      armar(tablas(), { sinPorPagar: true }),
+    ).preCierre(PERIODO)) as unknown as Respuesta;
+    expect(item(viejo, 'gastos_tc_oficial')).toMatchObject({
+      count: 1,
+      monto_mxn: 700,
+    });
+    expect(item(viejo, 'gastos_sin_tc')).toMatchObject({
+      count: 1,
+      monto_mxn: 300,
+      ids: ['g-hoy10'],
     });
   });
 });
