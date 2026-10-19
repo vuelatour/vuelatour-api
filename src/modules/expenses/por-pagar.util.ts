@@ -14,7 +14,10 @@
  */
 import { fechaInicioCorta } from '../../common/inicio-oficial.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  CATEGORIA_NOMINA,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 
 /** Estado de pago de un gasto (lo derivan los lectores, nunca se guarda). */
@@ -296,23 +299,48 @@ export const MOTIVO_RECORDATORIO_POR_PAGAR = 'gasto_por_pagar';
 export const CLAVE_ALERTA_POR_PAGAR = 'gasto_por_pagar';
 /** Link del aviso (Gastos del panel con el filtro). */
 export const LINK_GASTOS_POR_PAGAR = '/admin/expenses?por_pagar=1';
+/**
+ * Link del aviso de una NÓMINA (revisión P2, 19-oct-2026): la nómina vive
+ * solo en su módulo (invariante 91) y Gastos la excluye siempre.
+ */
+export const LINK_NOMINA = '/admin/nomina';
 /** Título del aviso del día del pago. */
 export const TITULO_RECORDATORIO_HOY = 'Gasto por pagar hoy';
 /** Título del aviso del día siguiente (una vez). */
 export const TITULO_RECORDATORIO_VENCIDO = 'Gasto por pagar vencido';
 
-/** Dedupe `gasto_por_pagar:<gasto_id>:<día Cancún>`. */
+/**
+ * Dedupe `gasto_por_pagar:<gasto_id>:<día Cancún>:<usuario_id>` (revisión
+ * P15: uno POR DESTINATARIO; el aviso puede ir al dueño y a la oficina que
+ * lo capturó a su nombre).
+ */
 export function claveRecordatorioPorPagar(
   gastoId: string,
   dia: string,
+  usuarioId: string,
 ): string {
-  return `${CLAVE_ALERTA_POR_PAGAR}:${gastoId}:${dia}`;
+  return `${CLAVE_ALERTA_POR_PAGAR}:${gastoId}:${dia}:${usuarioId}`;
+}
+
+/**
+ * Link del aviso: una NÓMINA ⇒ `/admin/nomina?mes=<YYYY-MM de su
+ * fecha_gasto>` (P2); lo demás ⇒ Gastos con el filtro «Por pagar».
+ */
+export function linkRecordatorioPorPagar(g: {
+  categoria?: string | null;
+  fecha_gasto?: unknown;
+}): string {
+  if (g.categoria !== CATEGORIA_NOMINA) return LINK_GASTOS_POR_PAGAR;
+  const mes = diaDe(g.fecha_gasto).slice(0, 7);
+  return /^\d{4}-\d{2}$/.test(mes) ? `${LINK_NOMINA}?mes=${mes}` : LINK_NOMINA;
 }
 
 /**
  * Cuerpo del aviso: «Taxi / estacionamiento · $500 MXN · vuelo #436 —
  * cuando lo pagues, márcalo pagado (Mis registros en la app, o Gastos en el
- * panel).» (sin vuelo, sin el tramo; dinero con `fmtDineroTexto`).
+ * panel).» (sin vuelo, sin el tramo; dinero con `fmtDineroTexto`). Una
+ * NÓMINA termina «— cuando lo pagues, márcalo pagado (Nómina en el
+ * panel).» (P2).
  */
 export function cuerpoRecordatorioPorPagar(g: {
   categoria?: string | null;
@@ -328,7 +356,39 @@ export function cuerpoRecordatorioPorPagar(g: {
   if (typeof g.folio === 'number' && Number.isFinite(g.folio)) {
     partes.push(`vuelo #${g.folio}`);
   }
-  return `${partes.join(' · ')} — cuando lo pagues, márcalo pagado (Mis registros en la app, o Gastos en el panel).`;
+  const donde =
+    g.categoria === CATEGORIA_NOMINA
+      ? 'Nómina en el panel'
+      : 'Mis registros en la app, o Gastos en el panel';
+  return `${partes.join(' · ')} — cuando lo pagues, márcalo pagado (${donde}).`;
+}
+
+/** Lo que el recordatorio sabe de un usuario. */
+export interface UsuarioRecordatorio {
+  activo: boolean;
+  rol: string | null;
+}
+
+/**
+ * A quién le llega el recordatorio (revisión P15, 19-oct-2026): al DUEÑO del
+ * gasto (`usuario_captura_id ?? created_by`, el mismo criterio de Mis
+ * registros, Mi caja y la ventana de «Ya lo pagué») si está activo; y, si
+ * `created_by` es OTRA persona, activa y de OFICINA (la que lo registró a
+ * nombre del piloto), también a ella. Sin repetidos, el dueño primero.
+ */
+export function destinatariosRecordatorioPorPagar(
+  g: { usuario_captura_id?: string | null; created_by?: string | null },
+  usuarios: ReadonlyMap<string, UsuarioRecordatorio>,
+): string[] {
+  const out: string[] = [];
+  const dueno = g.usuario_captura_id || g.created_by || null;
+  if (dueno && usuarios.get(dueno)?.activo) out.push(dueno);
+  const capturo = g.created_by || null;
+  if (capturo && capturo !== dueno) {
+    const u = usuarios.get(capturo);
+    if (u?.activo && u.rol != null && !esRolCampo(u.rol)) out.push(capturo);
+  }
+  return out;
 }
 
 // ===== Pre-cierre (renglón BLOQUEANTE `gastos_por_pagar`) =====

@@ -349,8 +349,9 @@ describe('por-pagar.util — textos', () => {
     expect(TITULO_RECORDATORIO_HOY).toBe('Gasto por pagar hoy');
     expect(TITULO_RECORDATORIO_VENCIDO).toBe('Gasto por pagar vencido');
     expect(LINK_GASTOS_POR_PAGAR).toBe('/admin/expenses?por_pagar=1');
-    expect(claveRecordatorioPorPagar('g-1', '2026-10-19')).toBe(
-      'gasto_por_pagar:g-1:2026-10-19',
+    // Revisión P15 (19-oct-2026): el dedupe es POR DESTINATARIO.
+    expect(claveRecordatorioPorPagar('g-1', '2026-10-19', 'u-1')).toBe(
+      'gasto_por_pagar:g-1:2026-10-19:u-1',
     );
     expect(
       cuerpoRecordatorioPorPagar({
