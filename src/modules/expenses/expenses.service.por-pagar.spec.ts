@@ -119,7 +119,12 @@ function consultaSinColumna(): Record<string, unknown> {
 }
 
 function armar(
-  opts: { sinPorPagar?: boolean; ultimaReposicion?: string | null } = {},
+  opts: {
+    sinPorPagar?: boolean;
+    ultimaReposicion?: string | null;
+    /** Con el módulo de conciliación (auto-cruce con el banco). */
+    conCruce?: boolean;
+  } = {},
 ) {
   const m = mundo();
   // Sin la migración la columna no existe: las filas no la traen.
@@ -180,6 +185,9 @@ function armar(
       .fn()
       .mockResolvedValue(opts.ultimaReposicion ?? null),
   };
+  const conciliacion = {
+    intentarCruzarGasto: jest.fn().mockResolvedValue({ ligado: false }),
+  };
   const nada = {} as never;
   const service = new ExpensesService(
     { service: { from } } as unknown as SupabaseService,
@@ -189,8 +197,9 @@ function armar(
     { numero: jest.fn().mockResolvedValue(1) } as never,
     cajaChica as never,
     nada,
+    opts.conCruce ? (conciliacion as never) : undefined,
   );
-  return { service, f, registro, cajaChica };
+  return { service, f, registro, cajaChica, conciliacion };
 }
 
 const fila = (f: ReturnType<typeof fakeCierre>, id: string) =>
@@ -592,6 +601,204 @@ describe('ExpensesService.assertOwnEnVentana — excepción del dueño al marcar
       por_pagar: false,
       fecha_gasto: '2026-10-19',
     });
+  });
+});
+
+describe('ExpensesService — gasto CONCILIADO y fecha futura (revisión P9)', () => {
+  const MENSAJE =
+    'Este gasto ya está conciliado con el banco: su fecha es la del cargo y no puede quedar en el futuro (quedaría «por pagar»). Si ese cargo no es su pago, desvincúlalo primero en Conciliación.';
+  const conciliadoPagado = (extra: Fila = {}) =>
+    gasto('g-conc-pagado', {
+      conciliado: true,
+      medio_pago: 'TRANSFERENCIA',
+      fecha_gasto: '2026-10-14',
+      ...extra,
+    });
+
+  it('mover a FUTURO la fecha de un conciliado (sin mandar `por_pagar`) ⇒ 409 GASTO_CONCILIADO y nada se escribe', async () => {
+    const { service, f } = armar();
+    f.tablas.gasto.push(conciliadoPagado());
+    const e = await error(
+      service.update(
+        'g-conc-pagado',
+        { fecha_gasto: '2026-10-25' },
+        ADMIN,
+        Rol.ADMIN,
+      ),
+    );
+    expect(e).toEqual({
+      status: 409,
+      code: 'GASTO_CONCILIADO',
+      message: MENSAJE,
+    });
+    expect(escrituras(f, 'g-conc-pagado')).toHaveLength(0);
+  });
+
+  it('con una fecha ≤ hoy pasa sin tocar `por_pagar`', async () => {
+    const { service, f } = armar();
+    f.tablas.gasto.push(conciliadoPagado());
+    await service.update(
+      'g-conc-pagado',
+      { fecha_gasto: '2026-10-16' },
+      ADMIN,
+      Rol.ADMIN,
+    );
+    const [w] = escrituras(f, 'g-conc-pagado');
+    expect(w.valores.fecha_gasto).toBe('2026-10-16');
+    expect('por_pagar' in w.valores).toBe(false);
+  });
+
+  it('un conciliado con fecha futura de antes (dato viejo) que reenvía SU fecha no se vuelve «por pagar»', async () => {
+    const { service, f } = armar();
+    f.tablas.gasto.push(conciliadoPagado({ fecha_gasto: '2026-10-21' }));
+    await service.update(
+      'g-conc-pagado',
+      { fecha_gasto: '2026-10-21', notas: 'factura recibida' },
+      ADMIN,
+      Rol.ADMIN,
+    );
+    const [w] = escrituras(f, 'g-conc-pagado');
+    expect(w.valores.notas).toBe('factura recibida');
+    expect('por_pagar' in w.valores).toBe(false);
+    expect(fila(f, 'g-conc-pagado').por_pagar).toBe(false);
+  });
+});
+
+describe('ExpensesService.generarPistas — pistas con aterrizaje FUTURO (revisión P11)', () => {
+  const escala = (id: string, fechaSalidaPlan: string): Fila => ({
+    id,
+    vuelo_id: 'v-1',
+    destino_iata: 'MID',
+    hora_llegada: null,
+    fecha_salida_plan: fechaSalidaPlan,
+    aeronave_id: 'av-1',
+    vuelo: { aeronave_id: 'av-1' },
+  });
+  const pistas = (...ids: string[]) =>
+    ({
+      items: ids.map((escala_id) => ({ escala_id, monto: 1200 })),
+    }) as never;
+
+  it('aterrizaje del 25-oct ⇒ la cuota nace POR PAGAR; la de ayer, pagada (sin nombrar la columna)', async () => {
+    const { service, f } = armar();
+    f.tablas.escala = [
+      escala('e-futura', '2026-10-25T15:00:00Z'),
+      escala('e-ayer', '2026-10-18T15:00:00Z'),
+    ];
+    const r = await service.generarPistas(pistas('e-futura', 'e-ayer'), ADMIN);
+    expect(r.creados).toBe(2);
+    const [futura, ayer] = altas(f).map((a) => a.valores);
+    expect(futura).toMatchObject({
+      fecha_gasto: '2026-10-25',
+      por_pagar: true,
+    });
+    expect(ayer.fecha_gasto).toBe('2026-10-18');
+    expect('por_pagar' in ayer).toBe(false);
+  });
+
+  it('SIN la migración: el insert de siempre (ninguna consulta nombra la columna salvo la sonda)', async () => {
+    const { service, f, registro } = armar({ sinPorPagar: true });
+    f.tablas.escala = [escala('e-futura', '2026-10-25T15:00:00Z')];
+    const r = await service.generarPistas(pistas('e-futura'), ADMIN);
+    expect(r.creados).toBe(1);
+    expect('por_pagar' in altas(f)[0].valores).toBe(false);
+    expect(registro.filter((x) => x !== 'gasto.select(por_pagar)')).toEqual([]);
+  });
+});
+
+describe('ExpensesService — auto-cruce con el banco y por pagar VIGENTE (revisión P14a)', () => {
+  const bancario = (id: string, extra: Fila = {}) =>
+    gasto(id, { medio_pago: 'TRANSFERENCIA', ...extra });
+
+  it('ALTA con fecha futura (nace por pagar) ⇒ NO busca cargo; con la de hoy sí', async () => {
+    const { service, conciliacion } = armar({ conCruce: true });
+    await service.create(
+      alta({ medio_pago: 'TRANSFERENCIA' } as Partial<CreateGastoDto>),
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(conciliacion.intentarCruzarGasto).not.toHaveBeenCalled();
+    const hoy = (await service.create(
+      alta({
+        medio_pago: 'TRANSFERENCIA',
+        fecha_gasto: '2026-10-19',
+        notas: 'pagado hoy',
+      } as Partial<CreateGastoDto>),
+      ADMIN,
+      Rol.ADMIN,
+    )) as Fila;
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenCalledTimes(1);
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenCalledWith(
+      hoy.id,
+      ADMIN,
+    );
+  });
+
+  it('ALTA «lo pago al rato» (`por_pagar: true` con fecha de hoy) ⇒ NO busca cargo', async () => {
+    const { service, conciliacion } = armar({ conCruce: true });
+    await service.create(
+      alta({
+        medio_pago: 'TRANSFERENCIA',
+        fecha_gasto: '2026-10-19',
+        por_pagar: true,
+      } as Partial<CreateGastoDto>),
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(conciliacion.intentarCruzarGasto).not.toHaveBeenCalled();
+  });
+
+  it('PATCH que mueve un pagado a FUTURO (queda por pagar) ⇒ NO busca cargo', async () => {
+    const { service, f, conciliacion } = armar({ conCruce: true });
+    f.tablas.gasto.push(bancario('g-banco', { fecha_gasto: '2026-10-14' }));
+    await service.update(
+      'g-banco',
+      { fecha_gasto: '2026-10-28' },
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(fila(f, 'g-banco').por_pagar).toBe(true);
+    expect(conciliacion.intentarCruzarGasto).not.toHaveBeenCalled();
+  });
+
+  it('MARCAR PAGADO sí lo cruza: con la fecha real y también un VENCIDO que conserva su fecha', async () => {
+    const { service, f, conciliacion } = armar({ conCruce: true });
+    f.tablas.gasto.push(
+      bancario('g-banco-futuro', {
+        por_pagar: true,
+        fecha_gasto: '2026-10-25',
+      }),
+      bancario('g-banco-vencido', {
+        por_pagar: true,
+        fecha_gasto: '2026-10-15',
+      }),
+    );
+    await service.update(
+      'g-banco-futuro',
+      { por_pagar: false, fecha_gasto: '2026-10-18' },
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenLastCalledWith(
+      'g-banco-futuro',
+      ADMIN,
+    );
+    await service.update(
+      'g-banco-vencido',
+      { por_pagar: false },
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(escrituras(f, 'g-banco-vencido')[0].valores).toEqual({
+      id: 'g-banco-vencido',
+      por_pagar: false,
+      updated_by: ADMIN,
+    });
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenLastCalledWith(
+      'g-banco-vencido',
+      ADMIN,
+    );
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenCalledTimes(2);
   });
 });
 

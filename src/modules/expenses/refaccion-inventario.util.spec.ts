@@ -65,6 +65,50 @@ describe('refacción a Inventario/Tienda (invariante 57): validación pura', () 
     ).toBeNull();
   });
 
+  it('fecha FUTURA (gasto por pagar, revisión P12) ⇒ INVENTARIO_FECHA_FUTURA; solo si el llamador pasa `hoy`', () => {
+    const futura = { categoria: 'REFACCION', fecha_gasto: '2026-10-20' };
+    expect(errorRefaccionInventario(futura, inv, '2026-10-19')).toEqual({
+      code: 'INVENTARIO_FECHA_FUTURA',
+      message:
+        'Una refacción con fecha futura queda «por pagar»: guárdala sin entrada a Inventario/Tienda y registra la entrada desde Inventario/Tienda (Compras) el día que llegue la pieza.',
+    });
+    expect(CODIGO_INVENTARIO.FECHA_FUTURA).toBe('INVENTARIO_FECHA_FUTURA');
+    // Hoy o antes: entra (la pieza llegó). Sin `hoy` (sin la migración): no
+    // se mide.
+    expect(
+      errorRefaccionInventario(
+        { ...futura, fecha_gasto: '2026-10-19' },
+        inv,
+        '2026-10-19',
+      ),
+    ).toBeNull();
+    expect(errorRefaccionInventario(futura, inv)).toBeNull();
+    expect(errorRefaccionInventario(futura, inv, null)).toBeNull();
+    // Un timestamp cuenta por su día.
+    expect(
+      errorRefaccionInventario(
+        { ...futura, fecha_gasto: '2026-10-19T23:00:00' },
+        inv,
+        '2026-10-19',
+      ),
+    ).toBeNull();
+    // Lo estructural va primero: otra categoría o BODEGA.
+    expect(
+      errorRefaccionInventario(
+        { ...futura, categoria: 'OPERACIONES' },
+        inv,
+        '2026-10-19',
+      )?.code,
+    ).toBe(CODIGO_INVENTARIO.SOLO_REFACCION);
+    expect(
+      errorRefaccionInventario(
+        { ...futura, medio_pago: 'BODEGA' },
+        inv,
+        '2026-10-19',
+      )?.code,
+    ).toBe(CODIGO_INVENTARIO.MEDIO_BODEGA);
+  });
+
   it('«vender al avión» exige avión', () => {
     expect(
       errorRefaccionInventario(

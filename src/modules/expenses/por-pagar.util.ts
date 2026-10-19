@@ -34,6 +34,15 @@ export const MENSAJE_POR_PAGAR_FECHA_FUTURA =
 export const MENSAJE_POR_PAGAR_CONCILIADO =
   'Este gasto ya está conciliado con el banco: el cargo es su pago y no se pone «por pagar». Si ese cargo no es su pago, desvincúlalo primero en Conciliación.';
 
+/**
+ * 409 `GASTO_CONCILIADO` al MOVER A FUTURO la fecha de un gasto conciliado
+ * (revisión del 19-oct-2026, P9): la puerta implícita (solo `fecha_gasto`)
+ * lo dejaba «por pagar» sin que nadie lo pidiera; la explícita (`true`) ya
+ * respondía 409.
+ */
+export const MENSAJE_FECHA_FUTURA_CONCILIADO =
+  'Este gasto ya está conciliado con el banco: su fecha es la del cargo y no puede quedar en el futuro (quedaría «por pagar»). Si ese cargo no es su pago, desvincúlalo primero en Conciliación.';
+
 /** Tope hacia adelante de la OFICINA (sin cambio: ya era su banda). */
 export const TOPE_FUTURO_OFICINA_DIAS = 30;
 

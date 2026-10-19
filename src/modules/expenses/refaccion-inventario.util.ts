@@ -26,7 +26,19 @@ export const CODIGO_INVENTARIO = {
   PRECIO_INVALIDO: 'INVENTARIO_PRECIO_INVALIDO',
   TC_REQUERIDO: 'INVENTARIO_TC_REQUERIDO',
   SOLO_AL_CREAR: 'INVENTARIO_SOLO_AL_CREAR',
+  // Gastos «por pagar» (19-oct-2026, invariante 93, revisión P12).
+  FECHA_FUTURA: 'INVENTARIO_FECHA_FUTURA',
 } as const;
+
+/**
+ * 400 `INVENTARIO_FECHA_FUTURA` (acuerdo entre repos del 19-oct-2026): una
+ * refacción con fecha futura queda «por pagar» y su fecha es la del PAGO;
+ * la compra, la ENTRADA del cardex, la SALIDA y el cargo de bodega al avión
+ * nacían con esa fecha futura (el cargo, en el balance del mes del pago) y
+ * no se movían al marcarla pagada. El panel lo previene con el MISMO texto.
+ */
+export const MENSAJE_INVENTARIO_FECHA_FUTURA =
+  'Una refacción con fecha futura queda «por pagar»: guárdala sin entrada a Inventario/Tienda y registra la entrada desde Inventario/Tienda (Compras) el día que llegue la pieza.';
 
 export interface RefaccionInventarioInput {
   item_id?: string | null;
@@ -51,14 +63,19 @@ const texto = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
  * existente o nombre del nuevo, cantidad > 0, precio de venta ≥ 0 (0 = a
  * costo), «vender al avión» exige avión y un gasto de BODEGA no es una compra.
  * El T.C. (pesos sin `tc_gasto`) se resuelve aparte porque pide el oficial.
+ * `hoy` (día Cancún; gastos por pagar, invariante 93): con él, una fecha del
+ * gasto posterior ⇒ `INVENTARIO_FECHA_FUTURA`. El servicio lo pasa SOLO con
+ * la migración 20261019000001 (sin ella, todo como el 0.0.94).
  */
 export function errorRefaccionInventario(
   dto: {
     categoria?: string | null;
     aeronave_id?: string | null;
     medio_pago?: string | null;
+    fecha_gasto?: string | null;
   },
   inv: RefaccionInventarioInput,
+  hoy?: string | null,
 ): ErrorRefaccionInventario | null {
   if (dto.categoria !== CATEGORIA_REFACCION) {
     return {
@@ -72,6 +89,12 @@ export function errorRefaccionInventario(
       code: CODIGO_INVENTARIO.MEDIO_BODEGA,
       message:
         'Un cargo de bodega no es una compra: captura la refacción con el medio con que se pagó.',
+    };
+  }
+  if (hoy && texto(dto.fecha_gasto).slice(0, 10) > hoy) {
+    return {
+      code: CODIGO_INVENTARIO.FECHA_FUTURA,
+      message: MENSAJE_INVENTARIO_FECHA_FUTURA,
     };
   }
   if (!texto(inv.item_id) && !texto(inv.nombre)) {

@@ -26,17 +26,35 @@ import { CODIGO_INVENTARIO } from './refaccion-inventario.util';
  */
 type Llamada = { metodo: string; args: unknown[] };
 
-function armar(extra: { tcOficial?: number | null } = {}) {
+function armar(
+  extra: {
+    tcOficial?: number | null;
+    /** Sin la migración 20261019000001 (42703 al nombrar `por_pagar`). */
+    sinPorPagar?: boolean;
+  } = {},
+) {
   const llamadas: Llamada[] = [];
   const supabase = {
     service: {
       from: (tabla: string) => {
         llamadas.push({ metodo: 'from', args: [tabla] });
         const q: Record<string, unknown> = {};
+        let error: { code: string; message: string } | null = null;
         const registra =
           (metodo: string) =>
           (...args: unknown[]) => {
             llamadas.push({ metodo, args });
+            if (
+              metodo === 'select' &&
+              extra.sinPorPagar &&
+              typeof args[0] === 'string' &&
+              /\bpor_pagar\b/.test(args[0])
+            ) {
+              error = {
+                code: '42703',
+                message: 'column gasto.por_pagar does not exist',
+              };
+            }
             return q;
           };
         for (const m of [
@@ -58,17 +76,23 @@ function armar(extra: { tcOficial?: number | null } = {}) {
           q[m] = registra(m);
         }
         q.maybeSingle = () =>
-          Promise.resolve({
-            data: {
-              id: 'g-nuevo',
-              monto: '1000.00',
-              moneda: 'MXN',
-              fecha_gasto: '2026-10-12',
-            },
-            error: null,
-          });
+          Promise.resolve(
+            error
+              ? { data: null, error }
+              : {
+                  data: {
+                    id: 'g-nuevo',
+                    monto: '1000.00',
+                    moneda: 'MXN',
+                    fecha_gasto: '2026-10-12',
+                  },
+                  error: null,
+                },
+          );
         q.then = (resolve: (v: unknown) => unknown) =>
-          Promise.resolve({ data: [], error: null }).then(resolve);
+          Promise.resolve(
+            error ? { data: null, error } : { data: [], error: null },
+          ).then(resolve);
         return q;
       },
     },
@@ -233,6 +257,50 @@ describe('refacción a Inventario/Tienda: validación antes de la BD', () => {
     );
     expect(r.status).toBe(400);
     expect(r.body.error).toBe(CODIGO_INVENTARIO.SOLO_AL_CREAR);
+  });
+});
+
+describe('refacción a Inventario/Tienda con fecha FUTURA (gastos por pagar, revisión P12)', () => {
+  beforeEach(() =>
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-12T18:00:00Z')),
+  );
+  afterEach(() => jest.useRealTimers());
+
+  it('fecha después de hoy (queda «por pagar») ⇒ 400 INVENTARIO_FECHA_FUTURA ANTES de insertar o tocar compras/inventario', async () => {
+    const { service, llamadas, compras, inventory } = armar();
+    const r = await rebote(
+      service.create(dto({ fecha_gasto: '2026-10-20' }), 'u-admin', Rol.ADMIN),
+    );
+    expect(r).toEqual({
+      status: 400,
+      body: {
+        error: 'INVENTARIO_FECHA_FUTURA',
+        message:
+          'Una refacción con fecha futura queda «por pagar»: guárdala sin entrada a Inventario/Tienda y registra la entrada desde Inventario/Tienda (Compras) el día que llegue la pieza.',
+      },
+    });
+    expect(inserts(llamadas)).toHaveLength(0);
+    expect(compras.create).not.toHaveBeenCalled();
+    expect(compras.recibir).not.toHaveBeenCalled();
+    expect(inventory.createMovimiento).not.toHaveBeenCalled();
+    expect(inventory.tcOficialDe).not.toHaveBeenCalled();
+  });
+
+  it('«lo pago al rato» con fecha de HOY sí entra (la pieza llegó hoy): la cadena de siempre', async () => {
+    const { service, compras, inventory } = armar();
+    await service.create(dto({ por_pagar: true }), 'u-admin', Rol.ADMIN);
+    expect(compras.create).toHaveBeenCalledTimes(1);
+    expect(inventory.createMovimiento).toHaveBeenCalledTimes(1);
+  });
+
+  it('SIN la migración 20261019000001: como el 0.0.94 (la fecha futura de oficina entra a la cadena)', async () => {
+    const { service, compras } = armar({ sinPorPagar: true });
+    await service.create(
+      dto({ fecha_gasto: '2026-10-20' }),
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(compras.create).toHaveBeenCalledTimes(1);
   });
 });
 

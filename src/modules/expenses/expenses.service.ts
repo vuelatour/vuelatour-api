@@ -69,6 +69,7 @@ import {
 } from '../../common/por-pagar-disponible.util';
 import {
   CODIGO_POR_PAGAR_FECHA_FUTURA,
+  MENSAJE_FECHA_FUTURA_CONCILIADO,
   MENSAJE_POR_PAGAR_CONCILIADO,
   MENSAJE_POR_PAGAR_FECHA_FUTURA,
   anexarEstadoPago,
@@ -461,6 +462,12 @@ export class ExpensesService {
     if (gasto?.conciliado === true) return;
     const medio = (gasto?.medio_pago as string | null) ?? '';
     if (!MEDIOS_PAGO_BANCARIOS.includes(medio)) return;
+    // GASTOS POR PAGAR (invariante 93, revisión P14a): un por pagar VIGENTE
+    // todavía no se pagó: ningún cargo ya importado puede ser su pago (el
+    // alta o la re-programación lo ligaban a otro cargo del mismo monto en
+    // ±3 días). Marcarlo pagado sí cruza, con la fecha REAL. Sin la
+    // migración la fila no trae `por_pagar` ⇒ PAGADO ⇒ como siempre.
+    if (gasto && porPagarVigente(gasto, hoyCancun())) return;
     void this.conciliacion
       .intentarCruzarGasto(id, userId)
       .catch((err) =>
@@ -1768,6 +1775,12 @@ export class ExpensesService {
       gasto_id?: string;
       error?: string;
     }> = [];
+    // GASTOS POR PAGAR (invariante 93, revisión P11): un aterrizaje FUTURO
+    // (esto es PRE-PROVISIÓN) es una cuota que nadie ha pagado: nace «por
+    // pagar», como cualquier alta con fecha > hoy (`porPagarFinal`). La
+    // sonda se consulta solo si algún renglón es futuro (null = sin sondear).
+    const hoyPistas = hoyCancun();
+    let conPorPagar: boolean | null = null;
     for (const item of dto.items) {
       const { data: esc } = await this.supabase.service
         .from('escala')
@@ -1824,6 +1837,17 @@ export class ExpensesService {
       const fechaGastoPista = fechaIso
         ? this.cancunDate(fechaIso)
         : this.cancunDate(new Date().toISOString());
+      let porPagarPista = false;
+      if (fechaGastoPista > hoyPistas) {
+        conPorPagar ??= await porPagarDisponible(this.supabase.service);
+        if (conPorPagar) {
+          const d = porPagarFinal({
+            fechaFinal: fechaGastoPista,
+            hoy: hoyPistas,
+          });
+          porPagarPista = d.ok && d.por_pagar;
+        }
+      }
       // CIERRE DE MES (revisión 16-oct-2026, invariante 89): este INSERT va
       // DIRECTO a la tabla (no pasa por create()) ⇒ el candado MES_CERRADO
       // se evalúa aquí, por renglón (eje VUELO: mes contable del vuelo).
@@ -1868,6 +1892,9 @@ export class ExpensesService {
           proveedor_id: item.proveedor_id ?? prov?.id ?? null,
           lugar: esc.destino_iata,
           estatus_comprobante: 'SIN_COMPROBANTE',
+          // Por pagar (invariante 93): la llave SOLO viaja en `true` (con la
+          // migración); una cuota de hoy o de antes deja el default.
+          ...(porPagarPista ? { por_pagar: true } : {}),
           notas:
             item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
           // Gasto fabricado por oficina: capturado = ahora (sin DEFAULT en BD).
@@ -2033,7 +2060,18 @@ export class ExpensesService {
     const inv = dto.inventario;
     if (!inv) return this.crearGasto(dto, userId, rol, opts);
     delete dto.inventario;
-    const invalido = errorRefaccionInventario(dto, inv);
+    // GASTOS POR PAGAR (invariante 93, revisión P12): con la migración, una
+    // refacción con fecha futura queda «por pagar» y NO entra a
+    // Inventario/Tienda (400 INVENTARIO_FECHA_FUTURA antes de tocar nada):
+    // compra, ENTRADA, SALIDA y cargo de bodega nacerían con la fecha del
+    // PAGO. La sonda solo se consulta si la fecha es futura.
+    const hoyAlta = hoyCancun();
+    const fechaFutura = String(dto.fecha_gasto ?? '').slice(0, 10) > hoyAlta;
+    const hoyInventario =
+      fechaFutura && (await porPagarDisponible(this.supabase.service))
+        ? hoyAlta
+        : null;
+    const invalido = errorRefaccionInventario(dto, inv, hoyInventario);
     if (invalido) {
       throw new BadRequestException({
         message: invalido.message,
@@ -4309,6 +4347,8 @@ export class ExpensesService {
     //  - `true` (re-programar): solo sin conciliar (409 GASTO_CONCILIADO);
     //  - RÉPLICA de un «marcar pagado» ya aplicado (revisión P6): la fila
     //    tal cual, sin escribir;
+    //  - CONCILIADO (revisión P9): la bandera no se toca; mover la fecha a
+    //    futuro ⇒ 409 GASTO_CONCILIADO;
     //  - si no: `porPagarFinal` (una fecha > hoy lo pone por pagar solo).
     if (dto.por_pagar === null) delete dto.por_pagar;
     const conPorPagar =
@@ -4374,6 +4414,18 @@ export class ExpensesService {
         // La misma fecha que ya tiene: no es un cambio de fecha.
         delete dto.fecha_gasto;
         replicaPagado = true;
+      } else if (vig.conciliado === true) {
+        // CONCILIADO (revisión P9): el cargo del banco ES su pago. La bandera
+        // no se toca por la puerta implícita (una fecha > hoy la ponía en
+        // true sin que nadie lo pidiera y, al desvincular el cargo, el gasto
+        // salía «por pagar»); moverle la fecha a FUTURO ⇒ 409 sin escribir.
+        const fechaFinal = String(dto.fecha_gasto ?? vigFecha).slice(0, 10);
+        if (fechaFinal !== vigFecha && fechaFinal > hoyPP) {
+          throw new ConflictException({
+            message: MENSAJE_FECHA_FUTURA_CONCILIADO,
+            error: 'GASTO_CONCILIADO',
+          });
+        }
       } else {
         const d = porPagarFinal({
           fechaFinal: String(dto.fecha_gasto ?? vigFecha).slice(0, 10),
@@ -4983,17 +5035,21 @@ export class ExpensesService {
       });
     }
     // AUTO-CRUCE con el banco: solo cuando cambió algo que decide el cruce
-    // (monto, moneda, fecha o medio). Editar notas o el vuelo no dispara
-    // nada. Best-effort: jamás afecta la respuesta del PATCH. La fecha del
-    // pago desde Conciliación (invariante 74) lo APAGA: ahí liga la persona
-    // con «Vincular» (con montos repetidos el cruce podía ligar OTRO cargo
-    // sin que el panel se enterara).
+    // (monto, moneda, fecha o medio) o se MARCÓ PAGADO (invariante 93,
+    // revisión P14a: hasta entonces no era cruzable; un vencido que conserva
+    // su fecha también). Editar notas o el vuelo no dispara nada.
+    // Best-effort: jamás afecta la respuesta del PATCH. La fecha del pago
+    // desde Conciliación (invariante 74) lo APAGA: ahí liga la persona con
+    // «Vincular» (con montos repetidos el cruce podía ligar OTRO cargo sin
+    // que el panel se enterara). Un por pagar vigente no cruza
+    // (`cruzarConBancoBestEffort`).
     if (
       opciones.autoCruce !== false &&
       (dto.monto !== undefined ||
         dto.moneda !== undefined ||
         dto.fecha_gasto !== undefined ||
-        dto.medio_pago !== undefined)
+        dto.medio_pago !== undefined ||
+        porPagarEscribir === false)
     ) {
       this.cruzarConBancoBestEffort(data, userId);
     }
