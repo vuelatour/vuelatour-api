@@ -725,6 +725,35 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      cardex formato libro siguen en pesos. La utilidad NO entra al Libro
      Dinero ni al reparto como ingreso de VuelaTour (no se pidió).
 
+   **CARDEX COMO LISTA POR FECHA Y RESUMEN POR MES (18-oct-2026, API
+   0.0.92, SIN migración).** Pedido del cliente: «cambiar el formato del
+   Cardex del producto en forma de lista por orden de fecha … En el Excel
+   que se descarga debería venir stock inicio del mes y stock final del mes
+   y cantidad de unidades vendidas». Fuente única en
+   `inventario-cardex.util.ts` (PURO, con spec): cada `BloqueCompra` /
+   `BloqueVenta` gana `orden` (posición en `sortChrono` del cardex
+   COMPLETO); `cardexCronologicoDe(bloques)` mezcla compras y ventas por
+   `orden` y COPIA sus números (nada se recalcula; detalle legible:
+   proveedor / «Entrada a bodega» / «Devolución de X» / «Ajuste de
+   inventario» / matrícula / «Toda la flota» / «Sin avión», + «a costo»,
+   «ref …» —la referencia «0» no se pinta—, «sin costo», «sin T.C.»);
+   `mesesCardexDe(movs, {hoy, desde?, hasta?})` = un renglón por mes del
+   primer movimiento al mes de hoy (o al del último movimiento si es
+   posterior), también los meses sin movimientos (el stock se arrastra):
+   `stock_inicio`, `entradas` (compras + devoluciones + ajustes),
+   `compras`, `unidades_vendidas` (TODAS las salidas, con precio o a
+   costo: lo que baja el stock), `stock_final` (= inicio + entradas −
+   vendidas, la MISMA aritmética de `walkCardex`), `movimientos`,
+   `vendido_mxn`/`utilidad_mxn` (`agregadosDeItem` del mes; null sin
+   movimientos) y `en_curso`. `desde`/`hasta` solo acotan los meses que se
+   devuelven: el stock de apertura sale de TODO el cardex. Viajan ADITIVOS:
+   `GET items/:id/resumen` ⇒ `compras[].orden`, `ventas[].orden` y
+   `meses[]`; el cardex en Excel (`cardexLibroXlsx`) ⇒ `movimientos[]`
+   (la lista por fecha) y `meses[]` (con `etiqueta` «Agosto 2026», « (en
+   curso)» en el mes de hoy) además de `entradas`/`salidas` de siempre.
+   pyservices pinta la hoja de la lista y la del resumen solo con
+   `movimientos` presente (sin ellos, el libro de siempre).
+
    **UBICACIONES DE BODEGA (25-sep-2026, migración `20260925000001`).**
    Catálogo `inventario_ubicacion` (nombre único sin distinguir mayúsculas,
    `orden`, `activo`; sembrado con «Oficina vieja», «Oficina nueva», «Locker
@@ -9860,6 +9889,22 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       aircraft, quotes, facturas-emitidas, dashboards, invoices,
       conciliacion y flights.
 
+    - **EXCEPCIÓN: EL INVENTARIO MUESTRA TODO EL HISTORIAL (18-oct-2026,
+      API 0.0.92, SIN migración).** Pedido del cliente: «en inventario sí
+      debemos mostrar lo de agosto y julio, solo en inventario por favor».
+      SUPERSEDE, solo para el inventario, lo que la «Auditoría 16-oct-2026»
+      decía del cardex, la utilidad de la tienda y la lista de compras: la
+      ficha del artículo (`GET items/:id` y `items/:id/resumen`),
+      `/inventory/movimientos` y su Excel, el cardex en Excel (formato
+      libro), `GET tienda/resumen` (el `desde` pedido TAL CUAL) y `GET
+      /compras` ya NO llevan piso aunque la fila esté encendida, y ya no
+      viaja `saldo_inicial` (se ELIMINÓ `inventario-saldo-inicial.util.ts`;
+      `InventoryService` y `ComprasService` no leen `inicioOficial`). El
+      resto de los módulos conserva el piso. La hoja «inventario» del
+      Balance general es un reporte por periodo: no cambia. Spec:
+      `inventario-historial-completo.spec.ts` (con la fila encendida, los
+      cuatro movimientos de agosto–octubre salen en todas las superficies y
+      ninguna consulta lleva `gte` por el inicio).
 87. **VARIAS FACTURAS RECIBIDAS POR GASTO (16-oct-2026, API 0.0.87,
     migración `20261016000003` APLICADA el 16-oct-2026 ~12:43 Cancún por MCP).** Pedido del cliente: ASA entrega
     5 CFDI por carga de combustible (producto, almacenamiento, expendio,
@@ -12000,6 +12045,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   $109,921.46 y de septiembre 7 pagos $25,757.80 (bloqueante: `listo:
   false` hasta repartirlas). Rollback: API 0.0.89 (los repartos ya hechos
   son filas normales de `gasto_reparto`: el 0.0.89 los lee igual).
+- **18-oct-2026 — 0.0.92, SIN migración** (inventario con todo el
+  historial —excepción de la invariante 86— y cardex como LISTA por fecha
+  con resumen por MES —invariante 8, «CARDEX COMO LISTA»—). Orden:
+  pyservices (push a `main`, COMPUERTA `GET /version` = su commit) ⇒ API
+  0.0.92 (`GET /v1/version` = `0.0.92`) ⇒ panel. Todo ADITIVO: un
+  pyservices viejo ignora `movimientos`/`meses` y pinta el libro de
+  siempre (ya sin el renglón «Saldo inicial»); un panel viejo ignora
+  `orden`/`meses` y pinta las tablas de siempre, ahora con julio y agosto.
+  Humo SOLO lecturas: ficha del «Aceite Semisintético 15W-50» ⇒ compras de
+  agosto visibles y `meses[]` desde 2026-08; `GET
+  /v1/inventory/tienda/resumen` sin fechas ⇒ incluye las 3 salidas de
+  jul/ago; el Excel del cardex trae las hojas nuevas. Rollback: API 0.0.91
+  (vuelve el piso del 1-sep en el inventario).
 - **16-oct-2026 — 0.0.91, SIN migración** (caso #351: leyendas del cierre
   que dicen «cobrado después» en vez de «pendiente de cobro», invariante
   89; sobre `e44c41d0` = 0.0.90). Orden: pyservices (push a `main`,

@@ -1210,6 +1210,12 @@ export function resumenDiarioDe(
 
 export interface BloqueCompra {
   movimiento_id: string | null;
+  /**
+   * ADITIVO (18-oct-2026): posición del movimiento en el cardex COMPLETO en
+   * orden cronológico (fecha, alta, id). Con él, compras y ventas se mezclan
+   * en UNA lista por fecha sin adivinar el orden de un mismo día.
+   */
+  orden: number;
   fecha: string;
   tipo: 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE';
   cantidad: number;
@@ -1247,6 +1253,8 @@ export interface BloqueCompra {
 
 export interface BloqueVenta {
   movimiento_id: string | null;
+  /** ADITIVO (18-oct-2026): ver `BloqueCompra.orden`. */
+  orden: number;
   fecha: string;
   cantidad: number;
   /** round2(total_mxn / cantidad): precio de venta (o costo, si a costo) en pesos. */
@@ -1354,7 +1362,7 @@ export function bloquesCardexDe(
   const vigente = costoVigenteEn(movs, { fecha: opts.hoy ?? '9999-12-31' });
   const compras: BloqueCompra[] = [];
   const ventas: BloqueVenta[] = [];
-  for (const m of sortChrono(movs)) {
+  for (const [orden, m] of sortChrono(movs).entries()) {
     if (!enPeriodo(m)) continue;
     const paso = m.id ? walk.get(m.id) : undefined;
     const cant = Number(m.cantidad);
@@ -1375,6 +1383,7 @@ export function bloquesCardexDe(
       const matricula = nombreDeJoin(m.aeronave, 'matricula');
       ventas.push({
         movimiento_id: m.id ?? null,
+        orden,
         fecha: String(m.fecha_movimiento ?? ''),
         cantidad: cant,
         precio_unitario_mxn: unit,
@@ -1431,6 +1440,7 @@ export function bloquesCardexDe(
       const fija = fijaPrecio(m);
       compras.push({
         movimiento_id: m.id ?? null,
+        orden,
         fecha: String(m.fecha_movimiento ?? ''),
         tipo,
         cantidad: cant,
@@ -1482,4 +1492,232 @@ export function bloquesCardexDe(
       movimientos_sin_tc: a.movimientos_sin_tc,
     },
   };
+}
+
+// ===== Cardex como LISTA por fecha y resumen por MES (18-oct-2026) =====
+//
+// Pedido del cliente: «cambiar el formato del Cardex del producto en forma de
+// lista por orden de fecha, de esa forma quedan más claros los movimientos
+// que ha tenido el producto con sus entradas, salidas y movimientos» y «en el
+// Excel que se descarga debería venir stock inicio del mes y stock final del
+// mes y cantidad de unidades vendidas». Las filas salen de `bloquesCardexDe`
+// (los MISMOS números del libro y de la ficha) mezcladas por `orden`; el
+// resumen por mes, del MISMO recorrido de stock (`walkCardex` usa la misma
+// aritmética) y de `agregadosDeItem` (vendido y utilidad del mes).
+
+export type TipoFilaCardex = 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE' | 'SALIDA';
+
+/** Una fila de la lista por fecha (Excel del cardex). Montos en PESOS. */
+export interface FilaCardex {
+  orden: number;
+  movimiento_id: string | null;
+  fecha: string;
+  /** YYYY-MM del movimiento (agrupa la lista por mes). */
+  mes: string;
+  tipo: TipoFilaCardex;
+  /** Unidades que ENTRARON (entrada, devolución o ajuste); null en una salida. */
+  entra: number | null;
+  /** Unidades que SALIERON (salida a un avión o a la flota); null si no. */
+  sale: number | null;
+  /** Stock DESPUÉS del movimiento (cardex completo). */
+  existencia: number;
+  /** «Aircraft Spruce · ref F-12» / «XA-VGV» / «Toda la flota · a costo». */
+  detalle: string;
+  /** Compra: costo unitario; salida: precio al que se vendió (o el costo, a costo). */
+  precio_unitario_mxn: number | null;
+  total_mxn: number | null;
+  /** Salida: venta − costo (0 a costo); null en entradas o sin T.C. */
+  ganancia_mxn: number | null;
+  a_costo: boolean;
+  sin_costo: boolean;
+  sin_tc: boolean;
+}
+
+/** Referencia útil (vacía o «0» no dice nada). */
+function refUtil(ref: string | null): string | null {
+  const r = typeof ref === 'string' ? ref.trim() : '';
+  return r && r !== '0' ? r : null;
+}
+
+function detalleDeCompra(c: BloqueCompra): string {
+  const partes: string[] = [];
+  if (c.tipo === 'DEVOLUCION') {
+    partes.push(
+      c.aeronave_matricula
+        ? `Devolución de ${c.aeronave_matricula}`
+        : 'Devolución',
+    );
+  } else if (c.tipo === 'AJUSTE') {
+    partes.push('Ajuste de inventario');
+  } else {
+    partes.push(c.proveedor_nombre ?? 'Entrada a bodega');
+  }
+  const ref = refUtil(c.referencia);
+  if (ref) partes.push(`ref ${ref}`);
+  if (c.sin_costo) partes.push('sin costo');
+  if (c.sin_tc) partes.push('sin T.C.');
+  return partes.join(' · ');
+}
+
+function detalleDeVenta(v: BloqueVenta): string {
+  const partes: string[] = [
+    v.para_flota
+      ? 'Toda la flota'
+      : v.vendido_a && v.vendido_a !== '—'
+        ? v.vendido_a
+        : 'Sin avión',
+  ];
+  if (v.a_costo) partes.push('a costo');
+  const ref = refUtil(v.referencia);
+  if (ref) partes.push(`ref ${ref}`);
+  if (v.sin_tc) partes.push('sin T.C.');
+  return partes.join(' · ');
+}
+
+/**
+ * Compras y ventas de `bloquesCardexDe` en UNA lista por fecha (el orden del
+ * cardex: fecha, alta, id). No calcula nada: copia los números del bloque.
+ */
+export function cardexCronologicoDe(bloques: BloquesCardex): FilaCardex[] {
+  const filas: FilaCardex[] = [
+    ...bloques.compras.map(
+      (c): FilaCardex => ({
+        orden: c.orden,
+        movimiento_id: c.movimiento_id,
+        fecha: c.fecha,
+        mes: c.fecha.slice(0, 7),
+        tipo: c.tipo,
+        entra: c.cantidad,
+        sale: null,
+        existencia: c.stock_despues,
+        detalle: detalleDeCompra(c),
+        precio_unitario_mxn: c.precio_unitario_mxn,
+        total_mxn: c.total_mxn,
+        ganancia_mxn: null,
+        a_costo: false,
+        sin_costo: c.sin_costo,
+        sin_tc: c.sin_tc,
+      }),
+    ),
+    ...bloques.ventas.map(
+      (v): FilaCardex => ({
+        orden: v.orden,
+        movimiento_id: v.movimiento_id,
+        fecha: v.fecha,
+        mes: v.fecha.slice(0, 7),
+        tipo: 'SALIDA',
+        entra: null,
+        sale: v.cantidad,
+        existencia: v.remanente,
+        detalle: detalleDeVenta(v),
+        precio_unitario_mxn: v.precio_unitario_mxn,
+        total_mxn: v.total_mxn,
+        ganancia_mxn: v.ganancia_mxn,
+        a_costo: v.a_costo,
+        sin_costo: false,
+        sin_tc: v.sin_tc,
+      }),
+    ),
+  ];
+  return filas.sort((a, b) => a.orden - b.orden);
+}
+
+/** Un mes del cardex: de cuánto partió, qué entró, qué se vendió y en qué quedó. */
+export interface MesCardex {
+  /** YYYY-MM. */
+  mes: string;
+  /** Existencia al ABRIR el mes (después del último movimiento anterior). */
+  stock_inicio: number;
+  /** Unidades que entraron (compras + devoluciones + ajustes). */
+  entradas: number;
+  /** De esas, solo las compras (ENTRADA). */
+  compras: number;
+  /**
+   * Unidades que salieron a los aviones (con precio o a costo): lo que
+   * descuenta el stock. stock_final = stock_inicio + entradas − unidades_vendidas.
+   */
+  unidades_vendidas: number;
+  /** Existencia al CERRAR el mes (en el mes en curso: la de hoy). */
+  stock_final: number;
+  /** Movimientos del mes. */
+  movimientos: number;
+  /** Vendido y utilidad del mes en pesos (`agregadosDeItem`); null = no hubo. */
+  vendido_mxn: number | null;
+  utilidad_mxn: number | null;
+  /** Es el mes de hoy (su stock final es el de hoy, no un cierre). */
+  en_curso: boolean;
+}
+
+/** '2026-09' ⇒ '2026-10'. */
+function mesSiguiente(mes: string): string {
+  const y = Number(mes.slice(0, 4));
+  const m = Number(mes.slice(5, 7));
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+}
+
+/**
+ * Resumen POR MES del cardex de UN ítem: todos los meses del primer
+ * movimiento al mes de `hoy` (o al del último movimiento si es posterior),
+ * también los que no tuvieron movimientos (el stock se arrastra).
+ * `desde`/`hasta` (YYYY-MM-DD) solo acotan qué meses se devuelven: el stock
+ * de apertura sale siempre de TODO el cardex.
+ */
+export function mesesCardexDe(
+  movs: MovCardex[],
+  opts: { hoy: string; desde?: string | null; hasta?: string | null },
+): MesCardex[] {
+  // Solo movimientos con fecha legible (la columna es NOT NULL; defensa).
+  const orden = sortChrono(movs).filter((m) =>
+    /^\d{4}-\d{2}/.test(String(m.fecha_movimiento ?? '')),
+  );
+  if (orden.length === 0) return [];
+  const mesDe = (m: MovForFifo) => String(m.fecha_movimiento ?? '').slice(0, 7);
+  const primero = mesDe(orden[0]);
+  const ultimoMov = mesDe(orden[orden.length - 1]);
+  const mesHoy = opts.hoy.slice(0, 7);
+  let fin = ultimoMov > mesHoy ? ultimoMov : mesHoy;
+  if (opts.hasta && opts.hasta.slice(0, 7) < fin) fin = opts.hasta.slice(0, 7);
+  const inicioVisible = opts.desde ? opts.desde.slice(0, 7) : primero;
+  const out: MesCardex[] = [];
+  let stock = 0;
+  let i = 0;
+  for (let mes = primero; mes <= fin; mes = mesSiguiente(mes)) {
+    const stockInicio = stock;
+    let entradas = 0;
+    let compras = 0;
+    let vendidas = 0;
+    let n = 0;
+    while (i < orden.length && mesDe(orden[i]) === mes) {
+      const m = orden[i];
+      const cant = Number(m.cantidad);
+      if (m.tipo === SALIDA) {
+        stock = round(stock - cant);
+        vendidas = round(vendidas + cant);
+      } else {
+        stock = round(stock + cant);
+        entradas = round(entradas + cant);
+        if (m.tipo === ENTRADA) compras = round(compras + cant);
+      }
+      n += 1;
+      i += 1;
+    }
+    if (mes < inicioVisible) continue;
+    const a =
+      n > 0
+        ? agregadosDeItem(movs, filtroPeriodo(`${mes}-01`, `${mes}-31`))
+        : null;
+    out.push({
+      mes,
+      stock_inicio: stockInicio,
+      entradas,
+      compras,
+      unidades_vendidas: vendidas,
+      stock_final: stock,
+      movimientos: n,
+      vendido_mxn: a?.ventas_mxn ?? null,
+      utilidad_mxn: a?.utilidad_mxn ?? null,
+      en_curso: mes === mesHoy,
+    });
+  }
+  return out;
 }

@@ -77,6 +77,7 @@ import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 import {
   agregadosDeItem,
   bloquesCardexDe,
+  cardexCronologicoDe,
   costoSinTc,
   costoUnitarioMxnDe,
   costoVigenteEn,
@@ -86,6 +87,7 @@ import {
   fijaPrecio,
   filtroPeriodo,
   margenVentaValido,
+  mesesCardexDe,
   montoGastoDeSalida,
   precioTxt,
   precioVentaDeSalida,
@@ -108,15 +110,7 @@ import {
   type OrigenVenta,
   type StatsInventario,
 } from './inventario-cardex.util';
-import {
-  inicioOficialDe,
-  pisoDia,
-  rangoConPiso,
-} from '../../common/inicio-oficial.util';
-import {
-  movAntesDelInicio,
-  saldoInicialCardex,
-} from './inventario-saldo-inicial.util';
+import { etiquetaMes } from '../../common/mes-contable.util';
 // T.C. oficial del día: la MISMA función que usa el cotizador (25-sep-2026).
 import {
   fuenteTcLegible,
@@ -1025,7 +1019,7 @@ export class InventoryService {
 
   /** Cardex (movimientos de inventario) en Excel. */
   async movimientosXlsx(filters: ListMovimientosQuery): Promise<Buffer> {
-    const { data, saldo_inicial } = await this.listMovimientos({
+    const { data } = await this.listMovimientos({
       ...filters,
       limit: 5000,
       offset: 0,
@@ -1085,26 +1079,6 @@ export class InventoryService {
         (x.referencia as string) ?? '',
       ];
     });
-    // INICIO OFICIAL (0.0.85): con artículo, el renglón «Saldo inicial al …»
-    // va AL FINAL (la lista es de la más reciente a la más vieja): existencia
-    // en «Cantidad» y el último precio de compra previo en sus columnas.
-    if (saldo_inicial) {
-      const cv = saldo_inicial.costo_vigente;
-      filas.push([
-        saldo_inicial.fecha,
-        'SALDO INICIAL',
-        saldo_inicial.etiqueta,
-        '',
-        saldo_inicial.existencia,
-        cv?.unitario_mxn != null ? round(cv.unitario_mxn, 2) : null,
-        cv ? cv.moneda : '',
-        cv?.tc_compra != null ? round(cv.tc_compra, 4) : null,
-        cv ? cv.unitario_usd : null,
-        '',
-        '',
-        '',
-      ]);
-    }
     return this.pyservices.generateTablaXlsx({
       titulo: 'Cardex de inventario',
       // Día Cancún (el ISO de UTC fechaba «mañana» de las 19:00 a las 23:59).
@@ -1133,30 +1107,12 @@ export class InventoryService {
       unidad?: string | null;
     };
     const movs = await this.movsCardexCompleto(itemId);
-    // INICIO OFICIAL (invariante 86, 0.0.85): el libro arranca en el inicio
-    // (`filtroPeriodo` solo filtra FILAS: el stock corriente sale de
-    // `walkCardex` sobre TODO el cardex) y abre con el renglón sintético
-    // «Saldo inicial al …» (sin valor de compra: no es una compra).
-    const inicio = await inicioOficialDe(this.configuracion);
-    const { compras, ventas, totales } = bloquesCardexDe(
-      item.nombre,
-      movs,
-      inicio ? filtroPeriodo(inicio) : undefined,
-      { hoy: hoyCancun() },
-    );
-    const saldoInicial = saldoInicialCardex(movs, inicio);
-    const entradaSaldo: CardexLibroEntradaPayload[] = saldoInicial
-      ? [
-          {
-            fecha: saldoInicial.fecha,
-            cantidad: saldoInicial.existencia,
-            descripcion: saldoInicial.etiqueta,
-            valor_compra_unitario: null,
-            valor_compra_total: null,
-            stock_despues: saldoInicial.existencia,
-          },
-        ]
-      : [];
+    // TODO el historial (18-oct-2026, pedido del cliente: «en inventario sí
+    // debemos mostrar lo de agosto y julio, solo en inventario»): el
+    // inventario NO lleva el piso del inicio oficial (invariante 86).
+    const hoy = hoyCancun();
+    const bloques = bloquesCardexDe(item.nombre, movs, undefined, { hoy });
+    const { compras, ventas, totales } = bloques;
     const entradas: CardexLibroEntradaPayload[] = compras.map((c) => ({
       fecha: c.fecha,
       cantidad: c.cantidad,
@@ -1186,8 +1142,39 @@ export class InventoryService {
       // ADITIVO (0.0.36): de qué T.C. salen los pesos (pyservices la pinta
       // en el subtítulo; uno viejo la ignora).
       nota: TEXTOS_INVENTARIO.notaLibro,
-      entradas: [...entradaSaldo, ...entradas],
+      // Formato de SIEMPRE (ENTRADAS | SALIDAS): lo pinta un pyservices
+      // previo, que ignora las llaves de abajo.
+      entradas,
       salidas,
+      // ADITIVOS (18-oct-2026): la LISTA por fecha y el resumen POR MES
+      // (stock al inicio, entradas, unidades vendidas, stock al final). Con
+      // ellas pyservices pinta el formato nuevo.
+      movimientos: cardexCronologicoDe(bloques).map((f) => ({
+        fecha: f.fecha,
+        mes: f.mes,
+        tipo: f.tipo,
+        detalle: f.detalle,
+        entra: f.entra,
+        sale: f.sale,
+        existencia: f.existencia,
+        precio_unitario: f.precio_unitario_mxn,
+        total: f.total_mxn,
+        ganancia: f.ganancia_mxn,
+        a_costo: f.a_costo,
+      })),
+      meses: mesesCardexDe(movs, { hoy }).map((m) => ({
+        mes: m.mes,
+        etiqueta: `${etiquetaMes(m.mes)}${m.en_curso ? ' (en curso)' : ''}`,
+        stock_inicio: m.stock_inicio,
+        entradas: m.entradas,
+        compras: m.compras,
+        unidades_vendidas: m.unidades_vendidas,
+        stock_final: m.stock_final,
+        movimientos: m.movimientos,
+        vendido: m.vendido_mxn,
+        ganancia: m.utilidad_mxn,
+        en_curso: m.en_curso,
+      })),
       // Total de COMPRA = solo las ENTRADAS (una devolución o un ajuste
       // regresan valor al stock, pero no son una compra). Total de VENTA =
       // toda la columna del libro: lo vendido con precio + lo que salió a
@@ -1465,15 +1452,10 @@ export class InventoryService {
         'El periodo está al revés: «desde» es posterior a «hasta».',
       );
     }
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
-    // utilidad de la tienda suma desde el inicio (`desde` sube; un periodo
-    // entero anterior queda vacío). La validación usa lo pedido.
-    const desdeTienda = pisoDia(
-      q.desde,
-      await inicioOficialDe(this.configuracion),
-    );
+    // Sin piso del inicio oficial (18-oct-2026: el inventario muestra TODO
+    // el historial, julio y agosto incluidos).
     const [porItem, margen] = await Promise.all([
-      this.agregadosPorItem(desdeTienda, q.hasta),
+      this.agregadosPorItem(q.desde, q.hasta),
       this.margenVentaPct(),
     ]);
     const suma = (
@@ -1490,7 +1472,7 @@ export class InventoryService {
     return {
       periodo:
         q.desde || q.hasta
-          ? { desde: desdeTienda ?? null, hasta: q.hasta ?? null }
+          ? { desde: q.desde ?? null, hasta: q.hasta ?? null }
           : null,
       margen_venta_pct: margen,
       utilidad_mxn: suma((a) => a.utilidad_mxn),
@@ -1804,19 +1786,13 @@ export class InventoryService {
         ganancia_usd_original: v.gananciaUsdOriginal,
       };
     });
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
-    // cardex del artículo NO lista movimientos anteriores al inicio; stock,
-    // costo vigente y dependencias de arriba salen del cardex COMPLETO. Su
-    // lugar lo toma el aditivo `saldo_inicial` («Saldo inicial al …»).
-    const inicio = await inicioOficialDe(this.configuracion);
+    // TODO el cardex (18-oct-2026): el inventario no lleva el piso del
+    // inicio oficial; ya no viaja el `saldo_inicial` del 0.0.85.
     return {
       ...item,
       ...stats,
       regla_costo: REGLA_COSTO,
-      movimientos: inicio
-        ? movimientos.filter((m) => !movAntesDelInicio(m, inicio))
-        : movimientos,
-      saldo_inicial: saldoInicialCardex(movs, inicio),
+      movimientos,
     };
   }
 
@@ -1859,11 +1835,8 @@ export class InventoryService {
       this.tcHoy(),
     ]);
     const hoy = hoyCancun();
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): las
-    // filas y sumas del periodo arrancan en el inicio (`desde` sube);
-    // existencia, valorizado y precio vigente siguen sobre TODO el cardex.
-    const inicio = await inicioOficialDe(this.configuracion);
-    const desde = pisoDia(q.desde, inicio);
+    // TODO el historial (18-oct-2026): sin piso del inicio oficial.
+    const desde = q.desde;
     const enPeriodo = filtroPeriodo(desde, q.hasta);
     const { compras, ventas, totales } = bloquesCardexDe(
       item.nombre,
@@ -1924,9 +1897,9 @@ export class InventoryService {
         q.desde || q.hasta
           ? { desde: desde ?? null, hasta: q.hasta ?? null }
           : null,
-      // ADITIVO (0.0.85): renglón «Saldo inicial al …» (null sin inicio o
-      // sin movimientos anteriores).
-      saldo_inicial: saldoInicialCardex(movs, inicio),
+      // ADITIVO (18-oct-2026): resumen POR MES (stock al inicio, entradas,
+      // unidades vendidas, stock al final), del mismo recorrido del stock.
+      meses: mesesCardexDe(movs, { hoy, desde, hasta: q.hasta }),
       // ADITIVO (0.0.36): T.C. oficial de hoy (el del valorizado); null = sin dato.
       tc_hoy: tcHoy,
       // ADITIVO (0.0.36): último precio de compra (null = ninguna compra con costo).
@@ -4258,36 +4231,9 @@ export class InventoryService {
   }
 
   async listMovimientos(filters: ListMovimientosQuery) {
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
-    // cardex general (y su Excel) arranca en el inicio; un rango entero
-    // anterior ⇒ vacío. EXCEPCIÓN `sin_costo=true`: es la bandeja de
-    // ENTRADAS pendientes de costo real (trabajo abierto, como un squawk);
-    // hoy 0 anteriores. Con `item_id`, el aditivo `saldo_inicial` (null sin
-    // artículo o sin movimientos previos).
-    const inicio =
-      filters.sin_costo === true
-        ? null
-        : await inicioOficialDe(this.configuracion);
-    const rango = rangoConPiso(
-      { desde: filters.desde, hasta: filters.hasta },
-      inicio,
-    );
-    const saldoInicial =
-      inicio && filters.item_id
-        ? saldoInicialCardex(
-            await this.movsCardexCompleto(filters.item_id),
-            inicio,
-          )
-        : null;
-    if (rango.vacio) {
-      return {
-        data: [],
-        count: 0,
-        limit: filters.limit,
-        offset: filters.offset,
-        saldo_inicial: saldoInicial,
-      };
-    }
+    // TODO el historial (18-oct-2026, «en inventario sí debemos mostrar lo
+    // de agosto y julio»): el cardex general y su Excel no llevan el piso
+    // del inicio oficial (invariante 86).
     let q = this.supabase.service
       .from('inventario_movimiento')
       .select(
@@ -4301,7 +4247,7 @@ export class InventoryService {
     if (filters.item_id) q = q.eq('item_id', filters.item_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.tipo) q = q.eq('tipo', filters.tipo);
-    if (rango.desde) q = q.gte('fecha_movimiento', rango.desde);
+    if (filters.desde) q = q.gte('fecha_movimiento', filters.desde);
     if (filters.hasta) q = q.lte('fecha_movimiento', filters.hasta);
     // Pendientes de costo real (carga masiva a $0): solo cuando viene true.
     if (filters.sin_costo === true) q = q.eq('costo_unitario_usd', 0);
@@ -4313,8 +4259,6 @@ export class InventoryService {
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
-      // ADITIVO (0.0.85): renglón «Saldo inicial al …» del artículo.
-      saldo_inicial: saldoInicial,
     };
   }
 }

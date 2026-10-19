@@ -3019,7 +3019,49 @@ export interface CardexLibroPayload {
   nota?: string | null;
   entradas: CardexLibroEntradaPayload[];
   salidas: CardexLibroSalidaPayload[];
+  /**
+   * ADITIVOS (18-oct-2026, pedido del cliente: el cardex «en forma de lista
+   * por orden de fecha» con «stock inicio del mes y stock final del mes y
+   * cantidad de unidades vendidas»). Con `movimientos` pyservices pinta el
+   * formato nuevo; uno previo los ignora y pinta ENTRADAS | SALIDAS.
+   */
+  movimientos?: CardexLibroMovimientoPayload[];
+  meses?: CardexLibroMesPayload[];
   total_compra: number;
   total_venta: number;
   total_ganancia: number;
+}
+
+/** Una fila de la lista por fecha (montos en la moneda del libro, MXN). */
+export interface CardexLibroMovimientoPayload {
+  fecha: string;
+  /** YYYY-MM (agrupa la lista por mes). */
+  mes: string;
+  tipo: 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE' | 'SALIDA';
+  /** «Aircraft Spruce · ref F-12» / «XA-VGV» / «Toda la flota · a costo». */
+  detalle: string;
+  entra: number | null;
+  sale: number | null;
+  /** Stock después del movimiento. */
+  existencia: number;
+  precio_unitario: number | null;
+  total: number | null;
+  ganancia: number | null;
+  a_costo: boolean;
+}
+
+/** Un renglón del resumen por mes. */
+export interface CardexLibroMesPayload {
+  mes: string;
+  /** «Septiembre 2026» / «Octubre 2026 (en curso)». */
+  etiqueta: string;
+  stock_inicio: number;
+  entradas: number;
+  compras: number;
+  unidades_vendidas: number;
+  stock_final: number;
+  movimientos: number;
+  vendido: number | null;
+  ganancia: number | null;
+  en_curso: boolean;
 }

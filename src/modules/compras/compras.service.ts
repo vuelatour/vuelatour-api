@@ -4,12 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { InventoryService } from '../inventory/inventory.service';
-import { inicioOficialDe } from '../../common/inicio-oficial.util';
-import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { findOrCreateItem } from '../inventory/compras.service';
 import { TipoMovimientoInventario } from '../inventory/dto/inventory.dto';
 import {
@@ -199,10 +196,6 @@ export class ComprasService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly inventory: InventoryService,
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): SOLO la
-    // LISTA de compras (el detalle por id, recibir y pagar no). @Optional y
-    // ÚLTIMO (specs por posición).
-    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private async conCandado<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -228,11 +221,9 @@ export class ComprasService {
       .order('folio', { ascending: false })
       .range(q.offset, q.offset + q.limit - 1);
     if (q.estado) query = query.eq('estado', q.estado);
-    // Inicio oficial (L): compras con `fecha` (date) desde el inicio — las
-    // ABIERTAS anteriores salen de la lista pero abren por id. Existencias
-    // y FIFO no dependen de esta lista.
-    const inicio = await inicioOficialDe(this.configuracion);
-    if (inicio) query = query.gte('fecha', inicio);
+    // Sin piso del inicio oficial (18-oct-2026, pedido del cliente: «en
+    // inventario sí debemos mostrar lo de agosto y julio»): las compras son
+    // del módulo de Inventario.
     const { data, error, count } = await query;
     if (error) throw new Error(error.message);
     const compras = (data ?? []) as unknown as CompraRow[];
