@@ -29,6 +29,7 @@ import { hoyCancun } from './fecha-cancun.util';
 import {
   type DiferimientoVuelo,
   esMesContable,
+  type GastoParaMesContable,
   mesContableDeGasto,
   mesContableDeVuelo,
   mesDePeriodo,
@@ -328,6 +329,39 @@ export interface GastoParaCandado {
   escala_id?: string | null;
 }
 
+/** Lo mínimo del vuelo que el eje del gasto necesita (leído o embebido). */
+export type VueloDelCandado = Pick<
+  VueloMesContable,
+  'fecha_vuelo' | 'aeronave_id' | 'es_externo'
+> &
+  Partial<Pick<VueloMesContable, 'periodo_contable' | 'fecha_contable'>>;
+
+/**
+ * El gasto TAL COMO lo evalúa el candado (PURO, fuente única de la forma):
+ * sus columnas de eje + SU vuelo, sin la escala embebida ni repartos (el
+ * candado no los lee). La usan `mesCandadoDeGasto` y el renglón
+ * `gastos_por_pagar` del pre-cierre (revisión del 19-oct-2026, invariante
+ * 93): así el pre-cierre cuenta un gasto por pagar en el MISMO mes que el
+ * candado protegería al cerrarse (eje vuelo ⇒ mes contable del vuelo; eje
+ * gasto ⇒ `fecha_gasto`). Sin `fecha_contable` en el vuelo (lectura sin la
+ * migración del cierre) el eje vuelo usa `fecha_vuelo`.
+ */
+export function gastoDelCandado(
+  g: GastoParaCandado,
+  vuelo: VueloDelCandado | null,
+): GastoParaMesContable {
+  return {
+    id: g.id ?? '',
+    categoria: g.categoria ?? null,
+    fecha_gasto: g.fecha_gasto ?? null,
+    monto: g.monto ?? null,
+    vuelo_id: g.vuelo_id ?? null,
+    aeronave_id: g.aeronave_id ?? null,
+    escala_id: g.escala_id ?? null,
+    vuelo,
+  };
+}
+
 /**
  * Mes CONTABLE de un gasto para el candado: el eje de
  * `ubicacionBalanceDeGasto` (invariante 72) — eje VUELO ⇒ mes contable del
@@ -345,16 +379,7 @@ export async function mesCandadoDeGasto(
     vueloLeido !== undefined
       ? vueloLeido
       : await leerVueloMesContable(sb, g.vuelo_id ?? null);
-  return mesContableDeGasto({
-    id: g.id ?? '',
-    categoria: g.categoria ?? null,
-    fecha_gasto: g.fecha_gasto ?? null,
-    monto: g.monto ?? null,
-    vuelo_id: g.vuelo_id ?? null,
-    aeronave_id: g.aeronave_id ?? null,
-    escala_id: g.escala_id ?? null,
-    vuelo,
-  });
+  return mesContableDeGasto(gastoDelCandado(g, vuelo));
 }
 
 /**

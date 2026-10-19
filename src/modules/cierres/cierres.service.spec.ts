@@ -17,7 +17,7 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import type { NotificationsService } from '../realtime/notifications.service';
 import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
-import { CierresService } from './cierres.service';
+import { CierresService, textoBloqueantePrevia } from './cierres.service';
 import {
   fakeCierre,
   type Escritura,
@@ -509,5 +509,82 @@ describe('periodo inválido', () => {
     const e = await atrapa(svc.previa('2026-9'));
     expect(e.status).toBe(400);
     expect(e.body.error).toBe('PERIODO_INVALIDO');
+  });
+});
+
+/**
+ * Revisión del 19-oct-2026 (P3): un renglón BLOQUEANTE que NO se pudo leer
+ * (`lectura_fallida: true`, count 0) deja el pre-cierre en `listo: false`;
+ * la previa lo lista entre los bloqueantes (marcado) y el 409
+ * PRECIERRE_NO_LISTO dice «no se pudo verificar» en vez de «: 0». Viaja
+ * también el ADITIVO `ids_nomina` (P2).
+ */
+describe('pre-cierre con un bloqueante SIN VERIFICAR (P3)', () => {
+  const sinVerificar = {
+    periodo: { desde: '2026-09-01', hasta: '2026-09-30' },
+    listo: false,
+    items: [
+      {
+        clave: 'gastos_por_pagar',
+        titulo: 'Gastos por pagar sin confirmar',
+        detalle: 'No se pudieron verificar los gastos por pagar del periodo.',
+        count: 0,
+        monto_mxn: 0,
+        lectura_fallida: true,
+        ids_nomina: [],
+        ids: [],
+      },
+      // Un informativo con lectura caída NO es bloqueante.
+      {
+        clave: 'tacometros_omitidos',
+        titulo: 'Tacómetros omitidos',
+        count: 0,
+        informativo: true,
+        lectura_fallida: true,
+      },
+    ],
+  };
+
+  it('la previa lo lista como bloqueante marcado y no se puede cerrar', async () => {
+    const { svc, ps } = armar();
+    jest.spyOn(ps, 'preCierre').mockResolvedValue(sinVerificar as never);
+    const p = await svc.previa('2026-09');
+    expect(p.listo).toBe(false);
+    expect(p.motivo_no_cerrable).toBe('PRECIERRE_NO_LISTO');
+    expect(p.bloqueantes).toEqual([
+      {
+        clave: 'gastos_por_pagar',
+        titulo: 'Gastos por pagar sin confirmar',
+        count: 0,
+        lectura_fallida: true,
+        ids_nomina: [],
+        ids: [],
+      },
+    ]);
+  });
+
+  it('POST /cierres ⇒ 409 PRECIERRE_NO_LISTO «…: no se pudo verificar» y nada se escribe', async () => {
+    const { svc, ps, f } = armar();
+    jest.spyOn(ps, 'preCierre').mockResolvedValue(sinVerificar as never);
+    const e = await atrapa(svc.cerrar('2026-09', { confirmar: true }, actor()));
+    expect(e.status).toBe(409);
+    expect(e.body.error).toBe('PRECIERRE_NO_LISTO');
+    expect(e.body.message).toBe(
+      'Antes de cerrar septiembre 2026 resuelve los pendientes que bloquean el pre-cierre (Gastos por pagar sin confirmar: no se pudo verificar).',
+    );
+    expect(
+      (e.body.details as { bloqueantes: Array<{ clave: string }> }).bloqueantes,
+    ).toEqual([expect.objectContaining({ clave: 'gastos_por_pagar' })]);
+    expect(f.tablas.cierre_mes).toHaveLength(0);
+  });
+
+  it('un bloqueante con count > 0 sigue diciendo su número', () => {
+    expect(
+      textoBloqueantePrevia({
+        clave: 'gastos_por_pagar',
+        titulo: 'Gastos por pagar sin confirmar',
+        count: 3,
+      }),
+    ).toBe('Gastos por pagar sin confirmar: 3');
   });
 });

@@ -72,6 +72,13 @@ import {
   porPagarVigente,
   resumenGastosPorPagar,
 } from '../expenses/por-pagar.util';
+// Revisión del 19-oct-2026 (P1/P2): el renglón cuenta por MES CONTABLE (la
+// regla del candado de mes cerrado) y separa los ids de NÓMINA.
+import {
+  idsNominaDe,
+  porPagarEnPeriodoContable,
+  selectPorPagarPrecierre,
+} from './gastos-por-pagar-precierre.util';
 import {
   cobradoParteAvion,
   pagoVendedorUsd,
@@ -4045,15 +4052,20 @@ export class ProfitSharingService {
     const nominaSinRepartir = await this.nominaSinRepartirPrecierre(
       gastos.filter((g) => g.categoria === CATEGORIA_NOMINA),
     );
-    // GASTOS POR PAGAR (19-oct-2026, invariante 93): lectura propia del
-    // periodo (estado ≠ PAGADO), paginada y best-effort: caída ⇒ null ⇒
-    // count 0 + `lectura_fallida`; sin la migración ⇒ [] (count 0). BLOQUEA.
+    // GASTOS POR PAGAR (19-oct-2026, invariante 93): lectura propia de los
+    // por pagar vigentes (estado ≠ PAGADO), paginada y best-effort; cuentan
+    // los de ESTE periodo por su MES CONTABLE (revisión P1: la regla del
+    // candado de mes cerrado, no `fecha_gasto`). Caída ⇒ null ⇒ count 0 +
+    // `lectura_fallida` (y `listo: false`, P3); sin la migración ⇒ [] (count
+    // 0). BLOQUEA.
     const hoyPorPagar = hoyCancun(this.ahora());
-    const gastosPorPagar = await this.gastosPorPagarPrecierre(
+    const porPagarPre = await this.gastosPorPagarPrecierre(
       q.desde,
       q.hasta,
       hoyPorPagar,
+      contable,
     );
+    const gastosPorPagar = porPagarPre.lista;
     // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el
     // monto a la baja DESPUÉS de repartir) — el sobrante restaría dinero
     // inexistente a los aviones. Aviso para corregir en Otros gastos.
@@ -4142,6 +4154,16 @@ export class ProfitSharingService {
         g.categoria === 'FIJO' &&
         !repartosPre.has(g.id as string),
     );
+    // GASTOS POR PAGAR (revisión P4, 19-oct-2026, invariante 93): con la
+    // migración, un gasto con fecha FUTURA (por pagar por construcción) aún
+    // no tiene T.C. oficial de SU día —el servicio de T.C. solo mira 7 días
+    // hacia atrás— y ya lo señala `gastos_por_pagar`: no cuenta «sin T.C.» ni
+    // se busca su oficial. Nunca toca un mes cerrable (sus días ya pasaron).
+    // Sin la migración, como el 0.0.94.
+    const esFechaFuturaPorPagar = (g: Record<string, unknown>): boolean =>
+      porPagarPre.disponible &&
+      typeof g.fecha_gasto === 'string' &&
+      g.fecha_gasto.slice(0, 10) > hoyPorPagar;
     const sinTc = gastos.filter(
       // PERSONAL_DUENO no entra al balance USD: su TC no bloquea el cierre.
       // Un pago de AFAC marcado (invariante 90) tampoco: no entra a ningún
@@ -4152,7 +4174,8 @@ export class ProfitSharingService {
         g.categoria !== 'PERSONAL_DUENO' &&
         !esPagoAfac(
           g as { categoria?: string | null; es_pago_afac?: boolean | null },
-        ),
+        ) &&
+        !esFechaFuturaPorPagar(g),
     );
     // TC oficial del día del gasto (29-ago): los MXN sin TC que SÍ tienen
     // referencia oficial YA entran al reparto y al balance (informativo);
@@ -4761,10 +4784,17 @@ export class ProfitSharingService {
     // (14-oct-2026, invariante 62)— permisos sin avión (el permiso lo carga
     // el avión) y —desde el 0.0.90 (16-oct-2026, invariante 91)— nómina sin
     // repartir. El resto es aviso (cobranza/conciliación son procesos).
+    // Revisión del 19-oct-2026 (P3): un bloqueante que NO se pudo leer
+    // (`lectura_fallida: true`; hoy `nomina_sin_repartir` y
+    // `gastos_por_pagar`) tampoco deja cerrar: «0» sin verificar no es 0.
     const bloqueantes: readonly string[] = CLAVES_BLOQUEANTES_PRECIERRE;
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))
-      .every((i) => i.count === 0);
+      .every(
+        (i) =>
+          i.count === 0 &&
+          (i as { lectura_fallida?: unknown }).lectura_fallida !== true,
+      );
 
     // CIERRE DE MES (invariante 89, ADITIVO): estado del mes y si se puede
     // cerrar (orden y estado; el pre-cierre decide `listo`).
@@ -4805,20 +4835,31 @@ export class ProfitSharingService {
 
   /**
    * Pre-cierre · GASTOS «POR PAGAR» SIN CONFIRMAR (19-oct-2026, API 0.0.95,
-   * invariante 93): los gastos del periodo (`fecha_gasto`, ya con el inicio
-   * oficial) con estado ≠ PAGADO (`estadoPagoGasto`: `por_pagar` y sin
-   * conciliar). Lectura PROPIA filtrada por la columna (pocas filas), por
-   * páginas de 1000 ordenadas por id. Sin la migración ⇒ [] (no nombra la
-   * columna). Nunca lanza: un error ⇒ null (`lectura_fallida`).
+   * invariante 93): los por pagar VIGENTES (`estadoPagoGasto` ≠ PAGADO:
+   * `por_pagar` y sin conciliar) de ESTE periodo por su MES CONTABLE
+   * (revisión P1 del 19-oct-2026: la regla del candado de mes cerrado —eje
+   * vuelo ⇒ el mes contable del vuelo; eje gasto ⇒ `fecha_gasto`—; antes
+   * filtraba por `fecha_gasto` y un por pagar de un vuelo de M fechado en
+   * M+1 no frenaba el cierre de M). Lee TODOS los vigentes (son pocos: se
+   * resuelven al marcarlos pagados) con su vuelo embebido, por páginas de
+   * 1000 ordenadas por id, y decide la pertenencia en JS. `disponible` = la
+   * sonda (la usa P4). Sin la migración ⇒ [] (no nombra la columna). Nunca
+   * lanza: un error ⇒ `lista: null` (`lectura_fallida`).
    */
   private async gastosPorPagarPrecierre(
     desde: string,
     hasta: string,
     hoy: string,
-  ): Promise<Array<Record<string, unknown>> | null> {
+    contable: boolean,
+  ): Promise<{
+    disponible: boolean;
+    lista: Array<Record<string, unknown>> | null;
+  }> {
     const sb = this.supabase.service;
+    let disponible = false;
     try {
-      if (!(await porPagarDisponible(sb))) return [];
+      disponible = await porPagarDisponible(sb);
+      if (!disponible) return { disponible, lista: [] };
       const out: Array<Record<string, unknown>> = [];
       for (let pagina = 0; ; pagina += 1) {
         if (pagina >= LOTE_PAGINADO_MAX_PAGINAS) {
@@ -4829,24 +4870,29 @@ export class ProfitSharingService {
         const ini = pagina * PAGINA_POSTGREST;
         const { data, error } = await sb
           .from('gasto')
-          .select('id, monto, moneda, fecha_gasto, por_pagar, conciliado')
+          .select(selectPorPagarPrecierre(colsVueloContable(contable)))
           .eq('por_pagar', true)
           .eq('conciliado', false)
-          .gte('fecha_gasto', desde)
-          .lte('fecha_gasto', hasta)
           .order('id', { ascending: true })
           .range(ini, ini + PAGINA_POSTGREST - 1);
         if (error) throw new Error(error.message);
-        const filas = (data ?? []) as Array<Record<string, unknown>>;
+        const filas = (data ?? []) as unknown as Array<Record<string, unknown>>;
         out.push(...filas);
         if (filas.length < PAGINA_POSTGREST) break;
       }
-      return out.filter((g) => porPagarVigente(g, hoy));
+      return {
+        disponible,
+        lista: out.filter(
+          (g) =>
+            porPagarVigente(g, hoy) &&
+            porPagarEnPeriodoContable(g, desde, hasta),
+        ),
+      };
     } catch (err) {
       this.logger.warn(
         `pre-cierre: no se pudieron verificar los gastos por pagar: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
+      return { disponible, lista: null };
     }
   }
 
@@ -5922,15 +5968,19 @@ function renglonNominaSinRepartir(
 /**
  * Renglón BLOQUEANTE `gastos_por_pagar` del pre-cierre (19-oct-2026, API
  * 0.0.95, invariante 93): los gastos del periodo «por pagar» sin confirmar,
- * su monto por moneda (`monto_usd` solo con dólares; jamás se suman monedas)
- * y sus `ids` como ÚLTIMAS llaves (invariante 81). null (lectura caída) ⇒
- * count 0 + `lectura_fallida: true` + «No se pudieron verificar…».
+ * su monto por moneda (`monto_usd` solo con dólares; jamás se suman monedas),
+ * `ids_nomina` (ADITIVO, revisión P2: el subconjunto de `ids` cuya categoría
+ * es NOMINA, que se resuelve en el módulo Nómina; `[]` si no hay) JUSTO antes
+ * de `ids`, y `ids` / `ids_truncado` como ÚLTIMAS llaves (invariante 81).
+ * null (lectura caída) ⇒ count 0 + `lectura_fallida: true` + «No se
+ * pudieron verificar…».
  */
 function renglonGastosPorPagar(
   lista: Array<Record<string, unknown>> | null,
   hoy: string,
 ) {
   const r = lista ? resumenGastosPorPagar(lista, hoy) : null;
+  const ids = idsPrecierre(lista ?? []);
   return {
     clave: CLAVE_PRECIERRE_GASTOS_POR_PAGAR,
     titulo: TITULO_PRECIERRE_GASTOS_POR_PAGAR,
@@ -5939,7 +5989,8 @@ function renglonGastosPorPagar(
     monto_mxn: r?.mxn ?? 0,
     ...(r && r.usd > 0 ? { monto_usd: r.usd } : {}),
     ...(lista ? {} : { lectura_fallida: true as const }),
-    ...idsPrecierre(lista ?? []),
+    ids_nomina: idsNominaDe(lista ?? [], ids.ids),
+    ...ids,
   };
 }
 

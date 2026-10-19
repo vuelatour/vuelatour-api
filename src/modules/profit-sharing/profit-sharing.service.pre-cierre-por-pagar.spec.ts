@@ -91,6 +91,8 @@ function armar(
     sinPorPagar?: boolean;
     fallarPorPagar?: boolean;
     inicio?: string | null;
+    /** Sin la migración del cierre (20261016000004): 42703 / 42P01. */
+    sinCierre?: boolean;
   } = {},
 ) {
   const from = (tabla: string) => {
@@ -117,6 +119,29 @@ function armar(
     }
     const resolver = (): { data: Fila[] | null; error: unknown } => {
       const sel = ops.find((o) => o[0] === 'select')?.[1][0];
+      if (opts.sinCierre) {
+        if (tabla === 'cierre_mes' || tabla === 'cierre_mes_vuelo') {
+          return {
+            data: null,
+            error: {
+              code: '42P01',
+              message: `relation ${tabla} does not exist`,
+            },
+          };
+        }
+        if (
+          typeof sel === 'string' &&
+          /\b(periodo_contable|fecha_contable)\b/.test(sel)
+        ) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column vuelo.periodo_contable does not exist',
+            },
+          };
+        }
+      }
       const nombra = typeof sel === 'string' && /\bpor_pagar\b/.test(sel);
       if (tabla === 'gasto' && nombra && opts.sinPorPagar) {
         return {
@@ -269,6 +294,8 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       count: 3,
       monto_mxn: 1250.5,
       monto_usd: 40,
+      // ADITIVO (revisión P2, 19-oct-2026): sin nómina, `[]`.
+      ids_nomina: [],
       ids: ['g-futuro', 'g-usd', 'g-vencido'],
     });
     expect(Object.keys(i).at(-1)).toBe('ids');
@@ -294,6 +321,7 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       detalle: 'Ningún gasto del periodo quedó por pagar.',
       count: 0,
       monto_mxn: 0,
+      ids_nomina: [],
       ids: [],
     });
     expect(r.listo).toBe(true);
@@ -326,8 +354,12 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       count: 0,
       monto_mxn: 0,
       lectura_fallida: true,
+      ids_nomina: [],
       ids: [],
     });
+    // Revisión P3 (19-oct-2026): un bloqueante sin verificar NO deja cerrar
+    // (antes `listo` quedaba en true con este mundo limpio).
+    expect(r.listo).toBe(false);
   });
 
   it('SIN la migración ⇒ count 0 sin `lectura_fallida` (no bloquea)', async () => {
@@ -346,6 +378,7 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       detalle: 'Ningún gasto del periodo quedó por pagar.',
       count: 0,
       monto_mxn: 0,
+      ids_nomina: [],
       ids: [],
     });
     expect(r.listo).toBe(true);
@@ -366,5 +399,232 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
     expect(i.monto_mxn).toBe(1050);
     expect((i.ids as string[]).length).toBe(500);
     expect(i.ids_truncado).toBe(true);
+  });
+});
+
+/**
+ * Revisión del 19-oct-2026.
+ *  - P1: el renglón cuenta por MES CONTABLE, la MISMA regla del candado de
+ *    mes cerrado (eje vuelo ⇒ el mes contable del vuelo; eje gasto ⇒
+ *    `fecha_gasto`). Antes filtraba por `fecha_gasto`: un por pagar de un
+ *    vuelo de septiembre fechado en octubre no frenaba el cierre de
+ *    septiembre y, cerrado éste, quedaba atrapado (409 MES_CERRADO).
+ *  - P2: `ids_nomina` (subconjunto de `ids`) justo antes de `ids`.
+ *  - P4: un gasto MXN sin T.C. con fecha FUTURA (por pagar) no cuenta en
+ *    `gastos_sin_tc` ni se busca su oficial (con la migración).
+ */
+describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE (P1), `ids_nomina` (P2) y sin T.C. futuro (P4)', () => {
+  beforeAll(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  const SEP = { desde: '2026-09-01', hasta: '2026-09-30' };
+  const V400 = 'v4000000-0000-4000-8000-000000000400';
+  /** El vuelo embebido como lo trae PostgREST (con la migración del cierre). */
+  const vuelo = (fechaVuelo: string, extra: Fila = {}): Fila => ({
+    fecha_vuelo: fechaVuelo,
+    periodo_contable: null,
+    fecha_contable: fechaVuelo,
+    aeronave_id: A1,
+    es_externo: false,
+    ...extra,
+  });
+  const porPagarDeVuelo = (id: string, extra: Fila): Fila =>
+    gasto(id, {
+      por_pagar: true,
+      vuelo_id: V400,
+      categoria: 'TAXI',
+      medio_pago: 'EFECTIVO',
+      ...extra,
+    });
+  const enPeriodo = async (
+    tablas: Record<string, Fila[]>,
+    periodo: { desde: string; hasta: string },
+    opts: Parameters<typeof armar>[1] = {},
+  ) => {
+    const r = (await armar(tablas, opts).preCierre(
+      periodo,
+    )) as unknown as Respuesta;
+    return { r, i: item(r, 'gastos_por_pagar') };
+  };
+
+  it('caso 30-sep/01-oct: TAXI por pagar del vuelo #400 (30-sep) fechado el 1-oct ⇒ cuenta en SEPTIEMBRE (bloquea) y NO en octubre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-taxi', {
+          fecha_gasto: '2026-10-01',
+          monto: '500.00',
+          vuelo: vuelo('2026-09-30T20:00:00Z'),
+        }),
+      ],
+    };
+    const sep = await enPeriodo(tablas, SEP);
+    expect(sep.i).toMatchObject({ count: 1, monto_mxn: 500, ids: ['g-taxi'] });
+    expect(sep.r.listo).toBe(false);
+    const oct = await enPeriodo(tablas, PERIODO);
+    expect(oct.i).toMatchObject({ count: 0, ids: [] });
+  });
+
+  it('oficina a +11 días: OPERACIONES de un vuelo del 25-sep con fecha de pago 09-oct ⇒ septiembre, no octubre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-asur', {
+          categoria: 'OPERACIONES',
+          medio_pago: 'TRANSFERENCIA',
+          fecha_gasto: '2026-10-09',
+          monto: '4500.00',
+          vuelo: vuelo('2026-09-25T18:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({
+      count: 1,
+      ids: ['g-asur'],
+    });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({ count: 0 });
+  });
+
+  it('al revés: HOTEL por pagar fechado el 28-sep de un vuelo del 2-oct ⇒ octubre (el mes de sus libros), no septiembre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-hotel', {
+          categoria: 'HOTEL',
+          fecha_gasto: '2026-09-28',
+          vuelo: vuelo('2026-10-02T15:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-hotel'],
+    });
+  });
+
+  it('vuelo DIFERIDO a octubre al cerrar septiembre (`fecha_contable` 1-oct): su por pagar cuenta en OCTUBRE', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-dif', {
+          fecha_gasto: '2026-09-30',
+          vuelo: vuelo('2026-09-30T20:00:00Z', {
+            periodo_contable: '2026-10-01T05:00:00Z',
+            fecha_contable: '2026-10-01T05:00:00Z',
+          }),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-dif'],
+    });
+  });
+
+  it('eje GASTO (categoría de EMPRESA aunque traiga vuelo): por su `fecha_gasto`', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-otro', {
+          categoria: 'OTRO',
+          fecha_gasto: '2026-10-01',
+          vuelo: vuelo('2026-09-30T20:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-otro'],
+    });
+  });
+
+  it('SIN la migración del cierre: el eje vuelo usa `fecha_vuelo` (y la lectura no nombra `fecha_contable`)', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-taxi', {
+          fecha_gasto: '2026-10-01',
+          vuelo: {
+            fecha_vuelo: '2026-09-30T20:00:00Z',
+            aeronave_id: A1,
+            es_externo: false,
+          },
+        }),
+      ],
+    };
+    const sep = await enPeriodo(tablas, SEP, { sinCierre: true });
+    expect(sep.i).toMatchObject({ count: 1, ids: ['g-taxi'] });
+    expect(sep.i).not.toHaveProperty('lectura_fallida');
+    expect(
+      (await enPeriodo(tablas, PERIODO, { sinCierre: true })).i,
+    ).toMatchObject({ count: 0 });
+  });
+
+  it('`ids_nomina`: los ids de NÓMINA por pagar (subconjunto de `ids`), justo ANTES de `ids`', async () => {
+    const { i } = await enPeriodo(
+      {
+        aeronave: AERONAVES,
+        gasto: [
+          gasto('g-taxi', { por_pagar: true, fecha_gasto: '2026-10-25' }),
+          gasto('g-nomina', {
+            por_pagar: true,
+            categoria: 'NOMINA',
+            aeronave_id: null,
+            medio_pago: 'TRANSFERENCIA',
+            fecha_gasto: '2026-10-30',
+            monto: '45000.00',
+          }),
+        ],
+      },
+      PERIODO,
+    );
+    expect(i.count).toBe(2);
+    expect([...(i.ids as string[])].sort()).toEqual(['g-nomina', 'g-taxi']);
+    expect(i.ids_nomina).toEqual(['g-nomina']);
+    expect(Object.keys(i).slice(-2)).toEqual(['ids_nomina', 'ids']);
+  });
+
+  it('P4: un MXN sin T.C. por pagar con fecha FUTURA no cuenta «sin T.C.» ni se busca su oficial; sin la migración, como el 0.0.94', async () => {
+    const tablas = (): Record<string, Fila[]> => ({
+      aeronave: AERONAVES,
+      gasto: [
+        gasto('g-futuro', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-28',
+        }),
+      ],
+    });
+    const svc = armar(tablas());
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    expect(item(r, 'gastos_sin_tc')).toMatchObject({ count: 0, ids: [] });
+    expect(item(r, 'gastos_por_pagar')).toMatchObject({
+      count: 1,
+      ids: ['g-futuro'],
+    });
+    const tc = (
+      svc as unknown as {
+        tipoCambio: { oficialDetallePara: jest.Mock };
+      }
+    ).tipoCambio.oficialDetallePara;
+    expect(
+      (tc.mock.calls as unknown[][]).some((c) =>
+        String(c[0]).startsWith('2026-10-28'),
+      ),
+    ).toBe(false);
+
+    // Sin la migración: el gasto (que nadie marcó por pagar) sigue «sin T.C.».
+    const viejo = (await armar(tablas(), { sinPorPagar: true }).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
+    expect(item(viejo, 'gastos_sin_tc')).toMatchObject({
+      count: 1,
+      ids: ['g-futuro'],
+    });
   });
 });
