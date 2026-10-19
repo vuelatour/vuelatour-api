@@ -257,6 +257,17 @@ export interface ComisionesDelVuelo {
   vendedor_usd_sin_tc_n: number;
   /** Su parte del avión en MXN (va a `gastos_sin_tc_mxn` del reparto). */
   vendedor_usd_sin_tc_mxn: number;
+  /**
+   * REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92), ADITIVOS y
+   * SOLO cuando son > 0 (sin ellos, el objeto de siempre byte a byte): los
+   * DÓLARES de la parte del avión que restaron en `total_usd` pero NO
+   * llegaron a pesos — comisión bancaria de un cobro USD sin T.C. propio ni
+   * K (`banco_sin_tc`) y pagos «(avión)» en USD sin `tc_gasto` ni K
+   * (`vendedor_sin_tc`). El reparto los suma a `pesos_sin_tc_usd` (el saldo
+   * en pesos queda incompleto y se avisa). El balance no los usa.
+   */
+  banco_sin_pesos_usd?: number;
+  vendedor_sin_pesos_usd?: number;
 }
 
 const round2 = (n: number): number =>
@@ -774,6 +785,8 @@ export function comisionesDelVuelo(
   let bancoMxn = 0;
   let bancoUsd = 0;
   let bancoSinTc = 0;
+  // Dólares de la parte del avión sin pesos (reparto en pesos, 0.0.94).
+  let bancoSinPesosUsd = 0;
   if (aplica) {
     const factorCobro = factorCobroAvion(i.cobros, k, p, cancelado);
     for (const c of i.cobros) {
@@ -792,7 +805,10 @@ export function comisionesDelVuelo(
       const parteUsd =
         comUsd != null ? i.parteAvion(round2(comUsd * factorCobro)) : null;
       if (parteMxn != null) bancoMxn += parteMxn;
-      else bancoSinTc += 1;
+      else {
+        bancoSinTc += 1;
+        if (parteUsd != null) bancoSinPesosUsd += parteUsd;
+      }
       if (parteUsd != null) bancoUsd += parteUsd;
 
       const metodo =
@@ -850,6 +866,7 @@ export function comisionesDelVuelo(
   let vendedorSinTc = false;
   let vendedorUsdSinTcN = 0;
   let vendedorUsdSinTcMxn = 0;
+  let vendedorSinPesosUsd = 0;
   if (absorbido) {
     const pagosMxn = pagosVendedorDeVuelo(i.gastos, aMxn, 'AVION');
     // OJO: `pagadoMxn` de ESTA llamada son DÓLARES — es «la suma convertida
@@ -858,6 +875,16 @@ export function comisionesDelVuelo(
     vendedorMxn = i.parteAvion(pagosMxn.pagadoMxn ?? 0);
     vendedorUsd = i.parteAvion(pagosUsd.pagadoMxn ?? 0);
     vendedorSinTc = pagosMxn.sinTc > 0;
+    if (vendedorSinTc) {
+      // REPARTO EN PESOS (0.0.94): los dólares (parte del avión) de los pagos
+      // «(avión)» que restaron en USD y no llegaron a pesos.
+      const sinPesos = pagosVendedorDeVuelo(
+        i.gastos.filter((g) => aMxn(g) == null),
+        aUsd,
+        'AVION',
+      );
+      vendedorSinPesosUsd = i.parteAvion(sinPesos.pagadoMxn ?? 0);
+    }
     vendedorUsdSinTcN = pagosUsd.sinTc;
     if (pagosUsd.sinTc > 0) {
       // Pagos «(avión)» MXN sin tc_gasto ni K: no llegan a USD — su parte del
@@ -938,5 +965,12 @@ export function comisionesDelVuelo(
     ...contadores,
     vendedor_usd_sin_tc_n: vendedorUsdSinTcN,
     vendedor_usd_sin_tc_mxn: round2(vendedorUsdSinTcMxn),
+    // ADITIVOS (0.0.94, invariante 92): SOLO cuando son > 0.
+    ...(bancoSinPesosUsd > 0
+      ? { banco_sin_pesos_usd: round2(bancoSinPesosUsd) }
+      : {}),
+    ...(vendedorSinPesosUsd > 0
+      ? { vendedor_sin_pesos_usd: round2(vendedorSinPesosUsd) }
+      : {}),
   };
 }

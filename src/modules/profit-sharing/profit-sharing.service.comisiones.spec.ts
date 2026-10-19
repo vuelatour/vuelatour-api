@@ -575,6 +575,11 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         'aviones.0.reparto.0.monto_usd',
         'aviones.0.reparto.1.monto_usd',
         'aviones.0.saldo_disponible_usd',
+        // API 0.0.94 (invariante 92): lo mismo EN PESOS (aditivo).
+        'aviones.0.ingresos.comisiones_venta_mxn',
+        'aviones.0.reparto.0.monto_mxn',
+        'aviones.0.reparto.1.monto_mxn',
+        'aviones.0.saldo_disponible_mxn',
       ].sort(),
     );
     // Antes de la vigencia una «(VuelaTour)» tampoco resta: la paga VuelaTour.

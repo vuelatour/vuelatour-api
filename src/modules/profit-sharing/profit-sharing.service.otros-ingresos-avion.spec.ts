@@ -197,6 +197,8 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
         comision: null,
         neto: 46550.8,
         usd: 2586.16,
+        // ADITIVO (0.0.94, invariante 92): el neto EN PESOS.
+        mxn: 46550.8,
         tc: 18,
         tc_oficial: true,
         // ADITIVO al final (0.0.77): de dónde salió el T.C.
@@ -382,6 +384,8 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
         moneda: 'MXN',
         comision: null,
         usd: 2586.16,
+        // ADITIVO (0.0.94, invariante 92): el neto EN PESOS.
+        mxn: 46550.8,
       },
     ]);
     expect(Object.keys(tst).slice(-3)).toEqual([

@@ -21,6 +21,12 @@ export interface RepartoSocioPayload {
   socio_nombre: string;
   porcentaje: number;
   monto_usd: number;
+  /**
+   * ADITIVO (18/19-oct-2026, API 0.0.94, invariante 92): el MISMO reparto
+   * por porcentaje sobre `saldo_mxn` (residuo mayor en centavos, lo decide
+   * el API). pyservices lo pinta solo con `reparto_en_pesos`.
+   */
+  monto_mxn?: number;
 }
 
 /**
@@ -49,6 +55,12 @@ export interface RepartoVueloLineaPayload {
   estado: string | null;
   cobrado_usd: number;
   pendiente_usd: number;
+  /**
+   * ADITIVOS (0.0.94, invariante 92): la parte del avión cobrada / pendiente
+   * EN PESOS (round2(USD × K del vuelo)); null = sin ningún T.C. ⇒ «—».
+   */
+  cobrado_mxn?: number | null;
+  pendiente_mxn?: number | null;
   participacion: number;
   multi_avion: boolean;
   /** Tramos de este avión ("CUN→MID"); informativo. */
@@ -103,6 +115,34 @@ export interface RepartoAvionPayload {
   otros_ingresos_avion_usd?: number;
   otros_ingresos_avion_sin_tc_mxn?: number;
   otros_ingresos_avion?: RepartoOtroIngresoLineaPayload[];
+  /**
+   * REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92; §2b del
+   * contrato, nombres EXACTOS de `RepartoAvion` de pyservices 16d6e2f). La
+   * MISMA cascada en PESOS REALES: venta del avión × el K de su vuelo (T.C.
+   * de la cotización ?? oficial del día de la cotización), comisiones con la
+   * fuente única del balance, gastos MXN tal cual (también los que no tienen
+   * T.C.: no llegan a dólares pero sus pesos son reales), USD × su T.C. o el
+   * oficial de su día, reserva × el oficial del cierre, otros ingresos con
+   * su neto en pesos. Los cobros MXN sin ningún T.C. (`cobros_sin_tc_mxn`)
+   * quedan FUERA de los pesos como de los dólares. `saldo_mxn` = el
+   * `saldo_disponible_mxn` de la pantalla; `otros_mxn` = los otros
+   * prorrateados. `pesos_sin_tc_usd` > 0 ⇒ el saldo en pesos está
+   * incompleto (pyservices lo avisa). `reserva_tc` = el oficial del cierre
+   * con que se pasó la reserva (null sin dato). Viajan SIEMPRE desde el
+   * 0.0.94; pyservices los pinta solo con `reparto_en_pesos`.
+   */
+  ingresos_cobrado_mxn?: number;
+  comisiones_venta_mxn?: number;
+  pendiente_cobro_mxn?: number;
+  gastos_directos_mxn?: number;
+  gastos_indirectos_mxn?: number;
+  permisos_mxn?: number;
+  otros_mxn?: number;
+  reserva_overhaul_mxn?: number;
+  otros_ingresos_avion_mxn?: number;
+  saldo_mxn?: number;
+  pesos_sin_tc_usd?: number;
+  reserva_tc?: number | null;
 }
 
 /**
@@ -121,6 +161,11 @@ export interface RepartoOtroIngresoLineaPayload {
   moneda: 'MXN' | 'USD';
   comision: number | null;
   usd: number | null;
+  /**
+   * ADITIVO (0.0.94, invariante 92): el neto EN PESOS (MXN tal cual; USD ×
+   * su T.C. propio); null = USD sin T.C. (no llegó a pesos).
+   */
+  mxn?: number | null;
 }
 
 /** Resumen global del TC oficial de respaldo usado en el periodo (nota). */
@@ -159,6 +204,17 @@ export interface RepartoPdfPayload {
    * Un API previo no la manda.
    */
   comision_vendedor_solo_gasto_real?: true;
+  /**
+   * ADITIVA (18/19-oct-2026, API 0.0.94, invariante 92): el PDF y el Excel
+   * del reparto van EN PESOS (los `*_mxn` de cada avión, `monto_mxn` de
+   * cada socio, `cobrado_mxn`/`pendiente_mxn` de cada vuelo y `mxn` de cada
+   * otro ingreso); los dólares quedan informativos. Viaja SIEMPRE desde el
+   * 0.0.94; pyservices (16d6e2f) solo enciende con un `true` JSON y sin ella
+   * pinta byte a byte lo de siempre. pyservices acepta además
+   * `gastos_por_categoria[i].mxn`, pero el API NO manda `gastos_por_categoria`
+   * al PDF/XLSX (nunca lo mandó: la tabla no se imprime).
+   */
+  reparto_en_pesos?: true;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';

@@ -77,6 +77,7 @@ import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
 import {
   avisosReembolsoGasto,
   diaTcOficialIngreso,
+  filaLibroDeIngreso,
   gastosLigadosDelLibro,
   ingresoEsDelAvion,
   leerIngresosDeResultado,
@@ -490,6 +491,14 @@ interface GastoCategoriaAcc {
   /** De `count`: los MXN convertidos con el TC oficial del día del gasto. */
   tc_oficial_count: number;
   tc_oficial_mxn: number;
+  /**
+   * REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92): la
+   * categoría EN PESOS (MXN tal cual —menos TUA/extensión embebidas—, con o
+   * sin T.C.; USD × su `tc_gasto` o el oficial de su día) y los DÓLARES que
+   * no llegaron a pesos (USD sin ningún T.C.; solo cuentan si restan).
+   */
+  mxn: number;
+  sin_pesos_usd: number;
 }
 interface CobroRow {
   /** ADITIVOS (14-oct-2026, invariante 77): «Vuelos cobrados de más». */
@@ -752,6 +761,8 @@ export class ProfitSharingService {
           socio_nombre: r.socio_nombre,
           porcentaje: r.porcentaje,
           monto_usd: r.monto_usd,
+          // ADITIVO (0.0.94, invariante 92): el mismo reparto EN PESOS.
+          monto_mxn: r.monto_mxn,
         })),
         // Detalle de vuelos del avión (RepartoVueloLinea de pyservices): la
         // PARTE del avión cobrada / pendiente (misma cifra que la card y que
@@ -764,6 +775,10 @@ export class ProfitSharingService {
           estado: v.estado,
           cobrado_usd: v.cobrado_avion_usd,
           pendiente_usd: v.pendiente_avion_usd,
+          // ADITIVOS (0.0.94, invariante 92): lo mismo EN PESOS (null = sin
+          // ningún T.C. para pasarlo a pesos ⇒ «—»).
+          cobrado_mxn: v.cobrado_avion_mxn,
+          pendiente_mxn: v.pendiente_avion_mxn,
           participacion: v.participacion ?? 1,
           multi_avion: v.multi_avion ?? false,
           tramos_avion: v.tramos_ruta_avion ?? v.tramos_avion ?? null,
@@ -777,6 +792,26 @@ export class ProfitSharingService {
               }
             : {}),
         })),
+        // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92; §2b
+        // del contrato, nombres de `RepartoAvion` de pyservices): la MISMA
+        // cascada EN PESOS que la pantalla. OJO a los nombres: el saldo viaja
+        // como `saldo_mxn` (en la pantalla, `saldo_disponible_mxn`) y los
+        // otros prorrateados como `otros_mxn`. Los gastos MXN sin T.C. y los
+        // otros ingresos MXN SÍ cuentan en pesos; los cobros MXN sin ningún
+        // T.C. (`cobros_sin_tc_mxn`) quedan fuera (igual que de los dólares).
+        // Van ANTES de las llaves que los specs fijan como las últimas.
+        ingresos_cobrado_mxn: a.ingresos.cobrado_mxn,
+        comisiones_venta_mxn: a.ingresos.comisiones_venta_mxn,
+        pendiente_cobro_mxn: a.ingresos.pendiente_cobro_mxn,
+        gastos_directos_mxn: a.gastos.directos_mxn,
+        gastos_indirectos_mxn: a.gastos.indirectos_mxn,
+        permisos_mxn: a.gastos.permisos_mxn,
+        otros_mxn: a.gastos.otros_prorrateados_mxn,
+        reserva_overhaul_mxn: a.reserva_overhaul_mxn,
+        otros_ingresos_avion_mxn: a.ingresos.otros_ingresos_avion_mxn,
+        saldo_mxn: a.saldo_disponible_mxn,
+        pesos_sin_tc_usd: a.pesos_sin_tc_usd,
+        reserva_tc: a.detalle.reserva.tc,
         // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): los ingresos
         // asignados a este avión. `saldo_usd` YA incluye
         // `otros_ingresos_avion_usd` (pyservices jamás lo vuelve a sumar);
@@ -793,8 +828,15 @@ export class ProfitSharingService {
           moneda: l.moneda,
           comision: l.comision,
           usd: l.usd,
+          // ADITIVO (0.0.94, invariante 92): el neto EN PESOS.
+          mxn: l.mxn,
         })),
       })),
+      // ADITIVA (18/19-oct-2026, API 0.0.94, invariante 92): el PDF y el
+      // Excel del reparto van EN PESOS (los `*_mxn` de cada avión); los
+      // dólares quedan informativos. Viaja SIEMPRE, ANTES de la bandera que
+      // los specs fijan como la última.
+      reparto_en_pesos: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real, en dos categorías —
       // `comisiones_venta_usd` = parte del avión de la bancaria + los pagos
@@ -861,6 +903,9 @@ export class ProfitSharingService {
       // de llegar a su propio EmptyState).
       return {
         periodo: { desde: q.desde, hasta: q.hasta },
+        // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92):
+        // la bandera viaja también en la respuesta vacía.
+        reparto_en_pesos: true as const,
         gastos_sin_tc: { count: 0, monto_mxn: 0 },
         gastos_tc_oficial: { count: 0, monto_mxn: 0 },
         tc_oficial: {
@@ -1018,28 +1063,45 @@ export class ProfitSharingService {
     );
     // (d) INGRESOS de los aviones en MXN sin T.C. propio (13-oct-2026,
     // invariante 67): el oficial del día del INGRESO, en el MISMO lote.
+    //
+    // Vuelos que HOY (0.0.93) piden el K oficial para sus DÓLARES: los de
+    // los cobros (a), los de la «(avión)» en pesos (c) y (e) el externo sin
+    // T.C. en la cotización con costo del operador y algún gasto de columnas
+    // (el K —oficial del día de la cotización, el MISMO del balance— decide
+    // si ese gasto es el pago al operador, invariante 88; va al mapa de (c)).
+    const vuelosKDolares = new Set(
+      vuelos
+        .filter(
+          (v) =>
+            vuelosTcCobros.has(v.id) ||
+            pagoVendedorAvionNecesitaK(
+              gastosVendedorPorVuelo.get(v.id) ?? [],
+              v.tc_usd_mxn,
+            ) ||
+            (v.es_externo === true &&
+              v.estado !== 'CANCELADO' &&
+              pos(v.tc_usd_mxn) == null &&
+              pos(v.costo_externo_usd) != null &&
+              (gastosExternoPorVuelo.get(v.id) ?? []).some((g) =>
+                gastoRestaEnColumnasDelVuelo(g.categoria),
+              )),
+        )
+        .map((v) => v.id),
+    );
+    // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92): el
+    // resolver recibe TODOS los vuelos —el K de los pesos es el del balance:
+    // capturado ?? oficial del día de la cotización para TODO vuelo sin
+    // tc_usd_mxn—, los gastos en DÓLARES sin tc_gasto (el oficial de su día
+    // los pasa a pesos) y el día de la RESERVA (oficial del cierre del
+    // periodo: min(hasta, hoy Cancún)), en el MISMO lote de días. Los mapas
+    // de los DÓLARES (`tcOficial.vuelo`, `tcKComisionesVuelo`) siguen
+    // restringidos a los vuelos que ya lo pedían: ningún USD se mueve.
+    const diaReserva = [q.hasta, hoyCancun(this.ahora())].sort()[0];
     const tcResuelto = await this.resolverTcOficial(
-      vuelos.filter(
-        (v) =>
-          vuelosTcCobros.has(v.id) ||
-          pagoVendedorAvionNecesitaK(
-            gastosVendedorPorVuelo.get(v.id) ?? [],
-            v.tc_usd_mxn,
-          ) ||
-          // (e) Externo sin T.C. en la cotización con costo del operador y
-          // algún gasto de columnas: el K (oficial del día de la
-          // cotización, el MISMO del balance) decide si ese gasto es el pago
-          // al operador (invariante 88). Va al mapa de (c).
-          (v.es_externo === true &&
-            v.estado !== 'CANCELADO' &&
-            pos(v.tc_usd_mxn) == null &&
-            pos(v.costo_externo_usd) != null &&
-            (gastosExternoPorVuelo.get(v.id) ?? []).some((g) =>
-              gastoRestaEnColumnasDelVuelo(g.categoria),
-            )),
-      ),
+      vuelos,
       gastos,
       ingresosDeAviones,
+      { gastosUsd: gastos, dias: [diaReserva] },
     );
     const tcOficial = {
       vuelo: new Map(
@@ -1049,8 +1111,14 @@ export class ProfitSharingService {
       ingreso: tcResuelto.ingreso,
     };
     const tcKComisionesVuelo = new Map(
-      [...tcResuelto.vuelo].filter(([id]) => !vuelosTcCobros.has(id)),
+      [...tcResuelto.vuelo].filter(
+        ([id]) => !vuelosTcCobros.has(id) && vuelosKDolares.has(id),
+      ),
     );
+    // K de los PESOS de cada vuelo (mapa completo) y oficiales en pesos.
+    const tcPesosVuelo = tcResuelto.vuelo;
+    const tcOficialGastoUsd = tcResuelto.gastoUsd;
+    const tcReserva = tcResuelto.porDia.get(diaReserva)?.tc ?? null;
 
     // Horas voladas del periodo por avión (por tramo: el avión de la escala
     // puede diferir del principal del vuelo). Base de la reserva de overhaul.
@@ -1169,6 +1237,11 @@ export class ProfitSharingService {
     let sinTcMxn = 0;
     let fijosTcOficialCount = 0;
     let fijosTcOficialMxn = 0;
+    // REPARTO EN PESOS (0.0.94, invariante 92): el MISMO pool EN PESOS (MXN
+    // tal cual, con o sin T.C.; USD × tc_gasto ?? oficial de su día) y los
+    // dólares del pool que no llegaron a pesos.
+    let fijoPoolMxn = 0;
+    let fijoPoolSinPesosUsd = 0;
     for (const g of gastosAtribuidos) {
       if (g.categoria !== FIJO || g.es_reparto_parcial) continue;
       const conv = this.toUsd(g, tcOficial.gasto);
@@ -1182,8 +1255,14 @@ export class ProfitSharingService {
           fijosTcOficialMxn += Number(g.monto);
         }
       }
+      const mxn = this.toMxn(g, tcOficialGastoUsd);
+      if (mxn != null) fijoPoolMxn += mxn;
+      else if (conv !== null) fijoPoolSinPesosUsd += conv.usd;
     }
     const otrosPorAvion = activos > 0 ? fijoPoolUsd / activos : 0;
+    const otrosPorAvionMxn = activos > 0 ? fijoPoolMxn / activos : 0;
+    const otrosPorAvionSinPesosUsd =
+      activos > 0 ? fijoPoolSinPesosUsd / activos : 0;
 
     const socioIds = [...new Set(socios.map((s) => s.socio_id))];
     const [nombres, clientes] = await Promise.all([
@@ -1220,6 +1299,12 @@ export class ProfitSharingService {
         vuelosConPagoVendedorAvion,
         ingresosAvion: ingresosPartidos.porAvion.get(a.id) ?? [],
         tcOficialIngreso: tcOficial.ingreso,
+        // REPARTO EN PESOS (0.0.94, invariante 92).
+        tcPesosVuelo,
+        tcOficialGastoUsd,
+        otrosPorAvionMxn,
+        otrosPorAvionSinPesosUsd,
+        tcReserva,
       }),
     );
 
@@ -1379,6 +1464,11 @@ export class ProfitSharingService {
 
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
+      // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92): cada
+      // avión trae su cascada EN PESOS (`*_mxn`, `pesos_sin_tc_usd`); con
+      // esta bandera el panel pinta los pesos como lo principal. Viaja
+      // SIEMPRE (también en la respuesta vacía).
+      reparto_en_pesos: true as const,
       ...(cierre ? { cierre } : {}),
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
       // ADITIVO (29-ago): FIJOS del pool convertidos con el TC oficial del
@@ -1833,6 +1923,25 @@ export class ProfitSharingService {
        * de arriba (sin él, ninguno).
        */
       tcOficialIngreso?: ReadonlyMap<string, TipoCambioDetalle>;
+      /**
+       * REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92).
+       * Opcionales SOLO para los specs que arman el ctx a mano (sin ellos:
+       * K = capturado ?? los mapas de siempre, pool en pesos 0, reserva sin
+       * T.C.); `compute()` los manda siempre.
+       *  - `tcPesosVuelo`: vuelo.id → oficial del día de la cotización de
+       *    TODO vuelo sin tc_usd_mxn (el K del balance).
+       *  - `tcOficialGastoUsd`: gasto.id → oficial del día de cada gasto en
+       *    DÓLARES sin tc_gasto (lo pasa a pesos).
+       *  - `otrosPorAvionMxn` / `otrosPorAvionSinPesosUsd`: la parte del pool
+       *    de FIJOS en pesos y sus dólares sin pesos.
+       *  - `tcReserva`: oficial del cierre del periodo (min(hasta, hoy)) con
+       *    que la reserva de overhaul pasa a pesos.
+       */
+      tcPesosVuelo?: ReadonlyMap<string, TipoCambioDetalle>;
+      tcOficialGastoUsd?: ReadonlyMap<string, TipoCambioDetalle>;
+      otrosPorAvionMxn?: number;
+      otrosPorAvionSinPesosUsd?: number;
+      tcReserva?: number | null;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -1910,6 +2019,21 @@ export class ProfitSharingService {
     // parte de ESTE avión va a `gastos_sin_tc_*` (integridad de siempre).
     let vendedorSinTcN = 0;
     let vendedorSinTcMxn = 0;
+    // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92): la MISMA
+    // cascada EN PESOS REALES, en los MISMOS loops. Venta del avión cobrada /
+    // pendiente = Σ por vuelo de round2(parte del avión USD × K del vuelo)
+    // (K = tc_usd_mxn ?? oficial del día de la cotización: el del balance);
+    // comisiones = `comisionesDelVuelo(...).total_mxn` con ese K (la MISMA
+    // fuente del balance); gastos MXN tal cual, USD × su T.C.; reserva × el
+    // oficial del cierre; otros ingresos con `filaLibroDeIngreso`.
+    // `pesosSinTcUsd` = dólares que SÍ entraron al saldo USD pero no llegaron
+    // a pesos (sin ningún T.C.): > 0 ⇒ el saldo en pesos está incompleto. Los
+    // cobros MXN sin ningún T.C. (`cobros_sin_tc_mxn`) quedan FUERA de los
+    // pesos igual que de los dólares (sin K no hay parte del avión).
+    let cobradoMxn = 0;
+    let pendienteMxn = 0;
+    let comisionesMxn = 0;
+    let pesosSinTcUsd = 0;
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
     // que los agregados (misma conversión cobrosEnUsd, misma partición,
     // mismo reparto multi-avión) para que la suma del detalle cuadre exacto
@@ -1997,6 +2121,15 @@ export class ProfitSharingService {
       cierre_marca?: string | null;
       diferido_de?: string | null;
       diferido_a?: string | null;
+      /**
+       * ADITIVOS (18/19-oct-2026, API 0.0.94, invariante 92): la parte del
+       * avión cobrada / pendiente EN PESOS (round2(USD × K)) y el K usado
+       * (T.C. de la cotización o el oficial del día de la cotización); null
+       * = sin ningún T.C. para pasarla a pesos.
+       */
+      cobrado_avion_mxn: number | null;
+      pendiente_avion_mxn: number | null;
+      tc_pesos: number | null;
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -2066,21 +2199,23 @@ export class ProfitSharingService {
       // `kComisionesDeVuelo` (revisión 13-oct-2026): el MISMO del balance
       // aunque los cobros no lo hayan pedido.
       const diaVuelo = diaCancun(v.fecha_vuelo);
-      const calcComisiones = comisionesDelVuelo({
+      const kComisiones = kComisionesDeVuelo(
+        v,
+        ctx.tcOficialVuelo,
+        ctx.tcKComisionesVuelo,
+      );
+      const entradaComisiones = {
         diaVuelo,
         vigenteDesde: ctx.vigenciaComisiones,
         cobros: ctx.cobrosPorVuelo.get(v.id) ?? [],
         gastos: ctx.gastosVendedorPorVuelo.get(v.id) ?? [],
-        tcVenta: kComisionesDeVuelo(
-          v,
-          ctx.tcOficialVuelo,
-          ctx.tcKComisionesVuelo,
-        ),
+        tcVenta: kComisiones,
         particion: p,
         estado: v.estado,
         parteAvion: parte,
         participacion: factor,
-      });
+      };
+      const calcComisiones = comisionesDelVuelo(entradaComisiones);
       const comisionesVuelo: ComisionesDelVuelo | null =
         calcComisiones.lleva_comisiones ? calcComisiones : null;
       if (comisionesVuelo != null) {
@@ -2095,6 +2230,39 @@ export class ProfitSharingService {
       const ventaAvion = parte(ventaAvionVuelo);
       const cobradoAvion = parte(cobradoAvionVuelo);
       const pendienteAvion = parte(pendienteAvionVuelo);
+      // ---- EN PESOS (0.0.94, invariante 92): K del balance ----
+      const kPesos =
+        pos(v.tc_usd_mxn) ??
+        ctx.tcPesosVuelo?.get(v.id)?.tc ??
+        tcOficialVuelo?.tc ??
+        ctx.tcKComisionesVuelo.get(v.id)?.tc ??
+        null;
+      const cobradoAvionMxn =
+        kPesos != null ? round2(cobradoAvion * kPesos) : null;
+      const pendienteAvionMxn =
+        kPesos != null ? round2(pendienteAvion * kPesos) : null;
+      if (cobradoAvionMxn != null) cobradoMxn += cobradoAvionMxn;
+      else pesosSinTcUsd += cobradoAvion;
+      if (pendienteAvionMxn != null) pendienteMxn += pendienteAvionMxn;
+      if (comisionesVuelo != null) {
+        // Las comisiones EN PESOS con el K del balance: si el de los dólares
+        // es el mismo, el MISMO cálculo; si no (vuelo sin tc_usd_mxn cuyos
+        // cobros no lo pedían), la MISMA fuente única con ese K — así los
+        // pesos coinciden con la columna COMISIONES del balance y los
+        // dólares no se mueven.
+        const comisionesPesos =
+          kPesos === kComisiones
+            ? comisionesVuelo
+            : comisionesDelVuelo({ ...entradaComisiones, tcVenta: kPesos });
+        if (comisionesPesos.lleva_comisiones) {
+          comisionesMxn += comisionesPesos.total_mxn;
+          pesosSinTcUsd +=
+            (comisionesPesos.banco_sin_pesos_usd ?? 0) +
+            (comisionesPesos.vendedor_sin_pesos_usd ?? 0);
+        } else {
+          pesosSinTcUsd += comisionesVuelo.total_usd;
+        }
+      }
       // Fila del avión: su parte del avión + (solo en el que reporta) la
       // parte VuelaTour, CERRADA POR DIFERENCIA contra el total del vuelo
       // (total − parte avión de los demás), así Σ filas de todos los aviones
@@ -2230,6 +2398,10 @@ export class ProfitSharingService {
               comision_vendedor_real_usd: comisionesVuelo.vendedor_usd,
             }
           : {}),
+        // REPARTO EN PESOS (0.0.94, invariante 92), ADITIVOS.
+        cobrado_avion_mxn: cobradoAvionMxn,
+        pendiente_avion_mxn: pendienteAvionMxn,
+        tc_pesos: kPesos,
       });
     }
     detalleVuelos.sort(
@@ -2261,6 +2433,9 @@ export class ProfitSharingService {
     let tuaEmbebidoCount = 0;
     let extensionEmbebidaUsd = 0;
     let extensionEmbebidaCount = 0;
+    // Las mismas filas informativas EN PESOS (0.0.94, invariante 92).
+    let tuaEmbebidoMxn = 0;
+    let extensionEmbebidaMxn = 0;
     // Clave EXCLUIDO del pago al vendedor por el eje fecha_gasto (13-oct-2026,
     // invariante 61): SOLO transparencia — ninguna suma a `gastos.*`; la
     // «(avión)» ya contó (o contará) por la lectura POR VUELO. Lado EXACTO
@@ -2365,6 +2540,8 @@ export class ProfitSharingService {
         sin_tc_mxn: 0,
         tc_oficial_count: 0,
         tc_oficial_mxn: 0,
+        mxn: 0,
+        sin_pesos_usd: 0,
       };
       // Monto EFECTIVO del avión = monto − TUA embebido (en la moneda del
       // gasto), convertido con la MISMA regla/TC de siempre (tc_gasto ??
@@ -2383,12 +2560,20 @@ export class ProfitSharingService {
       const tuaEmbebido = traslados.tua;
       const extensionEmbebida = traslados.extension;
       const descontado = round2(tuaEmbebido + extensionEmbebida);
-      const conv = this.toUsd(
+      const efectivo =
         descontado > 0
           ? { ...g, monto: round2(Number(g.monto) - descontado) }
-          : g,
-        ctx.tcOficialGasto,
-      );
+          : g;
+      const conv = this.toUsd(efectivo, ctx.tcOficialGasto);
+      // EN PESOS (0.0.94, invariante 92): el MISMO monto efectivo en pesos.
+      // Un MXN sin T.C. SÍ cuenta (los pesos son reales); un USD sin ningún
+      // T.C. no llega a pesos y, si resta, sus dólares van a
+      // `pesos_sin_tc_usd`.
+      const mxnGasto = this.toMxn(efectivo, ctx.tcOficialGastoUsd);
+      if (mxnGasto != null) acc.mxn += mxnGasto;
+      else if (grupo !== 'EXCLUIDO' && conv !== null) {
+        acc.sin_pesos_usd += conv.usd;
+      }
       if (grupo !== 'EXCLUIDO' && g.moneda === 'MXN' && g.id) {
         const propioGasto = pos(g.tc_gasto);
         const divisor = propioGasto ?? ctx.tcOficialGasto.get(g.id)?.tc ?? null;
@@ -2428,12 +2613,20 @@ export class ProfitSharingService {
           tuaEmbebidoUsd +=
             this.toUsd({ ...g, monto: tuaEmbebido }, ctx.tcOficialGasto)?.usd ??
             0;
+          tuaEmbebidoMxn +=
+            this.toMxn({ ...g, monto: tuaEmbebido }, ctx.tcOficialGastoUsd) ??
+            0;
         }
         if (extensionEmbebida > 0) {
           extensionEmbebidaCount += 1;
           extensionEmbebidaUsd +=
             this.toUsd({ ...g, monto: extensionEmbebida }, ctx.tcOficialGasto)
               ?.usd ?? 0;
+          extensionEmbebidaMxn +=
+            this.toMxn(
+              { ...g, monto: extensionEmbebida },
+              ctx.tcOficialGastoUsd,
+            ) ?? 0;
         }
       }
       porCategoria.set(clave, acc);
@@ -2451,6 +2644,8 @@ export class ProfitSharingService {
         sin_tc_mxn: 0,
         tc_oficial_count: 0,
         tc_oficial_mxn: 0,
+        mxn: tuaEmbebidoMxn,
+        sin_pesos_usd: 0,
       });
     }
     if (extensionEmbebidaCount > 0) {
@@ -2465,6 +2660,8 @@ export class ProfitSharingService {
         sin_tc_mxn: 0,
         tc_oficial_count: 0,
         tc_oficial_mxn: 0,
+        mxn: extensionEmbebidaMxn,
+        sin_pesos_usd: 0,
       });
     }
     let directos = 0;
@@ -2475,12 +2672,22 @@ export class ProfitSharingService {
     let sinTcMxn = 0;
     let tcOficialCount = 0;
     let tcOficialMxn = 0;
+    // EN PESOS (0.0.94, invariante 92): los MISMOS grupos.
+    let directosMxn = 0;
+    let indirectosMxn = 0;
+    let permisosMxn = 0;
+    let fijoManualMxn = 0;
     for (const acc of porCategoria.values()) {
       if (acc.grupo === 'DIRECTO') directos += acc.usd;
       else if (acc.grupo === 'INDIRECTO') indirectos += acc.usd;
       else if (acc.grupo === 'PERMISO') permisos += acc.usd;
       else if (acc.grupo === 'FIJO') fijoManual += acc.usd;
       // EXCLUIDO no suma al balance (comportamiento original del else).
+      if (acc.grupo === 'DIRECTO') directosMxn += acc.mxn;
+      else if (acc.grupo === 'INDIRECTO') indirectosMxn += acc.mxn;
+      else if (acc.grupo === 'PERMISO') permisosMxn += acc.mxn;
+      else if (acc.grupo === 'FIJO') fijoManualMxn += acc.mxn;
+      if (acc.grupo !== 'EXCLUIDO') pesosSinTcUsd += acc.sin_pesos_usd;
       sinTc += acc.sin_tc_count;
       sinTcMxn += acc.sin_tc_mxn;
       tcOficialCount += acc.tc_oficial_count;
@@ -2507,6 +2714,8 @@ export class ProfitSharingService {
         grupo: acc.grupo,
         count: acc.count,
         usd: round2(acc.usd),
+        // ADITIVO (0.0.94, invariante 92): la categoría EN PESOS.
+        mxn: round2(acc.mxn),
         sin_tc_count: acc.sin_tc_count,
         sin_tc_mxn: round2(acc.sin_tc_mxn),
         // ADITIVOS (29-ago): de `count`, los convertidos con TC oficial.
@@ -2524,6 +2733,9 @@ export class ProfitSharingService {
       .reduce((acc, r) => acc + Number(r.monto_por_hora_usd), 0);
     const reservaOverhaul = horasPeriodo * tarifaReserva;
     const reservaIncompleta = horasPeriodo > 0 && tarifaReserva <= 0;
+    // EN PESOS (0.0.94, invariante 92): la reserva publicada (USD) × el T.C.
+    // oficial del cierre del periodo; sin él, sus dólares no llegan a pesos.
+    const tcReserva = ctx.tcReserva ?? null;
 
     // ===== OTROS INGRESOS DEL AVIÓN (13-oct-2026, API 0.0.75, invariante
     // 67) ===== Ingresos de RESULTADO registrados en Ingresos con ESTE avión
@@ -2543,6 +2755,10 @@ export class ProfitSharingService {
     let otrosIngresosAvion = 0;
     let otrosIngresosSinTcMxn = 0;
     let otrosIngresosTcOficialCount = 0;
+    // EN PESOS (0.0.94, invariante 92): el NETO en pesos de la fila del
+    // libro (`filaLibroDeIngreso`, la MISMA de la hoja «Otros ingresos» del
+    // balance): MXN tal cual (con o sin T.C.), USD × su T.C. propio.
+    let otrosIngresosMxn = 0;
     const detalleOtrosIngresos: Array<{
       id: string;
       clave: string;
@@ -2555,6 +2771,8 @@ export class ProfitSharingService {
       comision: number | null;
       neto: number;
       usd: number | null;
+      /** ADITIVO (0.0.94, invariante 92): neto EN PESOS; null = USD sin T.C. */
+      mxn: number | null;
       tc: number | null;
       tc_oficial: boolean;
       /** ADITIVO al final (14-oct-2026, API 0.0.77): de dónde salió el T.C. */
@@ -2588,6 +2806,9 @@ export class ProfitSharingService {
         otrosIngresosAvion += usd;
         if (tcOficialUsado) otrosIngresosTcOficialCount += 1;
       }
+      const mxnIngreso = filaLibroDeIngreso(i)?.remanente_mxn ?? null;
+      if (mxnIngreso != null) otrosIngresosMxn += mxnIngreso;
+      else if (usd != null) pesosSinTcUsd += usd;
       detalleOtrosIngresos.push({
         id: i.id,
         clave: etiquetaIngreso(i.folio),
@@ -2605,6 +2826,7 @@ export class ProfitSharingService {
         comision: com > 0 ? round2(com) : null,
         neto,
         usd,
+        mxn: mxnIngreso,
         tc: conv.tc,
         tc_oficial: tcOficialUsado,
         tc_origen: conv.origen,
@@ -2637,41 +2859,53 @@ export class ProfitSharingService {
         otrosIngresosAvionR,
     );
 
+    // ===== EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92) =====
+    // La MISMA cascada con los MISMOS componentes redondeados que se
+    // publican (disciplina v1.3): saldo en pesos = cobrado − comisiones −
+    // directos − indirectos − permisos − otros − reserva + otros ingresos.
+    const cobradoMxnR = round2(cobradoMxn);
+    const comisionesMxnR = round2(comisionesMxn);
+    const directosMxnR = round2(directosMxn);
+    const indirectosMxnR = round2(indirectosMxn);
+    const permisosMxnR = round2(permisosMxn);
+    const otrosMxnR = round2((ctx.otrosPorAvionMxn ?? 0) + fijoManualMxn);
+    const reservaMxnR = tcReserva != null ? round2(reservaR * tcReserva) : 0;
+    if (tcReserva == null) pesosSinTcUsd += reservaR;
+    const otrosIngresosAvionMxnR = round2(otrosIngresosMxn);
+    pesosSinTcUsd += ctx.otrosPorAvionSinPesosUsd ?? 0;
+    const saldoMxn = round2(
+      cobradoMxnR -
+        comisionesMxnR -
+        directosMxnR -
+        indirectosMxnR -
+        permisosMxnR -
+        otrosMxnR -
+        reservaMxnR +
+        otrosIngresosAvionMxnR,
+    );
+
     // Reparto por residuo mayor (en centavos): con porcentajes que suman 100,
     // la suma de las partes da EXACTO el saldo (antes 50/50 de 100.01 daba
     // 50.01 + 50.01 = 100.02). Con ≠100% se reparte proporcional tal cual y
-    // el badge/advertencia de porcentajes lo delata.
+    // el badge/advertencia de porcentajes lo delata. EN PESOS (0.0.94) el
+    // MISMO reparto sobre el saldo en pesos (`centavosPorResiduoMayor`).
     const vigentes = ctx.socios.filter(
       (s) =>
         s.aeronave_id === a.id &&
         s.vigente_desde <= ctx.periodo.hasta &&
         (s.vigente_hasta === null || s.vigente_hasta >= ctx.periodo.desde),
     );
-    const saldoCents = Math.round(saldo * 100);
-    const partes = vigentes.map((s) => {
-      const pct = Number(s.porcentaje);
-      const exacto = (pct / 100) * saldoCents;
-      return {
-        s,
-        pct,
-        cents: Math.floor(exacto),
-        resto: exacto - Math.floor(exacto),
-      };
-    });
-    const repartoPct = partes.reduce((acc, p) => acc + p.pct, 0);
-    let faltan =
-      Math.round((repartoPct / 100) * saldoCents) -
-      partes.reduce((acc, p) => acc + p.cents, 0);
-    for (const p of [...partes].sort((x, y) => y.resto - x.resto)) {
-      if (faltan <= 0) break;
-      p.cents += 1;
-      faltan -= 1;
-    }
-    const reparto = partes.map((p) => ({
-      socio_id: p.s.socio_id,
-      socio_nombre: ctx.nombres.get(p.s.socio_id) ?? 'Socio',
-      porcentaje: p.pct,
-      monto_usd: p.cents / 100,
+    const pcts = vigentes.map((s) => Number(s.porcentaje));
+    const repartoPct = pcts.reduce((acc, p) => acc + p, 0);
+    const centsUsd = centavosPorResiduoMayor(pcts, saldo);
+    const centsMxn = centavosPorResiduoMayor(pcts, saldoMxn);
+    const reparto = vigentes.map((s, i) => ({
+      socio_id: s.socio_id,
+      socio_nombre: ctx.nombres.get(s.socio_id) ?? 'Socio',
+      porcentaje: pcts[i],
+      monto_usd: centsUsd[i] / 100,
+      // ADITIVO (0.0.94, invariante 92): lo que le toca EN PESOS.
+      monto_mxn: centsMxn[i] / 100,
     }));
 
     return {
@@ -2724,6 +2958,13 @@ export class ProfitSharingService {
         otros_ingresos_avion_usd: otrosIngresosAvionR,
         otros_ingresos_avion_sin_tc_mxn: round2(otrosIngresosSinTcMxn),
         otros_ingresos_avion_tc_oficial_count: otrosIngresosTcOficialCount,
+        // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92),
+        // ADITIVOS: venta del avión cobrada, comisiones, pendiente y otros
+        // ingresos del avión EN PESOS (lo que se transfiere a los socios).
+        cobrado_mxn: cobradoMxnR,
+        comisiones_venta_mxn: comisionesMxnR,
+        pendiente_cobro_mxn: round2(pendienteMxn),
+        otros_ingresos_avion_mxn: otrosIngresosAvionMxnR,
       },
       horas_voladas_hr: horasPeriodo,
       gastos: {
@@ -2740,10 +2981,21 @@ export class ProfitSharingService {
           count: tcOficialCount,
           monto_mxn: round2(tcOficialMxn),
         },
+        // ADITIVOS (0.0.94, invariante 92): los mismos grupos EN PESOS.
+        directos_mxn: directosMxnR,
+        indirectos_mxn: indirectosMxnR,
+        permisos_mxn: permisosMxnR,
+        otros_prorrateados_mxn: otrosMxnR,
       },
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
       saldo_disponible_usd: saldo,
+      // ADITIVOS (0.0.94, invariante 92): reserva y saldo EN PESOS, y los
+      // dólares que SÍ entraron al saldo USD pero no llegaron a pesos (> 0 ⇒
+      // el saldo en pesos está incompleto: el panel y el PDF lo avisan).
+      reserva_overhaul_mxn: reservaMxnR,
+      saldo_disponible_mxn: saldoMxn,
+      pesos_sin_tc_usd: round2(pesosSinTcUsd),
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
       // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
@@ -2757,6 +3009,10 @@ export class ProfitSharingService {
           horas_hr: horasPeriodo,
           tarifa_hora_usd: round2(tarifaReserva),
           monto_usd: round2(reservaOverhaul),
+          // ADITIVOS (0.0.94, invariante 92): la reserva EN PESOS y el T.C.
+          // oficial del cierre del periodo con que se pasó (null = sin dato).
+          monto_mxn: reservaMxnR,
+          tc: tcReserva,
         },
         // Composición de la parte VuelaTour de este avión (alimenta el
         // bloque global `otros_ingresos_vuelatour` de compute()).
@@ -2805,6 +3061,25 @@ export class ProfitSharingService {
   }
 
   /**
+   * REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92): un gasto
+   * EN PESOS. MXN ⇒ su monto tal cual (con o sin T.C.: los pesos son
+   * reales); USD ⇒ round2(monto × (`tc_gasto` ?? T.C. oficial del día del
+   * gasto)). null = USD sin ningún T.C. (sus dólares, si restan, van a
+   * `pesos_sin_tc_usd`). Un parcial del reparto manual comparte el id (y la
+   * fecha) del padre.
+   */
+  private toMxn(
+    g: GastoRow,
+    tcOficialGastoUsd: ReadonlyMap<string, TipoCambioDetalle> | undefined,
+  ): number | null {
+    const monto = Number(g.monto);
+    if (!Number.isFinite(monto)) return null;
+    if (g.moneda !== 'USD') return monto;
+    const tc = pos(g.tc_gasto) ?? tcOficialGastoUsd?.get(g.id)?.tc ?? null;
+    return tc != null && tc > 0 ? round2(monto * tc) : null;
+  }
+
+  /**
    * TC OFICIAL de respaldo (regla del cliente, 29-ago-2026): por VUELO (sin
    * tc_usd_mxn → día Cancún de la cotización: fecha_solicitud, si no
    * fecha_vuelo) y por GASTO (MXN sin tc_gasto → día del gasto, columna
@@ -2825,10 +3100,27 @@ export class ProfitSharingService {
     ingresos: ReadonlyArray<
       Pick<IngresoParaLibro, 'id' | 'moneda' | 'tc_usd_mxn' | 'fecha'>
     > = [],
+    // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92),
+    // OPCIONAL (los demás llamadores no lo mandan: mismos días de siempre):
+    // gastos en DÓLARES sin tc_gasto (el oficial de su día los pasa a
+    // pesos ⇒ `gastoUsd`) y días EXTRA (la reserva ⇒ `porDia`), en el MISMO
+    // lote — un día, una consulta. Los ingresos en dólares NO piden oficial:
+    // sus pesos salen de `filaLibroDeIngreso` (su T.C. propio, como el
+    // balance; el CHECK de la BD exige T.C. a un USD de resultado).
+    extra: {
+      gastosUsd?: ReadonlyArray<
+        Pick<GastoRow, 'id' | 'moneda' | 'tc_gasto' | 'fecha_gasto'>
+      >;
+      dias?: ReadonlyArray<string>;
+    } = {},
   ): Promise<{
     vuelo: Map<string, TipoCambioDetalle>;
     gasto: Map<string, TipoCambioDetalle>;
     ingreso: Map<string, TipoCambioDetalle>;
+    /** gasto.id → oficial del día de cada gasto USD sin tc_gasto (0.0.94). */
+    gastoUsd: Map<string, TipoCambioDetalle>;
+    /** Todos los días resueltos (incluidos los extra), con dato. */
+    porDia: Map<string, TipoCambioDetalle>;
   }> {
     const diaVuelo = new Map<string, string>();
     for (const v of vuelos) {
@@ -2848,10 +3140,18 @@ export class ProfitSharingService {
       const dia = diaTcOficialIngreso(i);
       if (dia) diaIngreso.set(i.id, dia);
     }
+    const diaGastoUsd = new Map<string, string>();
+    for (const g of extra.gastosUsd ?? []) {
+      if (g.moneda !== 'USD' || pos(g.tc_gasto) != null) continue;
+      const dia = diaDeFecha(g.fecha_gasto ?? null);
+      if (dia) diaGastoUsd.set(g.id, dia);
+    }
     const porDia = await this.tcOficialPorDias([
       ...diaVuelo.values(),
       ...diaGasto.values(),
       ...diaIngreso.values(),
+      ...diaGastoUsd.values(),
+      ...(extra.dias ?? []),
     ]);
     const vuelo = new Map<string, TipoCambioDetalle>();
     for (const [id, dia] of diaVuelo) {
@@ -2868,7 +3168,12 @@ export class ProfitSharingService {
       const det = porDia.get(dia);
       if (det) ingreso.set(id, det);
     }
-    return { vuelo, gasto, ingreso };
+    const gastoUsd = new Map<string, TipoCambioDetalle>();
+    for (const [id, dia] of diaGastoUsd) {
+      const det = porDia.get(dia);
+      if (det) gastoUsd.set(id, det);
+    }
+    return { vuelo, gasto, ingreso, gastoUsd, porDia };
   }
 
   /**
@@ -5410,6 +5715,35 @@ export class ProfitSharingService {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Reparto de un saldo por porcentajes en CENTAVOS por RESIDUO MAYOR (la
+ * regla de siempre del reparto a socios, extraída tal cual el 19-oct-2026
+ * para usarla también EN PESOS, invariante 92): cada socio recibe el piso
+ * de su parte exacta y los centavos que faltan para llegar a round(Σ% ×
+ * saldo) van a los residuos más grandes (orden estable en empate). Con
+ * porcentajes que suman 100, Σ partes == saldo al centavo.
+ */
+function centavosPorResiduoMayor(
+  pcts: ReadonlyArray<number>,
+  saldo: number,
+): number[] {
+  const saldoCents = Math.round(saldo * 100);
+  const partes = pcts.map((pct) => {
+    const exacto = (pct / 100) * saldoCents;
+    return { cents: Math.floor(exacto), resto: exacto - Math.floor(exacto) };
+  });
+  const repartoPct = pcts.reduce((acc, p) => acc + p, 0);
+  let faltan =
+    Math.round((repartoPct / 100) * saldoCents) -
+    partes.reduce((acc, p) => acc + p.cents, 0);
+  for (const p of [...partes].sort((x, y) => y.resto - x.resto)) {
+    if (faltan <= 0) break;
+    p.cents += 1;
+    faltan -= 1;
+  }
+  return partes.map((p) => p.cents);
 }
 
 /** Número positivo o null (TCs y divisores; numeric de PostgREST llega string). */
