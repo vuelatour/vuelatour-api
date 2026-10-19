@@ -29,13 +29,68 @@ import { cfgInicio } from '../../common/inicio-oficial.fixture-spec';
  *
  * Fake: BD EN MEMORIA (el intérprete del spec de la nómina, con max-rows
  * 1000). `sinPorPagar` = la columna no existe (42703 a todo select que la
- * nombre); `fallarPorPagar` hace fallar SOLO la lectura del renglón.
+ * nombre); `fallarPorPagar` hace fallar SOLO la lectura del renglón. Las
+ * filas de `gasto` salen PROYECTADAS como en PostgREST (`proyectar`).
  */
 type Fila = Record<string, unknown>;
 type Op = [string, unknown[]];
 
 const MAX_ROWS = 1000;
 const ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+/** Ítems de primer nivel de un select (las comas de un embed no parten). */
+function itemsDeSelect(sel: string): string[] {
+  const out: string[] = [];
+  let nivel = 0;
+  let actual = '';
+  for (const ch of sel) {
+    if (ch === '(') nivel += 1;
+    else if (ch === ')') nivel -= 1;
+    if (ch === ',' && nivel === 0) {
+      out.push(actual.trim());
+      actual = '';
+    } else {
+      actual += ch;
+    }
+  }
+  if (actual.trim()) out.push(actual.trim());
+  return out;
+}
+
+/**
+ * PROYECCIÓN como PostgREST (segunda pasada de la revisión, 19-oct-2026): la
+ * fila trae SOLO lo que el select nombra. `alias:expr` toma `alias`; un embed
+ * `alias:fk(cols)` llega proyectado a SUS columnas (null si la fila no lo
+ * trae); sin el embed en el select, la fila NO trae `alias`. Antes el fake
+ * devolvía la fila completa con su `vuelo` y ninguna prueba fijaba la
+ * LECTURA del renglón: un select sin el embed (el del 0.0.95), o sin
+ * `periodo_contable, fecha_contable` con la sonda del cierre encendida,
+ * pasaba todas las pruebas de P1.
+ */
+function proyectar(sel: string, fila: Fila): Fila {
+  const out: Fila = {};
+  for (const item of itemsDeSelect(sel)) {
+    if (item === '*') {
+      Object.assign(out, fila);
+      continue;
+    }
+    const embed = /^(\w+)(?::[\w!]+)?\((.*)\)$/s.exec(item);
+    if (embed) {
+      const [, alias, cols] = embed;
+      const raw = fila[alias];
+      const obj: unknown = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
+      out[alias] =
+        obj != null && typeof obj === 'object'
+          ? proyectar(cols, obj as Fila)
+          : null;
+      continue;
+    }
+    const conAlias = /^(\w+):/.exec(item);
+    const llave = conAlias ? conAlias[1] : item;
+    out[llave] = fila[llave] ?? null;
+  }
+  return out;
+}
 
 function valor(fila: Fila, col: string): unknown {
   let acc: unknown = fila;
@@ -170,6 +225,11 @@ function armar(
       filas = filas.slice(a, Math.min(b + 1, a + MAX_ROWS));
       const limite = ops.find((o) => o[0] === 'limit')?.[1][0];
       if (typeof limite === 'number') filas = filas.slice(0, limite);
+      // Los filtros ya corrieron sobre la fila completa (como la BD); lo que
+      // VUELVE es solo lo que el select nombra.
+      if (tabla === 'gasto' && typeof sel === 'string') {
+        filas = filas.map((f) => proyectar(sel, f));
+      }
       return { data: filas, error: null };
     };
     q.maybeSingle = () =>
