@@ -754,6 +754,32 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
    pyservices pinta la hoja de la lista y la del resumen solo con
    `movimientos` presente (sin ellos, el libro de siempre).
 
+   **EL SOCIO NO VE EL PRECIO DE COMPRA NI EL MARGEN (19-oct-2026, API
+   0.0.93, SIN migración).** Pedido del cliente con la captura de la hoja
+   «refacciones» del XA-VGV: «debemos quitar de la descripción de cosas que
+   se le han cargado al avión lo del precio en el que se compró y en lo que
+   se vendió, porque eso nos delata con los socios si ven este balance». La
+   nota que se GUARDA en el gasto de una salida («(precio de venta)»,
+   «(último precio + 25 %)», «(a costo)», «(costo FIFO…)», la de flota «1/7
+   del precio de venta … (precio de venta $36.42 USD)», «ref 0», la cláusula
+   «Re-preciado 25-sep-2026: costo FIFO + 25 % …; antes $373.75 USD» y la
+   «Corrección 28-ago-2026: costo en PESOS…») NO cambia: la oficina la sigue
+   viendo completa en Gastos. Lo que cambia es lo que IMPRIMEN los balances:
+   fuente única PURA `common/detalle-salida-bodega.util.ts#detalleSinPreciosDeBodega`
+   (con spec sobre las notas reales de prod), aplicada en `buildHoja` (el
+   DETALLE de toda hoja ledger: «refacciones» del individual y de cada
+   `aviones[]` del general, también la pantalla, que es el mismo libro) y en
+   la línea de celda de la fila del vuelo (`lineaDetalle`). Solo toca los
+   renglones que EMPIEZAN con «Salida de bodega»: quita la etiqueta del
+   precio al final del primer tramo (una presentación «(Galón)» se queda), el
+   «del precio de venta / del costo» de la flota y los tramos «ref 0»,
+   «Re-preciado…» y «Corrección …: costo…»; una referencia real u otro texto
+   de la oficina se quedan. Ningún número cambia (MONTO MXN/ORIGINAL siguen
+   siendo lo cargado). La hoja «refacciones» del GENERAL (costo/venta/
+   ganancia) y la hoja «inventario» siguen enseñando el costo y la utilidad
+   a propósito: son de VuelaTour. Una nota NUEVA que el inventario redacte
+   con otra forma de precio debe sumarse al util y a su spec.
+
    **UBICACIONES DE BODEGA (25-sep-2026, migración `20260925000001`).**
    Catálogo `inventario_ubicacion` (nombre único sin distinguir mayúsculas,
    `orden`, `activo`; sembrado con «Oficina vieja», «Oficina nueva», «Locker

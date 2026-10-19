@@ -972,3 +972,48 @@ describe('Hoja «permisos» — T.C. por fila y MONTO MXN como fórmula (13-oct-
     expect(payload.balance.permisos_usd).toBe(333.43);
   });
 });
+
+// Salida de bodega SIN precio de compra ni de venta (19-oct-2026, pedido del
+// cliente con la captura de la hoja «refacciones» del XA-VGV): el socio lee
+// QUÉ se cargó; el monto no cambia y la nota guardada tampoco.
+describe('Hoja «refacciones» — detalle sin precio de compra ni de venta', () => {
+  const NOTA_LLANTA =
+    'Salida de bodega: 1 × Llanta 6.00-6 (precio de venta) · ref 0 · Re-preciado 25-sep-2026: costo FIFO + 25 % (utilidad de la tienda VuelaTour, autorizado por la oficina); antes $373.75 USD';
+
+  it('el detalle dice solo la pieza; el monto y la nota guardada quedan igual', () => {
+    const gasto = {
+      ...gastoBase,
+      id: 'g-llanta',
+      categoria: 'REFACCION',
+      medio_pago: 'BODEGA',
+      monto: 467.19,
+      moneda: 'USD',
+      tc_gasto: 17.0077,
+      notas: NOTA_LLANTA,
+    };
+    const hoja = priv(armar()).buildHoja([gasto], 17.5, 0, 'refacciones', []);
+    expect(hoja.filas).toHaveLength(1);
+    expect(hoja.filas[0].detalle).toBe('Salida de bodega: 1 × Llanta 6.00-6');
+    expect(hoja.filas[0].monto_original).toBe(467.19);
+    expect(hoja.filas[0].monto_mxn).toBe(7945.83);
+    expect(gasto.notas).toBe(NOTA_LLANTA);
+  });
+
+  it('una nota que no es salida de bodega sale tal cual', () => {
+    const hoja = priv(armar()).buildHoja(
+      [
+        {
+          ...gastoBase,
+          id: 'g-x',
+          categoria: 'INDIRECTO',
+          notas: 'Seguro anual (costo pactado)',
+        },
+      ],
+      17.5,
+      0,
+      'Gastos Indirectos',
+      [],
+    );
+    expect(hoja.filas[0].detalle).toBe('Seguro anual (costo pactado)');
+  });
+});

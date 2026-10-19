@@ -202,6 +202,9 @@ import {
 } from '../../common/cierre-mes.lector';
 
 import { InventoryService } from '../inventory/inventory.service';
+// Detalle de una salida de bodega SIN precio de compra ni de venta
+// (19-oct-2026, invariante 8 «el socio no ve el margen»): puro, con spec.
+import { detalleSinPreciosDeBodega } from '../../common/detalle-salida-bodega.util';
 // Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
 // puro, con spec; el costo sale del util del inventario (fuente única).
 import {
@@ -3430,7 +3433,11 @@ export class AircraftBalanceService {
           : g.proveedor?.nombre;
         // Solo la primera línea de la nota, recortada: la nota de celda es un
         // vistazo, no el expediente (ese vive en Gastos).
-        const nota = (g.notas ?? '').split('\n')[0].trim().slice(0, 60);
+        // Una salida de bodega sin precio de compra ni de venta (19-oct-2026):
+        // el socio lee qué se cargó, no el margen de la tienda.
+        const nota = detalleSinPreciosDeBodega((g.notas ?? '').split('\n')[0])
+          .trim()
+          .slice(0, 60);
         // EXTERNOS: si el gasto del vuelo ajeno quedó sellado a un avión de
         // flota, la nota lo dice (no vive en el libro de ese avión).
         const avionSellado =
@@ -7283,7 +7290,10 @@ export class AircraftBalanceService {
           ? g.proveedor[0]?.nombre
           : g.proveedor?.nombre;
         const detalle = [
-          g.notas?.trim() ||
+          // Salida de bodega: SIN precio de compra ni de venta (19-oct-2026,
+          // pedido del cliente: «eso nos delata con los socios si ven este
+          // balance»). La nota guardada no cambia: la oficina la ve en Gastos.
+          detalleSinPreciosDeBodega(g.notas?.trim()) ||
             [g.categoria, proveedor].filter(Boolean).join(' · '),
           // Referencia al vuelo de un gasto de EMPRESA (11-sep-2026): traza,
           // no dinero del avión (la pone `gastosEmpresaYSueltos`).
