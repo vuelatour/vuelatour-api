@@ -280,6 +280,18 @@ import {
   type ResultadoCruce,
   type TcCruceUsd,
 } from './auto-cruce.util';
+// GASTOS «POR PAGAR» (19-oct-2026, invariante 93; revisión P14 (b)): en el
+// auto-cruce desde el banco, un por pagar vigente capturado DESPUÉS del día
+// del cargo no es candidato (ese cargo no puede ser su pago). Detrás de la
+// sonda de la columna.
+import { porPagarDisponible } from '../../common/por-pagar-disponible.util';
+import {
+  cargoPuedePagarGasto,
+  colsCandidatoPorPagar,
+  sinPorPagarPosterioresAlCargo,
+  textoPorPagarPosteriorAlCargo,
+  type FiltroPorPagarCruce,
+} from './por-pagar-cruce.util';
 import {
   descripcionGastoUsd,
   ordenarLigasUsdTc,
@@ -3049,6 +3061,12 @@ export class ConciliacionService {
       };
     }
 
+    // GASTOS «POR PAGAR» (invariante 93, revisión P14 (b)): con la
+    // migración, un por pagar vigente capturado DESPUÉS del día del cargo no
+    // es candidato en NINGÚN paso (ese cargo no puede ser su pago). Sin ella,
+    // null: no se filtra ni se nombra la columna.
+    const porPagar = await this.filtroPorPagarDeCargo(mov.fecha);
+
     // 1) Candidatos por monto (banda de centavos: la terminal redondea).
     const { data, error } = await this.gastosCandidatos({
       moneda,
@@ -3057,6 +3075,7 @@ export class ConciliacionService {
       montoMin: monto - TOLERANCIA_CENTAVOS,
       montoMax: monto + TOLERANCIA_CENTAVOS,
       limite: 25,
+      conPorPagar: porPagar !== null,
     });
     if (error) {
       return {
@@ -3065,7 +3084,8 @@ export class ConciliacionService {
         motivo: `No se pudieron leer los gastos candidatos: ${error.message}`,
       };
     }
-    const candidatos = (data ?? []).map((g) => this.aCandidatoCruce(g));
+    const paso1 = sinPorPagarPosterioresAlCargo(data ?? [], porPagar);
+    const candidatos = paso1.filas.map((g) => this.aCandidatoCruce(g));
     if (candidatos.length > 0) {
       const eleccion = elegirCandidato(mov, candidatos, ctx.terminaciones);
       if (eleccion.gasto_id) {
@@ -3091,6 +3111,7 @@ export class ConciliacionService {
       moneda,
       desde,
       hasta,
+      porPagar,
     );
     if (parcial.length > 0) {
       const eleccion = elegirCandidato(mov, parcial, ctx.terminaciones, {
@@ -3126,6 +3147,7 @@ export class ConciliacionService {
         desde,
         hasta,
         ctx,
+        porPagar,
       );
       if (usd.resultado) {
         if (usd.resultado.ligar) {
@@ -3141,8 +3163,20 @@ export class ConciliacionService {
     }
     return {
       ...base,
-      motivo: `Ningún gasto bancario sin conciliar de ${montoBonito(monto)} ${moneda ?? ''} entre ${desde} y ${hasta}.${detalleUsd ? ` ${detalleUsd}` : ''}`,
+      motivo: `Ningún gasto bancario sin conciliar de ${montoBonito(monto)} ${moneda ?? ''} entre ${desde} y ${hasta}.${detalleUsd ? ` ${detalleUsd}` : ''}${paso1.descartados > 0 ? ` ${textoPorPagarPosteriorAlCargo(paso1.descartados)}` : ''}`,
     };
+  }
+
+  /**
+   * Filtro de gastos «por pagar» para el auto-cruce de UN cargo (invariante
+   * 93, revisión P14 (b)): `null` sin la migración (nada se filtra y la
+   * columna no se nombra); con ella, el día del cargo y el hoy Cancún.
+   */
+  private async filtroPorPagarDeCargo(
+    fechaCargo: string,
+  ): Promise<FiltroPorPagarCruce | null> {
+    if (!(await porPagarDisponible(this.supabase.service))) return null;
+    return { fechaCargo, hoy: hoyCancun() };
   }
 
   /**
@@ -3162,6 +3196,7 @@ export class ConciliacionService {
     desde: string,
     hasta: string,
     ctx: CruceCtx,
+    porPagar: FiltroPorPagarCruce | null = null,
   ): Promise<{
     resultado?: { ligar?: string; pendiente: ResultadoMovimiento };
     detalle: string | null;
@@ -3182,6 +3217,7 @@ export class ConciliacionService {
       montoMin: banda.min,
       montoMax: banda.max,
       limite: TOPE_CRUCE_USD,
+      conPorPagar: porPagar !== null,
     });
     if (usdErr) {
       return pendiente(
@@ -3189,10 +3225,13 @@ export class ConciliacionService {
         `No se pudieron leer los gastos en USD: ${usdErr.message}`,
       );
     }
-    const filas = usd ?? [];
-    if (filas.length >= TOPE_CRUCE_USD) {
-      return pendiente('AMBIGUO', TEXTO_CRUCE_USD_TRUNCADO, filas.length);
+    // El tope se mide sobre la lectura CRUDA (truncada ⇒ AMBIGUO); después
+    // salen los por pagar capturados después del cargo (P14 (b)).
+    const leidos = usd ?? [];
+    if (leidos.length >= TOPE_CRUCE_USD) {
+      return pendiente('AMBIGUO', TEXTO_CRUCE_USD_TRUNCADO, leidos.length);
     }
+    const filas = sinPorPagarPosterioresAlCargo(leidos, porPagar).filas;
     if (filas.length === 0) return { detalle: null };
     // Un USD con partes ya está (parcialmente) pagado: un cruzado es 1 ↔ 1.
     const ligados = await this.sumasLigadasDe(filas.map((g) => g.id as string));
@@ -3337,13 +3376,20 @@ export class ConciliacionService {
     /** Solo gastos MAYORES que esto (camino de pago parcial). */
     mayorQue?: number;
     limite: number;
+    /**
+     * Con la sonda de por pagar (invariante 93, P14 (b)): suma al select lo
+     * que `cargoPuedePagarGasto` lee. Sin ella, el select de siempre.
+     */
+    conPorPagar?: boolean;
   }): Promise<{
     data: Array<Record<string, unknown>> | null;
     error: { message: string } | null;
   }> {
     let q = this.supabase.service
       .from('gasto')
-      .select(GASTO_CRUCE_COLS)
+      .select(
+        `${GASTO_CRUCE_COLS}${colsCandidatoPorPagar(opts.conPorPagar === true)}`,
+      )
       .eq('conciliado', false)
       .in('medio_pago', MEDIOS_BANCARIOS)
       .gte('fecha_gasto', opts.desde)
@@ -3383,16 +3429,21 @@ export class ConciliacionService {
     moneda: string | null,
     desde: string,
     hasta: string,
+    porPagar: FiltroPorPagarCruce | null = null,
   ): Promise<GastoCandidatoCruce[]> {
     if (!(monto > 0)) return [];
-    const { data, error } = await this.gastosCandidatos({
+    const { data: leidos, error } = await this.gastosCandidatos({
       moneda,
       desde,
       hasta,
       mayorQue: monto + TOLERANCIA_CENTAVOS,
       limite: 40,
+      conPorPagar: porPagar !== null,
     });
-    if (error || !data || data.length === 0) return [];
+    if (error || !leidos || leidos.length === 0) return [];
+    // P14 (b): sin los por pagar capturados después del cargo.
+    const data = sinPorPagarPosterioresAlCargo(leidos, porPagar).filas;
+    if (data.length === 0) return [];
     const ligado = await this.sumasLigadasDe(data.map((g) => g.id as string));
     return data
       .filter((g) => {
@@ -11953,6 +12004,11 @@ export class ConciliacionService {
       const fechas = pendientes.map((m) => m.fecha as string).sort();
       const desde = ventanaDias(fechas[0], MATCH_DAYS).desde;
       const hasta = ventanaDias(fechas[fechas.length - 1], MATCH_DAYS).hasta;
+      // GASTOS «POR PAGAR» (invariante 93, P14 (b)): la MISMA regla del
+      // auto-cruce — un por pagar vigente capturado después del día del cargo
+      // no es su candidato. Sin la migración no se nombra la columna.
+      const conPorPagar = await porPagarDisponible(this.supabase.service);
+      const hoyPorPagar = hoyCancun();
       // PAGINADA por la PK (14-oct-2026): PostgREST corta en max-rows = 1000
       // SIN avisar y el `.limit(MOTIVO_GASTOS_MAX)` de antes nunca veía el
       // corte (con 1,050 gastos en la ventana anotaba con una foto recortada).
@@ -11962,7 +12018,7 @@ export class ConciliacionService {
         (a, b) =>
           this.supabase.service
             .from('gasto')
-            .select(GASTO_CRUCE_COLS)
+            .select(`${GASTO_CRUCE_COLS}${colsCandidatoPorPagar(conPorPagar)}`)
             .eq('conciliado', false)
             .in('medio_pago', MEDIOS_BANCARIOS)
             .gte('fecha_gasto', desde)
@@ -12004,6 +12060,8 @@ export class ConciliacionService {
             if ((g.moneda as string | null) !== moneda) continue;
             if (!montoCasa(monto, Number(g.monto))) continue;
             if (candidatos.some((c) => c.id === (g.id as string))) continue;
+            if (conPorPagar && !cargoPuedePagarGasto(g, fecha, hoyPorPagar))
+              continue;
             candidatos.push(this.aCandidatoCruce(g));
           }
         }
@@ -12034,7 +12092,10 @@ export class ConciliacionService {
           Math.abs(Number(m.monto)) > 0,
       );
       if (sinCandidatoMxn.length > 0)
-        await this.anotarMotivoUsd(sinCandidatoMxn);
+        await this.anotarMotivoUsd(
+          sinCandidatoMxn,
+          conPorPagar ? hoyPorPagar : null,
+        );
     } catch (err) {
       this.logger.warn(
         `No se pudo calcular el motivo de los pendientes: ${err instanceof Error ? err.message : String(err)}`,
@@ -12055,6 +12116,11 @@ export class ConciliacionService {
    */
   private async anotarMotivoUsd(
     cargos: Array<Record<string, unknown>>,
+    /**
+     * Hoy Cancún con la sonda de por pagar (invariante 93, P14 (b)): sin los
+     * por pagar capturados después de cada cargo; null sin la migración.
+     */
+    hoyPorPagar: string | null = null,
   ): Promise<void> {
     const olvidar = () => {
       for (const m of cargos) {
@@ -12076,7 +12142,9 @@ export class ConciliacionService {
         (d, h) =>
           this.supabase.service
             .from('gasto')
-            .select(GASTO_CRUCE_COLS)
+            .select(
+              `${GASTO_CRUCE_COLS}${colsCandidatoPorPagar(hoyPorPagar !== null)}`,
+            )
             .eq('conciliado', false)
             .in('medio_pago', MEDIOS_BANCARIOS)
             .eq('moneda', 'USD')
@@ -12117,7 +12185,13 @@ export class ConciliacionService {
           libres
             .filter((g) => {
               const f = g.fecha_gasto as string | null;
-              return !!f && f >= lo && f <= hi;
+              return (
+                !!f &&
+                f >= lo &&
+                f <= hi &&
+                (hoyPorPagar === null ||
+                  cargoPuedePagarGasto(g, fecha, hoyPorPagar))
+              );
             })
             .map((g) => ({
               id: g.id as string,

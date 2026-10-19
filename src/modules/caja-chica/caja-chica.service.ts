@@ -14,6 +14,8 @@ import {
   CONCEPTO_CAJA,
   TIPO_GASTO_CAJA,
   TIPO_REPOSICION,
+  efectivoPorPagarDeCaja,
+  efectivoQueCuentaEnCaja,
   efectoMovimientoCaja,
   historialConSaldo,
   lecturaFondo,
@@ -43,14 +45,15 @@ import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
 import { inicioOficialDe, pisoDia } from '../../common/inicio-oficial.util';
 // GASTOS «POR PAGAR» (19-oct-2026, invariante 93): un EFECTIVO por pagar
 // vigente NO es del libro (saldo, por reponer, reposición): entra con su
-// fecha real al marcarse pagado. Sonda ÚNICA de la columna y regla pura.
+// fecha real al marcarse pagado. Sonda ÚNICA de la columna; la regla de qué
+// efectivo cuenta vive en `efectivoQueCuentaEnCaja` (common/caja-chica-saldo,
+// la MISMA de la alerta de caja en negativo; revisión P13).
 import {
   colsPorPagar,
   porPagarDisponible,
 } from '../../common/por-pagar-disponible.util';
 import {
   estadoPagoGasto,
-  porPagarVigente,
   type EstadoPagoGasto,
 } from '../expenses/por-pagar.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
@@ -403,14 +406,17 @@ export class CajaChicaService {
       .in('usuario_captura_id', usuarioIds);
     if (error) throw new Error(error.message);
     const hoy = hoyCancun();
-    for (const g of (data ?? []) as unknown as Array<
-      Record<string, unknown> & {
-        usuario_captura_id: string;
-        monto: number | string;
-        moneda: string;
-      }
-    >) {
-      if (conPorPagar && porPagarVigente(g, hoy)) continue;
+    for (const g of efectivoQueCuentaEnCaja(
+      (data ?? []) as unknown as Array<
+        Record<string, unknown> & {
+          usuario_captura_id: string;
+          monto: number | string;
+          moneda: string;
+        }
+      >,
+      hoy,
+      conPorPagar,
+    )) {
       const k = (g as { usuario_captura_id: string }).usuario_captura_id;
       if (!map.has(k)) map.set(k, []);
       map.get(k)!.push(g);
@@ -475,12 +481,10 @@ export class CajaChicaService {
     // GASTOS POR PAGAR (invariante 93): el vigente (estado ≠ PAGADO) NO es
     // del libro; sin por pagar, el libro es byte a byte el de siempre.
     const hoy = hoyCancun();
-    const efectivo = conPorPagar
-      ? deLaMoneda.filter((g) => !porPagarVigente(g, hoy))
-      : deLaMoneda;
+    const efectivo = efectivoQueCuentaEnCaja(deLaMoneda, hoy, conPorPagar);
     const porPagar = conPorPagar
       ? listaPorPagarCaja(
-          deLaMoneda.filter((g) => porPagarVigente(g, hoy)),
+          efectivoPorPagarDeCaja(deLaMoneda, hoy, conPorPagar),
           hoy,
         )
       : null;
@@ -1373,38 +1377,38 @@ export class CajaChicaService {
       Record<string, unknown> & { monto: number | string; moneda: string }
     >;
     // El saldo y su lectura: sin los EFECTIVO por pagar vigentes.
-    const gastos = conPorPagar
-      ? todosGastos.filter((g) => !porPagarVigente(g, hoyPP))
-      : todosGastos;
-    const gastosLista = (
-      (gastosListaRes.data ?? []) as unknown as Array<Record<string, unknown>>
-    )
-      .filter((g) => !conPorPagar || !porPagarVigente(g, hoyPP))
-      .map((g) => {
-        const vuelo = (Array.isArray(g.vuelo) ? g.vuelo[0] : g.vuelo) as {
-          folio?: number;
-        } | null;
-        const { vuelo: _omit, conciliado: _conciliado, ...rest } = g;
-        void _omit;
-        void _conciliado;
-        return {
-          ...rest,
-          folio: vuelo?.folio ?? null,
-          // ADITIVO (invariante 93), solo con la migración.
-          ...(conPorPagar
-            ? {
-                por_pagar: g.por_pagar === true,
-                estado_pago: estadoPagoGasto(g, hoyPP),
-              }
-            : {}),
-        };
-      });
+    const gastos = efectivoQueCuentaEnCaja(todosGastos, hoyPP, conPorPagar);
+    const gastosLista = efectivoQueCuentaEnCaja(
+      (gastosListaRes.data ?? []) as unknown as Array<Record<string, unknown>>,
+      hoyPP,
+      conPorPagar,
+    ).map((g) => {
+      const vuelo = (Array.isArray(g.vuelo) ? g.vuelo[0] : g.vuelo) as {
+        folio?: number;
+      } | null;
+      const { vuelo: _omit, conciliado: _conciliado, ...rest } = g;
+      void _omit;
+      void _conciliado;
+      return {
+        ...rest,
+        folio: vuelo?.folio ?? null,
+        // ADITIVO (invariante 93), solo con la migración.
+        ...(conPorPagar
+          ? {
+              por_pagar: g.por_pagar === true,
+              estado_pago: estadoPagoGasto(g, hoyPP),
+            }
+          : {}),
+      };
+    });
     // Lista ADITIVA (invariante 93): EFECTIVO por pagar de la moneda del
     // fondo, aún fuera de la caja.
     const porPagar = conPorPagar
       ? listaPorPagarCaja(
-          todosGastos.filter(
-            (g) => g.moneda === fo.moneda && porPagarVigente(g, hoyPP),
+          efectivoPorPagarDeCaja(
+            todosGastos.filter((g) => g.moneda === fo.moneda),
+            hoyPP,
+            conPorPagar,
           ),
           hoyPP,
         )

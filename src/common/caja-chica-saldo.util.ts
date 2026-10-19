@@ -15,7 +15,15 @@
  *  · Caja ACUMULADA (`es_acumulada`, pedido 6-ago-2026): el mismo número con
  *    el signo invertido es lo POR REPONER — sube con cada gasto y la
  *    reposición lo regresa a cero.
+ *
+ * GASTOS «POR PAGAR» (19-oct-2026, invariante 93): qué EFECTIVO entra a esa
+ * suma lo decide `efectivoQueCuentaEnCaja` (abajo), la MISMA regla para el
+ * libro, «Mi caja», la lista de fondos y la alerta de caja en negativo.
  */
+import {
+  porPagarVigente,
+  type FilaEstadoPago,
+} from '../modules/expenses/por-pagar.util';
 
 export type MovimientoCajaLike = { tipo: string; monto: number | string };
 export type GastoCajaLike = { monto: number | string };
@@ -59,6 +67,39 @@ export function saldoCaja(
   const efectivoTotal = efectivo.reduce((s, g) => s + Number(g.monto), 0);
   const saldo = round2(movTotal - efectivoTotal);
   return esAcumulada ? round2(-saldo) : saldo;
+}
+
+/**
+ * GASTOS «POR PAGAR» (19-oct-2026, invariante 93; revisión P13 del
+ * 19-oct-2026) — FUENTE ÚNICA de «¿este gasto EFECTIVO ya salió de la
+ * caja?». Un por pagar VIGENTE (estado ≠ PAGADO: `porPagarVigente`, la regla
+ * de `expenses/por-pagar.util`, nunca recalculada aquí) todavía no: no es del
+ * libro (saldo, por reponer, reposición) ni de la alerta de caja en negativo;
+ * entra con su fecha real al marcarse pagado. `conPorPagar` = la sonda de la
+ * migración (`porPagarDisponible`): sin ella NADA se filtra (el 0.0.94 byte a
+ * byte). Sin gastos por pagar devuelve los MISMOS gastos en el MISMO orden.
+ */
+export function efectivoQueCuentaEnCaja<T extends object>(
+  gastos: ReadonlyArray<T>,
+  hoy: string,
+  conPorPagar: boolean,
+): T[] {
+  if (!conPorPagar) return [...gastos];
+  return gastos.filter((g) => !porPagarVigente(g as FilaEstadoPago, hoy));
+}
+
+/**
+ * El complemento de `efectivoQueCuentaEnCaja`: los EFECTIVO por pagar
+ * vigentes (aún fuera de la caja; la lista ADITIVA `por_pagar`). Sin la
+ * migración, ninguno.
+ */
+export function efectivoPorPagarDeCaja<T extends object>(
+  gastos: ReadonlyArray<T>,
+  hoy: string,
+  conPorPagar: boolean,
+): T[] {
+  if (!conPorPagar) return [];
+  return gastos.filter((g) => porPagarVigente(g as FilaEstadoPago, hoy));
 }
 
 export interface OpcionesFondoCaja {

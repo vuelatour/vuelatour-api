@@ -1,6 +1,8 @@
 import {
   CONCEPTO_CAJA,
   compararEntradasCaja,
+  efectivoPorPagarDeCaja,
+  efectivoQueCuentaEnCaja,
   efectoMovimientoCaja,
   historialConSaldo,
   lecturaFondo,
@@ -288,5 +290,83 @@ describe('CONCEPTO_CAJA', () => {
     expect(CONCEPTO_CAJA.REINTEGRO).toBe('Reintegro a dirección');
     expect(CONCEPTO_CAJA.AJUSTE).toBe('Ajuste');
     expect(CONCEPTO_CAJA.GASTO).toBe('Gasto en efectivo');
+  });
+});
+
+/**
+ * GASTOS «POR PAGAR» (19-oct-2026, invariante 93; revisión P13): la regla
+ * ÚNICA de qué EFECTIVO cuenta en la caja (libro, «Mi caja», lista de
+ * fondos y la alerta de caja en negativo). Un por pagar VIGENTE (POR_PAGAR o
+ * VENCIDO) aún no sale de la caja; uno conciliado o marcado pagado sí.
+ */
+describe('efectivoQueCuentaEnCaja / efectivoPorPagarDeCaja', () => {
+  const HOY = '2026-10-19';
+  const pagado = {
+    id: 'g-pagado',
+    monto: 300,
+    por_pagar: false,
+    conciliado: false,
+    fecha_gasto: '2026-10-10',
+  };
+  const porPagar = {
+    id: 'g-futuro',
+    monto: 500,
+    por_pagar: true,
+    conciliado: false,
+    fecha_gasto: '2026-10-25',
+  };
+  const vencido = {
+    id: 'g-vencido',
+    monto: 250,
+    por_pagar: true,
+    conciliado: false,
+    fecha_gasto: '2026-10-16',
+  };
+  const conciliado = {
+    id: 'g-conc',
+    monto: 80,
+    por_pagar: true,
+    conciliado: true,
+    fecha_gasto: '2026-10-12',
+  };
+  const sinLlave = { id: 'g-viejo', monto: 40 };
+  const todos = [pagado, porPagar, vencido, conciliado, sinLlave];
+
+  it('con la migración: fuera los por pagar vigentes (POR_PAGAR y VENCIDO); el conciliado y el pagado cuentan; mismo orden', () => {
+    expect(efectivoQueCuentaEnCaja(todos, HOY, true).map((g) => g.id)).toEqual([
+      'g-pagado',
+      'g-conc',
+      'g-viejo',
+    ]);
+    expect(efectivoPorPagarDeCaja(todos, HOY, true).map((g) => g.id)).toEqual([
+      'g-futuro',
+      'g-vencido',
+    ]);
+  });
+
+  it('sin la migración: TODO cuenta (el 0.0.94) y no hay lista de por pagar', () => {
+    const r = efectivoQueCuentaEnCaja(todos, HOY, false);
+    expect(r).toEqual(todos);
+    expect(r).not.toBe(todos); // copia: quien la ordene no toca la lectura
+    expect(efectivoPorPagarDeCaja(todos, HOY, false)).toEqual([]);
+  });
+
+  it('sin gastos por pagar: los MISMOS gastos en el MISMO orden (ningún saldo cambia)', () => {
+    const limpios = [pagado, conciliado, sinLlave];
+    expect(efectivoQueCuentaEnCaja(limpios, HOY, true)).toEqual(limpios);
+    expect(
+      saldoCaja(
+        [{ tipo: 'REPOSICION', monto: 1000 }],
+        efectivoQueCuentaEnCaja(limpios, HOY, true),
+      ),
+    ).toBe(saldoCaja([{ tipo: 'REPOSICION', monto: 1000 }], limpios));
+  });
+
+  it('marcar pagado lo mete a la caja (y lo saca de la lista)', () => {
+    const marcado = { ...porPagar, por_pagar: false, fecha_gasto: HOY };
+    expect(
+      efectivoQueCuentaEnCaja([pagado, marcado], HOY, true).map((g) => g.id),
+    ).toEqual(['g-pagado', 'g-futuro']);
+    expect(efectivoPorPagarDeCaja([pagado, marcado], HOY, true)).toEqual([]);
   });
 });

@@ -29,13 +29,68 @@ import { cfgInicio } from '../../common/inicio-oficial.fixture-spec';
  *
  * Fake: BD EN MEMORIA (el intérprete del spec de la nómina, con max-rows
  * 1000). `sinPorPagar` = la columna no existe (42703 a todo select que la
- * nombre); `fallarPorPagar` hace fallar SOLO la lectura del renglón.
+ * nombre); `fallarPorPagar` hace fallar SOLO la lectura del renglón. Las
+ * filas de `gasto` salen PROYECTADAS como en PostgREST (`proyectar`).
  */
 type Fila = Record<string, unknown>;
 type Op = [string, unknown[]];
 
 const MAX_ROWS = 1000;
 const ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+/** Ítems de primer nivel de un select (las comas de un embed no parten). */
+function itemsDeSelect(sel: string): string[] {
+  const out: string[] = [];
+  let nivel = 0;
+  let actual = '';
+  for (const ch of sel) {
+    if (ch === '(') nivel += 1;
+    else if (ch === ')') nivel -= 1;
+    if (ch === ',' && nivel === 0) {
+      out.push(actual.trim());
+      actual = '';
+    } else {
+      actual += ch;
+    }
+  }
+  if (actual.trim()) out.push(actual.trim());
+  return out;
+}
+
+/**
+ * PROYECCIÓN como PostgREST (segunda pasada de la revisión, 19-oct-2026): la
+ * fila trae SOLO lo que el select nombra. `alias:expr` toma `alias`; un embed
+ * `alias:fk(cols)` llega proyectado a SUS columnas (null si la fila no lo
+ * trae); sin el embed en el select, la fila NO trae `alias`. Antes el fake
+ * devolvía la fila completa con su `vuelo` y ninguna prueba fijaba la
+ * LECTURA del renglón: un select sin el embed (el del 0.0.95), o sin
+ * `periodo_contable, fecha_contable` con la sonda del cierre encendida,
+ * pasaba todas las pruebas de P1.
+ */
+function proyectar(sel: string, fila: Fila): Fila {
+  const out: Fila = {};
+  for (const item of itemsDeSelect(sel)) {
+    if (item === '*') {
+      Object.assign(out, fila);
+      continue;
+    }
+    const embed = /^(\w+)(?::[\w!]+)?\((.*)\)$/s.exec(item);
+    if (embed) {
+      const [, alias, cols] = embed;
+      const raw = fila[alias];
+      const obj: unknown = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
+      out[alias] =
+        obj != null && typeof obj === 'object'
+          ? proyectar(cols, obj as Fila)
+          : null;
+      continue;
+    }
+    const conAlias = /^(\w+):/.exec(item);
+    const llave = conAlias ? conAlias[1] : item;
+    out[llave] = fila[llave] ?? null;
+  }
+  return out;
+}
 
 function valor(fila: Fila, col: string): unknown {
   let acc: unknown = fila;
@@ -91,6 +146,8 @@ function armar(
     sinPorPagar?: boolean;
     fallarPorPagar?: boolean;
     inicio?: string | null;
+    /** Sin la migración del cierre (20261016000004): 42703 / 42P01. */
+    sinCierre?: boolean;
   } = {},
 ) {
   const from = (tabla: string) => {
@@ -117,6 +174,29 @@ function armar(
     }
     const resolver = (): { data: Fila[] | null; error: unknown } => {
       const sel = ops.find((o) => o[0] === 'select')?.[1][0];
+      if (opts.sinCierre) {
+        if (tabla === 'cierre_mes' || tabla === 'cierre_mes_vuelo') {
+          return {
+            data: null,
+            error: {
+              code: '42P01',
+              message: `relation ${tabla} does not exist`,
+            },
+          };
+        }
+        if (
+          typeof sel === 'string' &&
+          /\b(periodo_contable|fecha_contable)\b/.test(sel)
+        ) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column vuelo.periodo_contable does not exist',
+            },
+          };
+        }
+      }
       const nombra = typeof sel === 'string' && /\bpor_pagar\b/.test(sel);
       if (tabla === 'gasto' && nombra && opts.sinPorPagar) {
         return {
@@ -145,6 +225,11 @@ function armar(
       filas = filas.slice(a, Math.min(b + 1, a + MAX_ROWS));
       const limite = ops.find((o) => o[0] === 'limit')?.[1][0];
       if (typeof limite === 'number') filas = filas.slice(0, limite);
+      // Los filtros ya corrieron sobre la fila completa (como la BD); lo que
+      // VUELVE es solo lo que el select nombra.
+      if (tabla === 'gasto' && typeof sel === 'string') {
+        filas = filas.map((f) => proyectar(sel, f));
+      }
       return { data: filas, error: null };
     };
     q.maybeSingle = () =>
@@ -269,6 +354,8 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       count: 3,
       monto_mxn: 1250.5,
       monto_usd: 40,
+      // ADITIVO (revisión P2, 19-oct-2026): sin nómina, `[]`.
+      ids_nomina: [],
       ids: ['g-futuro', 'g-usd', 'g-vencido'],
     });
     expect(Object.keys(i).at(-1)).toBe('ids');
@@ -294,6 +381,7 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       detalle: 'Ningún gasto del periodo quedó por pagar.',
       count: 0,
       monto_mxn: 0,
+      ids_nomina: [],
       ids: [],
     });
     expect(r.listo).toBe(true);
@@ -326,8 +414,12 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       count: 0,
       monto_mxn: 0,
       lectura_fallida: true,
+      ids_nomina: [],
       ids: [],
     });
+    // Revisión P3 (19-oct-2026): un bloqueante sin verificar NO deja cerrar
+    // (antes `listo` quedaba en true con este mundo limpio).
+    expect(r.listo).toBe(false);
   });
 
   it('SIN la migración ⇒ count 0 sin `lectura_fallida` (no bloquea)', async () => {
@@ -346,6 +438,7 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
       detalle: 'Ningún gasto del periodo quedó por pagar.',
       count: 0,
       monto_mxn: 0,
+      ids_nomina: [],
       ids: [],
     });
     expect(r.listo).toBe(true);
@@ -366,5 +459,298 @@ describe('ProfitSharingService.preCierre — `gastos_por_pagar` (invariante 93)'
     expect(i.monto_mxn).toBe(1050);
     expect((i.ids as string[]).length).toBe(500);
     expect(i.ids_truncado).toBe(true);
+  });
+});
+
+/**
+ * Revisión del 19-oct-2026.
+ *  - P1: el renglón cuenta por MES CONTABLE, la MISMA regla del candado de
+ *    mes cerrado (eje vuelo ⇒ el mes contable del vuelo; eje gasto ⇒
+ *    `fecha_gasto`). Antes filtraba por `fecha_gasto`: un por pagar de un
+ *    vuelo de septiembre fechado en octubre no frenaba el cierre de
+ *    septiembre y, cerrado éste, quedaba atrapado (409 MES_CERRADO).
+ *  - P2: `ids_nomina` (subconjunto de `ids`) justo antes de `ids`.
+ *  - P4: un gasto MXN sin T.C. con fecha FUTURA (por pagar) y SIN oficial
+ *    no BLOQUEA como `gastos_sin_tc` (con la migración). Con oficial —el
+ *    servicio mira 7 días atrás: hasta hoy + 7 encuentra el de hoy— sigue en
+ *    el informativo `gastos_tc_oficial`, como en el reparto, que lo resta
+ *    (segunda pasada de la revisión).
+ */
+describe('ProfitSharingService.preCierre — `gastos_por_pagar` por MES CONTABLE (P1), `ids_nomina` (P2) y sin T.C. futuro (P4)', () => {
+  beforeAll(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  const SEP = { desde: '2026-09-01', hasta: '2026-09-30' };
+  const V400 = 'v4000000-0000-4000-8000-000000000400';
+  /** El vuelo embebido como lo trae PostgREST (con la migración del cierre). */
+  const vuelo = (fechaVuelo: string, extra: Fila = {}): Fila => ({
+    fecha_vuelo: fechaVuelo,
+    periodo_contable: null,
+    fecha_contable: fechaVuelo,
+    aeronave_id: A1,
+    es_externo: false,
+    ...extra,
+  });
+  const porPagarDeVuelo = (id: string, extra: Fila): Fila =>
+    gasto(id, {
+      por_pagar: true,
+      vuelo_id: V400,
+      categoria: 'TAXI',
+      medio_pago: 'EFECTIVO',
+      ...extra,
+    });
+  const enPeriodo = async (
+    tablas: Record<string, Fila[]>,
+    periodo: { desde: string; hasta: string },
+    opts: Parameters<typeof armar>[1] = {},
+  ) => {
+    const r = (await armar(tablas, opts).preCierre(
+      periodo,
+    )) as unknown as Respuesta;
+    return { r, i: item(r, 'gastos_por_pagar') };
+  };
+
+  it('caso 30-sep/01-oct: TAXI por pagar del vuelo #400 (30-sep) fechado el 1-oct ⇒ cuenta en SEPTIEMBRE (bloquea) y NO en octubre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-taxi', {
+          fecha_gasto: '2026-10-01',
+          monto: '500.00',
+          vuelo: vuelo('2026-09-30T20:00:00Z'),
+        }),
+      ],
+    };
+    const sep = await enPeriodo(tablas, SEP);
+    expect(sep.i).toMatchObject({ count: 1, monto_mxn: 500, ids: ['g-taxi'] });
+    expect(sep.r.listo).toBe(false);
+    const oct = await enPeriodo(tablas, PERIODO);
+    expect(oct.i).toMatchObject({ count: 0, ids: [] });
+  });
+
+  it('oficina a +11 días: OPERACIONES de un vuelo del 25-sep con fecha de pago 09-oct ⇒ septiembre, no octubre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-asur', {
+          categoria: 'OPERACIONES',
+          medio_pago: 'TRANSFERENCIA',
+          fecha_gasto: '2026-10-09',
+          monto: '4500.00',
+          vuelo: vuelo('2026-09-25T18:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({
+      count: 1,
+      ids: ['g-asur'],
+    });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({ count: 0 });
+  });
+
+  it('al revés: HOTEL por pagar fechado el 28-sep de un vuelo del 2-oct ⇒ octubre (el mes de sus libros), no septiembre', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-hotel', {
+          categoria: 'HOTEL',
+          fecha_gasto: '2026-09-28',
+          vuelo: vuelo('2026-10-02T15:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-hotel'],
+    });
+  });
+
+  it('vuelo DIFERIDO a octubre al cerrar septiembre (`fecha_contable` 1-oct): su por pagar cuenta en OCTUBRE', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-dif', {
+          fecha_gasto: '2026-09-30',
+          vuelo: vuelo('2026-09-30T20:00:00Z', {
+            periodo_contable: '2026-10-01T05:00:00Z',
+            fecha_contable: '2026-10-01T05:00:00Z',
+          }),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-dif'],
+    });
+  });
+
+  it('eje GASTO (categoría de EMPRESA aunque traiga vuelo): por su `fecha_gasto`', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-otro', {
+          categoria: 'OTRO',
+          fecha_gasto: '2026-10-01',
+          vuelo: vuelo('2026-09-30T20:00:00Z'),
+        }),
+      ],
+    };
+    expect((await enPeriodo(tablas, SEP)).i).toMatchObject({ count: 0 });
+    expect((await enPeriodo(tablas, PERIODO)).i).toMatchObject({
+      count: 1,
+      ids: ['g-otro'],
+    });
+  });
+
+  it('SIN la migración del cierre: el eje vuelo usa `fecha_vuelo` (y la lectura no nombra `fecha_contable`)', async () => {
+    const tablas = {
+      aeronave: AERONAVES,
+      gasto: [
+        porPagarDeVuelo('g-taxi', {
+          fecha_gasto: '2026-10-01',
+          vuelo: {
+            fecha_vuelo: '2026-09-30T20:00:00Z',
+            aeronave_id: A1,
+            es_externo: false,
+          },
+        }),
+      ],
+    };
+    const sep = await enPeriodo(tablas, SEP, { sinCierre: true });
+    expect(sep.i).toMatchObject({ count: 1, ids: ['g-taxi'] });
+    expect(sep.i).not.toHaveProperty('lectura_fallida');
+    expect(
+      (await enPeriodo(tablas, PERIODO, { sinCierre: true })).i,
+    ).toMatchObject({ count: 0 });
+  });
+
+  it('`ids_nomina`: los ids de NÓMINA por pagar (subconjunto de `ids`), justo ANTES de `ids`', async () => {
+    const { i } = await enPeriodo(
+      {
+        aeronave: AERONAVES,
+        gasto: [
+          gasto('g-taxi', { por_pagar: true, fecha_gasto: '2026-10-25' }),
+          gasto('g-nomina', {
+            por_pagar: true,
+            categoria: 'NOMINA',
+            aeronave_id: null,
+            medio_pago: 'TRANSFERENCIA',
+            fecha_gasto: '2026-10-30',
+            monto: '45000.00',
+          }),
+        ],
+      },
+      PERIODO,
+    );
+    expect(i.count).toBe(2);
+    expect([...(i.ids as string[])].sort()).toEqual(['g-nomina', 'g-taxi']);
+    expect(i.ids_nomina).toEqual(['g-nomina']);
+    expect(Object.keys(i).slice(-2)).toEqual(['ids_nomina', 'ids']);
+  });
+
+  it('P4: un MXN sin T.C. por pagar con fecha FUTURA y SIN oficial no BLOQUEA como «sin T.C.» (ya lo señala `gastos_por_pagar`); sin la migración, como el 0.0.94', async () => {
+    const tablas = (): Record<string, Fila[]> => ({
+      aeronave: AERONAVES,
+      gasto: [
+        gasto('g-futuro', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-28',
+        }),
+      ],
+    });
+    // El fake no tiene oficial para ningún día (`oficialDetallePara` ⇒ null).
+    const r = (await armar(tablas()).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
+    expect(item(r, 'gastos_sin_tc')).toMatchObject({ count: 0, ids: [] });
+    expect(item(r, 'gastos_tc_oficial')).toMatchObject({ count: 0 });
+    expect(item(r, 'gastos_por_pagar')).toMatchObject({
+      count: 1,
+      ids: ['g-futuro'],
+    });
+
+    // Sin la migración: el gasto (que nadie marcó por pagar) sigue «sin T.C.».
+    const viejo = (await armar(tablas(), { sinPorPagar: true }).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
+    expect(item(viejo, 'gastos_sin_tc')).toMatchObject({
+      count: 1,
+      ids: ['g-futuro'],
+    });
+  });
+
+  it('P4 (segunda pasada): a hoy + 3 SÍ hay oficial (el servicio mira 7 días atrás) ⇒ sigue en `gastos_tc_oficial`, como en el reparto que lo resta; a hoy + 10, sin oficial, fuera del bloqueante', async () => {
+    const tablas = (): Record<string, Fila[]> => ({
+      aeronave: AERONAVES,
+      gasto: [
+        gasto('g-hoy3', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-22',
+          monto: '700.00',
+        }),
+        gasto('g-hoy10', {
+          por_pagar: true,
+          tc_gasto: null,
+          fecha_gasto: '2026-10-29',
+          monto: '300.00',
+        }),
+      ],
+    });
+    /**
+     * `oficialDetallePara(dia)` busca en [dia − 7, dia] y el último dato es
+     * el de HOY (19-oct): lo encuentra para un día ≤ 26-oct, no después.
+     */
+    const conOficialDeHoy = (svc: ProfitSharingService) => {
+      (
+        svc as unknown as { tipoCambio: { oficialDetallePara: jest.Mock } }
+      ).tipoCambio.oficialDetallePara.mockImplementation((dia: string) =>
+        Promise.resolve(
+          dia <= '2026-10-26'
+            ? { tc: 18.25, fecha_dato: '2026-10-19', fuente: 'open.er-api' }
+            : null,
+        ),
+      );
+      return svc;
+    };
+    const r = (await conOficialDeHoy(armar(tablas())).preCierre(
+      PERIODO,
+    )) as unknown as Respuesta;
+    // El de hoy + 3 se convierte con el oficial de hoy: informativo, como
+    // en el reparto (antes de la segunda pasada salía con count 0).
+    expect(item(r, 'gastos_tc_oficial')).toMatchObject({
+      count: 1,
+      monto_mxn: 700,
+    });
+    // El de hoy + 10 no tiene oficial todavía: no bloquea como «sin T.C.».
+    expect(item(r, 'gastos_sin_tc')).toMatchObject({
+      count: 0,
+      monto_mxn: 0,
+      ids: [],
+    });
+    expect(item(r, 'gastos_por_pagar')).toMatchObject({
+      count: 2,
+      monto_mxn: 1000,
+    });
+
+    // Sin la migración (0.0.94): el de hoy + 3 igual de convertido y el de
+    // hoy + 10 «sin T.C.».
+    const viejo = (await conOficialDeHoy(
+      armar(tablas(), { sinPorPagar: true }),
+    ).preCierre(PERIODO)) as unknown as Respuesta;
+    expect(item(viejo, 'gastos_tc_oficial')).toMatchObject({
+      count: 1,
+      monto_mxn: 700,
+    });
+    expect(item(viejo, 'gastos_sin_tc')).toMatchObject({
+      count: 1,
+      monto_mxn: 300,
+      ids: ['g-hoy10'],
+    });
   });
 });

@@ -1,7 +1,11 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
-import { saldoCaja } from '../../common/caja-chica-saldo.util';
+import {
+  efectivoQueCuentaEnCaja,
+  saldoCaja,
+} from '../../common/caja-chica-saldo.util';
+import { porPagarDisponible } from '../../common/por-pagar-disponible.util';
 import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
 import { afacRealDisponible } from '../../common/afac-real-disponible.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
@@ -1564,13 +1568,20 @@ export class AlertsService {
     // OJO: caja_chica_movimiento no tiene columna `estado`; el saldo suma
     // TODOS los movimientos con `saldoCaja` (common/caja-chica-saldo.util),
     // la misma función del panel y de la app.
+    // GASTOS «POR PAGAR» (invariante 93, revisión P13 del 19-oct-2026): con
+    // la migración, un EFECTIVO por pagar vigente todavía no sale de la caja
+    // y NO cuenta (`efectivoQueCuentaEnCaja`, la MISMA regla del libro); la
+    // columna se nombra solo detrás de la sonda. Sin ella, como el 0.0.94.
+    const conPorPagar = await porPagarDisponible(this.supabase.service);
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
         .select('fondo_id, tipo, monto'),
       this.supabase.service
         .from('gasto')
-        .select('usuario_captura_id, monto, moneda')
+        .select(
+          `usuario_captura_id, monto, moneda${conPorPagar ? ', fecha_gasto, por_pagar, conciliado' : ''}`,
+        )
         .eq('medio_pago', 'EFECTIVO')
         .in('usuario_captura_id', usuarioIds),
     ]);
@@ -1579,16 +1590,21 @@ export class AlertsService {
     if (movsRes.error) throw new Error(movsRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
     const movs = movsRes.data;
-    const gastos = gastosRes.data;
+    // Solo el efectivo que YA salió de la caja (sin los por pagar vigentes).
+    const gastos = efectivoQueCuentaEnCaja(
+      (gastosRes.data ?? []) as unknown as Array<Record<string, unknown>>,
+      this.hoyCancun(),
+      conPorPagar,
+    );
 
     for (const f of fondos) {
-      // Misma fórmula que el panel y la app (fuente única, 5-sep-2026).
+      // Misma fórmula Y mismo universo de gastos que el panel y la app
+      // (fuente única `saldoCaja`, 5-sep-2026; `efectivoQueCuentaEnCaja`,
+      // 19-oct-2026).
       const movsDelFondo = ((movs ?? []) as Array<Record<string, unknown>>)
         .filter((m) => m.fondo_id === f.id)
         .map((m) => ({ tipo: String(m.tipo), monto: Number(m.monto) }));
-      const efectivoDelUsuario = (
-        (gastos ?? []) as Array<Record<string, unknown>>
-      )
+      const efectivoDelUsuario = gastos
         .filter(
           (g) => g.usuario_captura_id === f.usuario_id && g.moneda === f.moneda,
         )

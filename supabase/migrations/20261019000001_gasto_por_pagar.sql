@@ -32,9 +32,17 @@
 -- ÚNICA common/por-pagar-disponible.util): sin la columna todo como el
 -- 0.0.94 (límites de fecha de siempre, `config.gastos_por_pagar: false`,
 -- `por_pagar: true` en un alta/PATCH ⇒ 503 POR_PAGAR_NO_DISPONIBLE). Con la
--- migración y un API ≤ 0.0.94 no cambia nada (columna en false que nadie
--- lee). El «sí» de la sonda se memoriza: tras un ROLLBACK hay que
--- reiniciar el API.
+-- migración y un API ≤ 0.0.94 no cambia nada MIENTRAS ningún gasto tenga
+-- por_pagar = true: el 0.0.94 no lee la columna, así que un por pagar vivo
+-- le cuenta como PAGADO (en caja chica baja el saldo, sube el «por reponer»
+-- y puede entrar a una reposición), su pre-cierre no lo bloquea (se podría
+-- CERRAR el mes con él) y nadie lo puede marcar pagado (su DTO rechaza la
+-- llave `por_pagar`). Al volver al 0.0.95 ese gasto sale otra vez del libro
+-- de caja chica y una reposición registrada en esa ventana cambia de tramo.
+-- ROLLBACK del API a ≤ 0.0.94 PROHIBIDO con gastos por pagar vivos: antes,
+-- `select count(*) from public.gasto where por_pagar and not conciliado`
+-- debe dar 0 (márcalos pagados o elimínalos). El «sí» de la sonda se
+-- memoriza: tras un ROLLBACK de esta migración hay que reiniciar el API.
 --
 -- CÓMO APLICAR (proyecto bjesduasnzbzywofukbf; confirmar con un SELECT —
 -- p. ej. `select max(folio) from vuelo` ≈ 468 el 19-oct-2026):
@@ -508,10 +516,19 @@ $ver$;
 -- <<< CUERPO
 
 -- =====================================================================
--- ROLLBACK (SOLO desde el SQL Editor y con confirmación; ANTES bajar el API
--- a 0.0.94 o reiniciarlo después —la sonda memoriza el «sí»— y exportar
---   select id, fecha_gasto, monto, moneda, created_by from public.gasto where por_pagar;
--- porque esos gastos quedarían como PAGADOS):
+-- ROLLBACK de la MIGRACIÓN (SOLO desde el SQL Editor y con confirmación del
+-- usuario). Orden obligatorio:
+--  1) Dejar en 0 los gastos por pagar vivos (marcarlos pagados con la fecha
+--     real del pago, o eliminarlos si no se pagaron):
+--       select count(*) from public.gasto where por_pagar and not conciliado;
+--     y exportar antes, para el registro, todos los marcados:
+--       select id, fecha_gasto, monto, moneda, created_by from public.gasto where por_pagar;
+--     (sin la columna esos gastos quedarían como PAGADOS).
+--  2) SOLO con ese conteo en 0, bajar el API a ≤ 0.0.94 si hace falta (con
+--     por pagar vivos ese ROLLBACK del API está PROHIBIDO: ver DEPENDENCIA
+--     en la cabecera); si el API se queda en 0.0.95, reiniciarlo DESPUÉS
+--     del paso 3 (la sonda memoriza el «sí»).
+--  3) El bloque de abajo.
 -- begin;
 -- (quitar la columna por_pagar de public.gasto; el índice parcial se va con
 --  ella)

@@ -180,14 +180,15 @@ describe('GastosPorPagarService.recordar', () => {
         },
       }),
     );
-    // Dedupe marcado DESPUÉS de entregar, uno por gasto y día.
+    // Dedupe marcado DESPUÉS de entregar, uno por gasto, día y DESTINATARIO
+    // (revisión P15 del 19-oct-2026: antes era por gasto y día).
     expect(db.alerta_emitida).toEqual([
       {
-        dedupe_key: 'gasto_por_pagar:g-hoy:2026-10-19',
+        dedupe_key: 'gasto_por_pagar:g-hoy:2026-10-19:u-luis',
         clave: 'gasto_por_pagar',
       },
       {
-        dedupe_key: 'gasto_por_pagar:g-ayer:2026-10-19',
+        dedupe_key: 'gasto_por_pagar:g-ayer:2026-10-19:u-itzi',
         clave: 'gasto_por_pagar',
       },
     ]);
@@ -247,5 +248,119 @@ describe('GastosPorPagarService.recordar', () => {
   it('`runRecordatorios` (cron) nunca lanza, ni con la BD fallando', async () => {
     const { svc } = armar({ marcarFalla: 'error' });
     await expect(svc.runRecordatorios()).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Revisión del 19-oct-2026. P15: el dueño del gasto es
+ * `usuario_captura_id ?? created_by` (Mis registros, Mi caja, «Ya lo
+ * pagué»); si la OFICINA lo capturó «a nombre del piloto», también le llega
+ * a ella. P2: la NÓMINA se marca pagada en el módulo Nómina.
+ */
+describe('GastosPorPagarService.recordar — destinatarios (P15) y nómina (P2)', () => {
+  const PABLO = 'u-pablo';
+  const COORD = 'u-coord';
+
+  /** Solo los gastos de la prueba (los del mundo base se quitan). */
+  const soloEstos = (db: Record<string, Fila[]>, ...gastos: Fila[]) => {
+    db.gasto = gastos;
+    db.usuario.push(
+      { id: PABLO, estado: 'ACTIVO', rol: 'PILOTO' },
+      { id: COORD, estado: 'ACTIVO', rol: 'COORDINADOR' },
+    );
+  };
+
+  it('capturado por el COORDINADOR a nombre del piloto: le llega al PILOTO (dueño) y al coordinador; una clave por persona', async () => {
+    const { svc, db, notifyUser } = armar();
+    soloEstos(
+      db,
+      gasto('g-hotel', {
+        categoria: 'HOTEL',
+        monto: 1200,
+        usuario_captura_id: PABLO,
+        created_by: COORD,
+      }),
+    );
+    const r = await svc.recordar();
+    expect(r).toMatchObject({ candidatos: 1, avisados: 2, saltados: 0 });
+    expect((notifyUser.mock.calls as unknown[][]).map((c) => c[0])).toEqual([
+      PABLO,
+      COORD,
+    ]);
+    expect(notifyUser).toHaveBeenCalledWith(
+      PABLO,
+      expect.objectContaining({
+        titulo: 'Gasto por pagar hoy',
+        data: {
+          gasto_id: 'g-hotel',
+          motivo: 'gasto_por_pagar',
+          fecha_gasto: '2026-10-19',
+        },
+        link: '/admin/expenses?por_pagar=1',
+      }),
+    );
+    expect(db.alerta_emitida.map((a) => a.dedupe_key)).toEqual([
+      'gasto_por_pagar:g-hotel:2026-10-19:u-pablo',
+      'gasto_por_pagar:g-hotel:2026-10-19:u-coord',
+    ]);
+    // Otra corrida el mismo día: nadie repite.
+    notifyUser.mockClear();
+    expect(await svc.recordar()).toMatchObject({
+      avisados: 0,
+      ya_avisados: 2,
+    });
+    expect(notifyUser).not.toHaveBeenCalled();
+  });
+
+  it('`created_by` de CAMPO distinto del dueño (otro piloto) no recibe el aviso', async () => {
+    const { svc, db, notifyUser } = armar();
+    soloEstos(
+      db,
+      gasto('g-1', { usuario_captura_id: PABLO, created_by: LUIS }),
+    );
+    // LUIS (mundo base) no tiene rol de oficina.
+    db.usuario = db.usuario.map((u) =>
+      u.id === LUIS ? { ...u, rol: 'PILOTO' } : u,
+    );
+    await svc.recordar();
+    expect((notifyUser.mock.calls as unknown[][]).map((c) => c[0])).toEqual([
+      PABLO,
+    ]);
+  });
+
+  it('el select trae `usuario_captura_id` (antes solo `created_by`)', async () => {
+    const { svc, consultas } = armar();
+    await svc.recordar();
+    const lectura = consultas.find(
+      (q) => q.tabla === 'gasto' && q.sel.includes('created_by'),
+    );
+    expect(lectura?.sel).toContain('usuario_captura_id');
+  });
+
+  it('NÓMINA por pagar: link a /admin/nomina?mes=<mes de su fecha> y cuerpo «(Nómina en el panel)»', async () => {
+    const { svc, db, notifyUser } = armar();
+    soloEstos(
+      db,
+      gasto('g-nomina', {
+        categoria: 'NOMINA',
+        monto: 45000,
+        vuelo: null,
+        created_by: COORD,
+        usuario_captura_id: COORD,
+      }),
+    );
+    await svc.recordar();
+    expect(notifyUser).toHaveBeenCalledWith(COORD, {
+      tipo: 'gasto_registrado',
+      titulo: 'Gasto por pagar hoy',
+      cuerpo:
+        'Nómina · $45,000 MXN — cuando lo pagues, márcalo pagado (Nómina en el panel).',
+      data: {
+        gasto_id: 'g-nomina',
+        motivo: 'gasto_por_pagar',
+        fecha_gasto: '2026-10-19',
+      },
+      link: '/admin/nomina?mes=2026-10',
+    });
   });
 });

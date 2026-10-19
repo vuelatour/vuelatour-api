@@ -319,6 +319,18 @@ describe('ProfitSharingService.preCierre — `nomina_sin_repartir` (invariante 9
     });
   });
 
+  it('revisión P3 (19-oct-2026): la nómina sin verificar deja `listo: false` (no se cierra un «0» que nadie leyó)', async () => {
+    const r = (await armar(
+      { aeronave: AERONAVES, gasto: [nomina('g-sin')] },
+      { fallarRepartoExistencia: true },
+    ).preCierre(PERIODO)) as unknown as Respuesta;
+    expect(item(r, 'nomina_sin_repartir')).toMatchObject({
+      count: 0,
+      lectura_fallida: true,
+    });
+    expect(r.listo).toBe(false);
+  });
+
   it('INICIO OFICIAL (invariante 86): un periodo que cruza el 1-sep solo cuenta la nómina desde el inicio', async () => {
     const svc = armar(
       {

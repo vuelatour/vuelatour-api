@@ -134,7 +134,22 @@ export interface BloqueantePrevia {
   clave: string;
   titulo: string;
   count: number;
+  /**
+   * ADITIVO (revisión P3, 19-oct-2026): el renglón NO se pudo leer. Es
+   * bloqueante aunque `count` sea 0 (no se verificó).
+   */
+  lectura_fallida?: true;
+  /** ADITIVO (revisión P2): los `ids` de NÓMINA de `gastos_por_pagar`. */
+  ids_nomina?: string[];
   ids?: string[];
+}
+
+/** Lo que dice el 409 de un bloqueante que no se pudo leer. */
+export const TEXTO_BLOQUEANTE_SIN_VERIFICAR = 'no se pudo verificar';
+
+/** «Título: 3» o «Título: no se pudo verificar» (409 PRECIERRE_NO_LISTO). */
+export function textoBloqueantePrevia(b: BloqueantePrevia): string {
+  return `${b.titulo}: ${b.lectura_fallida ? TEXTO_BLOQUEANTE_SIN_VERIFICAR : b.count}`;
 }
 
 export interface RepartoAvionPrevia {
@@ -349,16 +364,27 @@ export class CierresService {
       filas.filter((f) => f.estado === 'CERRADO').map((f) => f.periodo),
     );
     const pre = await this.profitSharing.preCierre({ desde, hasta });
-    const items = (pre.items as Array<Record<string, unknown>>).map((i) => ({
-      clave: String(i.clave),
-      titulo: String(i.titulo ?? i.clave),
-      count: Number(i.count) || 0,
-      ...(Array.isArray(i.ids) ? { ids: i.ids as string[] } : {}),
-    }));
+    const items = (pre.items as Array<Record<string, unknown>>).map(
+      (i): BloqueantePrevia => ({
+        clave: String(i.clave),
+        titulo: String(i.titulo ?? i.clave),
+        count: Number(i.count) || 0,
+        // Revisión P3 (19-oct-2026): un renglón que no se pudo leer viaja
+        // marcado (el pre-cierre ya lo cuenta en `listo: false`).
+        ...(i.lectura_fallida === true
+          ? { lectura_fallida: true as const }
+          : {}),
+        ...(Array.isArray(i.ids_nomina)
+          ? { ids_nomina: i.ids_nomina as string[] }
+          : {}),
+        ...(Array.isArray(i.ids) ? { ids: i.ids as string[] } : {}),
+      }),
+    );
+    // Bloquea con count > 0 o sin verificar (`lectura_fallida`, P3).
     const bloqueantes = items.filter(
       (i) =>
         (CLAVES_BLOQUEANTES_PRECIERRE as readonly string[]).includes(i.clave) &&
-        i.count > 0,
+        (i.count > 0 || i.lectura_fallida === true),
     );
     const motivo = motivoNoCerrable({
       mes: periodo,
@@ -569,7 +595,7 @@ export class CierresService {
       throw conflicto(
         'PRECIERRE_NO_LISTO',
         `Antes de cerrar ${etiquetaMesMinuscula(periodo)} resuelve los pendientes que bloquean el pre-cierre (${prep.previa.bloqueantes
-          .map((b) => `${b.titulo}: ${b.count}`)
+          .map(textoBloqueantePrevia)
           .join('; ')}).`,
         { bloqueantes: prep.previa.bloqueantes },
       );
