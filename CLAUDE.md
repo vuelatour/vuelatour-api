@@ -11004,6 +11004,76 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     y el panel no pinta la línea. Spec: `expenses.service.fecha-vuelo.spec`
     (el select de la consulta que pagina y la fila sin tocar).
 
+95. **PROPIETARIOS DEL AVIÓN (19-oct-2026, API 0.0.97, SIN migración).**
+    Pedido del cliente (captura de «Propietarios actuales» de XA-VGV con
+    Hernan Garza y Alejandro Canales, los dos al 100 %): «no me deja borrar
+    al socio anterior y no es fácil editar nombres y porcentajes de los
+    socios», «que pueda agregar un socio desde esta parte» y «que se puedan
+    quitar o editar, incluidos los porcentajes». Dos bugs detrás: (a) la X
+    del panel cerraba con el día UTC del servidor y «termina hoy» sigue
+    vigente HOY (`vigente_hasta >= hoy`), así que el socio no desaparecía;
+    (b) el PATCH solo aceptaba `porcentaje`, `vigente_hasta` y `notas` y el
+    panel mandaba siempre `socio_id` + `vigente_desde` ⇒ 400 «should not
+    exist» en inglés: editar un propietario desde el panel NUNCA funcionó.
+    - **Fechas**: `vigente_desde` / `vigente_hasta` son DÍAS de pared
+      INCLUSIVOS. El reparto cuenta a un socio en un periodo si su vigencia
+      lo CRUZA (`profit-sharing.service`): dos dueños al 100 % encimados
+      reparten el 200 % (el caso XA-VGV de ago–oct hasta corregirlo).
+    - **Regla pura** `aircraft/propietarios.util.ts` (`esDia`, `diaMas`,
+      `diaAnterior`, `diaDeDate`, `fmtDiaMx`, `errorVigencia`,
+      `planSustitucion`, textos y `CODIGO_PROPIETARIO`). El servicio solo
+      lee (`leerOwner`, 404 `PROPIETARIO_NO_EXISTE`), valida y escribe
+      (`escribirOwner`: 23503 ⇒ 400 `PROPIETARIO_USUARIO_NO_EXISTE`, 23514 ⇒
+      400 `PROPIETARIO_VIGENCIA_INVALIDA` con el nombre y la salida).
+    - **`DELETE /v1/aircraft/owners/:id`** (ADMIN) = «Quitar»:
+      `?hasta=AAAA-MM-DD` = último día (sin él, HOY en Cancún); último día
+      anterior al primero ⇒ 400 `PROPIETARIO_VIGENCIA_INVALIDA` «X empezó
+      el 18/08/2026: no puede terminar el 17/08/2026. Si se agregó por
+      error, bórralo del historial.» (`mensajeHastaAntesDelInicio`), sin
+      escribir. `?permanente=true` = «Se agregó por error»: BORRA la fila
+      (`deleteOwner`; la UI confirma; los repartos de los meses en que
+      figuraba cambian). Formato malo ⇒ 400 `PROPIETARIO_FECHA_INVALIDA`.
+    - **`PATCH /v1/aircraft/owners/:id`** acepta además `socio_id`,
+      `vigente_desde` y `vigente_hasta: null` (reabrir); la vigencia se
+      valida contra la fila VIGENTE antes de escribir.
+    - **NUNCA más del 100 % en un mismo día** (pedido del 19-oct-2026: «hace
+      rato hicieron una prueba y pusieron 100 y 100 entre 2 socios»):
+      `excesoPorcentaje` barre los días en que cambia el conjunto de
+      vigentes del avión (cada primer día y el siguiente a cada último) y,
+      si alguno pasa de 100 (tolerancia 0.0005, 3 decimales), el alta y el
+      PATCH de porcentaje/fechas responden 400 `PROPIETARIO_SUMA_EXCEDE`
+      «Los propietarios sumarían 200 % el 18/08/2026 (Hernan Garza 100 % +
+      Alejandro Canales 100 %): no pueden pasar de 100 %. Pon el último día
+      del que sale o baja los porcentajes.» (`details {dia, suma,
+      propietarios[]}`), sin escribir. El alta evalúa las filas COMO
+      QUEDARÍAN (los `sustituye_a` ya recortados). Sumar MENOS de 100 sigue
+      permitido (N621TX reparte 59.08 % desde que salió Hernan). Cerrar o
+      borrar nunca se bloquea.
+    - **`POST /v1/aircraft/:id/owners`** acepta `sustituye_a: uuid[]` (del
+      MISMO avión): cada uno termina el día ANTERIOR a `vigente_desde`.
+      Todo se decide antes de escribir (`planSustitucion`: id ajeno o
+      inexistente ⇒ 400 `PROPIETARIO_SUSTITUYE_INVALIDO`; uno que empezó
+      después de ese día ⇒ 400 `PROPIETARIO_VIGENCIA_INVALIDA`; uno que ya
+      terminaba ese día o antes no se toca); luego insert y cierres uno a
+      uno. Respuesta ADITIVA `sustituidos: [{id, vigente_hasta}]`.
+    - **`POST /v1/users/socios`** (ADMIN, `CreateSocioDto {nombre,
+      es_empresa?, email?, telefono?}`) = SOCIO SIN ACCESO desde la card:
+      rol SOCIO, estado INACTIVO, sin invitación ni tarjeta (como los
+      socios cargados en mayo); un usuario con el MISMO nombre (ilike
+      exacto, comodines escapados) ⇒ 409 `SOCIO_YA_EXISTE` con
+      `details.usuario {id, nombre, rol, estado, es_empresa}`; correo
+      repetido ⇒ 409 `EMAIL_YA_EXISTE`. `GET /v1/users` trae `es_empresa`
+      (ADITIVO) para que el selector distinga «Empresa».
+    - **Lecturas**: `GET :id/owners` (vigentes) y `?history=true` (todos)
+      no cambian; el snapshot sigue con los vigentes (`vigente_hasta is
+      null or >= hoy`).
+    - Specs: `propietarios.util.spec`, `aircraft.service.propietarios.spec`
+      (grabador: hoy Cancún, 400 sin escribir, delete, patch con persona y
+      null, alta con sustitución en orden in → insert → update),
+      `aircraft.controller.propietarios.spec` (pipe REAL: `hasta` /
+      `permanente`, `vigente_hasta: null` llega null, `sustituye_a`, 403) y
+      `users.service.socios.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

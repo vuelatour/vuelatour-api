@@ -17,6 +17,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CreateSocioDto } from './dto/create-socio.dto';
 import { CreateUsuarioDto } from './dto/create-usuario.dto';
 import { ListUsuariosQuery } from './dto/list-usuarios.query';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -44,6 +45,19 @@ export class UsersController {
   })
   create(@Body() dto: CreateUsuarioDto, @CurrentUser() current: AuthenticatedUser) {
     return this.users.create(dto, current.userId);
+  }
+
+  @Post('socios')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Alta rápida de un SOCIO sin acceso (rol SOCIO, INACTIVO, sin invitación) desde la card de propietarios del avión. 409 SOCIO_YA_EXISTE si ya hay un usuario con ese nombre (details.usuario). Invariante 95.',
+  })
+  createSocio(
+    @Body() dto: CreateSocioDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.users.createSocio(dto, current.userId);
   }
 
   @Get(':id')

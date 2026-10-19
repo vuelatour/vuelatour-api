@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsDate,
   IsNumber,
   IsOptional,
@@ -44,9 +46,33 @@ export class CreateAeronaveSocioDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  /**
+   * PROPIETARIOS (19-oct-2026, invariante 95): ids de `aeronave_socio` del
+   * MISMO avión a los que este propietario SUSTITUYE. Cada uno termina el
+   * día anterior a `vigente_desde` (todo se valida antes de escribir).
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Propietarios vigentes del mismo avión que este sustituye: terminan el día anterior a vigente_desde.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  sustituye_a?: string[];
 }
 
 export class UpdateAeronaveSocioDto {
+  /** PROPIETARIOS (19-oct-2026, invariante 95): se corrige la persona. */
+  @ApiPropertyOptional({
+    description: 'Usuario id del socio (persona o empresa)',
+  })
+  @IsOptional()
+  @IsUUID()
+  socio_id?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Number)
@@ -55,11 +81,25 @@ export class UpdateAeronaveSocioDto {
   @Max(100)
   porcentaje?: number;
 
-  @ApiPropertyOptional({ description: 'Cerrar régimen poniendo vigente_hasta' })
+  /** PROPIETARIOS (19-oct-2026, invariante 95): se corrige el primer día. */
+  @ApiPropertyOptional({ description: 'Primer día del régimen' })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
-  vigente_hasta?: Date;
+  vigente_desde?: Date;
+
+  /**
+   * Último día del régimen. `null` EXPLÍCITO = reabrir (quitar la fecha de
+   * fin); ausente = no se toca.
+   */
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Último día del régimen; null = reabrir (sin fecha de fin)',
+  })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  vigente_hasta?: Date | null;
 
   @ApiPropertyOptional()
   @IsOptional()

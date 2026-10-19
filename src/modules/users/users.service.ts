@@ -11,6 +11,7 @@ import { Rol } from '../../common/types/auth.types';
 import { SupabaseService } from '../supabase/supabase.service';
 import { EmailService } from '../notifications/email.service';
 import { PushService } from '../realtime/push.service';
+import type { CreateSocioDto } from './dto/create-socio.dto';
 import type { CreateUsuarioDto } from './dto/create-usuario.dto';
 import type { ListUsuariosQuery } from './dto/list-usuarios.query';
 import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
@@ -27,8 +28,10 @@ import {
   tarjetaEsDeOtro,
 } from './usuario-edicion.util';
 
+// `es_empresa` (19-oct-2026, invariante 95, ADITIVO): el selector de
+// propietarios del avión distingue «Empresa» (Aero Charter) de las personas.
 const COLUMNS_BASE =
-  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
+  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, es_empresa, telefono, avatar_url, created_at, updated_at';
 
 /**
  * `apodo` (migración `20260917000001`): nombre corto de la oficina para el
@@ -39,6 +42,9 @@ const COLUMNS = `${COLUMNS_BASE}, apodo`;
 
 /** Migración que crea `usuario.apodo`. */
 const MIGRACION_APODO = '20260917000001';
+
+/** 409 del alta rápida de socio cuando el nombre ya existe (invariante 95). */
+export const CODIGO_SOCIO_YA_EXISTE = 'SOCIO_YA_EXISTE';
 
 export interface UsuarioRow {
   id: string;
@@ -51,6 +57,8 @@ export interface UsuarioRow {
   tarjeta_terminacion: string | null;
   /** También vuela (rol secundario): entra a selectores de piloto y horas. */
   es_piloto: boolean;
+  /** Razón social (Aero Charter) en vez de persona; ADITIVO (invariante 95). */
+  es_empresa?: boolean;
   es_piloto_externo: boolean;
   telefono: string | null;
   avatar_url: string | null;
@@ -223,6 +231,73 @@ export class UsersService {
    * a un piloto: queda en estado INVITADO con supabase_auth_id=null. Al primer
    * login con Google, un trigger / proceso de provisión enlaza el auth_id.
    */
+  /**
+   * SOCIO SIN ACCESO (19-oct-2026, invariante 95): alta rápida desde la card
+   * de propietarios. Rol SOCIO, estado INACTIVO, sin invitación ni tarjeta;
+   * `email` opcional (no da acceso). Un usuario con el MISMO nombre (sin
+   * distinguir mayúsculas) ⇒ 409 `SOCIO_YA_EXISTE` con `details.usuario`,
+   * para que el panel ofrezca usar el existente en vez de duplicarlo.
+   */
+  async createSocio(
+    dto: CreateSocioDto,
+    createdBy: string,
+  ): Promise<UsuarioRow> {
+    const nombre = dto.nombre.trim().replace(/\s+/g, ' ');
+    if (nombre.length < 2) {
+      throw new BadRequestException('Escribe el nombre del socio.');
+    }
+    const patron = nombre.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const { data: parecidos, error: eBusca } = await this.supabase.service
+      .from('usuario')
+      .select('id, nombre, rol, estado, es_empresa')
+      .ilike('nombre', patron)
+      .limit(1);
+    if (eBusca) throw new Error(eBusca.message);
+    const existente = (parecidos ?? [])[0] as
+      | { id: string; nombre: string; rol: string; estado: string }
+      | undefined;
+    if (existente) {
+      throw new ConflictException({
+        message: `Ya existe un usuario con ese nombre: ${existente.nombre} (${existente.rol}). Elígelo en la lista en vez de duplicarlo.`,
+        error: CODIGO_SOCIO_YA_EXISTE,
+        details: { usuario: existente },
+      });
+    }
+    const payload: Record<string, unknown> = {
+      nombre,
+      email: dto.email?.trim().toLowerCase() || null,
+      rol: Rol.SOCIO,
+      estado: 'INACTIVO',
+      es_empresa: dto.es_empresa === true,
+      tiene_fondo_caja: false,
+      es_piloto: false,
+      es_piloto_externo: false,
+      telefono: dto.telefono?.trim() || null,
+      created_by: createdBy,
+      updated_by: createdBy,
+    };
+    const insertar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .insert(payload)
+        .select(columnas)
+        .maybeSingle();
+    let { data, error } = await insertar(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await insertar(this.columnas()));
+    }
+    if (error) {
+      if (error.code === '23505') {
+        throw new ConflictException({
+          message: 'Ese correo ya está registrado en otro usuario.',
+          error: 'EMAIL_YA_EXISTE',
+        });
+      }
+      throw new Error(`Failed to create socio: ${error.message}`);
+    }
+    return data as unknown as UsuarioRow;
+  }
+
   async create(dto: CreateUsuarioDto, createdBy: string): Promise<UsuarioRow> {
     if (!dto.nombre?.trim() || !dto.email?.trim()) {
       throw new BadRequestException('nombre and email are required');

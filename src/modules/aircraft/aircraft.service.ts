@@ -8,6 +8,22 @@ import {
   Optional,
 } from '@nestjs/common';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+// PROPIETARIOS (19-oct-2026, invariante 95): fechas de pared, textos y el
+// plan de sustitución viven en la regla pura; aquí solo se lee y escribe.
+import {
+  CODIGO_PROPIETARIO,
+  MENSAJE_FECHA_INVALIDA,
+  MENSAJE_PROPIETARIO_NO_EXISTE,
+  MENSAJE_USUARIO_NO_EXISTE,
+  diaDeDate,
+  errorVigencia,
+  esDia,
+  excesoPorcentaje,
+  mensajeHastaAntesDelInicio,
+  mensajeSumaExcede,
+  planSustitucion,
+  type VigenciaPct,
+} from './propietarios.util';
 // AFAC POR VUELO (16-oct-2026, invariante 90): un PERMISO marcado «Pago de
 // AFAC» lo paga VuelaTour ⇒ fuera de las finanzas del avión.
 import {
@@ -97,6 +113,43 @@ const IMAGEN_COLS =
   'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, etiqueta, size_bytes, content_type, created_at, updated_at';
 
 const IMAGENES_BUCKET = 'aeronave-imagenes';
+
+// PROPIETARIOS (19-oct-2026, invariante 95): una fila de `aeronave_socio`
+// con el nombre del socio para los textos de los 400/404.
+const OWNER_COLS =
+  'id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, usuario:socio_id(nombre)';
+
+export interface OwnerRow {
+  id: string;
+  aeronave_id: string;
+  socio_id: string;
+  porcentaje: string | number;
+  vigente_desde: string;
+  vigente_hasta: string | null;
+  notas: string | null;
+  /** Nombre del socio (el embed; «Socio» si el usuario ya no existe). */
+  nombre: string;
+}
+
+/** PostgREST puede devolver el embed como objeto o como arreglo de uno. */
+function filaOwner(x: Record<string, unknown>): OwnerRow {
+  const u = x.usuario as { nombre?: unknown } | { nombre?: unknown }[] | null;
+  const uno = Array.isArray(u) ? (u[0] ?? null) : (u ?? null);
+  const nombre =
+    typeof uno?.nombre === 'string' && uno.nombre.trim() ? uno.nombre : 'Socio';
+  const desde = x.vigente_desde as string;
+  const hasta = (x.vigente_hasta as string | null | undefined) ?? null;
+  return {
+    id: String(x.id),
+    aeronave_id: String(x.aeronave_id),
+    socio_id: String(x.socio_id),
+    porcentaje: x.porcentaje as string | number,
+    vigente_desde: desde.slice(0, 10),
+    vigente_hasta: hasta === null ? null : hasta.slice(0, 10),
+    notas: (x.notas as string | null) ?? null,
+    nombre,
+  };
+}
 
 @Injectable()
 export class AircraftService {
@@ -1943,48 +1996,59 @@ export class AircraftService {
     return data ?? [];
   }
 
-  async createOwner(
-    aeronaveId: string,
-    dto: CreateAeronaveSocioDto,
-    createdBy: string,
-  ) {
-    await this.findById(aeronaveId);
+  /**
+   * PROPIETARIOS (19-oct-2026, invariante 95). Una fila de `aeronave_socio`
+   * con el nombre del socio (para los textos). 404 con código si no existe.
+   */
+  private async leerOwner(ownerId: string): Promise<OwnerRow> {
     const { data, error } = await this.supabase.service
       .from('aeronave_socio')
-      .insert({
-        aeronave_id: aeronaveId,
-        socio_id: dto.socio_id,
-        porcentaje: dto.porcentaje,
-        vigente_desde: dto.vigente_desde.toISOString().slice(0, 10),
-        vigente_hasta: dto.vigente_hasta?.toISOString().slice(0, 10),
-        notas: dto.notas,
-        created_by: createdBy,
-        updated_by: createdBy,
-      })
-      .select('id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas')
+      .select(OWNER_COLS)
+      .eq('id', ownerId)
       .maybeSingle();
-    if (error) {
-      if (error.code === '23503')
-        throw new BadRequestException('socio_id does not exist');
-      throw new Error(error.message);
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: MENSAJE_PROPIETARIO_NO_EXISTE,
+        error: CODIGO_PROPIETARIO.NO_EXISTE,
+      });
     }
-    return data!;
+    return filaOwner(data);
   }
 
-  async updateOwner(
-    ownerId: string,
-    dto: UpdateAeronaveSocioDto,
-    updatedBy: string,
-  ) {
-    if (Object.keys(dto).length === 0) {
-      throw new BadRequestException('Empty patch');
-    }
-    const patch: Record<string, unknown> = { updated_by: updatedBy };
-    if (dto.porcentaje !== undefined) patch.porcentaje = dto.porcentaje;
-    if (dto.vigente_hasta !== undefined)
-      patch.vigente_hasta = dto.vigente_hasta.toISOString().slice(0, 10);
-    if (dto.notas !== undefined) patch.notas = dto.notas;
+  /** Todas las filas del avión (cualquier vigencia) para la suma por día. */
+  private async vigenciasDelAvion(aeronaveId: string): Promise<VigenciaPct[]> {
+    const { data, error } = await this.supabase.service
+      .from('aeronave_socio')
+      .select(OWNER_COLS)
+      .eq('aeronave_id', aeronaveId);
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Record<string, unknown>[]).map(filaOwner);
+  }
 
+  /**
+   * «Que no se pueda poner más del 100 % del avión» (19-oct-2026): con las
+   * filas como quedarían, ningún día puede sumar más de 100. 400
+   * `PROPIETARIO_SUMA_EXCEDE` con quiénes y qué día, sin escribir.
+   */
+  private assertSumaNoExcede(filas: VigenciaPct[]): void {
+    const exceso = excesoPorcentaje(filas);
+    if (!exceso) return;
+    throw new BadRequestException({
+      message: mensajeSumaExcede(exceso),
+      error: CODIGO_PROPIETARIO.SUMA_EXCEDE,
+      details: exceso,
+    });
+  }
+
+  /** `aeronave_socio.update(patch)` por id, con los 23503/23514 en es-MX. */
+  private async escribirOwner(
+    ownerId: string,
+    patch: Record<string, unknown>,
+    nombre: string,
+    desde: string,
+    hasta: string | null,
+  ) {
     const { data, error } = await this.supabase.service
       .from('aeronave_socio')
       .update(patch)
@@ -1993,18 +2057,234 @@ export class AircraftService {
         'id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas',
       )
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!data)
-      throw new NotFoundException(`aeronave_socio ${ownerId} not found`);
+    if (error) {
+      if (error.code === '23503') {
+        throw new BadRequestException({
+          message: MENSAJE_USUARIO_NO_EXISTE,
+          error: CODIGO_PROPIETARIO.USUARIO_NO_EXISTE,
+        });
+      }
+      if (error.code === '23514') {
+        throw new BadRequestException({
+          message: mensajeHastaAntesDelInicio(nombre, desde, hasta ?? desde),
+          error: CODIGO_PROPIETARIO.VIGENCIA_INVALIDA,
+        });
+      }
+      throw new Error(error.message);
+    }
+    if (!data) {
+      throw new NotFoundException({
+        message: MENSAJE_PROPIETARIO_NO_EXISTE,
+        error: CODIGO_PROPIETARIO.NO_EXISTE,
+      });
+    }
     return data;
   }
 
-  async closeOwner(ownerId: string, vigenteHasta: Date, updatedBy: string) {
-    return this.updateOwner(
-      ownerId,
-      { vigente_hasta: vigenteHasta },
-      updatedBy,
+  /**
+   * Alta de un propietario. Con `sustituye_a` (invariante 95) los
+   * propietarios nombrados terminan el día ANTERIOR a `vigente_desde`: se
+   * valida TODO antes de escribir (ids del mismo avión, ninguno que haya
+   * empezado después de ese día) y, ya insertado el nuevo, se cierran uno a
+   * uno. Respuesta ADITIVA: `sustituidos: [{id, vigente_hasta}]`.
+   */
+  async createOwner(
+    aeronaveId: string,
+    dto: CreateAeronaveSocioDto,
+    createdBy: string,
+  ) {
+    await this.findById(aeronaveId);
+    const desde = diaDeDate(dto.vigente_desde);
+    const hasta = dto.vigente_hasta ? diaDeDate(dto.vigente_hasta) : null;
+    const vigencia = errorVigencia('Este propietario', desde, hasta);
+    if (vigencia) {
+      throw new BadRequestException({
+        message: vigencia,
+        error: CODIGO_PROPIETARIO.VIGENCIA_INVALIDA,
+      });
+    }
+    let cerrar: { id: string; hasta: string }[] = [];
+    if (dto.sustituye_a && dto.sustituye_a.length > 0) {
+      const ids = [...new Set(dto.sustituye_a)];
+      const { data, error } = await this.supabase.service
+        .from('aeronave_socio')
+        .select(OWNER_COLS)
+        .in('id', ids);
+      if (error) throw new Error(error.message);
+      const filas = ((data ?? []) as Record<string, unknown>[]).map(filaOwner);
+      const plan = planSustitucion(aeronaveId, desde, ids, filas);
+      if (!plan.ok) {
+        throw new BadRequestException({
+          message: plan.message,
+          error: plan.code,
+        });
+      }
+      cerrar = plan.cerrar;
+    }
+    // La suma por día con las filas COMO QUEDARÍAN (los sustituidos ya
+    // recortados) y el nuevo: nunca más del 100 %.
+    const hastaPorId = new Map(cerrar.map((c) => [c.id, c.hasta]));
+    const resultantes = (await this.vigenciasDelAvion(aeronaveId)).map((f) =>
+      hastaPorId.has(f.id) ? { ...f, vigente_hasta: hastaPorId.get(f.id)! } : f,
     );
+    this.assertSumaNoExcede([
+      ...resultantes,
+      {
+        id: 'nuevo',
+        nombre: 'El nuevo propietario',
+        porcentaje: dto.porcentaje,
+        vigente_desde: desde,
+        vigente_hasta: hasta,
+      },
+    ]);
+    const { data, error } = await this.supabase.service
+      .from('aeronave_socio')
+      .insert({
+        aeronave_id: aeronaveId,
+        socio_id: dto.socio_id,
+        porcentaje: dto.porcentaje,
+        vigente_desde: desde,
+        vigente_hasta: hasta ?? undefined,
+        notas: dto.notas,
+        created_by: createdBy,
+        updated_by: createdBy,
+      })
+      .select('id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas')
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503') {
+        throw new BadRequestException({
+          message: MENSAJE_USUARIO_NO_EXISTE,
+          error: CODIGO_PROPIETARIO.USUARIO_NO_EXISTE,
+        });
+      }
+      throw new Error(error.message);
+    }
+    const sustituidos: { id: string; vigente_hasta: string }[] = [];
+    for (const c of cerrar) {
+      const { error: e } = await this.supabase.service
+        .from('aeronave_socio')
+        .update({ vigente_hasta: c.hasta, updated_by: createdBy })
+        .eq('id', c.id);
+      if (e) throw new Error(e.message);
+      sustituidos.push({ id: c.id, vigente_hasta: c.hasta });
+    }
+    return { ...(data as Record<string, unknown>), sustituidos };
+  }
+
+  /**
+   * Corrección de una fila: persona (`socio_id`), porcentaje, primer y
+   * último día (`vigente_hasta: null` = reabrir) y notas. La vigencia se
+   * valida contra la fila VIGENTE antes de escribir (texto con el nombre);
+   * el CHECK de la BD queda de respaldo.
+   */
+  async updateOwner(
+    ownerId: string,
+    dto: UpdateAeronaveSocioDto,
+    updatedBy: string,
+  ) {
+    if (Object.keys(dto).length === 0) {
+      throw new BadRequestException('Empty patch');
+    }
+    const actual = await this.leerOwner(ownerId);
+    const patch: Record<string, unknown> = { updated_by: updatedBy };
+    if (dto.socio_id !== undefined) patch.socio_id = dto.socio_id;
+    if (dto.porcentaje !== undefined) patch.porcentaje = dto.porcentaje;
+    if (dto.vigente_desde !== undefined)
+      patch.vigente_desde = diaDeDate(dto.vigente_desde);
+    if (dto.vigente_hasta !== undefined)
+      patch.vigente_hasta =
+        dto.vigente_hasta === null ? null : diaDeDate(dto.vigente_hasta);
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+
+    const desde =
+      (patch.vigente_desde as string | undefined) ?? actual.vigente_desde;
+    const hasta =
+      'vigente_hasta' in patch
+        ? (patch.vigente_hasta as string | null)
+        : actual.vigente_hasta;
+    const vigencia = errorVigencia(actual.nombre, desde, hasta);
+    if (vigencia) {
+      throw new BadRequestException({
+        message: vigencia,
+        error: CODIGO_PROPIETARIO.VIGENCIA_INVALIDA,
+      });
+    }
+    // Un cambio de porcentaje o de fechas no puede dejar un día por encima
+    // del 100 % (la fila se evalúa como quedaría).
+    if (
+      patch.porcentaje !== undefined ||
+      patch.vigente_desde !== undefined ||
+      'vigente_hasta' in patch
+    ) {
+      const filas = (await this.vigenciasDelAvion(actual.aeronave_id)).map(
+        (f) =>
+          f.id === ownerId
+            ? {
+                ...f,
+                porcentaje:
+                  (patch.porcentaje as number | undefined) ?? f.porcentaje,
+                vigente_desde: desde,
+                vigente_hasta: hasta,
+              }
+            : f,
+      );
+      this.assertSumaNoExcede(filas);
+    }
+    return this.escribirOwner(ownerId, patch, actual.nombre, desde, hasta);
+  }
+
+  /**
+   * «Quitar» = cerrar el régimen con su ÚLTIMO día (`hasta`, día de pared;
+   * sin él, HOY en Cancún — antes era el día UTC del servidor). Un último día
+   * anterior al primero es 400 con la salida (borrarlo si se agregó por
+   * error); el historial se conserva.
+   */
+  async closeOwner(
+    ownerId: string,
+    hasta: string | undefined,
+    updatedBy: string,
+  ) {
+    const dia = hasta ?? this.hoyCancun();
+    if (!esDia(dia)) {
+      throw new BadRequestException({
+        message: MENSAJE_FECHA_INVALIDA,
+        error: CODIGO_PROPIETARIO.FECHA_INVALIDA,
+      });
+    }
+    const actual = await this.leerOwner(ownerId);
+    if (dia < actual.vigente_desde) {
+      throw new BadRequestException({
+        message: mensajeHastaAntesDelInicio(
+          actual.nombre,
+          actual.vigente_desde,
+          dia,
+        ),
+        error: CODIGO_PROPIETARIO.VIGENCIA_INVALIDA,
+      });
+    }
+    return this.escribirOwner(
+      ownerId,
+      { vigente_hasta: dia, updated_by: updatedBy },
+      actual.nombre,
+      actual.vigente_desde,
+      dia,
+    );
+  }
+
+  /**
+   * «Se agregó por error»: borra la fila del historial (`permanente=true`;
+   * la UI confirma). Los repartos de los meses en que figuraba cambian: por
+   * eso NO es la salida para un socio que sí fue dueño (ese se CIERRA).
+   */
+  async deleteOwner(ownerId: string) {
+    const actual = await this.leerOwner(ownerId);
+    const { error } = await this.supabase.service
+      .from('aeronave_socio')
+      .delete()
+      .eq('id', ownerId);
+    if (error) throw new Error(error.message);
+    return { ok: true, eliminado: actual };
   }
 
   // ============ Seguros ============

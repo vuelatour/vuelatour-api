@@ -309,15 +309,34 @@ export class AircraftController {
   @Delete('owners/:ownerId')
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
+  @ApiQuery({
+    name: 'hasta',
+    required: false,
+    type: String,
+    description:
+      'Último día del régimen (AAAA-MM-DD, día Cancún). Sin él, HOY en Cancún.',
+  })
+  @ApiQuery({
+    name: 'permanente',
+    required: false,
+    type: Boolean,
+    description:
+      'true = BORRA la fila del historial (se agregó por error; la UI confirma). Sin él, solo cierra el régimen.',
+  })
   @ApiOperation({
-    summary: 'Close ownership share with today as vigente_hasta (ADMIN)',
+    summary:
+      'Quitar un propietario (ADMIN): cierra el régimen con su último día o, con permanente=true, borra la fila (invariante 95).',
   })
   closeOwner(
     @Param('ownerId', ParseUUIDPipe) ownerId: string,
+    @Query('hasta') hasta: string | undefined,
+    @Query('permanente', new ParseBoolPipe({ optional: true }))
+    permanente = false,
     @CurrentUser() current: AuthenticatedUser,
   ) {
     if (!current) throw new ForbiddenException();
-    return this.aircraft.closeOwner(ownerId, new Date(), current.userId);
+    if (permanente) return this.aircraft.deleteOwner(ownerId);
+    return this.aircraft.closeOwner(ownerId, hasta || undefined, current.userId);
   }
 
   // ============ Seguros ============
