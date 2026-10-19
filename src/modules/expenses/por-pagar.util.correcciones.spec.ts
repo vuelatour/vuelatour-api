@@ -44,12 +44,44 @@ describe('esReplicaMarcarPagado (P6)', () => {
     ).toBe(false);
   });
 
-  it('conciliado, sin la columna (sin migración) o con fecha vigente FUTURA ⇒ NO es réplica', () => {
+  it('pagado por la bandera y CONCILIADO (el banco lo ligó entre los dos envíos) ⇒ también es réplica; con otra fecha, no', () => {
+    // 2.ª pasada de la revisión: marcar pagado dispara el auto-cruce (P14a);
+    // la réplica no escribe, así que el candado de conciliado no aplica.
+    const conciliado = { ...pagado, conciliado: true };
+    for (const fechaEnviada of [undefined, null, HOY]) {
+      expect(
+        esReplicaMarcarPagado({
+          porPagarEnviado: false,
+          fechaEnviada,
+          vigente: conciliado,
+          hoy: HOY,
+        }),
+      ).toBe(true);
+    }
+    expect(
+      esReplicaMarcarPagado({
+        porPagarEnviado: false,
+        fechaEnviada: '2026-10-19',
+        vigente: conciliado,
+        hoy: HOY,
+      }),
+    ).toBe(false);
+  });
+
+  it('conciliado con la bandera todavía en true, sin la columna (sin migración) o con fecha vigente FUTURA ⇒ NO es réplica', () => {
     const base = { porPagarEnviado: false, hoy: HOY };
+    // El banco lo ligó ANTES de marcarlo pagado: el PATCH sí bajaría la
+    // bandera (no es un reenvío).
     expect(
       esReplicaMarcarPagado({
         ...base,
-        vigente: { ...pagado, conciliado: true },
+        vigente: { ...pagado, por_pagar: true, conciliado: true },
+      }),
+    ).toBe(false);
+    expect(
+      esReplicaMarcarPagado({
+        ...base,
+        vigente: { ...pagado, conciliado: true, fecha_gasto: '2026-10-21' },
       }),
     ).toBe(false);
     expect(

@@ -548,7 +548,7 @@ describe('ExpensesService.assertOwnEnVentana — excepción del dueño al marcar
     expect(escrituras(f, 'g-pagado')).toHaveLength(0);
   });
 
-  it('un CONCILIADO nunca es réplica (409 GASTO_CONCILIADO de siempre)', async () => {
+  it('un CONCILIADO con la bandera todavía en true (lo ligó el banco antes de marcarlo) no es réplica: 409 GASTO_CONCILIADO de siempre', async () => {
     const { service } = armar();
     const e = await error(
       service.assertOwnEnVentana('g-conc', PILOTO, undefined, {
@@ -556,6 +556,60 @@ describe('ExpensesService.assertOwnEnVentana — excepción del dueño al marcar
       }),
     );
     expect(e).toMatchObject({ status: 409, code: 'GASTO_CONCILIADO' });
+  });
+
+  it('réplica sobre un CONCILIADO ya pagado por la bandera (el cruce lo ligó entre los envíos) ⇒ pasa sin 409 y el PATCH no escribe; con otra fecha, el 409 de siempre', async () => {
+    const { service, f } = armar();
+    f.tablas.gasto.push(
+      gasto('g-conc-replica', {
+        medio_pago: 'TARJETA_CORP',
+        tarjeta_terminacion: '0585',
+        conciliado: true,
+        fecha_gasto: '2026-10-15',
+        updated_at: '2026-10-19T15:00:05Z',
+      }),
+    );
+    for (const fechaPago of [undefined, null, '2026-10-15']) {
+      await expect(
+        service.assertOwnEnVentana('g-conc-replica', PILOTO, undefined, {
+          marcarPagado: true,
+          fechaPago,
+        }),
+      ).resolves.toBeUndefined();
+    }
+    const otra = await error(
+      service.assertOwnEnVentana('g-conc-replica', PILOTO, undefined, {
+        marcarPagado: true,
+        fechaPago: '2026-10-16',
+      }),
+    );
+    expect(otra).toMatchObject({ status: 409, code: 'GASTO_CONCILIADO' });
+    // Un PATCH con más llaves no es el mínimo: el candado de siempre.
+    const conNotas = await error(
+      service.assertOwnEnVentana('g-conc-replica', PILOTO, undefined, {
+        marcarPagado: false,
+        porPagar: false,
+      }),
+    );
+    expect(conNotas).toMatchObject({ status: 409, code: 'GASTO_CONCILIADO' });
+    const r = (await service.update(
+      'g-conc-replica',
+      {
+        por_pagar: false,
+        fecha_gasto: '2026-10-15',
+        // La versión de ANTES del cruce (el CAS daría 409 CONFLICTO_VERSION).
+        if_updated_at: '2026-10-19T15:00:00Z',
+        capturado_en: '2026-10-19T09:58:00-05:00',
+      },
+      PILOTO,
+      Rol.PILOTO,
+    )) as Fila;
+    expect(r).toMatchObject({
+      id: 'g-conc-replica',
+      conciliado: true,
+      estado_pago: 'PAGADO',
+    });
+    expect(escrituras(f, 'g-conc-replica')).toHaveLength(0);
   });
 
   it('AJENO ⇒ 403 GASTO_AJENO aunque sea marcar pagado', async () => {

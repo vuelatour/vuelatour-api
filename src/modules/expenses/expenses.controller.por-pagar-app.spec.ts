@@ -33,10 +33,15 @@ import { fakeCierre, type Fila } from '../../common/cierre-mes.fixture-spec';
  *    pagado con una fecha ya repuesta sí, con un texto que no dice «ya
  *    entró».
  *  - P8: el PATCH mínimo de un VISITANTE no reescribe la categoría.
+ *  - P6 + P14a (2.ª pasada): marcar pagado un gasto BANCARIO dispara el
+ *    auto-cruce y el banco lo concilia antes del reenvío; el reenvío
+ *    idéntico sigue siendo réplica (200 sin escribir), no 409
+ *    GASTO_CONCILIADO (app) ni CONFLICTO_VERSION (oficina).
  */
 
 const PILOTO = 'u-piloto';
 const VIS = 'u-vis';
+const ADMIN = 'u-admin';
 
 const gasto = (id: string, extra: Fila = {}): Fila => ({
   id,
@@ -64,13 +69,22 @@ const gasto = (id: string, extra: Fila = {}): Fila => ({
 
 function armar(
   gastos: Fila[],
-  opts: { ultimaReposicion?: string | null } = {},
+  opts: {
+    ultimaReposicion?: string | null;
+    /**
+     * Con el módulo de conciliación: el cargo YA está en el estado de cuenta
+     * y el auto-cruce lo liga (el gasto queda conciliado y el trigger
+     * `tg_set_updated_at` le mueve la versión).
+     */
+    conciliaAlCruzar?: boolean;
+  } = {},
 ) {
   const f = fakeCierre(
     {
       usuario: [
         { id: PILOTO, nombre: 'Luis Piloto', gastos_sin_limite_hasta: null },
         { id: VIS, nombre: 'Visitante', gastos_sin_limite_hasta: null },
+        { id: ADMIN, nombre: 'Ale', gastos_sin_limite_hasta: null },
       ],
       gasto: gastos,
       aeronave: [{ id: 'av-1', matricula: 'N4142R', activa: true }],
@@ -81,6 +95,20 @@ function armar(
     fechaUltimaReposicionDe: jest
       .fn()
       .mockResolvedValue(opts.ultimaReposicion ?? null),
+  };
+  const conciliacion = {
+    intentarCruzarGasto: jest.fn((id: string) => {
+      const g = (f.tablas.gasto ?? []).find((x) => x.id === id);
+      if (g) {
+        g.conciliado = true;
+        g.updated_at = new Date(Date.now() + 5_000).toISOString();
+      }
+      return Promise.resolve({
+        ligado: true,
+        movimiento_id: 'mov-1',
+        motivo: 'Ligado por monto.',
+      });
+    }),
   };
   const nada = {} as never;
   const service = new ExpensesService(
@@ -94,9 +122,10 @@ function armar(
     { numero: jest.fn().mockResolvedValue(1) } as never,
     cajaChica as never,
     nada,
+    opts.conciliaAlCruzar ? (conciliacion as never) : undefined,
   );
   const ctrl = new ExpensesController(service, nada);
-  return { f, service, ctrl, cajaChica };
+  return { f, service, ctrl, cajaChica, conciliacion };
 }
 
 const fila = (f: ReturnType<typeof fakeCierre>, id: string) =>
@@ -145,6 +174,7 @@ const usuario = (userId: string, rol: Rol): AuthenticatedUser =>
   ({ userId, authId: `auth-${userId}`, nombre: userId, rol }) as never;
 const piloto = usuario(PILOTO, Rol.PILOTO);
 const visitante = usuario(VIS, Rol.VISITANTE);
+const oficina = usuario(ADMIN, Rol.ADMIN);
 const patch = (cuerpo: Record<string, unknown>) =>
   cuerpo as unknown as UpdateGastoDto;
 
@@ -301,6 +331,158 @@ describe('P6 — reenviar un «Ya lo pagué» que ya se aplicó', () => {
     );
     expect(e).toMatchObject({ status: 403, code: 'GASTO_FUERA_DE_VENTANA' });
     expect(escrituras(f, 'g6d')).toHaveLength(0);
+  });
+});
+
+describe('P6 + P14a — el banco concilia el «Ya lo pagué» antes del reenvío', () => {
+  // TARJETA_CORP por pagar, VENCIDO el 15-oct, capturado el 05-oct (su
+  // semana ya pasó). El 20-oct el piloto toca «Ya lo pagué»: marcar pagado
+  // dispara el auto-cruce (P14a), el estado de cuenta ya trae el cargo y el
+  // gasto queda CONCILIADO. La respuesta se perdió: el outbox reenvía el
+  // MISMO cuerpo.
+  const g9 = (extra: Fila = {}) =>
+    gasto('g9', {
+      medio_pago: 'TARJETA_CORP',
+      tarjeta_terminacion: '0585',
+      por_pagar: true,
+      fecha_gasto: '2026-10-15',
+      ...extra,
+    });
+  const cuerpo = (extra: Record<string, unknown> = {}) =>
+    patch({
+      por_pagar: false,
+      if_updated_at: '2026-10-05T15:00:00.000Z',
+      capturado_en: '2026-10-20T09:58:00-05:00',
+      ...extra,
+    });
+
+  it('reenvío idéntico (sin fecha) ⇒ 200 con la fila conciliada (sin 409 GASTO_CONCILIADO) y UNA sola escritura', async () => {
+    reloj('2026-10-20T15:00:00Z');
+    const { ctrl, f, conciliacion } = armar([g9()], {
+      conciliaAlCruzar: true,
+    });
+    await ctrl.update('g9', cuerpo(), piloto);
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenCalledWith('g9', PILOTO);
+    expect(fila(f, 'g9')).toMatchObject({ por_pagar: false, conciliado: true });
+    const r = (await ctrl.update('g9', cuerpo(), piloto)) as Fila;
+    expect(r).toMatchObject({
+      id: 'g9',
+      por_pagar: false,
+      conciliado: true,
+      fecha_gasto: '2026-10-15',
+      estado_pago: 'PAGADO',
+    });
+    expect(escrituras(f, 'g9')).toHaveLength(1);
+    // La réplica no vuelve a buscar cargo.
+    expect(conciliacion.intentarCruzarGasto).toHaveBeenCalledTimes(1);
+  });
+
+  it('con el cuerpo de la app (fecha del pago 20-oct) también ⇒ 200 sin escribir', async () => {
+    reloj('2026-10-20T15:00:00Z');
+    const { ctrl, f } = armar([g9()], { conciliaAlCruzar: true });
+    const conFecha = () => cuerpo({ fecha_gasto: '2026-10-20' });
+    await ctrl.update('g9', conFecha(), piloto);
+    expect(fila(f, 'g9')).toMatchObject({
+      por_pagar: false,
+      conciliado: true,
+      fecha_gasto: '2026-10-20',
+    });
+    const r = (await ctrl.update('g9', conFecha(), piloto)) as Fila;
+    expect(r).toMatchObject({
+      id: 'g9',
+      conciliado: true,
+      fecha_gasto: '2026-10-20',
+      estado_pago: 'PAGADO',
+    });
+    expect(escrituras(f, 'g9')).toHaveLength(1);
+  });
+
+  it('la conciliación MANUAL de la oficina entre los dos envíos da lo mismo', async () => {
+    reloj('2026-10-20T15:00:00Z');
+    const { ctrl, f } = armar([g9()]);
+    await ctrl.update('g9', cuerpo(), piloto);
+    // La oficina ligó el cargo en Conciliación (la BD mueve la versión).
+    Object.assign(fila(f, 'g9'), {
+      conciliado: true,
+      updated_at: '2026-10-20T15:00:30.000Z',
+    });
+    const r = (await ctrl.update('g9', cuerpo(), piloto)) as Fila;
+    expect(r).toMatchObject({ id: 'g9', conciliado: true, por_pagar: false });
+    expect(escrituras(f, 'g9')).toHaveLength(1);
+  });
+
+  it('con OTRA fecha sobre el conciliado sigue el 409 GASTO_CONCILIADO de siempre (no es réplica) y nada se escribe', async () => {
+    reloj('2026-10-20T15:00:00Z');
+    const { ctrl, f } = armar([g9()], { conciliaAlCruzar: true });
+    await ctrl.update('g9', cuerpo({ fecha_gasto: '2026-10-20' }), piloto);
+    const e = await error(
+      ctrl.update('g9', cuerpo({ fecha_gasto: '2026-10-19' }), piloto),
+    );
+    expect(e).toEqual({
+      status: 409,
+      code: 'GASTO_CONCILIADO',
+      message:
+        'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
+    });
+    expect(escrituras(f, 'g9')).toHaveLength(1);
+    expect(fila(f, 'g9').fecha_gasto).toBe('2026-10-20');
+  });
+
+  it('un PATCH con MÁS llaves sobre el conciliado sigue con el candado GASTO_CONCILIADO', async () => {
+    reloj('2026-10-20T15:00:00Z');
+    const { ctrl, f } = armar([g9()], { conciliaAlCruzar: true });
+    await ctrl.update('g9', cuerpo(), piloto);
+    const e = await error(
+      ctrl.update('g9', cuerpo({ notas: 'pagado con la tarjeta' }), piloto),
+    );
+    expect(e).toMatchObject({ status: 409, code: 'GASTO_CONCILIADO' });
+    expect(escrituras(f, 'g9')).toHaveLength(1);
+    expect(fila(f, 'g9').notas).toBeNull();
+  });
+
+  describe('OFICINA (sin ventana): el reenvío del «Marcar pagado» del panel', () => {
+    const bancario = () =>
+      g9({
+        medio_pago: 'TRANSFERENCIA',
+        tarjeta_terminacion: null,
+        fecha_gasto: '2026-10-25',
+      });
+    const cuerpoPanel = (fecha = '2026-10-20') =>
+      patch({
+        por_pagar: false,
+        fecha_gasto: fecha,
+        if_updated_at: '2026-10-05T15:00:00.000Z',
+      });
+
+    it('misma fecha y la versión de ANTES ⇒ 200 sin escribir (antes: 409 CONFLICTO_VERSION)', async () => {
+      reloj('2026-10-20T15:00:00Z');
+      const { ctrl, f } = armar([bancario()], { conciliaAlCruzar: true });
+      await ctrl.update('g9', cuerpoPanel(), oficina);
+      expect(fila(f, 'g9')).toMatchObject({
+        por_pagar: false,
+        conciliado: true,
+        fecha_gasto: '2026-10-20',
+      });
+      const r = (await ctrl.update('g9', cuerpoPanel(), oficina)) as Fila;
+      expect(r).toMatchObject({
+        id: 'g9',
+        conciliado: true,
+        estado_pago: 'PAGADO',
+      });
+      expect(escrituras(f, 'g9')).toHaveLength(1);
+    });
+
+    it('OTRA fecha con la versión de ANTES sigue siendo 409 CONFLICTO_VERSION (cambiaría la fecha)', async () => {
+      reloj('2026-10-20T15:00:00Z');
+      const { ctrl, f } = armar([bancario()], { conciliaAlCruzar: true });
+      await ctrl.update('g9', cuerpoPanel(), oficina);
+      const e = await error(
+        ctrl.update('g9', cuerpoPanel('2026-10-19'), oficina),
+      );
+      expect(e).toMatchObject({ status: 409, code: 'CONFLICTO_VERSION' });
+      expect(escrituras(f, 'g9')).toHaveLength(1);
+      expect(fila(f, 'g9').fecha_gasto).toBe('2026-10-20');
+    });
   });
 });
 

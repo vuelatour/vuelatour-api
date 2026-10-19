@@ -4110,23 +4110,15 @@ export class ExpensesService {
         error: 'GASTO_AJENO',
       });
     }
-    if (gasto.conciliado === true) {
-      throw new ConflictException({
-        message:
-          'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
-        error: 'GASTO_CONCILIADO',
-      });
-    }
-    // Permiso temporal sin límite (caso Luis, 1-sep): salta SOLO los candados
-    // de TIEMPO que siguen (reposición de caja chica y semana de edición).
-    // Dueño y conciliado ya se validaron arriba y aplican SIEMPRE.
-    if (await this.sinLimiteVigente(userId)) return;
     const hoy = hoyCancun();
-    const diaVigente = String(gasto.fecha_gasto ?? '').slice(0, 10);
     // RÉPLICA de un «Ya lo pagué» que ya se aplicó (revisión P6: respuesta
     // perdida ⇒ el outbox reenvía el MISMO cuerpo): no cambiaría nada, así
-    // que no hay ventana ni candado que evaluar. Un 403 aquí la app lo toma
-    // como determinista y marcaba FALLIDO un pago que sí quedó.
+    // que no hay ventana ni candado que evaluar. Va ANTES del candado de
+    // conciliado (2.ª pasada de la revisión): marcar pagado dispara el
+    // auto-cruce (P14a) y el banco —o la oficina en Conciliación— puede
+    // ligarlo entre los dos envíos; el PATCH mínimo no escribe nada. Un
+    // 403/409 aquí la app lo toma como determinista y marcaba FALLIDO un
+    // pago que sí quedó.
     if (
       opts.marcarPagado === true &&
       esReplicaMarcarPagado({
@@ -4138,6 +4130,19 @@ export class ExpensesService {
     ) {
       return;
     }
+    if (gasto.conciliado === true) {
+      throw new ConflictException({
+        message:
+          'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
+        error: 'GASTO_CONCILIADO',
+      });
+    }
+    // Permiso temporal sin límite (caso Luis, 1-sep): salta SOLO los candados
+    // de TIEMPO que siguen (reposición de caja chica y semana de edición).
+    // Dueño y conciliado ya se validaron arriba y aplican a toda escritura
+    // (solo la réplica, que no escribe nada, sale antes del conciliado).
+    if (await this.sinLimiteVigente(userId)) return;
+    const diaVigente = String(gasto.fecha_gasto ?? '').slice(0, 10);
     const vigPorPagar = (gasto as { por_pagar?: unknown }).por_pagar === true;
     const soloMarcarPagado = opts.marcarPagado === true && vigPorPagar;
     // ¿Este PATCH lo marca pagado (mínimo o con más llaves)? Con él entra
@@ -4346,7 +4351,9 @@ export class ExpensesService {
     //    la carga se mueve a la misma hora de pared del día nuevo;
     //  - `true` (re-programar): solo sin conciliar (409 GASTO_CONCILIADO);
     //  - RÉPLICA de un «marcar pagado» ya aplicado (revisión P6): la fila
-    //    tal cual, sin escribir;
+    //    tal cual, sin escribir; también si el banco lo concilió entre los
+    //    dos envíos (2.ª pasada: va ANTES de la rama del conciliado, que
+    //    dejaba la MISMA fecha para el CAS ⇒ 409 CONFLICTO_VERSION);
     //  - CONCILIADO (revisión P9): la bandera no se toca; mover la fecha a
     //    futuro ⇒ 409 GASTO_CONCILIADO;
     //  - si no: `porPagarFinal` (una fecha > hoy lo pone por pagar solo).
@@ -4411,7 +4418,8 @@ export class ExpensesService {
           hoy: hoyPP,
         })
       ) {
-        // La misma fecha que ya tiene: no es un cambio de fecha.
+        // La misma fecha que ya tiene: no es un cambio de fecha (conciliado
+        // o no: ni el candado de mes, ni la semana, ni el CAS la ven).
         delete dto.fecha_gasto;
         replicaPagado = true;
       } else if (vig.conciliado === true) {

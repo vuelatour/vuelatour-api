@@ -262,13 +262,18 @@ export function fechaMarcarPagado(
  * RÉPLICA idempotente de un «marcar pagado» (revisión del 19-oct-2026, P6):
  * el primer PATCH ya escribió `por_pagar = false`, la respuesta se perdió y
  * el outbox de la app reenvía el MISMO cuerpo. Es réplica si el gasto
- * VIGENTE ya está pagado por la bandera (`por_pagar` false, sin conciliar)
- * con fecha ≤ hoy y el PATCH trae `por_pagar: false` sin fecha o con la
- * MISMA: no cambiaría nada, así que se responde la fila tal cual (sin la
- * ventana de corrección, sin CAS y sin línea de bitácora). Un PATCH que sí
- * cambiaría algo (otra fecha) NO es réplica. Una fecha vigente futura con
- * `por_pagar` false (dato previo a la migración) tampoco: «marcar pagado»
- * nunca deja una fecha futura, así que eso no es un reenvío.
+ * VIGENTE ya está pagado por la bandera (`por_pagar` false) con fecha ≤ hoy
+ * y el PATCH trae `por_pagar: false` sin fecha o con la MISMA: no cambiaría
+ * nada, así que se responde la fila tal cual (sin la ventana de corrección,
+ * sin CAS y sin línea de bitácora). CONCILIADO o no da igual (2.ª pasada de
+ * la revisión): marcar pagado dispara el auto-cruce (P14a) y el banco puede
+ * ligarlo entre los dos envíos; el candado de conciliado protege
+ * ESCRITURAS y la réplica no escribe. Un PATCH que sí cambiaría algo (otra
+ * fecha) NO es réplica. Una fecha vigente futura con `por_pagar` false (dato
+ * previo a la migración) tampoco: «marcar pagado» nunca deja una fecha
+ * futura, así que eso no es un reenvío. Un conciliado que sigue con la
+ * bandera en true (el banco lo ligó ANTES de marcarlo) tampoco: el PATCH sí
+ * bajaría la bandera.
  */
 export function esReplicaMarcarPagado(args: {
   porPagarEnviado: unknown;
@@ -278,7 +283,7 @@ export function esReplicaMarcarPagado(args: {
 }): boolean {
   if (args.porPagarEnviado !== false) return false;
   const v = args.vigente;
-  if (v.por_pagar !== false || v.conciliado === true) return false;
+  if (v.por_pagar !== false) return false;
   const dia = diaDe(v.fecha_gasto);
   if (!RE_DIA.test(dia) || dia > args.hoy) return false;
   return args.fechaEnviada == null || args.fechaEnviada.slice(0, 10) === dia;
