@@ -40,6 +40,22 @@ function fakeSupabase(db: Tablas, fallos: Record<string, unknown> = {}) {
       let sel = '';
       let limite: number | null = null;
       const ejecutar = (unico: boolean) => {
+        // Sin la migración de gastos por pagar (20261019000001): 42703 a todo
+        // select de `gasto` que nombre la columna (la sonda incluida).
+        if (
+          fallos.sinPorPagar &&
+          tabla === 'gasto' &&
+          /\bpor_pagar\b/.test(sel)
+        ) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column gasto.por_pagar does not exist',
+            },
+            count: null,
+          };
+        }
         const err = fallos[`${tabla}:${op}`];
         if (err) return { data: null, error: err, count: null };
         if (op === 'insert') {
@@ -804,5 +820,172 @@ describe('list — motivo de cada pendiente', () => {
     const { data } = await svc.list({ limit: 100, offset: 0 });
     expect(data).toHaveLength(1);
     expect(data[0].motivo_pendiente).toBeUndefined();
+  });
+});
+
+/**
+ * GASTOS «POR PAGAR» en el auto-cruce desde el BANCO (19-oct-2026,
+ * invariante 93; revisión P14 (b)). Un por pagar VIGENTE se capturó antes de
+ * pagarse: un cargo con fecha ANTERIOR al día de su captura (`capturado_en ??
+ * created_at`, día Cancún) no puede ser su pago y NO es candidato (ni en el
+ * paso por monto, ni por faltante, ni en el cruce USD, ni en el motivo de la
+ * lista). LÍMITE CONOCIDO: al ligar, la fecha del gasto se queda en la
+ * programada (el auto-cruce no la mueve al día del cargo).
+ */
+describe('auto-cruce y gastos POR PAGAR (P14 b)', () => {
+  /** Caso del hallazgo: el 19-oct un piloto captura «Estacionamiento ASUR» $212 para el 21-oct. */
+  const porPagar = (id: string, extra: Row = {}): Row =>
+    gastoBase(id, 212, {
+      lugar: 'Estacionamiento ASUR',
+      fecha_gasto: '2026-10-21',
+      por_pagar: true,
+      capturado_en: '2026-10-19T15:00:00Z',
+      created_at: '2026-10-19T15:00:00Z',
+      ...extra,
+    });
+  const importar = (svc: ConciliacionService, fecha: string) =>
+    svc.importar(
+      {
+        cuenta_bancaria_id: CTA,
+        movimientos: [cargo(fecha, 212, { descripcion: 'ASUR CANCUN' })],
+      },
+      USER,
+    ) as Promise<Record<string, unknown>>;
+
+  it('un cargo ANTERIOR al día de la captura (18-oct) NO se liga al por pagar del 19-oct, y el motivo lo dice', async () => {
+    const db = mundo({ gasto: [porPagar('g-pp')] });
+    const r = await importar(armar(db), '2026-10-18');
+    expect(r.conciliados).toBe(0);
+    expect(r.sin_candidato).toBe(1);
+    expect((r.detalle as Array<{ motivo: string }>)[0].motivo).toContain(
+      '1 gasto «por pagar» del mismo monto se capturó después de este cargo: no puede ser su pago.',
+    );
+    expect(db.gasto[0].conciliado).toBe(false);
+    expect(db.movimiento_bancario[0].gasto_id ?? null).toBeNull();
+  });
+
+  it('un cargo del MISMO día de la captura sí es candidato («lo anoto hoy y lo pago al rato»)', async () => {
+    const db = mundo({ gasto: [porPagar('g-pp')] });
+    const r = await importar(armar(db), '2026-10-19');
+    expect(r.conciliados).toBe(1);
+    expect(db.movimiento_bancario[0].gasto_id).toBe('g-pp');
+  });
+
+  it('capturado ANTES del cargo: se liga (es su pago) y su fecha se queda en la programada (límite conocido)', async () => {
+    const db = mundo({
+      gasto: [
+        porPagar('g-pp', {
+          fecha_gasto: '2026-10-18',
+          capturado_en: '2026-10-15T15:00:00Z',
+          created_at: '2026-10-15T15:00:00Z',
+        }),
+      ],
+    });
+    const r = await importar(armar(db), '2026-10-17');
+    expect(r.conciliados).toBe(1);
+    expect(db.gasto[0].conciliado).toBe(true);
+    expect(db.gasto[0].fecha_gasto).toBe('2026-10-18');
+  });
+
+  it('con un pagado y un por pagar posterior del mismo monto: liga el pagado (antes: AMBIGUO)', async () => {
+    const db = mundo({
+      gasto: [
+        porPagar('g-pp'),
+        gastoBase('g-ok', 212, { fecha_gasto: '2026-10-17' }),
+      ],
+    });
+    const r = await importar(armar(db), '2026-10-18');
+    expect(r.conciliados).toBe(1);
+    expect(db.movimiento_bancario[0].gasto_id).toBe('g-ok');
+    expect(db.gasto.find((g) => g.id === 'g-pp')!.conciliado).toBe(false);
+  });
+
+  it('sin `capturado_en` decide `created_at` (capturado el 19 ⇒ no es candidato del 18)', async () => {
+    const db = mundo({
+      gasto: [
+        porPagar('g-pp', {
+          capturado_en: null,
+          created_at: '2026-10-19T15:00:00Z',
+        }),
+      ],
+    });
+    const r = await importar(armar(db), '2026-10-18');
+    expect(r.conciliados).toBe(0);
+    expect(r.sin_candidato).toBe(1);
+  });
+
+  it('el día de la captura es el de CANCÚN: 04:30Z del 19 = 23:30 del 18 ⇒ sí es candidato del 18', async () => {
+    const db = mundo({
+      gasto: [
+        porPagar('g-pp', {
+          capturado_en: '2026-10-19T04:30:00Z',
+          created_at: '2026-10-19T04:31:00Z',
+        }),
+      ],
+    });
+    const r = await importar(armar(db), '2026-10-18');
+    expect(r.conciliados).toBe(1);
+  });
+
+  it('cruce USD (paso 3): un gasto USD por pagar capturado después del cargo tampoco es candidato', async () => {
+    const usd = (extra: Row = {}) =>
+      gastoBase('g-usd', 100, {
+        moneda: 'USD',
+        notas: 'Aircraft Spruce & Specialty Co. · Michelin Tube',
+        fecha_gasto: '2026-10-20',
+        por_pagar: true,
+        capturado_en: '2026-10-19T15:00:00Z',
+        created_at: '2026-10-19T15:00:00Z',
+        ...extra,
+      });
+    const cruzar = (db: Tablas) =>
+      armar(db, {}, oficialFijo(20)).importar(
+        {
+          cuenta_bancaria_id: CTA,
+          movimientos: [
+            cargo('2026-10-18', 2000, {
+              descripcion: 'AIRCRAFT SPRUCE AND SP',
+            }),
+          ],
+        },
+        USER,
+      ) as Promise<Record<string, unknown>>;
+    const posterior = await cruzar(mundo({ gasto: [usd()] }));
+    expect(posterior.conciliados).toBe(0);
+    // Control: el MISMO gasto, ya pagado, sí se liga por el T.C. implícito.
+    const pagado = await cruzar(mundo({ gasto: [usd({ por_pagar: false })] }));
+    expect(pagado.conciliados).toBe(1);
+  });
+
+  it('SIN la migración: la conducta del 0.0.94 (se liga) y los candidatos no nombran la columna', async () => {
+    const db = mundo({ gasto: [porPagar('g-pp')] });
+    const r = await importar(armar(db, { sinPorPagar: true }), '2026-10-18');
+    // Un select de candidatos con `por_pagar` habría dado 42703 ⇒ ERROR.
+    expect(r.errores).toBe(0);
+    expect(r.conciliados).toBe(1);
+    expect(db.movimiento_bancario[0].gasto_id).toBe('g-pp');
+  });
+
+  it('lista: el motivo usa la MISMA regla (SIN_CANDIDATOS, no «Se puede cruzar»)', async () => {
+    const db = mundo({
+      movimiento_bancario: [
+        {
+          id: 'm-1',
+          cuenta_bancaria_id: CTA,
+          fecha: '2026-10-18',
+          tipo: TipoMovimientoBancario.CARGO,
+          monto: 212,
+          descripcion: 'ASUR CANCUN',
+          referencia: null,
+          conciliado: false,
+          gasto_id: null,
+          notas: null,
+        },
+      ],
+      gasto: [porPagar('g-pp')],
+    });
+    const { data } = await armar(db).list({ limit: 100, offset: 0 });
+    expect(data[0].motivo_pendiente).toBe('SIN_CANDIDATOS');
+    expect(data[0].candidatos_n).toBe(0);
   });
 });
