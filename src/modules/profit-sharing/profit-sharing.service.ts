@@ -44,6 +44,11 @@ import {
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd, retieneCobros } from '../../common/cobros-usd.util';
 import {
+  reservaOverhaulIncompleta,
+  reservaOverhaulPeriodoUsd,
+  tarifaReservaOverhaul,
+} from '../../common/reserva-overhaul.util';
+import {
   gastoRestaEnColumnasDelVuelo,
   pagoOperadorExternoEnGastos,
   usdDelPagoOperador,
@@ -2747,12 +2752,22 @@ export class ProfitSharingService {
     // Reserva de overhaul DEL PERIODO = horas voladas del periodo × tarifa por
     // hora (sumada por motor: bimotor = 2 filas). Antes se multiplicaba por el
     // acumulado DE POR VIDA, restando lo mismo (y creciente) cada mes.
+    // FUENTE ÚNICA `common/reserva-overhaul.util` (19-oct-2026, API 0.0.98,
+    // invariante 96): la MISMA aritmética que la fila «(−) RESERVA DE
+    // OVERHAUL» del balance por avión y del general.
     const horasPeriodo = round2(ctx.horasPorAvion.get(a.id) ?? 0);
-    const tarifaReserva = ctx.reservas
-      .filter((r) => r.aeronave_id === a.id)
-      .reduce((acc, r) => acc + Number(r.monto_por_hora_usd), 0);
-    const reservaOverhaul = horasPeriodo * tarifaReserva;
-    const reservaIncompleta = horasPeriodo > 0 && tarifaReserva <= 0;
+    const tarifaReserva = tarifaReservaOverhaul(
+      ctx.reservas,
+      a.id,
+    ).usd_por_hora;
+    const reservaOverhaul = reservaOverhaulPeriodoUsd(
+      horasPeriodo,
+      tarifaReserva,
+    );
+    const reservaIncompleta = reservaOverhaulIncompleta(
+      horasPeriodo,
+      tarifaReserva,
+    );
     // EN PESOS (0.0.94, invariante 92): la reserva publicada (USD) × el T.C.
     // oficial del cierre del periodo; sin él, sus dólares no llegan a pesos.
     const tcReserva = ctx.tcReserva ?? null;

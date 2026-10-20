@@ -364,7 +364,7 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
       gasto_id: gastoId,
     });
 
-    it('(5) gasto de la HOJA «Gastos Indirectos» (SERVICIOS 45,483.60 sin vuelo): balance ÷ el T.C. de las hojas (20) y reparto ÷ el oficial del día del gasto (17.1211, 15-sep); neto 0.00 en los dos', async () => {
+    it('(5) gasto de la HOJA «Gastos Indirectos» (SERVICIOS 45,483.60 sin vuelo): balance y reparto ÷ el oficial del día del gasto (17.1211, 15-sep; desde el 0.0.98 el balance ya no usa el T.C. de las hojas, invariante 96); neto 0.00 en los dos', async () => {
       const sinNada = mundo();
       const conAmbos = mundo([reembolsoDe(SERV.id as string, 45483.6)], [SERV]);
       const conGasto = mundo([], [SERV]);
@@ -374,18 +374,20 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
       const bGasto = await libro(conGasto);
       const fila = bAmbos.otros_ingresos_avion!.filas[0];
       expect(fila).toMatchObject({
-        tc_usd: 20,
-        neto_usd: r2(45483.6 / 20),
+        tc_usd: 17.1211,
+        neto_usd: r2(45483.6 / 17.1211),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-servic del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-servic del 15-sep-2026, T.C. oficial del 2026-09-15): reembolso y gasto se anulan en este libro.',
       });
       expect(
-        r2(
-          bNada.balance.utilidad_despues_usd! -
-            bGasto.balance.utilidad_despues_usd!,
+        Math.abs(
+          r2(
+            bNada.balance.utilidad_despues_usd! -
+              bGasto.balance.utilidad_despues_usd!,
+          ) - r2(45483.6 / 17.1211),
         ),
-      ).toBe(r2(45483.6 / 20));
+      ).toBeLessThanOrEqual(0.01);
       expect(
         Math.abs(
           bAmbos.balance.utilidad_despues_usd! -
@@ -413,7 +415,7 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
       );
     });
 
-    it('(6) gasto de la FILA de un vuelo (OPERACIONES 2,000 del #501): el balance usa el T.C. de costos de esa fila y se anulan', async () => {
+    it('(6) gasto de la FILA de un vuelo (OPERACIONES 2,000 del #501): el balance usa el T.C. con que la fila convierte ESE gasto (desde el 0.0.98 el oficial de su día, 17.2, no el T.C. de costos 20; invariante 96) y se anulan', async () => {
       const OPS: Fila = {
         ...gastoBase,
         id: 'g-operaciones-501',
@@ -430,11 +432,11 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
       const v501 = bAmbos.vuelos.find((v) => v.vuelo_id === V1)!;
       expect(v501.tc_costos).toBe(20);
       expect(bAmbos.otros_ingresos_avion!.filas[0]).toMatchObject({
-        tc_usd: 20,
-        neto_usd: 100,
+        tc_usd: 17.2,
+        neto_usd: r2(2000 / 17.2),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-operac del 10-sep-2026, T.C. de costos del vuelo #501): reembolso y gasto se anulan en este libro.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-operac del 10-sep-2026, T.C. oficial del 2026-09-10): reembolso y gasto se anulan en este libro.',
       });
       expect(
         Math.abs(
@@ -527,24 +529,26 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         gasto_mxn: 2000,
       });
       expect(x.libro.otros_ingresos_avion!.filas[0]).toMatchObject({
-        tc_usd: 20,
-        neto_usd: 100,
+        tc_usd: 17.2,
+        neto_usd: r2(2000 / 17.2),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-op-tua del 10-sep-2026, T.C. de costos del vuelo #501): este libro solo le carga $1,500 MXN de ese gasto al avión; los $500 MXN restantes del reembolso no se anulan con nada.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-op-tua del 10-sep-2026, T.C. oficial del 2026-09-10): este libro solo le carga $1,500 MXN de ese gasto al avión; los $500 MXN restantes del reembolso no se anulan con nada.',
       });
       const aviso =
         'ING-7 reembolsa $2,000 MXN de un gasto del que este libro solo le carga $1,500 MXN al avión: $500 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso';
       expect(x.libro.pendientes).toContain(
         `Hoja "Otros ingresos" (2026-09-04): ${aviso}`,
       );
-      // Balance: el gasto restó 1,500 ÷ 20 = 75 y el reembolso suma 100.
+      // Balance (0.0.98, invariante 96: el oficial del 10-sep, como el
+      // reparto): el gasto restó 1,500 ÷ 17.2 y el reembolso suma 2,000 ÷
+      // 17.2 ⇒ quedan +500 ÷ 17.2 = 29.07 (hasta el 0.0.97: ÷ 20 = 25).
       expect(
         r2(
           x.libro.balance.utilidad_despues_usd! -
             bNada.balance.utilidad_despues_usd!,
         ),
-      ).toBe(25);
+      ).toBe(r2(500 / 17.2));
       // Reparto: el divisor del gasto (oficial del 10-sep, 17.2) y el MISMO aviso.
       expect(x.repartoAvion.detalle.otros_ingresos_avion[0]).toMatchObject({
         usd: r2(2000 / 17.2),

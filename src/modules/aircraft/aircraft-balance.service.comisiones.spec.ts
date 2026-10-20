@@ -610,6 +610,9 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
         'vuelos.0.comision_vendedor_real_pagos',
         'vuelos.0.comisiones_detalle',
         'vuelos.0.comisiones_mxn',
+        // API 0.0.98 (invariante 96): la ganancia USD antes de comisiones
+        // de la fila (aditiva, solo en filas con COMISIONES).
+        'vuelos.0.ganancia_antes_comisiones_usd',
         'vuelos.0.ganancia_mxn',
         'vuelos.0.ganancia_usd',
       ].sort(),

@@ -443,8 +443,11 @@ describe('Balance GENERAL — AFAC POR VUELO en «otros movimientos» (invariant
     const tstSin = libroDe(sin, 'XB-TST');
     expect(tst.permisos.total_mxn).toBe(P - 2500);
     expect(tst.permisos.filas.map((f) => f.gasto_id)).not.toContain(G1.id);
+    // USD GASTO POR GASTO (0.0.98, invariante 96): g2 sus 100 USD tal cual
+    // y g3 (1,000 MXN, sin oficial del día en este mundo) ÷ el T.C. de las
+    // hojas. Hasta el 0.0.97: (P − 2,500) ÷ T.C. promedio = 140.
     expect(tst.balance.permisos_usd).toBe(
-      r2((P - 2500) / tst.totales.tc_promedio!),
+      r2(100 + (P - 2500 - 1800) / tst.totales.tc_promedio!),
     );
     // La utilidad del avión SUBE lo que dejó de restar (en USD de su hoja).
     expect(

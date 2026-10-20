@@ -11074,6 +11074,91 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `permanente`, `vigente_hasta: null` llega null, `sustituye_a`, 403) y
       `users.service.socios.spec`.
 
+96. **RESERVA DE OVERHAUL MARCADA EN EL BALANCE Y USD INFORMATIVO GASTO POR
+    GASTO (19-oct-2026, API 0.0.98, SIN migración).** Pregunta del cliente
+    con capturas: el socio Ángel Álvarez (N990GG, septiembre) salía con
+    4,576 USD en el balance y 4,581 en «Pagos a socios»: «¿por qué varía?».
+    Eran dos cascadas: el balance restaba la provisión AFAC y convertía los
+    gastos con UN T.C. (el promedio del libro, o el de costos del vuelo); el
+    reparto restaba la reserva de overhaul y convertía cada gasto con SU T.C.
+    Decisiones del 19-oct-2026 (no se vuelven a preguntar): (1) la reserva
+    de overhaul se sigue restando SOLO en el reparto; en el balance por
+    avión y el general solo se MARCA, sin descontar nada, «que se entienda
+    muy bien lo que debe aportar»; (2) el reparto sigue SIN AFAC (responde
+    el pendiente (a) de la invariante 90); (3) el USD informativo del
+    balance convierte con la MISMA regla del reparto (opción B).
+    - **Reserva (fuente única `common/reserva-overhaul.util.ts`, PURA)**:
+      `tarifaReservaOverhaul(reservas, avión)` = Σ `reserva_overhaul.
+      monto_por_hora_usd` de sus motores (`usd_por_hora`, `motores`);
+      `reservaOverhaulPeriodoUsd(horas, tarifa)` = round2(round2(horas) ×
+      tarifa) —la cuenta de siempre del reparto, que ahora la usa—;
+      `reservaOverhaulIncompleta` = voló horas sin tarifa. El balance
+      (`buildPayload`, nunca en EXTERNOS) lee `reserva_overhaul` del avión y
+      manda en el bloque `balance`, ADITIVAS, justo después de
+      `utilidad_cobrada_mxn`: `reserva_overhaul_usd`, `_mxn` (× el T.C.
+      oficial del cierre, día min(hasta, hoy Cancún) por la puerta única
+      `tcOficialDeDias`, el MISMO del reparto; 0 si la reserva es 0; null
+      sin dato), `_horas_hr` (= `horas_voladas_hr`), `_usd_hr`, `_motores`,
+      `_tc`, `_tc_dia` y `_incompleta`. NINGUNA utilidad, cascada, socio ni
+      bloque VUELATOUR la resta. Sin pendiente nuevo (pyservices avisa «sin
+      tarifa» con `_incompleta`).
+    - **USD gasto por gasto (regla B)**: los PESOS del balance no se mueven
+      (invariante 92). Los dólares informativos sí: (a) en la fila del vuelo,
+      `costo_usd` (AE) = Σ de cada gasto en dólares + la provisión AFAC en
+      USD (tarifa × horas cobradas); `ganancia_usd` (AM) = venta USD del
+      avión (solo si la fila tiene pesos) − AE − las comisiones en USD de
+      `comisionesDelVuelo` (la cifra del reparto); `costo_usd_siva`,
+      `iva_pagado_usd` y `costo_hr_usd*` derivan de AE; `iva_pagado_mxn`
+      (AH) se queda con la fórmula de siempre (los pesos ÷ z, byte a byte).
+      (b) Cada hoja de gastos de `buildPayload` (Gastos Indirectos,
+      refacciones, otros, permisos, pagos AFAC y combustible) pasa a
+      `buildHoja` la opción `usdDeGasto` y su `usd` = round2(Σ USD de cada
+      gasto, sin redondear por gasto). La conversión es UNA,
+      `tcUsdDeGastoMxn`: USD tal cual; MXN ÷ (`tc_gasto` propio ?? T.C.
+      OFICIAL de SU día —`oficialPorDiaGasto`, UNA lectura por día con el
+      memo del libro— ?? el respaldo de siempre: T.C. de costos del vuelo o
+      T.C. de las hojas). Es la de `profit-sharing#toUsd` con su respaldo.
+      (c) Las partes cargadas de los reembolsos ligados (invariante 67) usan
+      ese MISMO divisor por gasto: un reembolso sigue anulándose exacto con
+      su gasto. (d) Guarda de siempre: sin ningún T.C. en el libro
+      (`tcGanancia`/`tcHojas` null) la ganancia USD de la fila y las hojas
+      quedan vacías — jamás una utilidad USD que omite la venta.
+      `hojaGastosEmpresa` y los pagos AFAC sueltos del general NO cambian
+      («otros gastos» sigue ÷ el T.C. promedio, como el bloque VUELATOUR).
+    - **Identidad**: con esto, utilidad cobrada USD del balance = saldo del
+      reparto + reserva de overhaul + fijos prorrateados (las dos restas que
+      el balance no hace), salvo la provisión AFAC (el balance la resta, el
+      reparto no) y lo ya conocido (anticipos con comisión de vuelos no
+      realizados, otros ingresos). Spec explícito en
+      `aircraft-balance.service.reserva.spec` (mundo del reparto en pesos:
+      4,838.80 = 4,348.80 + 140 + 350).
+    - **Contrato ADITIVO con pyservices** (commits `9105823` y `4055c2a`):
+      bandera raíz `usd_por_gasto: true` (libro individual, cada `aviones[]`
+      y la raíz del general, justo después de `balance_en_pesos`) ⇒
+      pyservices escribe como VALOR las celdas USD de las filas
+      (`costo_usd`, `costo_usd_siva`, `iva_pagado_usd`, `iva_pagado_mxn`,
+      `ganancia_usd`, `costo_hr_usd*`) y el TOTAL USD (C5) de las hojas,
+      en vez de las fórmulas «÷ T.C.»; en la hoja del general (que no pinta
+      COMISIONES) usa la llave de fila ADITIVA `ganancia_antes_comisiones_usd`
+      (= AM + comisiones USD de la fila; solo en filas con COMISIONES, antes
+      de `factura_vuelatour`). El bloque «RESERVA DE OVERHAUL · informativa
+      (no se resta en este balance)» sale después de los socios solo con
+      `reserva_overhaul_usd`. Skew: pyservices viejo ignora las llaves
+      (fórmulas de siempre con números del API nuevo: los valores USD de
+      celda los recalcula ÷ T.C.); API viejo ⇒ sin banderas, libro de
+      siempre. Orden: pyservices (COMPUERTA `GET /version`) ⇒ API.
+    - Specs: `common/reserva-overhaul.util` (vía el reparto, que la usa con
+      números idénticos), `aircraft-balance.service.reserva.spec` (reserva,
+      no resta, bimotor, orden de llaves, general, regla B) y los goldens
+      ajustados a propósito: `pesos.spec` (lista EXACTA de las celdas USD que
+      cambian contra el golden 0.0.93; ningún peso), `comisiones-general.spec`
+      (XB-DOS 3,926.66 ⇒ 3,926.67 = el saldo del reparto al centavo; «antes
+      de comisiones» vuelve a 4,160.00), `empresa.spec` (permisos 355),
+      `afac-om.spec`, `libros.afac-real.spec` (293.98 en balance y reparto),
+      `ingreso-conversion-unica.spec` (el reembolso ligado al oficial del día
+      del gasto en los dos libros), `comisiones.spec` y `modo.spec` (llaves
+      aditivas).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12694,6 +12779,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   - La cabecera y el pie del archivo se corrigieron el 19-oct-2026
     (revisión P16, solo comentarios). El CUERPO no cambió: el dry-run del
     19-oct sigue valiendo.
+- **19/20-oct-2026 — 0.0.98, SIN migración** (reserva de overhaul
+  marcada en el balance y USD informativo gasto por gasto, invariante 96;
+  rama `reserva-balance` sobre `2fab5532` = 0.0.97 en prod). Orden:
+  pyservices `4055c2a` (rama `reserva-balance` ⇒ push `HEAD:main`;
+  COMPUERTA `GET <PYSERVICES_BASE_URL>/version` = `4055c2a…`) ⇒ API
+  0.0.98 (`GET /v1/version` = `0.0.98`). Panel: nada. Humo SOLO lecturas:
+  balance de N990GG sep-2026 en pantalla ⇒ bloque «RESERVA DE OVERHAUL ·
+  informativa» con 2 motores × 55 USD/hr × horas voladas, ninguna utilidad
+  movida en PESOS y la utilidad cobrada USD = saldo del reparto + reserva
+  (± la provisión AFAC, que el reparto no resta). Aviso a la oficina: los
+  dólares del balance cambian centavos o dólares (son informativos); los
+  pesos, no. Rollback: API ⇒ 0.0.97 (pyservices nuevo sin banderas pinta
+  lo de siempre).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
@@ -13912,11 +14010,10 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
 
-- **AFAC por vuelo (16-oct-2026, invariante 90)**: (a) el reparto a socios
-  NO cobra lo RESERVADO (columna T) y, con los permisos marcados fuera, se
-  queda sin NINGÚN costo AFAC: preguntar «¿el reparto debe descontar lo
-  reservado (100 USD/hr × horas cobradas), como el balance?» (≈ US$14,843
-  de la flota en septiembre); (b) capturar los costos reales de septiembre
+- **AFAC por vuelo (16-oct-2026, invariante 90)**: (a) RESUELTO el
+  19-oct-2026 (invariante 96): el reparto sigue SIN descontar lo RESERVADO
+  (decisión del cliente: «No, el reparto sigue sin AFAC»); es la diferencia
+  conocida entre la utilidad del balance y el saldo del reparto; (b) capturar los costos reales de septiembre
   ANTES de cerrarlo (cerrado ⇒ 409 hasta reabrir); siguiente lote sugerido:
   renglón informativo del pre-cierre `afac_sin_costo_real` (solo conteo);
   (c) vuelos SIN reservado (XB-IJP sin tarifa, servicio/interno con 0 h,

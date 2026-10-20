@@ -1005,6 +1005,13 @@ export interface BalanceAvionVueloPayload {
   por_cobrar_mxn: number | null;
   por_cobrar_usd: number | null;
   /**
+   * GANANCIA USD ANTES DE COMISIONES de la fila (19-oct-2026, API 0.0.98,
+   * invariante 96; ADITIVA): solo en filas con COMISIONES. Con
+   * `usd_por_gasto`, pyservices la escribe como VALOR en la hoja del
+   * general (que no pinta COMISIONES) en vez de «REMANENTE ÷ T.C.».
+   */
+  ganancia_antes_comisiones_usd?: number | null;
+  /**
    * Columna «FACTURA VUELATOUR» de la hoja PRINCIPAL (30-sep-2026, API
    * 0.0.45, ADITIVO; pedido de Marie para Ale: «se ocupa que diga el num de
    * factura que nosotros emitimos del servicio»). Folio de la factura del
@@ -1480,6 +1487,23 @@ export interface BalanceAvionBalancePayload {
   utilidad_despues_mxn?: number | null;
   por_cobrar_mxn?: number;
   utilidad_cobrada_mxn?: number | null;
+  /**
+   * RESERVA DE OVERHAUL INFORMATIVA (19-oct-2026, API 0.0.98, invariante
+   * 96; ADITIVAS, nunca en EXTERNOS): lo que el avión debe aportar para el
+   * overhaul de sus motores en el periodo (horas voladas × Σ USD/hr de sus
+   * motores, la MISMA cuenta del reparto). NO se resta de ninguna utilidad
+   * del balance: pyservices la pinta como bloque aparte. En pesos al T.C.
+   * oficial del cierre (null sin dato; 0 si la reserva es 0).
+   */
+  reserva_overhaul_usd?: number;
+  reserva_overhaul_mxn?: number | null;
+  reserva_overhaul_horas_hr?: number;
+  reserva_overhaul_usd_hr?: number;
+  reserva_overhaul_motores?: number;
+  reserva_overhaul_tc?: number | null;
+  reserva_overhaul_tc_dia?: string | null;
+  /** Voló horas y el avión no tiene tarifa de reserva configurada. */
+  reserva_overhaul_incompleta?: boolean;
   comisiones_mxn?: number;
   utilidad_antes_comisiones_mxn?: number;
 }
@@ -1687,6 +1711,12 @@ export interface BalanceGeneralPayload {
    * NO la lleva). Sin ella (API previo) pyservices pinta lo de siempre.
    */
   balance_en_pesos?: true;
+  /**
+   * ADITIVA (19-oct-2026, API 0.0.98, invariante 96): los dólares del libro
+   * salen GASTO POR GASTO (la misma conversión del reparto). Con ella
+   * pyservices escribe como VALOR las celdas USD de filas y hojas.
+   */
+  usd_por_gasto?: true;
   /** CIERRE DE MES (invariante 89; ADITIVO, solo con la migración). */
   cierre?: BalanceCierrePayload;
   /** Por matrícula: cuántos vuelos pasan / vienen y sus montos MXN. */
@@ -2000,6 +2030,11 @@ export interface BalanceAvionPayload {
    * la cascada, los socios y el bloque VUELATOUR con la MXN como principal.
    */
   balance_en_pesos?: true;
+  /**
+   * ADITIVA (19-oct-2026, API 0.0.98, invariante 96): dólares GASTO POR
+   * GASTO (la misma conversión del reparto). Viaja SIEMPRE.
+   */
+  usd_por_gasto?: true;
   /**
    * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): «0.0.74: comisión del
    * vendedor solo como gasto real, en dos categorías» (COMISIONES = parte

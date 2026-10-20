@@ -966,10 +966,13 @@ describe('Hoja «permisos» — T.C. por fila y MONTO MXN como fórmula (13-oct-
       expect('tc_por_fila' in hoja!).toBe(false);
       for (const f of hoja!.filas) expect('tc_aplicado' in f).toBe(false);
     }
-    // Números congelados ANTES del cambio: 2,500 + 2,568.52 + 1,600 MXN y
-    // 6,668.52 ÷ T.C. 20 en la cascada `(−) PERMISOS USD`.
+    // Los PESOS congelados ANTES del cambio: 2,500 + 2,568.52 + 1,600 MXN.
+    // Desde el 0.0.98 (invariante 96) el USD es GASTO POR GASTO, como el
+    // reparto: 2,500 MXN ÷ 20 (T.C. de las hojas: sin oficial del día) +
+    // 150 USD + 80 USD tal cual = 355 (hasta el 0.0.97: 6,668.52 ÷ 20 =
+    // 333.43, los dólares de los gastos USD re-convertidos al promedio).
     expect(payload.permisos.total_mxn).toBe(6668.52);
-    expect(payload.balance.permisos_usd).toBe(333.43);
+    expect(payload.balance.permisos_usd).toBe(355);
   });
 });
 

@@ -438,9 +438,9 @@ describe('PAGO DE AFAC marcado en los tres libros (invariante 90)', () => {
  * prod (SELECT del 16-oct, id a03433b7…): «Permisos Vuelos Privados VGV»
  * $5,000.00 MXN, PERMISO, SIN `tc_gasto`, sin vuelo, 1-sep-2026,
  * TRANSFERENCIA conciliada; T.C. oficial del 1-sep = 17.0077. Sin T.C.
- * propio cada libro lo convierte con SU regla (balance: T.C. de las hojas;
- * reparto: oficial del día ⇒ 5000 / 17.0077 = 293.98 USD; Libro Dinero:
- * pesos). Marcarlo debe sacar EXACTAMENTE esa conversión de cada uno (nada
+ * propio, balance y reparto lo convierten con el oficial del día ⇒ 5000 /
+ * 17.0077 = 293.98 USD (desde el 0.0.98, invariante 96: hasta el 0.0.97 el
+ * balance usaba el T.C. de las hojas); Libro Dinero: pesos. Marcarlo debe sacar EXACTAMENTE esa conversión de cada uno (nada
  * más se mueve) y `pagos_afac` lo lleva con la MISMA conversión que tenía
  * en la hoja «permisos».
  */
@@ -499,9 +499,10 @@ describe('PAGO DE AFAC marcado — caso real de prod sin T.C. propio (revisión)
     const base = await libros(null);
     const sin = await libros(false);
     const con = await libros(true);
-    // Sin marca: 5,000 en la hoja (MXN: `tc_aplicado` null, la hoja pasa
-    // a USD con el T.C. de las hojas = 20 en este mundo); reparto 293.98 USD
-    // (oficial del día); Libro Dinero 5,000 pesos.
+    // Sin marca: 5,000 en la hoja (MXN: `tc_aplicado` null); su USD es el
+    // del oficial del día, 293.98, IGUAL en balance y reparto (0.0.98,
+    // invariante 96; hasta el 0.0.97 el balance daba 250 con el T.C. de las
+    // hojas = 20 de este mundo); Libro Dinero 5,000 pesos.
     expect(sin.b.permisos.total_mxn).toBe(5000);
     const filaPermiso = sin.b.permisos.filas.find(
       (f) => f.gasto_id === PERMISO_REAL.id,
@@ -510,7 +511,7 @@ describe('PAGO DE AFAC marcado — caso real de prod sin T.C. propio (revisión)
     const deltaBalanceUsd = r2(
       sin.b.balance.permisos_usd! - (base.b.balance.permisos_usd ?? 0),
     );
-    expect(deltaBalanceUsd).toBe(250);
+    expect(deltaBalanceUsd).toBe(293.98);
     expect(r2(sin.r.gastos.permisos_usd - base.r.gastos.permisos_usd)).toBe(
       293.98,
     );

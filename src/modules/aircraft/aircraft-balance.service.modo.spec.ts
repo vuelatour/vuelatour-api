@@ -145,11 +145,13 @@ describe('Balance general — `modo` ⇒ `variante` del payload (6-oct-2026, API
     const { service, generales } = armar();
     await service.xlsxGeneral(DESDE, HASTA, 'general');
     // … seguida SOLO por la bandera del balance en pesos (API 0.0.94,
-    // invariante 92), también aditiva y al final.
+    // invariante 92) y la de los dólares gasto por gasto (API 0.0.98,
+    // invariante 96), también aditivas y al final.
     expect(Object.keys(generales[0])).toEqual([
       ...LLAVES_PREVIAS,
       'variante',
       'balance_en_pesos',
+      'usd_por_gasto',
     ]);
   });
 

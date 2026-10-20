@@ -294,7 +294,11 @@ const socios = (montos: [number, number], pct: [number, number]) => [
  *    vendedor; el 0.0.65 restaba 5,467.97 de provisión); #503 (18,000 −
  *    300) ÷ 18 = 983.33; #505 (18,000 − 3,000) ÷ 18 = 833.33; #514 (18,000
  *    − 900) ÷ 18 = 950.00 ⇒ 3,926.66 (= 4,159.99 − 233.33) ⇒ 50 % 1,963.33
- *    cada uno. 0.0.65: 3,570.85.
+ *    cada uno. 0.0.65: 3,570.85. Desde el 0.0.98 (invariante 96, regla B)
+ *    la ganancia USD de cada fila es venta USD − costo USD gasto por gasto −
+ *    comisiones USD del reparto, así que «antes de comisiones» vuelve a ser
+ *    4,160.00 exacto ⇒ 3,926.67 (= el `saldo_disponible_usd` del reparto de
+ *    XB-DOS, al centavo) ⇒ 50 % 1,963.34 cada uno.
  */
 const BALANCE_0074 = {
   'XB-TST': {
@@ -310,16 +314,16 @@ const BALANCE_0074 = {
     socios: socios([2812.21, 1148.65], [71, 29]),
   },
   'XB-DOS': {
-    utilidad_antes_usd: 3926.66,
+    utilidad_antes_usd: 3926.67,
     combustible_usd: 0,
     gastos_indirectos_usd: 0,
     refacciones_usd: 0,
     otros_usd: 0,
     permisos_usd: 0,
-    utilidad_despues_usd: 3926.66,
+    utilidad_despues_usd: 3926.67,
     por_cobrar_usd: 0,
-    utilidad_cobrada_usd: 3926.66,
-    socios: socios([1963.33, 1963.33], [50, 50]),
+    utilidad_cobrada_usd: 3926.67,
+    socios: socios([1963.34, 1963.34], [50, 50]),
   },
 } as const;
 
@@ -452,14 +456,15 @@ const PAGOS_REALES = { 505: 3000, 506: 1500 } as const;
  * 50 %) + 1,148.65 (XB-TST, 29 %) = 3,111.98; ingresos = lo cobrado a los
  * clientes (sin cambio); egresos = los del 0.0.73 (170.85) − el exceso del
  * #505 que ya no egresa (300 ÷ 18 = 16.67) = 154.18; resultado = 3,111.98 +
- * 1,032.48 − 154.18 − 38.72 = 3,951.56.
+ * 1,032.48 − 154.18 − 38.72 = 3,951.56. Desde el 0.0.98 (invariante 96) la
+ * parte de XB-DOS es 1,963.34 ⇒ participación 3,111.99 y resultado 3,951.57.
  */
 const EMPRESA_0074 = {
-  participacion_usd: 3111.98,
+  participacion_usd: 3111.99,
   ingresos_propios_usd: 1032.48,
   pagos_vendedor_usd: 154.18,
   otros_gastos_empresa_usd: 38.72,
-  resultado_usd: 3951.56,
+  resultado_usd: 3951.57,
 };
 
 const MATRICULAS = ['XB-TST', 'XB-DOS'] as const;
@@ -475,6 +480,11 @@ function sinOtrosIngresosAvion(
   const resto: Record<string, unknown> = sinCascadaPesos(b);
   expect(resto.otros_ingresos_avion_usd).toBe(0);
   delete resto.otros_ingresos_avion_usd;
+  // RESERVA DE OVERHAUL INFORMATIVA (0.0.98, invariante 96): ADITIVA y no
+  // resta de nada; sus números los prueba
+  // `aircraft-balance.service.reserva.spec`.
+  for (const k of Object.keys(resto))
+    if (k.startsWith('reserva_overhaul_')) delete resto[k];
   return resto;
 }
 
@@ -717,10 +727,11 @@ describe('`balance.comisiones_usd` — la MISMA cifra que el reparto (fuente ún
     }
     // XB-TST: la utilidad antes de comisiones es la de antes de la regla.
     expect(bloqueDe(g, 'XB-TST').utilidad_antes_comisiones_usd).toBe(5000);
-    // XB-DOS: 3,926.66 + 233.33 = 4,159.99 — un centavo bajo los 4,160.00
-    // de la regla anterior: el reparto redondea la comisión en USD por vuelo
-    // (#503: 16.66) y la fila redondea su ganancia neta (983.33).
-    expect(bloqueDe(g, 'XB-DOS').utilidad_antes_comisiones_usd).toBe(4159.99);
+    // XB-DOS: 3,926.67 + 233.33 = 4,160.00 — los 4,160.00 de la regla
+    // anterior al centavo desde el 0.0.98 (invariante 96): la ganancia USD
+    // de la fila ya resta la comisión del reparto TAL CUAL (#503: 16.66).
+    // Hasta el 0.0.97 era 4,159.99 (la fila redondeaba su ganancia neta).
+    expect(bloqueDe(g, 'XB-DOS').utilidad_antes_comisiones_usd).toBe(4160);
   });
 
   it('libro con filas de la vigencia SIN comisiones: las llaves viajan en 0 (antes de comisiones = utilidad antes)', async () => {
@@ -825,7 +836,7 @@ describe('`balance.comisiones_usd` — vigencia a mitad del periodo y filas sin 
     expect(f.tc_costos).toBeNull();
     expect(f.ganancia_usd).toBe(-20.29);
     expect(p.balance.comisiones_usd).toBe(r2(233.33 + 20.29));
-    expect(p.balance.utilidad_antes_comisiones_usd).toBe(4159.99);
+    expect(p.balance.utilidad_antes_comisiones_usd).toBe(4160);
     expect(
       r2(
         (p.balance.utilidad_antes_comisiones_usd ?? NaN) -
@@ -1433,10 +1444,11 @@ describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.74)', (
   it('`mundoSinFaltante` (sin el pago del #506): sube la participación de la empresa el 29 % de ese pago y los egresos no cambian (ese pago ya egresaba $0.00)', async () => {
     const con = (await general(undefined, mundoSinFaltante())).empresa!;
     // XB-TST: utilidad cobrada 3,960.86 + 1,500 ÷ 18 (83.33) = 4,044.19 ⇒
-    // 29 % = 1,172.82 (residuo mayor) ⇒ 1,963.33 + 1,172.82.
-    expect(con.participacion_usd).toBe(3136.15);
+    // 29 % = 1,172.82 (residuo mayor) ⇒ 1,963.34 (XB-DOS desde el 0.0.98)
+    // + 1,172.82.
+    expect(con.participacion_usd).toBe(3136.16);
     expect(con.pagos_vendedor_usd).toBe(EMPRESA_0074.pagos_vendedor_usd);
-    expect(con.resultado_usd).toBe(3975.73);
+    expect(con.resultado_usd).toBe(3975.74);
   });
 
   it('conservación: Σ ganancia de los libros + Σ remanente de «otros movimientos» == la regla anterior AL CENTAVO — lo que las filas restan en COMISIONES (banco + pagos absorbidos) es exactamente lo que la pestaña deja de egresar', async () => {

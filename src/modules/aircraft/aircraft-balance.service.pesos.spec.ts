@@ -163,6 +163,102 @@ function generalSinPesos(g: unknown): Record<string, unknown> {
   return c;
 }
 
+/**
+ * USD GASTO POR GASTO (19-oct-2026, API 0.0.98, invariante 96, regla B): los
+ * dólares INFORMATIVOS del libro ya no son «pesos ÷ un T.C.» sino la MISMA
+ * conversión del reparto (cada gasto con su T.C. propio ?? oficial de SU
+ * día). Estas son EXACTAMENTE las celdas que cambian contra el golden del
+ * 0.0.93 (`ruta: antes -> ahora`); ningún peso se mueve. Comprobación con el
+ * reparto del MISMO mundo: utilidad cobrada 4,838.80 = saldo del reparto
+ * 4,348.80 + reserva de overhaul 140 + fijos prorrateados 350 (las dos
+ * restas que el balance no hace).
+ */
+const CAMBIOS_0098_INDIVIDUAL = [
+  'ind.vuelos.0.costo_usd: 195 -> 200',
+  'ind.vuelos.0.costo_usd_siva: 168.1 -> 172.41',
+  'ind.vuelos.0.iva_pagado_usd: 26.9 -> 27.59',
+  'ind.vuelos.0.ganancia_usd: 1789.3 -> 1784.3',
+  'ind.vuelos.0.costo_hr_usd: 97.5 -> 100',
+  'ind.vuelos.0.costo_hr_usd_siva: 84.05 -> 86.21',
+  'ind.totales.ganancia_usd: 3259.3 -> 3254.3',
+  'ind.totales.costo_hr_prom_usd: 97.5 -> 100',
+  'ind.permisos.usd: 26.14 -> 27.78',
+  'ind.permisos.usd_hr: 7.47 -> 7.94',
+  'ind.combustible.usd: 156.86 -> 167.6',
+  'ind.combustible.usd_hr: 44.82 -> 47.89',
+  'ind.balance.utilidad_antes_usd: 3259.3 -> 3254.3',
+  'ind.balance.combustible_usd: 156.86 -> 167.6',
+  'ind.balance.permisos_usd: 26.14 -> 27.78',
+  'ind.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
+  'ind.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
+  'ind.balance.socios.0.monto_usd: 2869.03 -> 2858.76',
+  'ind.balance.socios.1.monto_usd: 1987.15 -> 1980.04',
+  'ind.balance.utilidad_antes_comisiones_usd: 3305 -> 3300',
+];
+const CAMBIOS_0098_GENERAL = [
+  'gen.consolidado.vuelos.0.costo_usd: 195 -> 200',
+  'gen.consolidado.vuelos.0.costo_usd_siva: 168.1 -> 172.41',
+  'gen.consolidado.vuelos.0.iva_pagado_usd: 26.9 -> 27.59',
+  'gen.consolidado.vuelos.0.ganancia_usd: 1789.3 -> 1784.3',
+  'gen.consolidado.vuelos.0.costo_hr_usd: 97.5 -> 100',
+  'gen.consolidado.vuelos.0.costo_hr_usd_siva: 84.05 -> 86.21',
+  'gen.consolidado.totales.ganancia_usd: 3259.3 -> 3254.3',
+  'gen.consolidado.totales.costo_hr_prom_usd: 97.5 -> 100',
+  'gen.consolidado.permisos.usd: 26.14 -> 27.78',
+  'gen.consolidado.permisos.usd_hr: 7.47 -> 7.94',
+  'gen.consolidado.combustible.usd: 156.86 -> 167.6',
+  'gen.consolidado.combustible.usd_hr: 44.82 -> 47.89',
+  'gen.aviones.0.vuelos.0.costo_usd: 195 -> 200',
+  'gen.aviones.0.vuelos.0.costo_usd_siva: 168.1 -> 172.41',
+  'gen.aviones.0.vuelos.0.iva_pagado_usd: 26.9 -> 27.59',
+  'gen.aviones.0.vuelos.0.ganancia_usd: 1789.3 -> 1784.3',
+  'gen.aviones.0.vuelos.0.costo_hr_usd: 97.5 -> 100',
+  'gen.aviones.0.vuelos.0.costo_hr_usd_siva: 84.05 -> 86.21',
+  'gen.aviones.0.totales.ganancia_usd: 3259.3 -> 3254.3',
+  'gen.aviones.0.totales.costo_hr_prom_usd: 97.5 -> 100',
+  'gen.aviones.0.permisos.usd: 26.14 -> 27.78',
+  'gen.aviones.0.permisos.usd_hr: 7.47 -> 7.94',
+  'gen.aviones.0.combustible.usd: 156.86 -> 167.6',
+  'gen.aviones.0.combustible.usd_hr: 44.82 -> 47.89',
+  'gen.aviones.0.balance.utilidad_antes_usd: 3259.3 -> 3254.3',
+  'gen.aviones.0.balance.combustible_usd: 156.86 -> 167.6',
+  'gen.aviones.0.balance.permisos_usd: 26.14 -> 27.78',
+  'gen.aviones.0.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
+  'gen.aviones.0.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
+  'gen.aviones.0.balance.socios.0.monto_usd: 2869.03 -> 2858.76',
+  'gen.aviones.0.balance.socios.1.monto_usd: 1987.15 -> 1980.04',
+  'gen.aviones.0.balance.utilidad_antes_comisiones_usd: 3305 -> 3300',
+  'gen.empresa.participaciones.0.monto_usd: 2869.03 -> 2858.76',
+  'gen.empresa.participacion_usd: 2869.03 -> 2858.76',
+  'gen.empresa.resultado_usd: 2301.28 -> 2291.01',
+];
+
+/** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
+function quitar0098(p: Record<string, unknown> | undefined): void {
+  if (!p) return;
+  delete p.usd_por_gasto;
+  const b = p.balance as Record<string, unknown> | undefined;
+  if (b)
+    for (const k of Object.keys(b))
+      if (k.startsWith('reserva_overhaul_')) delete b[k];
+  for (const v of (p.vuelos as Array<Record<string, unknown>>) ?? [])
+    delete v.ganancia_antes_comisiones_usd;
+}
+
+/** Rutas donde `a` (hoy) difiere de `b` (golden): `ruta: antes -> ahora`. */
+function difs(a: unknown, b: unknown, ruta = '', out: string[] = []): string[] {
+  if (JSON.stringify(a) === JSON.stringify(b)) return out;
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const x = a as Record<string, unknown>;
+    const y = b as Record<string, unknown>;
+    for (const k of new Set([...Object.keys(x), ...Object.keys(y)]))
+      difs(x[k], y[k], ruta ? `${ruta}.${k}` : k, out);
+    return out;
+  }
+  out.push(`${ruta}: ${JSON.stringify(b)} -> ${JSON.stringify(a)}`);
+  return out;
+}
+
 const LLAVES_PESOS_BLOQUE = [
   'utilidad_antes_mxn',
   'combustible_mxn',
@@ -179,15 +275,22 @@ const LLAVES_PESOS_BLOQUE = [
 ];
 
 describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: el libro individual sin lo del 0.0.94 es BYTE A BYTE el del 0.0.93', async () => {
-    expect(JSON.stringify(libroSinPesos(await libro()))).toBe(
-      JSON.stringify(GOLDEN.balance_individual),
+  it('GOLDEN: el libro individual sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98', async () => {
+    const hoy = libroSinPesos(await libro());
+    quitar0098(hoy);
+    expect(difs(hoy, GOLDEN.balance_individual, 'ind')).toEqual(
+      CAMBIOS_0098_INDIVIDUAL,
     );
   });
 
-  it('GOLDEN: el general sin lo del 0.0.94 es BYTE A BYTE el del 0.0.93', async () => {
-    expect(JSON.stringify(generalSinPesos(await general()))).toBe(
-      JSON.stringify(GOLDEN.balance_general),
+  it('GOLDEN: el general sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98', async () => {
+    const hoy = generalSinPesos(await general());
+    delete hoy.usd_por_gasto;
+    quitar0098(hoy.consolidado as Record<string, unknown>);
+    for (const a of hoy.aviones as Array<Record<string, unknown>>)
+      quitar0098(a);
+    expect(difs(hoy, GOLDEN.balance_general, 'gen')).toEqual(
+      CAMBIOS_0098_GENERAL,
     );
   });
 
