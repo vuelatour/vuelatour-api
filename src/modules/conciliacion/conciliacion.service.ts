@@ -279,6 +279,7 @@ import {
   type OficialDelDia,
   type ResultadoCruce,
   type TcCruceUsd,
+  cuentaDescarta,
 } from './auto-cruce.util';
 // GASTOS «POR PAGAR» (19-oct-2026, invariante 93; revisión P14 (b)): en el
 // auto-cruce desde el banco, un por pagar vigente capturado DESPUÉS del día
@@ -474,7 +475,7 @@ const MATCH_DAYS = 3;
  * por tarjeta/descripción y el camino inverso leen EXACTAMENTE lo mismo).
  */
 const GASTO_CRUCE_COLS =
-  'id, monto, moneda, fecha_gasto, medio_pago, tarjeta_terminacion, lugar, notas, categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre)';
+  'id, monto, moneda, fecha_gasto, medio_pago, tarjeta_terminacion, cuenta_bancaria_id, lugar, notas, categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre)';
 /**
  * Métodos de cobro que llegan al banco como ABONO y se cruzan SOLOS
  * (auto-match): misma lista para cobro_vuelo y para los sobres de grupo.
@@ -1001,6 +1002,13 @@ export interface SugerenciaConciliacion {
      */
     folio_comprobante?: string | null;
     /**
+     * ADITIVOS (20-oct-2026, invariante 98): la cuenta de donde la oficina
+     * dijo que salió el pago (null = no se capturó). El panel avisa si NO es
+     * la del cargo; no bloquea.
+     */
+    cuenta_bancaria_id?: string | null;
+    cuenta_alias?: string | null;
+    /**
      * ADITIVO (0.0.75, invariante 69): SOLO en «Vincular gasto» y solo
      * cuando el concepto del cargo cita una factura: el folio del gasto
      * (factura recibida, ticket, IA o «fact NNNN» en la 1.ª línea de las
@@ -1357,7 +1365,7 @@ const TOPE_VUELOS_CLIENTE = 10_000;
 
 /** El gasto de la conciliación al revés (+ `embedFolio()` para su factura). */
 const GASTO_CONCILIACION_COLS =
-  'id, monto, moneda, tc_gasto, conciliado, medio_pago, tarjeta_terminacion, categoria, fecha_gasto, vuelo_id, lugar, notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
+  'id, monto, moneda, tc_gasto, conciliado, medio_pago, tarjeta_terminacion, cuenta_bancaria_id, categoria, fecha_gasto, vuelo_id, lugar, notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias)';
 
 /**
  * Gasto de cada parte en la lista de movimientos (forma de `MovimientoGasto`).
@@ -1378,7 +1386,7 @@ const GASTO_PARTE_REPORTE_COLS =
  * `fecha_vuelo` del embed alimenta `candado_mes_vuelo` (revisión del
  * 14-oct-2026).
  */
-const GASTO_RICO_COLS = `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), captura:usuario!usuario_captura_id(nombre)`;
+const GASTO_RICO_COLS = `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), captura:usuario!usuario_captura_id(nombre), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias)`;
 
 /** Lo que la traducción de errores de partes necesita saber del intento. */
 interface CtxErrorPartes {
@@ -3190,7 +3198,12 @@ export class ConciliacionService {
    * sin `resultado` ⇒ SIN_CANDIDATO con `detalle` (o null).
    */
   private async cruceUsdDeCargo(
-    mov: { id: string; fecha: string; descripcion: string | null },
+    mov: {
+      id: string;
+      fecha: string;
+      descripcion: string | null;
+      cuenta_bancaria_id?: string | null;
+    },
     monto: number,
     base: ResultadoMovimiento,
     desde: string,
@@ -3240,8 +3253,15 @@ export class ConciliacionService {
     );
     // Solo los que caen EXACTO en la banda 15–25 (la lectura usa la banda
     // redondeada): sin ninguno no hace falta ni el oficial.
+    // La cuenta del gasto manda (invariante 98): un USD que dice que salió
+    // de OTRA cuenta no se cruza solo con este cargo.
     const enBanda = libres.filter(
-      (g) => evaluarTcCruce(monto, Number(g.monto), null)?.en_banda === true,
+      (g) =>
+        evaluarTcCruce(monto, Number(g.monto), null)?.en_banda === true &&
+        !cuentaDescarta(
+          mov.cuenta_bancaria_id,
+          (g.cuenta_bancaria_id as string | null) ?? null,
+        ),
     );
     if (enBanda.length === 0) return { detalle: null };
     const of = await this.oficialDelDia(ctx, mov.fecha);
@@ -3414,6 +3434,8 @@ export class ConciliacionService {
       id: g.id as string,
       monto: Number(g.monto) || 0,
       tarjeta_terminacion: (g.tarjeta_terminacion as string | null) ?? null,
+      // La cuenta del gasto manda en el auto-cruce (invariante 98).
+      cuenta_bancaria_id: (g.cuenta_bancaria_id as string | null) ?? null,
       lugar: (g.lugar as string | null) ?? null,
       notas: (g.notas as string | null) ?? null,
       proveedor: typeof prov?.nombre === 'string' ? prov.nombre : null,
@@ -4149,7 +4171,7 @@ export class ConciliacionService {
       const { desde, hasta } = ventanaDias(fecha, MATCH_DAYS);
       const { data: movs, error: movErr } = await this.supabase.service
         .from('movimiento_bancario')
-        .select('id, monto, descripcion, referencia')
+        .select('id, monto, descripcion, referencia, cuenta_bancaria_id')
         .eq('conciliado', false)
         .eq('tipo', TipoMovimientoBancario.CARGO)
         .in('cuenta_bancaria_id', ids)
@@ -4164,6 +4186,9 @@ export class ConciliacionService {
         monto: Number((m as { monto: unknown }).monto) || 0,
         descripcion: (m as { descripcion?: string | null }).descripcion ?? null,
         referencia: (m as { referencia?: string | null }).referencia ?? null,
+        cuenta_bancaria_id:
+          (m as { cuenta_bancaria_id?: string | null }).cuenta_bancaria_id ??
+          null,
       }));
       if (candidatos.length === 0) {
         return nada('Ningún cargo pendiente del banco cuadra con el gasto.');
@@ -12070,6 +12095,7 @@ export class ConciliacionService {
             monto,
             descripcion: (m.descripcion as string | null) ?? null,
             referencia: (m.referencia as string | null) ?? null,
+            cuenta_bancaria_id: (m.cuenta_bancaria_id as string | null) ?? null,
           },
           candidatos,
           ctx.terminaciones,
@@ -12496,6 +12522,14 @@ export class ConciliacionService {
           primeraLinea(typeof g.notas === 'string' ? g.notas : null) || null,
         folio_comprobante:
           typeof folioComprobante === 'string' ? folioComprobante : null,
+        cuenta_bancaria_id:
+          typeof g.cuenta_bancaria_id === 'string'
+            ? g.cuenta_bancaria_id
+            : null,
+        cuenta_alias: (() => {
+          const c = unwrapOne(g.cuenta as { alias?: unknown } | null);
+          return typeof c?.alias === 'string' ? c.alias : null;
+        })(),
       },
       estado,
       fuente: leidos.fuente,
@@ -14990,6 +15024,12 @@ export class ConciliacionService {
         typeof captura?.nombre === 'string' ? captura.nombre : null,
       // ADITIVO (5-oct-2026): número de la factura del gasto.
       folio_comprobante: folioComprobanteDeFila(g),
+      // ADITIVOS (invariante 98): la cuenta capturada en el gasto.
+      cuenta_bancaria_id: (g.cuenta_bancaria_id as string | null) ?? null,
+      cuenta_alias: (() => {
+        const c = unwrapOne(g.cuenta as { alias?: unknown } | null);
+        return typeof c?.alias === 'string' ? c.alias : null;
+      })(),
       ...(opts.factura
         ? {
             coincide_factura: coincideFacturaConGasto(

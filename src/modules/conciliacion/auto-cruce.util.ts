@@ -403,6 +403,8 @@ export interface MovimientoCruce {
   monto: number;
   descripcion?: string | null;
   referencia?: string | null;
+  /** Cuenta del cargo (invariante 98): descarta gastos de OTRA cuenta. */
+  cuenta_bancaria_id?: string | null;
 }
 
 /** Gasto candidato con todo lo que sirve para desempatar. */
@@ -416,6 +418,36 @@ export interface GastoCandidatoCruce extends TextoDelGasto {
    * del banco en el camino inverso. Default: `monto`.
    */
   monto_cruce?: number | null;
+  /**
+   * Cuenta de donde la oficina dijo que salió el pago (invariante 98). null
+   * = no se capturó: el gasto sigue siendo candidato de cualquier cuenta.
+   */
+  cuenta_bancaria_id?: string | null;
+}
+
+/**
+ * LA CUENTA DEL GASTO MANDA (20-oct-2026, invariante 98): un gasto que dice
+ * de qué cuenta salió NO se liga SOLO a un cargo de otra cuenta (el SPEI de
+ * $2,801.40 de HSBC no es el pago que la oficina capturó desde Scotiabank).
+ * A mano se puede (la persona decide); el auto-cruce no. Un gasto sin cuenta
+ * capturada se queda como siempre.
+ */
+export function cuentaDescarta(
+  cuentaDelCargo: string | null | undefined,
+  cuentaDelGasto: string | null | undefined,
+): boolean {
+  return (
+    typeof cuentaDelCargo === 'string' &&
+    typeof cuentaDelGasto === 'string' &&
+    cuentaDelCargo !== cuentaDelGasto
+  );
+}
+
+/** Texto del pendiente cuando la cuenta descartó a todos los candidatos. */
+export function textoOtraCuenta(n: number): string {
+  return n === 1
+    ? 'Un gasto cuadra en monto y fecha, pero dice que salió de otra cuenta: vincúlalo a mano si es este pago.'
+    : `${n} gastos cuadran en monto y fecha, pero dicen que salieron de otra cuenta: vincúlalo a mano si es uno de ellos.`;
 }
 
 /**
@@ -489,6 +521,25 @@ export function elegirCandidato(
     mov.descripcion,
     terminacionesValidas,
   );
+  // La cuenta del gasto manda (invariante 98): fuera los de OTRA cuenta.
+  const deOtraCuenta = candidatos.filter((c) =>
+    cuentaDescarta(mov.cuenta_bancaria_id, c.cuenta_bancaria_id),
+  );
+  if (deOtraCuenta.length > 0) {
+    candidatos = candidatos.filter(
+      (c) => !cuentaDescarta(mov.cuenta_bancaria_id, c.cuenta_bancaria_id),
+    );
+    if (candidatos.length === 0) {
+      return {
+        gasto_id: null,
+        criterio: null,
+        motivo: 'SIN_CANDIDATOS',
+        candidatos_n: 0,
+        terminacion,
+        detalle: textoOtraCuenta(deOtraCuenta.length),
+      };
+    }
+  }
   // Desfase 0.00 gana; solo ±0.01 ⇒ AMBIGUO (ver `separarPorDesfase`).
   const desfase = separarPorDesfase(
     mov.monto,
@@ -598,6 +649,25 @@ export function elegirMovimiento(
   detalle?: string;
 } {
   if (movimientos.length === 0) return { movimiento_id: null, criterio: null };
+  // La cuenta del gasto manda (invariante 98): fuera los cargos de OTRA.
+  const deOtraCuenta = movimientos.filter((m) =>
+    cuentaDescarta(m.cuenta_bancaria_id, gasto.cuenta_bancaria_id),
+  );
+  if (deOtraCuenta.length > 0) {
+    movimientos = movimientos.filter(
+      (m) => !cuentaDescarta(m.cuenta_bancaria_id, gasto.cuenta_bancaria_id),
+    );
+    if (movimientos.length === 0) {
+      return {
+        movimiento_id: null,
+        criterio: null,
+        detalle:
+          deOtraCuenta.length === 1
+            ? 'Un cargo del banco cuadra, pero es de otra cuenta que la que dice el gasto: vincúlalo a mano si es este pago.'
+            : `${deOtraCuenta.length} cargos del banco cuadran, pero son de otra cuenta que la que dice el gasto: vincúlalo a mano.`,
+      };
+    }
+  }
   // Desfase 0.00 gana; solo ±0.01 ⇒ nadie (ver `separarPorDesfase`).
   const desfase = separarPorDesfase(
     gasto.monto_cruce ?? gasto.monto,

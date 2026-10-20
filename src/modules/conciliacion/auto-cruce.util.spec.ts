@@ -43,6 +43,8 @@ import {
   tokensTexto,
   ventanaDias,
   type GastoCandidatoCruce,
+  cuentaDescarta,
+  textoOtraCuenta,
 } from './auto-cruce.util';
 
 /**
@@ -1623,5 +1625,74 @@ describe('T.C. oficial del día (invariante 70)', () => {
       TC_IMPLICITO_MAX,
       TOLERANCIA_TC_OFICIAL_PCT,
     ]).toEqual([15, 25, 2]);
+  });
+});
+
+describe('la cuenta del gasto manda (20-oct-2026, invariante 98)', () => {
+  const HSBC = 'c-hsbc';
+  const SCOTIA = 'c-scotia';
+
+  it('cuentaDescarta: solo cuando las DOS se conocen y son distintas', () => {
+    expect(cuentaDescarta(HSBC, SCOTIA)).toBe(true);
+    expect(cuentaDescarta(HSBC, HSBC)).toBe(false);
+    expect(cuentaDescarta(HSBC, null)).toBe(false);
+    expect(cuentaDescarta(null, SCOTIA)).toBe(false);
+    expect(cuentaDescarta(undefined, undefined)).toBe(false);
+  });
+
+  it('elegirCandidato: el gasto de OTRA cuenta no se liga solo; dice por qué', () => {
+    const r = elegirCandidato(
+      { monto: 2801.4, descripcion: 'SPEI', cuenta_bancaria_id: HSBC },
+      [{ id: 'g1', monto: 2801.4, cuenta_bancaria_id: SCOTIA }],
+    );
+    expect(r.gasto_id).toBeNull();
+    expect(r.motivo).toBe('SIN_CANDIDATOS');
+    expect(r.detalle).toBe(textoOtraCuenta(1));
+    expect(textoOtraCuenta(2)).toBe(
+      '2 gastos cuadran en monto y fecha, pero dicen que salieron de otra cuenta: vincúlalo a mano si es uno de ellos.',
+    );
+  });
+
+  it('elegirCandidato: descarta el de otra cuenta y elige el que queda (sin cuenta o de la misma)', () => {
+    const r = elegirCandidato(
+      { monto: 500, descripcion: 'SPEI', cuenta_bancaria_id: HSBC },
+      [
+        { id: 'g-otra', monto: 500, cuenta_bancaria_id: SCOTIA },
+        { id: 'g-misma', monto: 500, cuenta_bancaria_id: HSBC },
+      ],
+    );
+    expect(r.gasto_id).toBe('g-misma');
+    const sinCuenta = elegirCandidato(
+      { monto: 500, descripcion: 'SPEI', cuenta_bancaria_id: HSBC },
+      [
+        { id: 'g-otra', monto: 500, cuenta_bancaria_id: SCOTIA },
+        { id: 'g-libre', monto: 500, cuenta_bancaria_id: null },
+      ],
+    );
+    expect(sinCuenta.gasto_id).toBe('g-libre');
+  });
+
+  it('control: sin cuentas capturadas, el cruce de siempre', () => {
+    const r = elegirCandidato({ monto: 500, descripcion: 'X' }, [
+      { id: 'g1', monto: 500 },
+    ]);
+    expect(r.gasto_id).toBe('g1');
+  });
+
+  it('elegirMovimiento: el cargo de otra cuenta no se liga solo', () => {
+    const r = elegirMovimiento(
+      { id: 'g', monto: 500, cuenta_bancaria_id: HSBC },
+      [{ id: 'm1', monto: 500, cuenta_bancaria_id: SCOTIA }],
+    );
+    expect(r.movimiento_id).toBeNull();
+    expect(r.detalle).toContain('otra cuenta');
+    const ok = elegirMovimiento(
+      { id: 'g', monto: 500, cuenta_bancaria_id: HSBC },
+      [
+        { id: 'm1', monto: 500, cuenta_bancaria_id: SCOTIA },
+        { id: 'm2', monto: 500, cuenta_bancaria_id: HSBC },
+      ],
+    );
+    expect(ok.movimiento_id).toBe('m2');
   });
 });

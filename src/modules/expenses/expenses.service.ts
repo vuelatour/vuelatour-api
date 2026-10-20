@@ -112,6 +112,7 @@ import type { FacturaDeGasto } from '../facturacion/gasto-facturas.util';
 import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 import {
   MEDIOS_SOLO_OFICINA,
+  cuentaParaGuardar,
   mensajeMedioSoloOficina,
 } from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
@@ -289,7 +290,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, capturado_en, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, cuenta_bancaria_id, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, capturado_en, created_at, updated_at';
 
 /**
  * Prefijo del aviso ⚠ "avión del gasto ≠ avión del tramo" que se anexa a
@@ -349,7 +350,7 @@ function excepcionCambioFecha(
 // `vuelo.fecha_vuelo` (ADITIVO, 19-oct-2026, API 0.0.96, invariante 94): el
 // panel pinta la fecha del vuelo bajo «Vuelo #375» en la tabla de Gastos.
 const LIST_EMBEDS =
-  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
+  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, banco, moneda, tipo), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
 const LIST_COLS = `${COLS}${LIST_EMBEDS}`;
 
 /**
@@ -634,6 +635,9 @@ export class ExpensesService {
       { label: 'Proveedor' },
       { label: 'Capturó' },
       { label: 'Medio pago' },
+      // Cuenta (20-oct-2026, invariante 98): de dónde salió una
+      // transferencia, un pago domiciliado o un pago por Paywise.
+      { label: 'Cuenta' },
       // Banco (9-oct-2026): ¿ya cruzó con el estado de cuenta? Conciliado /
       // Parcial / Sin conciliar; vacío en pagos que no se concilian
       // (`etiquetaEstadoBanco`, fuente única con el panel).
@@ -673,6 +677,7 @@ export class ExpensesService {
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
         etiquetaMedioPago(medio),
+        (x.cuenta as { alias?: string } | null)?.alias ?? '',
         etiquetaEstadoBanco(estadoBancoGasto(x)),
         // Dos opciones (14-sep-2026): «Con comprobante» / «Sin
         // comprobante» — la palabra «Factura» salió de esta columna para
@@ -2681,6 +2686,14 @@ export class ExpensesService {
       valorIa: dto.valor_ia_extraido,
       capturaId,
     });
+    // Cuenta de donde salió el pago (invariante 98): solo con transferencia,
+    // pago domiciliado o Paywise; con otro medio se ignora.
+    const cuentaBancariaId = cuentaParaGuardar(
+      dto.medio_pago,
+      dto.cuenta_bancaria_id,
+      null,
+    );
+    if (cuentaBancariaId) await this.validarCuentaBancaria(cuentaBancariaId);
     // MEDIO vs comprobante (3-sep, reporte de pilotos): la app ya NO
     // preselecciona EFECTIVO ni deja que la IA pise el medio elegido; el
     // medio es del humano y aquí JAMÁS se reescribe. Si un rol de CAMPO
@@ -2857,6 +2870,8 @@ export class ExpensesService {
       fecha_gasto: dto.fecha_gasto,
       medio_pago: dto.medio_pago,
       tarjeta_terminacion: tarjetaTerminacion,
+      // La llave SOLO viaja con cuenta (invariante 98).
+      ...(cuentaBancariaId ? { cuenta_bancaria_id: cuentaBancariaId } : {}),
       vuelo_id: dto.vuelo_id,
       escala_id: dto.escala_id,
       aeronave_id: aeronaveId,
@@ -3646,6 +3661,31 @@ export class ExpensesService {
    * terminación null fuera de TARJETA_CORP (antes un EFECTIVO con
    * terminación reventaba en 500).
    */
+  /**
+   * Cuenta de donde salió el pago (invariante 98): tiene que existir y estar
+   * ACTIVA. 400 con code estable; el panel y la app pintan el texto tal cual.
+   */
+  private async validarCuentaBancaria(id: string): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('cuenta_bancaria')
+      .select('id, alias, activa')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new BadRequestException({
+        message: 'Esa cuenta bancaria no existe: elige otra de la lista.',
+        error: 'CUENTA_BANCARIA_NO_EXISTE',
+      });
+    }
+    if ((data as { activa?: boolean }).activa === false) {
+      throw new BadRequestException({
+        message: `La cuenta «${typeof (data as { alias?: unknown }).alias === 'string' ? (data as { alias: string }).alias : ''}» está dada de baja: elige otra.`,
+        error: 'CUENTA_BANCARIA_INACTIVA',
+      });
+    }
+  }
+
   private async sellarTarjetaTerminacion(args: {
     medioPago: string | null | undefined;
     explicita: string | null | undefined;
@@ -4549,6 +4589,8 @@ export class ExpensesService {
       // Candado de conciliación (14-sep-2026): se compara el valor NUEVO
       // contra el VIGENTE — reenviar el mismo medio no es tocarlo.
       dto.medio_pago !== undefined ||
+      // Cuenta del pago (invariante 98): se compara contra la VIGENTE.
+      dto.cuenta_bancaria_id !== undefined ||
       // La línea de bitácora se anexa a las notas VIGENTES.
       lineaSello !== null ||
       // Combustible del avión (invariante 43): se compara contra el VIGENTE.
@@ -4572,6 +4614,7 @@ export class ExpensesService {
           medio_pago?: string | null;
           notas?: string | null;
           tarjeta_terminacion?: string | null;
+          cuenta_bancaria_id?: string | null;
           usuario_captura_id?: string | null;
           valor_ia_extraido?: unknown;
           tipo_combustible?: string | null;
@@ -4939,6 +4982,27 @@ export class ExpensesService {
         valorIa: dto.valor_ia_extraido ?? actual?.valor_ia_extraido,
         capturaId: actual?.usuario_captura_id ?? null,
       });
+    }
+    // Cuenta de donde salió el pago (invariante 98): cambiar a un medio que
+    // no la lleva la LIMPIA; una cuenta nueva se valida (existe y activa).
+    {
+      const cuenta = cuentaParaGuardar(
+        dto.medio_pago ?? actual?.medio_pago ?? null,
+        dto.cuenta_bancaria_id,
+        actual?.cuenta_bancaria_id ?? null,
+      );
+      if (cuenta === undefined) {
+        delete cols.cuenta_bancaria_id;
+      } else {
+        if (cuenta && cuenta !== (actual?.cuenta_bancaria_id ?? null)) {
+          await this.validarCuentaBancaria(cuenta);
+        }
+        if (cuenta === (actual?.cuenta_bancaria_id ?? null)) {
+          delete cols.cuenta_bancaria_id;
+        } else {
+          cols.cuenta_bancaria_id = cuenta;
+        }
+      }
     }
     if (aeronaveHeredada) cols.aeronave_id = aeronaveHeredada;
     else if (escalaAutoLimpiada && dto.aeronave_id === undefined) {

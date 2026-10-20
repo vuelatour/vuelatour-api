@@ -1,9 +1,10 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Length,
@@ -73,12 +74,20 @@ export class ListBankAccountsQuery {
 
 export class CreateBankAccountDto {
   @ApiProperty({ maxLength: 50, example: 'GASTOS GNRAL' })
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
+  @IsNotEmpty()
   @MaxLength(50)
   alias!: string;
 
   @ApiProperty({ maxLength: 50, example: 'Scotiabank' })
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
+  @IsNotEmpty()
   @MaxLength(50)
   banco!: string;
 

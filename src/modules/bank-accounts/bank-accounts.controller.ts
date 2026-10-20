@@ -39,9 +39,28 @@ export class BankAccountsController {
     return this.accounts.list(q);
   }
 
+  /**
+   * Opciones para el selector «Cuenta de donde salió» del gasto (20-oct-2026,
+   * invariante 98): SIN número de cuenta ni CLABE (solo la terminación), para
+   * toda la oficina (la coordinación también captura gastos). Va ANTES de
+   * `:id` (si no, `ParseUUIDPipe` respondería 400 a «opciones»).
+   */
+  @Get('opciones')
+  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @ApiOperation({
+    summary: 'Bank account options for the expense form (office roles)',
+  })
+  opciones(@Query('incluir_inactivas') incluirInactivas?: string) {
+    return this.accounts.opciones(
+      incluirInactivas === 'true' || incluirInactivas === '1',
+    );
+  }
+
   @Post()
-  @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Create bank account (ADMIN)' })
+  // Toda la oficina da de alta una cuenta desde el gasto (decisión del
+  // cliente 20-oct-2026); editar y dar de baja siguen siendo de ADMIN.
+  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Create bank account (office roles)' })
   create(
     @Body() dto: CreateBankAccountDto,
     @CurrentUser() c: AuthenticatedUser,

@@ -314,6 +314,8 @@ const COLUMNAS_DE_HOY = [
   'Proveedor',
   'Capturó',
   'Medio pago',
+  // 20-oct-2026 (invariante 98): de qué cuenta salió el pago.
+  'Cuenta',
   'Banco',
   'Comprobante',
   'Facturación',

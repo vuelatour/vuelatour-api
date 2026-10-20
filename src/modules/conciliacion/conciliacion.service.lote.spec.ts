@@ -2888,6 +2888,9 @@ describe('CONCILIACIÓN AL REVÉS — conciliacionDeGasto / leerCargosDeGastos (
       lugar: null,
       notas_primera_linea: 'Pago VIP SAESA',
       folio_comprobante: null,
+      // ADITIVOS (20-oct-2026, invariante 98): sin cuenta capturada.
+      cuenta_bancaria_id: null,
+      cuenta_alias: null,
     });
     expect(r.cargos).toHaveLength(1);
     expect(r.cargos[0]).toMatchObject({

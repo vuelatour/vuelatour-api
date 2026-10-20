@@ -11210,6 +11210,48 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       oficina), `grupos-reparto.util.spec`, `ubicacion-balance-gasto.util.spec`
       y `gasto-avion.*`.
 
+98. **CUENTA DE DONDE SALIÓ EL PAGO; CUENTAS Y PROVEEDORES EN LÍNEA DESDE EL
+    GASTO (20-oct-2026, API 0.0.100, migración `20261020000004`).** Puntos 2 y
+    5 de la lista del cliente del 20-oct-2026.
+    - **`gasto.cuenta_bancaria_id`** (uuid NULL, FK a `cuenta_bancaria`,
+      índice parcial; la bitácora `tg_gasto_bitacora` la audita). Solo con
+      medio TRANSFERENCIA, DOMICILIADO o PAYWISE (`MEDIOS_CON_CUENTA`,
+      `common/medio-pago.util.ts`); regla ÚNICA `cuentaParaGuardar`: con otro
+      medio ⇒ null (cambiar a efectivo LIMPIA la cuenta, como la tarjeta);
+      la llave ausente ⇒ se conserva. Sin CHECK a propósito (lo normaliza el
+      API en alta y PATCH). Una cuenta nueva tiene que existir y estar activa
+      (400 `CUENTA_BANCARIA_NO_EXISTE` / `CUENTA_BANCARIA_INACTIVA`); el alta
+      solo nombra la columna con valor. Es clasificación, no dinero: se
+      cambia aunque el gasto esté conciliado.
+    - **Lectura**: `COLS` + embed `cuenta:cuenta_bancaria!cuenta_bancaria_id(
+      alias, banco, moneda, tipo)` en la lista; columna «Cuenta» del Excel de
+      gastos (tras «Medio pago»); `GET /v1/conciliacion/gastos/:id` y los
+      candidatos de «Vincular gasto» traen `cuenta_bancaria_id` + `cuenta_alias`
+      (ADITIVOS).
+    - **LA CUENTA DEL GASTO MANDA EN EL AUTO-CRUCE**: `cuentaDescarta` en
+      `elegirCandidato` / `elegirMovimiento` y en el cruce USD: un gasto que
+      dice de qué cuenta salió NO se liga SOLO a un cargo de OTRA cuenta
+      (`textoOtraCuenta`). A mano sí (decide la persona; el panel avisa). Un
+      gasto sin cuenta capturada sigue como siempre.
+    - **`GET /v1/bank-accounts/opciones`** (ADMIN, FACTURACION, COORDINADOR):
+      id, alias, banco, moneda, tipo, razón social, activa y la TERMINACIÓN —
+      nunca el número completo ni la CLABE (`opcionDeCuenta`). Va antes de
+      `:id`. **`POST /v1/bank-accounts`** abierto a toda la oficina (editar y
+      dar de baja siguen siendo ADMIN); alias repetido ⇒ 409
+      `CUENTA_ALIAS_DUPLICADO` con la existente en `details`. El DTO recorta
+      alias/banco y los exige no vacíos.
+    - **Proveedores**: `POST`/`PATCH /v1/providers` abiertos a la
+      coordinación; un nombre que ya usa OTRO proveedor activo (sin acentos,
+      mayúsculas ni signos: `normalizarNombreProveedor`, espejo en el panel)
+      ⇒ 409 `PROVEEDOR_DUPLICADO` con el existente.
+    - Paridad: panel `lib/admin/cuentas-gasto.ts` / `proveedores-gasto.ts` y
+      app `features/captures/data/cuentas_gasto.dart` (la app ofrece la cuenta
+      en «Registrar gasto» de oficina y agrega cuentas en línea).
+    - Specs: `medio-pago.util.spec`, `expenses.service.cuenta-bancaria.spec`,
+      `auto-cruce.util.spec` («la cuenta del gasto manda»),
+      `providers.service.spec`, `bank-accounts.service.spec` y el Excel
+      (`expenses.service.xlsx.spec`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12853,6 +12895,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `ADD VALUE` no se revierte sin recrear el tipo: rollback = API ⇒ 0.0.98
   (los valores quedan sin uso). Humo SOLO lecturas: `/v1/version` y que el
   panel ofrezca las dos categorías y el medio.
+- **20-oct-2026 — 0.0.100, migración `20261020000004`** (columna
+  `gasto.cuenta_bancaria_id` + bitácora; invariante 98; rama `lote-b2`).
+  Orden: migración por MCP (dry-run con escrituras reales: alta y cambio
+  auditados, FK) ⇒ API 0.0.100 (`/v1/version`) ⇒ panel. La app (1.1.3+88)
+  la sube el usuario. Rollback: API ⇒ 0.0.99 (la columna queda sin uso).
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera

@@ -4,6 +4,9 @@ import {
   MENSAJE_MEDIO_SOLO_OFICINA,
   etiquetaMedioPago,
   mensajeMedioSoloOficina,
+  MEDIOS_CON_CUENTA,
+  cuentaParaGuardar,
+  medioLlevaCuenta,
 } from './medio-pago.util';
 
 /**
@@ -87,5 +90,27 @@ describe('etiquetaMedioPago', () => {
     expect(etiquetaMedioPago('')).toBeNull();
     expect(etiquetaMedioPago('   ')).toBeNull();
     expect(etiquetaMedioPago(null, '1234')).toBeNull();
+  });
+
+  it('cuenta de donde salió el pago (20-oct-2026, invariante 98): medios y regla de guardado', () => {
+    expect(MEDIOS_CON_CUENTA).toEqual([
+      'TRANSFERENCIA',
+      'DOMICILIADO',
+      'PAYWISE',
+    ]);
+    expect(medioLlevaCuenta('TRANSFERENCIA')).toBe(true);
+    expect(medioLlevaCuenta('PAYWISE')).toBe(true);
+    expect(medioLlevaCuenta('TARJETA_CORP')).toBe(false);
+    expect(medioLlevaCuenta('EFECTIVO')).toBe(false);
+    expect(medioLlevaCuenta(null)).toBe(false);
+    // Con medio que lleva cuenta: lo enviado manda; sin llave, se conserva.
+    expect(cuentaParaGuardar('TRANSFERENCIA', 'c1', null)).toBe('c1');
+    expect(cuentaParaGuardar('TRANSFERENCIA', null, 'c1')).toBeNull();
+    expect(cuentaParaGuardar('TRANSFERENCIA', '', 'c1')).toBeNull();
+    expect(cuentaParaGuardar('TRANSFERENCIA', undefined, 'c1')).toBeUndefined();
+    // Medio sin cuenta: limpia la que había o la enviada; si no hay nada, no toca.
+    expect(cuentaParaGuardar('EFECTIVO', undefined, 'c1')).toBeNull();
+    expect(cuentaParaGuardar('EFECTIVO', 'c1', null)).toBeNull();
+    expect(cuentaParaGuardar('EFECTIVO', undefined, null)).toBeUndefined();
   });
 });

@@ -105,3 +105,39 @@ export function etiquetaMedioPago(
   const term = (terminacion ?? '').trim();
   return term ? `${base} ****${term}` : base;
 }
+
+/**
+ * CUENTA DE DONDE SALIÓ EL PAGO (20-oct-2026, invariante 98): medios que
+ * llevan `gasto.cuenta_bancaria_id`. La tarjeta corporativa NO (su cuenta la
+ * dice la terminación); el efectivo y los personales tampoco. Espejo EXACTO
+ * en el panel (`lib/admin/cuentas-gasto.ts`) y en la app.
+ */
+export const MEDIOS_CON_CUENTA: readonly string[] = [
+  'TRANSFERENCIA',
+  'DOMICILIADO',
+  'PAYWISE',
+];
+
+/** ¿Este medio lleva la cuenta de donde salió el pago? */
+export function medioLlevaCuenta(medio: string | null | undefined): boolean {
+  return MEDIOS_CON_CUENTA.includes((medio ?? '').trim());
+}
+
+/**
+ * La cuenta que se GUARDA en el gasto (alta o PATCH), regla única:
+ *  - el medio efectivo no lleva cuenta ⇒ null (cambiar de transferencia a
+ *    efectivo LIMPIA la cuenta, como la tarjeta con su terminación);
+ *  - la llave no viajó ⇒ `undefined` (se conserva la que había);
+ *  - si viajó, su valor (uuid o null para quitarla).
+ */
+export function cuentaParaGuardar(
+  medioEfectivo: string | null | undefined,
+  enviada: string | null | undefined,
+  actual: string | null | undefined,
+): string | null | undefined {
+  if (!medioLlevaCuenta(medioEfectivo)) {
+    return actual != null || enviada != null ? null : undefined;
+  }
+  if (enviada === undefined) return undefined;
+  return enviada === '' ? null : enviada;
+}

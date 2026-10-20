@@ -168,6 +168,12 @@ export interface ConciliacionDeGastoRespuesta {
     lugar: string | null;
     notas_primera_linea: string | null;
     folio_comprobante: string | null;
+    /**
+     * ADITIVOS (20-oct-2026, invariante 98): la cuenta de donde la oficina
+     * dijo que salió el pago. El panel acota «Buscar el cargo» a ella.
+     */
+    cuenta_bancaria_id?: string | null;
+    cuenta_alias?: string | null;
   };
   estado: EstadoBancoApi;
   fuente: 'PUENTE' | 'ESPEJO';

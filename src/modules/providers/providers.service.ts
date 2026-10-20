@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -52,7 +53,37 @@ export class ProvidersService {
     return data;
   }
 
+  /**
+   * Nombre ya usado por OTRO proveedor activo (20-oct-2026, invariante 98):
+   * sin acentos, mayúsculas ni espacios de más. El alta y el cambio de
+   * nombre en línea desde el gasto responden 409 `PROVEEDOR_DUPLICADO` con
+   * el existente, para que el panel lo elija en vez de duplicarlo.
+   */
+  private async assertNombreLibre(nombre: string, excepto?: string) {
+    const clave = normalizarNombreProveedor(nombre);
+    if (!clave) return;
+    const { data, error } = await this.supabase.service
+      .from('proveedor')
+      .select('id, nombre')
+      .eq('activo', true)
+      .limit(2000);
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as Array<{ id: string; nombre: string }>;
+    const otro = filas.find(
+      (p) =>
+        p.id !== excepto && normalizarNombreProveedor(p.nombre ?? '') === clave,
+    );
+    if (otro) {
+      throw new ConflictException({
+        message: `Ya existe el proveedor «${otro.nombre}»: elígelo de la lista.`,
+        error: 'PROVEEDOR_DUPLICADO',
+        details: { id: otro.id, nombre: otro.nombre },
+      });
+    }
+  }
+
   async create(dto: CreateProveedorDto, createdBy: string) {
+    await this.assertNombreLibre(dto.nombre);
     const { data, error } = await this.supabase.service
       .from('proveedor')
       .insert({ ...dto, created_by: createdBy, updated_by: createdBy })
@@ -68,6 +99,9 @@ export class ProvidersService {
 
   async update(id: string, dto: UpdateProveedorDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
+    if (typeof dto.nombre === 'string') {
+      await this.assertNombreLibre(dto.nombre, id);
+    }
     const { data, error } = await this.supabase.service
       .from('proveedor')
       .update({ ...dto, updated_by: updatedBy })
@@ -82,4 +116,14 @@ export class ProvidersService {
   async softDelete(id: string, updatedBy: string) {
     return this.update(id, { activo: false }, updatedBy);
   }
+}
+
+/** «Gas Natural del Sureste, S.A.» y «gas natural del sureste sa» chocan. */
+export function normalizarNombreProveedor(nombre: string): string {
+  return nombre
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9ñ]+/g, ' ')
+    .trim();
 }

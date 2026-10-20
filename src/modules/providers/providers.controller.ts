@@ -36,8 +36,11 @@ export class ProvidersController {
   }
 
   @Post()
-  @Roles(Rol.ADMIN, Rol.FACTURACION)
-  @ApiOperation({ summary: 'Create provider (ADMIN or FACTURACION)' })
+  // Toda la oficina crea y corrige proveedores desde el gasto (decisión del
+  // cliente 20-oct-2026, invariante 98); dar de baja sigue siendo de
+  // ADMIN/FACTURACION.
+  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Create provider (office roles)' })
   create(@Body() dto: CreateProveedorDto, @CurrentUser() c: AuthenticatedUser) {
     return this.providers.create(dto, c.userId);
   }
@@ -49,8 +52,8 @@ export class ProvidersController {
   }
 
   @Patch(':id')
-  @Roles(Rol.ADMIN, Rol.FACTURACION)
-  @ApiOperation({ summary: 'Update provider (ADMIN or FACTURACION)' })
+  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Update provider (office roles)' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProveedorDto,

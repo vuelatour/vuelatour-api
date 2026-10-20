@@ -403,6 +403,17 @@ export class CreateGastoDto {
 
   @ApiPropertyOptional({
     description:
+      'Cuenta de donde salió el pago (20-oct-2026, invariante 98). Solo se ' +
+      'guarda con medio TRANSFERENCIA, DOMICILIADO o PAYWISE; con otro medio ' +
+      'el API la deja en null. `null` en un PATCH la quita.',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string | null;
+
+  @ApiPropertyOptional({
+    description:
       'Vuelo asociado (opcional). Desde el 11-sep-2026 el PILOTO puede ' +
       'capturar SIN vuelo, pero SOLO en categorías que no son del vuelo ' +
       '(empresa/indirectos/refacción/servicios y GAS): las «directas del ' +
