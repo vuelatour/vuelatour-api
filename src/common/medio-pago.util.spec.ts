@@ -1,7 +1,9 @@
 import {
   MEDIO_PAGO_LABEL,
+  MEDIOS_SOLO_OFICINA,
   MENSAJE_MEDIO_SOLO_OFICINA,
   etiquetaMedioPago,
+  mensajeMedioSoloOficina,
 } from './medio-pago.util';
 
 /**
@@ -24,6 +26,7 @@ describe('etiquetaMedioPago', () => {
         'BODEGA',
         'DOMICILIADO',
         'EFECTIVO',
+        'EFECTIVO_EMPRESA',
         'PAYWISE',
         'PERSONAL_ALE',
         'PERSONAL_PABLO',
@@ -54,6 +57,22 @@ describe('etiquetaMedioPago', () => {
   it('«Pago domiciliado» solo oficina: texto EXACTO del 400 MEDIO_SOLO_OFICINA', () => {
     expect(MENSAJE_MEDIO_SOLO_OFICINA).toBe(
       'El pago domiciliado lo registra la oficina: elige otro medio de pago.',
+    );
+  });
+
+  it('«Efectivo de la empresa» (20-oct-2026, invariante 97): etiqueta, solo oficina y su texto', () => {
+    expect(etiquetaMedioPago('EFECTIVO_EMPRESA')).toBe(
+      'Efectivo de la empresa (no de fondo)',
+    );
+    expect([...MEDIOS_SOLO_OFICINA].sort()).toEqual([
+      'DOMICILIADO',
+      'EFECTIVO_EMPRESA',
+    ]);
+    expect(mensajeMedioSoloOficina('EFECTIVO_EMPRESA')).toBe(
+      'El efectivo de la empresa lo registra la oficina: si pagaste con el efectivo de tu fondo, elige «Efectivo».',
+    );
+    expect(mensajeMedioSoloOficina('DOMICILIADO')).toBe(
+      MENSAJE_MEDIO_SOLO_OFICINA,
     );
   });
 

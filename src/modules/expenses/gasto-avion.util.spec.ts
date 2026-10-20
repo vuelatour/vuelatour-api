@@ -63,6 +63,8 @@ const EMPRESA_Y_COMISION = [
   'GASOLINA',
   'FIJO',
   'VISITA',
+  // «Paquetería» (20-oct-2026, invariante 97): de EMPRESA.
+  'PAQUETERIA',
   'COMISION_VENDEDOR',
 ];
 /**
@@ -111,9 +113,9 @@ describe('columna «Avión» — gastos REALES de prod (15-oct-2026)', () => {
   });
 });
 
-describe('sin avión ni reparto: las 22 categorías', () => {
-  it('empresa, comisión (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; NÓMINA ⇒ «Sin repartir»; PERSONAL_DUENO ⇒ «Personal»; las 14 restantes ⇒ «Falta avión»', () => {
-    expect(CATEGORIAS).toHaveLength(22);
+describe('sin avión ni reparto: las 24 categorías', () => {
+  it('empresa, comisión (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; NÓMINA ⇒ «Sin repartir»; PERSONAL_DUENO ⇒ «Personal»; las 15 restantes ⇒ «Falta avión»', () => {
+    expect(CATEGORIAS).toHaveLength(24);
     const falta: string[] = [];
     for (const categoria of CATEGORIAS) {
       const celda = celdaAvionGasto(gasto({ categoria }));
@@ -128,7 +130,7 @@ describe('sin avión ni reparto: las 22 categorías', () => {
         falta.push(categoria);
       }
     }
-    expect(falta).toHaveLength(14);
+    expect(falta).toHaveLength(15);
     // A propósito, como la bandeja del API: la «(avión)», los servicios del
     // avión, la refacción y el comisariato sin avión SÍ son pendientes.
     for (const c of [
@@ -136,6 +138,7 @@ describe('sin avión ni reparto: las 22 categorías', () => {
       'SERVICIOS',
       'REFACCION',
       'COMISARIATO',
+      'OTROS_DIRECTOS_VUELO',
     ]) {
       expect(falta).toContain(c);
     }
@@ -184,7 +187,7 @@ describe('con avión sellado', () => {
     const resto = CATEGORIAS.filter(
       (c) => !EMPRESA_Y_COMISION.includes(c) && c !== 'PERSONAL_DUENO',
     );
-    expect(resto).toHaveLength(15);
+    expect(resto).toHaveLength(16);
     expect(resto).toContain('COMISION_VENDEDOR_AVION');
     for (const categoria of resto) {
       expect([
@@ -312,7 +315,7 @@ describe('reparto: gana a todo', () => {
         empresa.length > 0,
       );
     }
-    expect(conReparto).toBe(28 * 6 * 2 * 7);
+    expect(conReparto).toBe(30 * 6 * 2 * 7);
   });
 });
 
@@ -339,7 +342,7 @@ describe('«Falta avión» = la bandeja de pendientes del API', () => {
       }
       revisadas += 1;
     }
-    expect(revisadas).toBe(22 * 5 * 2 * 10);
+    expect(revisadas).toBe(24 * 5 * 2 * 10);
   });
 });
 

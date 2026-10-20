@@ -956,6 +956,8 @@ describe('alcanceRepartoPorFecha — espejo del ternario de computeAvion', () =>
     'TAXI',
     'PILOTO_EXTERNO',
     'COMISARIATO',
+    // 20-oct-2026 (invariante 97): grupo DIRECTO, como COMISARIATO.
+    'OTROS_DIRECTOS_VUELO',
     'REFACCION',
     'SERVICIOS',
     'PERMISO',
@@ -970,11 +972,13 @@ describe('alcanceRepartoPorFecha — espejo del ternario de computeAvion', () =>
     'GASOLINA',
     'VISITA',
     'PERSONAL_DUENO',
+    // 20-oct-2026 (invariante 97): de EMPRESA ⇒ EXCLUIDO del reparto.
+    'PAQUETERIA',
   ];
 
-  it('tabla CONGELADA de las 22 categorías sin reparto (con y sin avión)', () => {
+  it('tabla CONGELADA de las 24 categorías sin reparto (con y sin avión)', () => {
     const todas = Object.values(CategoriaGasto) as string[];
-    expect(todas).toHaveLength(22);
+    expect(todas).toHaveLength(24);
     expect([...AVION, 'FIJO', ...NULO].sort()).toEqual([...todas].sort());
     for (const categoria of todas) {
       const conAvion = alcanceRepartoPorFecha(sinVuelo({ categoria }), []);

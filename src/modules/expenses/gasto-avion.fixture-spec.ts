@@ -261,8 +261,8 @@ const REPARTOS_MATRIZ: readonly FilaGasto[] = [
 ];
 
 /**
- * Producto cartesiano categoría × avión × vuelo × reparto (28 × 6 × 2 × 10
- * = 3,360 filas). Incluye combinaciones que la BD no permite (reparto en una
+ * Producto cartesiano categoría × avión × vuelo × reparto (30 × 6 × 2 × 10
+ * = 3,600 filas desde el 20-oct-2026; antes 28 categorías y 3,360). Incluye combinaciones que la BD no permite (reparto en una
  * categoría que no se reparte): la columna debe decir lo mismo que la tabla
  * con CUALQUIER fila que le llegue.
  */

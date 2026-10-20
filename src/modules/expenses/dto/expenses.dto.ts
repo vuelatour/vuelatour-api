@@ -55,6 +55,16 @@ export enum CategoriaGasto {
    *    sigue en COMIDA.
    *  - La migración 20261013000001 (valor del enum) va ANTES del API. */
   COMISARIATO = 'COMISARIATO',
+  /** «Otros gastos directos del vuelo» (20-oct-2026, API 0.0.99, pedido del
+   *  cliente: «agregar en las categorias del gasto la de "Otros gastos
+   *  directos del vuelo" y que se vaya lo que se capture con esa categoria a
+   *  la hoja de reportes de hora en el balance general y por avión en la
+   *  columna de "Otros"»). Invariante 97 del CLAUDE.md del API: la MISMA
+   *  regla que COMISARIATO (destino «Gastos directos del vuelo», columna
+   *  OTROS, grupo DIRECTO del reparto, exige vuelo solo al PILOTO, sin TUA
+   *  embebido, no repartible, no ligable a compras). La migración
+   *  20261020000002 (valor del enum) va ANTES del API. */
+  OTROS_DIRECTOS_VUELO = 'OTROS_DIRECTOS_VUELO',
   HOTEL = 'HOTEL',
   TAXI = 'TAXI',
   REFACCION = 'REFACCION',
@@ -124,6 +134,13 @@ export enum CategoriaGasto {
    *  salió de verdad del banco/fondo). */
   PERSONAL_DUENO = 'PERSONAL_DUENO',
   OTRO = 'OTRO',
+  /** «Paquetería» (20-oct-2026, API 0.0.99, pedido del cliente: «crear una
+   *  nueva categoria que se llame "Paqueteria" y se vaya al balance general
+   *  de Vuelatour»). Invariante 97: gasto de EMPRESA (destino «Otros gastos
+   *  (Balance general VuelaTour)» ⇒ entra sola a CATEGORIAS_GASTO_EMPRESA y
+   *  a «sin avión»). La migración 20261020000001 va ANTES del API: las
+   *  listas de empresa viajan como literales a PostgREST (22P02 sin ella). */
+  PAQUETERIA = 'PAQUETERIA',
 }
 
 export enum Moneda {
@@ -151,6 +168,16 @@ export enum MedioPago {
    *  `gasto_check`). Solo oficina: PILOTO/MECANICO/VISITANTE ⇒ 400
    *  `MEDIO_SOLO_OFICINA` en el alta. La IA de tickets no lo sugiere. */
   DOMICILIADO = 'DOMICILIADO',
+  /** «Efectivo de la empresa (no de fondo)» (20-oct-2026, API 0.0.99,
+   *  migración 20261020000003, invariante 97; caso del 19-oct: comisiones
+   *  pagadas en efectivo por el dueño se capturaron como EFECTIVO y se
+   *  restaron del fondo de quien las registró). Dinero en efectivo de la
+   *  empresa que NO sale de ninguna caja chica: caja chica solo mira
+   *  `medio_pago = 'EFECTIVO'` exacto, así que este medio no entra a ningún
+   *  libro, reposición ni alerta. NO bancario (como EFECTIVO: se liga a un
+   *  cargo solo con justificación, invariante 48). Solo oficina:
+   *  PILOTO/MECANICO/VISITANTE ⇒ 400 `MEDIO_SOLO_OFICINA` en el alta. */
+  EFECTIVO_EMPRESA = 'EFECTIVO_EMPRESA',
 }
 
 export enum TipoCombustible {

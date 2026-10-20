@@ -65,6 +65,9 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
    *  directo del vuelo, columna OTROS del balance del avión. La comida de la
    *  tripulación es COMIDA. */
   COMISARIATO: 'Comisariato',
+  /** Cualquier otro gasto directo del vuelo (20-oct-2026, invariante 97):
+   *  columna OTROS de la fila del vuelo, como Comisariato. */
+  OTROS_DIRECTOS_VUELO: 'Otros gastos directos del vuelo',
   HOTEL: 'Hotel',
   TAXI: 'Taxi / estacionamiento',
   REFACCION: 'Refacción',
@@ -87,6 +90,8 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
   VISITA: 'Visita',
   PERSONAL_DUENO: 'Gasto personal del dueño',
   OTRO: 'Otros gastos VuelaTour',
+  /** Envíos y mensajería de la empresa (20-oct-2026, invariante 97). */
+  PAQUETERIA: 'Paquetería',
 };
 
 /** A dónde se va el gasto POR DEFAULT (texto verde del selector de captura). */
@@ -100,6 +105,9 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   // COMISARIATO (13-oct-2026, invariante 63): el MISMO destino que COMIDA ⇒
   // `categoriaExigeVuelo` la deriva sola (candado solo del PILOTO).
   COMISARIATO: 'Gastos directos del vuelo (en el balance del avión)',
+  // OTROS_DIRECTOS_VUELO (20-oct-2026, invariante 97): el destino de
+  // COMISARIATO ⇒ `categoriaExigeVuelo` la deriva sola.
+  OTROS_DIRECTOS_VUELO: 'Gastos directos del vuelo (en el balance del avión)',
   HOTEL: 'Gastos directos del vuelo (en el balance del avión)',
   TAXI: 'Gastos directos del vuelo (en el balance del avión)',
   PILOTO_EXTERNO: 'Gastos directos del vuelo (en el balance del avión)',
@@ -121,6 +129,9 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   OTRO: 'Otros gastos (Balance general VuelaTour)',
   FIJO: 'Otros gastos (Balance general VuelaTour)',
   VISITA: 'Otros gastos (Balance general VuelaTour)',
+  // PAQUETERIA (20-oct-2026, invariante 97): destino de EMPRESA ⇒ entra sola
+  // a CATEGORIAS_GASTO_EMPRESA (y por ella a «sin avión»).
+  PAQUETERIA: 'Otros gastos (Balance general VuelaTour)',
   PERSONAL_DUENO: 'Gastos personales de los dueños (fuera de la empresa)',
 };
 
@@ -226,6 +237,9 @@ export const CATEGORIA_PAGO_VENDEDOR_AVION = 'COMISION_VENDEDOR_AVION';
  * Para los lectores que necesitan el literal (balance, reparto, compras).
  */
 export const CATEGORIA_COMISARIATO = 'COMISARIATO';
+/** Literal de «Otros gastos directos del vuelo» (20-oct-2026, invariante
+ *  97): columna OTROS del balance, como COMISARIATO. */
+export const CATEGORIA_OTROS_DIRECTOS_VUELO = 'OTROS_DIRECTOS_VUELO';
 
 /**
  * «Nómina» (16-oct-2026, API 0.0.90, invariante 91): vive en su módulo
@@ -328,6 +342,9 @@ export const MIGRACION_DE_CATEGORIA: Readonly<Record<string, string>> = {
   COMISION_VENDEDOR_AVION: '20261013000003',
   // COMISARIATO (13-oct-2026, invariante 63): 22.º valor del enum, al final.
   COMISARIATO: '20261013000001',
+  // 20-oct-2026 (invariante 97): 23.º y 24.º valores, al final.
+  PAQUETERIA: '20261020000001',
+  OTROS_DIRECTOS_VUELO: '20261020000002',
 };
 
 /**

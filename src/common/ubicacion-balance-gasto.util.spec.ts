@@ -387,6 +387,8 @@ describe('R5 — LA CATEGORÍA DE EMPRESA MANDA', () => {
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      // «Paquetería» (20-oct-2026, invariante 97).
+      'PAQUETERIA',
       'VISITA',
     ]);
   });

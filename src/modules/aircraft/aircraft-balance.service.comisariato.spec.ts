@@ -366,3 +366,52 @@ describe('Balance por avión — Comisariato (13-oct-2026, invariante 63)', () =
     );
   });
 });
+
+/**
+ * «Otros gastos directos del vuelo» y «Paquetería» (20-oct-2026, API 0.0.99,
+ * invariante 97). La primera es la MISMA regla que el Comisariato: entera en
+ * la columna OTROS de la fila del vuelo. La segunda es de EMPRESA: con vuelo
+ * NO asoma en la fila (como el OTRO).
+ */
+describe('Balance por avión — «Otros gastos directos del vuelo» y «Paquetería» (invariante 97)', () => {
+  const OTROS_DIRECTOS: Fila = {
+    ...COMISARIATO_VUELO,
+    id: 'g-otros-directos',
+    categoria: 'OTROS_DIRECTOS_VUELO',
+    notas: 'Renta de carrito de equipaje',
+  };
+  const PAQUETERIA: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-paqueteria',
+    categoria: 'PAQUETERIA',
+    monto: 420,
+    notas: 'DHL envío de documentos',
+  };
+
+  it('«Otros gastos directos del vuelo» con vuelo: ENTERA en OTROS (junto al FBO), con su línea', async () => {
+    const fila = filaDel501(await payloadDe([...CONTROLES, OTROS_DIRECTOS]));
+    expect(fila.otros_mxn).toBe(750);
+    expect(fila.op_mxn).toBe(300);
+    expect(fila.piloto_mxn).toBeNull();
+    const linea = (fila.otros_detalle ?? []).find((l) =>
+      l.startsWith('Otros gastos directos del vuelo'),
+    );
+    expect(linea).toBeDefined();
+    expect(linea).toContain('$250.00');
+    expect(fila.tua_pagado_mxn).toBeNull();
+  });
+
+  it('«Paquetería» con vuelo: es de la EMPRESA y no asoma en la fila ni mueve su remanente', async () => {
+    const sin = filaDel501(await payloadDe(CONTROLES));
+    const con = filaDel501(await payloadDe([...CONTROLES, PAQUETERIA]));
+    expect(con.otros_mxn).toBe(sin.otros_mxn);
+    expect(con.op_mxn).toBe(sin.op_mxn);
+    expect(con.remanente_mxn).toBe(sin.remanente_mxn);
+    const notas = [
+      ...(con.op_detalle ?? []),
+      ...(con.otros_detalle ?? []),
+    ].join(' | ');
+    expect(notas).not.toContain('DHL');
+  });
+});

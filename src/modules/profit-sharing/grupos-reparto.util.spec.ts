@@ -17,7 +17,7 @@ import {
  * siguen verdes SIN tocarse (la mudanza no cambia ninguna conducta).
  */
 describe('grupos-reparto.util — membresía congelada', () => {
-  it('DIRECTO: las 9 categorías directas del vuelo (sin TUAS ni OTRO)', () => {
+  it('DIRECTO: las 10 categorías directas del vuelo (sin TUAS ni OTRO; «Otros gastos directos del vuelo» desde el 20-oct-2026)', () => {
     expect([...DIRECTO].sort()).toEqual(
       [
         'GAS',
@@ -29,6 +29,7 @@ describe('grupos-reparto.util — membresía congelada', () => {
         'TAXI',
         'PILOTO_EXTERNO',
         'COMISARIATO',
+        'OTROS_DIRECTOS_VUELO',
       ].sort(),
     );
   });

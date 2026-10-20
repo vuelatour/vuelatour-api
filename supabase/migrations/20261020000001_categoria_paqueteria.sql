@@ -1,0 +1,105 @@
+-- 20-oct-2026 · CATEGORÍA DE GASTO «Paquetería» (PAQUETERIA). API 0.0.99,
+-- invariante 97 del CLAUDE.md del API.
+--
+-- PEDIDO DEL CLIENTE (20-oct-2026): «Debemos crear una nueva categoria que se
+-- llame "Paqueteria" y se vaya al balance general de Vuelatour. y recuerda
+-- que todas estas categorias deben ser las mismas en la app y en el admin
+-- web.»
+--
+-- QUÉ HACE: agrega `PAQUETERIA` AL FINAL del enum `public.categoria_gasto`.
+-- Sin filas, triggers ni CHECK. Destino «Otros gastos (Balance general
+-- VuelaTour)» ⇒ categoría de EMPRESA (entra sola a CATEGORIAS_GASTO_EMPRESA y
+-- a «sin avión»).
+--
+-- DEPENDENCIA DURA DEL API 0.0.99: las listas de EMPRESA y de «sin avión»
+-- viajan como literales a PostgREST (`.in('categoria', …)` del Balance
+-- general y del Libro Dinero, `not.in(…)` de la bandeja de pendientes, la
+-- alerta y el pre-cierre) ⇒ contra una BD sin el valor: 22P02 ⇒ 500. ESTA
+-- MIGRACIÓN VA ANTES DEL PUSH DEL API, comprobando `pg_enum` justo antes.
+--
+-- SOLA EN SU ARCHIVO A PROPÓSITO (patrón 20261013000001 / 20261013000009): un
+-- valor nuevo de enum no se puede USAR —ni escribir ni leer con el literal:
+-- 55P04— en la transacción que lo crea.
+--
+-- ROLLBACK: no hay; el valor no se retira sin recrear el tipo y sin filas es
+-- inofensivo. Regresar el API a ≤ 0.0.98 solo con 0 gastos que lo usen.
+--
+-- Por MCP se aplica SOLO el CUERPO (apply_migration, name
+-- '20261020000001_categoria_paqueteria'). Sin palabras destructivas.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN (ANTES de aplicar). UNA sentencia por MCP `execute_sql`; el `raise
+-- exception` final revierte todo. Cualquier 'DRYRUN_FALLA …' u otro error =
+-- NO aplicar. Conteo RELATIVO. El DDL va ANTES de cualquier escritura de
+-- prueba.
+--
+-- do $dry$
+-- declare
+--   v_n0 int; v_n int; v_ult text;
+--   v_usr uuid; v_avion uuid; v_g uuid; v_b int;
+-- begin
+--   -- A) CONTEXTO
+--   if exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--              where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'PAQUETERIA') then
+--     raise exception 'DRYRUN_FALLA A: PAQUETERIA ya existe (¿migración aplicada?)';
+--   end if;
+--   if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--                  where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISARIATO') then
+--     raise exception 'DRYRUN_FALLA A: el enum no tiene COMISARIATO (¿otro proyecto?)';
+--   end if;
+--   if not exists (select 1 from pg_constraint where conrelid = 'public.gasto'::regclass and conname = 'gasto_check'
+--                  and pg_get_constraintdef(oid) ilike '%TARJETA_CORP%') then
+--     raise exception 'DRYRUN_FALLA A: gasto_check no es el de siempre (tarjeta solo con TARJETA_CORP)';
+--   end if;
+--   select count(*) into v_n0 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   select u.id into v_usr from public.usuario u where u.rol::text = 'ADMIN' and u.estado::text = 'ACTIVO' order by u.created_at limit 1;
+--   select a.id into v_avion from public.aeronave a order by a.matricula limit 1;
+--   if v_usr is null or v_avion is null then raise exception 'DRYRUN_FALLA A: sin ADMIN activo o sin aeronave'; end if;
+--   raise notice 'okA · % valores (conteo relativo)', v_n0;
+--   -- B) CUERPO REAL (pegado TAL CUAL, antes de cualquier escritura)
+--   alter type public.categoria_gasto add value if not exists 'PAQUETERIA';
+--   -- C1) uno más y AL FINAL por enumsortorder
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C1: % valores tras el ADD (esperado %)', v_n, v_n0 + 1; end if;
+--   select e.enumlabel into v_ult from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto' order by e.enumsortorder desc limit 1;
+--   if v_ult is distinct from 'PAQUETERIA' then raise exception 'DRYRUN_FALLA C1: el último valor es % (esperado PAQUETERIA)', v_ult; end if;
+--   -- C2) re-ejecutar el cuerpo es no-op (IF NOT EXISTS)
+--   alter type public.categoria_gasto add value if not exists 'PAQUETERIA';
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C2: el cuerpo no es idempotente (% valores)', v_n; end if;
+--   -- C3) ESCRITURA REAL con el tipo ya alterado (los 4 triggers de gasto), con un medio que YA existía
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto, medio_pago, aeronave_id, notas, origen, created_by, updated_by)
+--   values (v_usr, 'SERVICIOS', 1499.00, 'MXN', date '2026-10-20', 'TRANSFERENCIA', v_avion, 'DRYRUN 20261020000001', 'OFICINA', v_usr, v_usr)
+--   returning id into v_g;
+--   update public.gasto set monto = 1500.00, updated_by = v_usr where id = v_g;
+--   select count(*) into v_b from public.gasto_bitacora where gasto_id = v_g;
+--   if v_b <> 2 then raise exception 'DRYRUN_FALLA C3: bitácora = % (esperado INSERT + UPDATE)', v_b; end if;
+--   -- C4) el valor nuevo NO se puede usar antes del COMMIT (55P04): por eso el API sale DESPUÉS
+--   begin
+--     update public.gasto set categoria = 'PAQUETERIA', updated_by = v_usr where id = v_g;
+--     raise exception 'DRYRUN_FALLA C4: se escribió el valor nuevo antes del commit';
+--   exception when sqlstate '55P04' then
+--     raise notice 'okC4 · 55P04 al escribir antes del commit';
+--   end;
+--   raise exception 'DRYRUN_OK 20261020000001 · A–C4 (% → % valores, PAQUETERIA al final, gasto_check intacto, idempotente, triggers de gasto intactos, 55P04 antes del commit)', v_n0, v_n0 + 1;
+-- end $dry$;
+--
+-- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada:
+--   select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto' and e.enumlabel = 'PAQUETERIA';        ⇒ 0
+--   select count(*) from public.gasto where notas = 'DRYRUN 20261020000001'; ⇒ 0
+--
+-- APLICAR el CUERPO con apply_migration y VERIFICAR:
+--   - el último valor por enumsortorder es PAQUETERIA;
+--   - select 'PAQUETERIA'::public.categoria_gasto;  ⇒ sin error;
+--   - get_advisors sin hallazgos nuevos.
+-- JUSTO ANTES DEL PUSH DEL API 0.0.99:
+--   select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto' and e.enumlabel = 'PAQUETERIA';  ⇒ 1 fila
+-- ---------------------------------------------------------------------------
+
+alter type public.categoria_gasto add value if not exists 'PAQUETERIA';

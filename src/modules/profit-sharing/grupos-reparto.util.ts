@@ -33,6 +33,9 @@ export const DIRECTO: ReadonlySet<string> = new Set([
   // PASAJEROS = costo directo del vuelo (columna OTROS del balance); fuera
   // de este set caería a EXCLUIDO e inflaría la utilidad de los socios.
   'COMISARIATO',
+  // «Otros gastos directos del vuelo» (20-oct-2026, invariante 97): la misma
+  // regla que COMISARIATO (columna OTROS del balance).
+  'OTROS_DIRECTOS_VUELO',
   // 'OTRO' YA NO está aquí (regla del cliente, 11-sep-2026 — LA CATEGORÍA DE
   // EMPRESA MANDA SOBRE EL VUELO): un OTRO con vuelo es gasto de VuelaTour,
   // no costo del avión. Ver `categoriaEsDeEmpresa` en el clasificador de

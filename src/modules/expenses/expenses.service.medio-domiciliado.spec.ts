@@ -245,3 +245,52 @@ describe('ExpensesService — «Pago domiciliado» (13-oct-2026, invariante 64)'
     expect(filas[1]).not.toHaveProperty('monto_vinculado');
   });
 });
+
+describe('ExpensesService — «Efectivo de la empresa» (20-oct-2026, invariante 97)', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(HOY));
+  afterEach(() => jest.useRealTimers());
+
+  const efectivo = (extra: Partial<CreateGastoDto> = {}) =>
+    dto({
+      categoria: CategoriaGasto.COMISION_VENDEDOR,
+      vuelo_id: VUELO,
+      medio_pago: MedioPago.EFECTIVO_EMPRESA,
+      notas: 'Comisión a Saab pagada en efectivo por Ale',
+      ...extra,
+    });
+
+  it('PILOTO, MECÁNICO y VISITANTE ⇒ 400 MEDIO_SOLO_OFICINA con su texto, SIN tocar la BD', async () => {
+    const casos: Array<[Rol, Partial<CreateGastoDto>]> = [
+      [Rol.PILOTO, { categoria: CategoriaGasto.COMIDA }],
+      [Rol.MECANICO, { categoria: CategoriaGasto.GAS, vuelo_id: undefined }],
+      [Rol.VISITANTE, {}],
+    ];
+    for (const [rol, extra] of casos) {
+      const { service, llamadas } = armar();
+      const r = await rebote(service.create(efectivo(extra), 'u-campo', rol));
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('MEDIO_SOLO_OFICINA');
+      expect(r.body.message).toBe(
+        'El efectivo de la empresa lo registra la oficina: si pagaste con el efectivo de tu fondo, elige «Efectivo».',
+      );
+      expect(llamadas).toHaveLength(0);
+    }
+  });
+
+  it('la oficina lo guarda tal cual, SIN tarjeta y SIN auto-cruce con el banco (no es bancario)', async () => {
+    for (const rol of [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION]) {
+      const { service, insertado, intentarCruzarGasto } = armar();
+      await service.create(
+        efectivo({ tarjeta_terminacion: '4321' }),
+        'u-oficina',
+        rol,
+        { notificar: false },
+      );
+      expect(insertado()).toMatchObject({
+        medio_pago: 'EFECTIVO_EMPRESA',
+        tarjeta_terminacion: null,
+      });
+      expect(intentarCruzarGasto).not.toHaveBeenCalled();
+    }
+  });
+});

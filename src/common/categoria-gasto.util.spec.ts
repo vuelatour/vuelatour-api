@@ -31,8 +31,11 @@ import { CATS_SIN_TUA_EMBEBIDO } from './desglose-gasto.util';
 describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', () => {
   const codigos = Object.values(CategoriaGasto);
 
-  it('el enum tiene las 22 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después y COMISARIATO justo después de COMIDA desde el 13-oct-2026)', () => {
-    expect(codigos).toHaveLength(22);
+  it('el enum tiene las 24 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después y COMISARIATO justo después de COMIDA desde el 13-oct-2026; OTROS_DIRECTOS_VUELO justo después de COMISARIATO y PAQUETERIA al final desde el 20-oct-2026)', () => {
+    expect(codigos).toHaveLength(24);
+    const k = codigos.indexOf(CategoriaGasto.COMISARIATO);
+    expect(codigos[k + 1]).toBe('OTROS_DIRECTOS_VUELO');
+    expect(codigos[codigos.length - 1]).toBe('PAQUETERIA');
     expect(codigos).toContain('COMISION_VENDEDOR');
     const i = codigos.indexOf(CategoriaGasto.COMISION_VENDEDOR);
     expect(codigos[i + 1]).toBe('COMISION_VENDEDOR_AVION');
@@ -198,6 +201,8 @@ describe('categoriaExigeVuelo', () => {
     CategoriaGasto.COMIDA,
     // 13-oct-2026: COMISARIATO entra por su destino (candado del PILOTO).
     CategoriaGasto.COMISARIATO,
+    // 20-oct-2026 (invariante 97): derivada del destino, como COMISARIATO.
+    CategoriaGasto.OTROS_DIRECTOS_VUELO,
     CategoriaGasto.HOTEL,
     CategoriaGasto.TAXI,
     CategoriaGasto.PERMISO,
@@ -220,6 +225,8 @@ describe('categoriaExigeVuelo', () => {
     CategoriaGasto.SERVICIOS,
     CategoriaGasto.PERSONAL_DUENO,
     CategoriaGasto.OTRO,
+    // 20-oct-2026 (invariante 97): de EMPRESA.
+    CategoriaGasto.PAQUETERIA,
   ];
 
   it('las categorías del VUELO lo exigen', () => {
@@ -266,12 +273,13 @@ describe('categoriaExigeVuelo', () => {
  * mover un destino mueve dinero del cierre y debe fallar aquí primero.
  */
 describe('categoriaEsDeEmpresa (11-sep-2026)', () => {
-  it('la lista congelada es exactamente OTRO, NOMINA, GASOLINA, FIJO, VISITA', () => {
+  it('la lista congelada es exactamente OTRO, NOMINA, GASOLINA, FIJO, VISITA y PAQUETERIA (20-oct-2026)', () => {
     expect([...CATEGORIAS_GASTO_EMPRESA].sort()).toEqual([
       'FIJO',
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      'PAQUETERIA',
       'VISITA',
     ]);
   });
@@ -326,6 +334,7 @@ describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
       'INDIRECTO',
       'NOMINA',
       'OTRO',
+      'PAQUETERIA',
       'PERSONAL_DUENO',
       'VISITA',
     ]);
@@ -381,9 +390,10 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(texto).toContain(
       'COMISION_VENDEDOR_AVION → Comisión del vendedor (avión) → Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
     );
-    // 22 categorías (COMISION_VENDEDOR_AVION y COMISARIATO entraron el
-    // 13-oct-2026) + el título.
-    expect(texto.split('\n')).toHaveLength(23);
+    // 24 categorías (COMISION_VENDEDOR_AVION y COMISARIATO entraron el
+    // 13-oct-2026; OTROS_DIRECTOS_VUELO y PAQUETERIA el 20-oct-2026) + el
+    // título.
+    expect(texto.split('\n')).toHaveLength(25);
   });
 
   it('exige vuelo (piloto) Y para TODOS los roles (solo las dos)', () => {
@@ -409,6 +419,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      'PAQUETERIA',
       'VISITA',
     ]);
     expect(categoriaEsDeEmpresa('COMISION_VENDEDOR')).toBe(false);
@@ -423,6 +434,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      'PAQUETERIA',
       'VISITA',
     ]);
     expect(categoriaFueraDelAvion('COMISION_VENDEDOR')).toBe(true);
@@ -535,6 +547,8 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       COMISION_VENDEDOR: '20260928000001',
       COMISION_VENDEDOR_AVION: '20261013000003',
       COMISARIATO: '20261013000001',
+      PAQUETERIA: '20261020000001',
+      OTROS_DIRECTOS_VUELO: '20261020000002',
     });
     const errAvion = {
       code: '22P02',
@@ -654,6 +668,7 @@ describe('COMISARIATO (13-oct-2026)', () => {
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      'PAQUETERIA',
       'VISITA',
     ]);
     expect(CATEGORIAS_GASTO_SIN_AVION).not.toContain('COMISARIATO');

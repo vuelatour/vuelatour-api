@@ -38,7 +38,32 @@ export const MEDIO_PAGO_LABEL: Record<string, string> = {
   /** Cargo automático a la cuenta (suscripciones, seguros, servicios);
    *  bancario, se concilia como transferencia (13-oct-2026, invariante 64). */
   DOMICILIADO: 'Pago domiciliado',
+  /** Efectivo de la empresa que NO sale de ninguna caja chica (20-oct-2026,
+   *  invariante 97): no bancario y fuera de los fondos. */
+  EFECTIVO_EMPRESA: 'Efectivo de la empresa (no de fondo)',
 };
+
+/**
+ * Medios que SOLO registra la oficina (PILOTO, MECANICO y VISITANTE ⇒ 400
+ * `MEDIO_SOLO_OFICINA` en el ALTA): el pago domiciliado (invariante 64) y el
+ * efectivo de la empresa (20-oct-2026, invariante 97: decisión del cliente,
+ * «solo oficina»; un piloto paga con el efectivo de SU fondo).
+ */
+export const MEDIOS_SOLO_OFICINA: ReadonlySet<string> = new Set([
+  'DOMICILIADO',
+  'EFECTIVO_EMPRESA',
+]);
+
+/** Texto del 400 `MEDIO_SOLO_OFICINA` para el efectivo de la empresa. */
+export const MENSAJE_EFECTIVO_EMPRESA_SOLO_OFICINA =
+  'El efectivo de la empresa lo registra la oficina: si pagaste con el efectivo de tu fondo, elige «Efectivo».';
+
+/** El texto del 400 `MEDIO_SOLO_OFICINA` según el medio enviado. */
+export function mensajeMedioSoloOficina(medio: string): string {
+  return medio === 'EFECTIVO_EMPRESA'
+    ? MENSAJE_EFECTIVO_EMPRESA_SOLO_OFICINA
+    : MENSAJE_MEDIO_SOLO_OFICINA;
+}
 
 /**
  * «Pago domiciliado» lo registra SOLO la oficina (13-oct-2026, invariante

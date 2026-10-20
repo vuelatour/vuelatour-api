@@ -292,6 +292,11 @@ export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
   // 600ml $22…»). Cubre balance, reparto y Libro Dinero por la fuente única
   // `trasladosEmbebidosDeGasto`. Se usa en JS, nunca en un query.
   'COMISARIATO',
+  // 20-oct-2026 (invariante 97): «Otros gastos directos del vuelo» entra
+  // ENTERO a OTROS como COMISARIATO; «Paquetería» es un envío de la empresa
+  // (además las de EMPRESA ya se excluyen por su categoría).
+  'OTROS_DIRECTOS_VUELO',
+  'PAQUETERIA',
 ]);
 
 export interface GastoParaTuaEmbebido {

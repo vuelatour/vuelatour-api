@@ -33,6 +33,7 @@ import {
 } from '../tipo-cambio/tipo-cambio.service';
 import {
   CATEGORIA_COMISARIATO,
+  CATEGORIA_OTROS_DIRECTOS_VUELO,
   CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_EMPRESA,
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
@@ -275,12 +276,25 @@ const VUELO_COLS =
 // (litros/precio). El medio EFECTIVO solo se señala como "(efectivo)" en la
 // nota de la celda.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
+/** «(efectivo)» informativo de la nota de la celda; el efectivo de la
+ *  empresa (20-oct-2026, invariante 97) se dice aparte. */
+const sufijoEfectivo = (medio: string | null | undefined): string =>
+  medio === 'EFECTIVO'
+    ? ' (efectivo)'
+    : medio === 'EFECTIVO_EMPRESA'
+      ? ' (efectivo de la empresa)'
+      : '';
 // OTROS de la fila del vuelo = FBO (regla 27-jul; OTRO salió el 11-sep-2026:
 // ver CAT_EMPRESA — la categoría OTRO ya no resta en el avión) + COMISARIATO
 // (13-oct-2026, pedido del cliente: snacks/bebidas de los PASAJEROS como
 // costo directo del vuelo, invariante 63). COMISARIATO está en
 // CATS_SIN_TUA_EMBEBIDO ⇒ `separarPartes` da null y entra ENTERO aquí.
-const CAT_OTROS = new Set(['FBO', CATEGORIA_COMISARIATO]);
+// «Otros gastos directos del vuelo» (20-oct-2026, invariante 97): igual.
+const CAT_OTROS = new Set([
+  'FBO',
+  CATEGORIA_COMISARIATO,
+  CATEGORIA_OTROS_DIRECTOS_VUELO,
+]);
 /**
  * LA CATEGORÍA MANDA SOBRE EL VUELO (regla del cliente, 11-sep-2026).
  *
@@ -3592,7 +3606,7 @@ export class AircraftBalanceService {
           // que NO entra a ningún total de dinero. Misma cadena de TC que la
           // nota (tc_gasto ?? z ?? tcPromedio).
           const mxnTua = gastoMxn(g);
-          const sufijoTua = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
+          const sufijoTua = sufijoEfectivo(g.medio_pago);
           opDetalle.push(
             lineaDetalle(
               g,
@@ -3636,7 +3650,7 @@ export class AircraftBalanceService {
           continue;
         }
         // "(efectivo)" en la nota es informativo: NO cambia la columna.
-        const sufijo = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
+        const sufijo = sufijoEfectivo(g.medio_pago);
         // Partes TUA/FBO EMBEBIDAS en la factura (leídas por IA — caso ASUR
         // "aterrizaje, pernocta, TUA, plataforma, servicio FBO"): el desglose
         // MANDA sobre la categoría que eligió el capturista. Regla del libro

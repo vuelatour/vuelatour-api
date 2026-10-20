@@ -457,6 +457,7 @@ function listaFechas(fechas: readonly string[]): string {
 /** «en efectivo» / «en «Personal Pablo»». */
 function medioEnFrase(medio: string | null | undefined): string {
   if (medio === 'EFECTIVO') return 'en efectivo';
+  if (medio === 'EFECTIVO_EMPRESA') return 'en efectivo de la empresa';
   return `en «${etiquetaMedioPago(medio) ?? 'sin medio de pago'}»`;
 }
 

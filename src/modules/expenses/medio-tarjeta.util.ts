@@ -25,6 +25,9 @@ export const MEDIOS_NO_BANCARIOS: ReadonlySet<string> = new Set([
   'EFECTIVO',
   'PERSONAL_PABLO',
   'PERSONAL_ALE',
+  // Efectivo de la empresa (20-oct-2026, invariante 97): tampoco pasa por
+  // el banco.
+  'EFECTIVO_EMPRESA',
 ]);
 
 /** Medios que la IA distingue en un voucher/comprobante como pago bancario
@@ -44,6 +47,8 @@ const MEDIO_LABEL: Record<string, string> = {
   BODEGA: 'Bodega',
   // Cargo automático a la cuenta (13-oct-2026, invariante 64).
   DOMICILIADO: 'Pago domiciliado',
+  // Efectivo que no sale de ninguna caja chica (20-oct-2026, invariante 97).
+  EFECTIVO_EMPRESA: 'Efectivo de la empresa (no de fondo)',
 };
 
 /** Etiqueta legible del medio (reportes y avisos los lee gente de oficina). */

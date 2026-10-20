@@ -11159,6 +11159,57 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       del gasto en los dos libros), `comisiones.spec` y `modo.spec` (llaves
       aditivas).
 
+97. **CATEGORÍAS «PAQUETERÍA» Y «OTROS GASTOS DIRECTOS DEL VUELO»; MEDIO
+    «EFECTIVO DE LA EMPRESA (NO DE FONDO)» (20-oct-2026, API 0.0.99,
+    migraciones `20261020000001`, `20261020000002`, `20261020000003`).**
+    Lista de 11 puntos del cliente del 20-oct-2026 (puntos 3, 6 y 9).
+    - **Tres valores de enum, uno por migración** (`ALTER TYPE … ADD VALUE`
+      no corre en la misma transacción que lo usa): `categoria_gasto`
+      `PAQUETERIA` y `OTROS_DIRECTOS_VUELO`, `medio_pago` `EFECTIVO_EMPRESA`.
+      Se aplican ANTES del API: el DTO los acepta y un literal que la BD no
+      conoce da 22P02 en PostgREST. `MIGRACION_DE_CATEGORIA` los nombra.
+    - **«Paquetería»** (`PAQUETERIA`): envíos y mensajería de la EMPRESA.
+      Destino «Otros gastos (Balance general VuelaTour)» ⇒ entra sola a
+      `CATEGORIAS_GASTO_EMPRESA` (se deriva del destino) y por ella a la hoja
+      «otros gastos» del general, a «sin avión» y fuera del avión AUNQUE
+      traiga vuelo o avión sellado. Está en `CATS_SIN_TUA_EMBEBIDO`. SÍ se
+      liga a una compra (el envío de una pieza es costo de la compra).
+      pyservices la sugiere para DHL/FedEx/Estafeta (antes caían en OTRO).
+    - **«Otros gastos directos del vuelo»** (`OTROS_DIRECTOS_VUELO`,
+      `CATEGORIA_OTROS_DIRECTOS_VUELO`): cualquier otro gasto DIRECTO de un
+      vuelo. Mismo destino y misma regla que COMISARIATO (invariante 63):
+      `CAT_OTROS` del balance (columna OTROS de la fila del vuelo, junto al
+      FBO), `DIRECTO` del reparto a socios (fuera de él caería a EXCLUIDO e
+      inflaría la utilidad), `CATS_SIN_TUA_EMBEBIDO` (entra ENTERA a OTROS) y
+      NO se liga a una compra. Exige vuelo al PILOTO por su destino directo
+      (`categoriaExigeVuelo`), no a la oficina. pyservices NO la sugiere
+      (solo la tolera en el reanálisis).
+    - **«Efectivo de la empresa (no de fondo)»** (`EFECTIVO_EMPRESA`):
+      efectivo que NO sale de ninguna caja chica (caso de las comisiones de
+      Saab del 19-oct-2026). Toda lectura de caja chica y de la alerta de
+      efectivo filtra `medio_pago = 'EFECTIVO'` EXACTO, así que este medio
+      no entra a ningún fondo ni a «Mi caja» sin tocar esos queries — **no
+      volver esos filtros un `like`/`in` que lo cuele**. Es NO bancario
+      (`MEDIOS_NO_BANCARIOS`: no se espera cargo del banco; se liga con
+      justificación como el efectivo, «en efectivo de la empresa»). Solo
+      oficina: `MEDIOS_SOLO_OFICINA` = DOMICILIADO + EFECTIVO_EMPRESA ⇒ 400
+      `MEDIO_SOLO_OFICINA` en el ALTA de PILOTO/MECANICO/VISITANTE con
+      `mensajeMedioSoloOficina(medio)` («El efectivo de la empresa lo
+      registra la oficina: si pagaste con el efectivo de tu fondo, elige
+      «Efectivo».»); el PATCH no se bloquea. El balance pinta « (efectivo de
+      la empresa)» en la nota de la celda (`sufijoEfectivo`) y el reporte de
+      efectivos lo junta en su propio renglón («Efectivo de la empresa …»),
+      nunca a nombre de quien lo capturó.
+    - Paridad: etiquetas y destinos IDÉNTICOS en el panel
+      (`categorias-gasto.ts`, `medios-pago.ts`) y en la app
+      (`categoria_gasto.dart`, `medio_pago_badge.dart`, App 1.1.3+87); la
+      columna «Avión · vuelo» (`gasto-avion.paridad.spec`) los cubre.
+    - Specs: `categoria-gasto.util.spec`, `medio-pago.util.spec`,
+      `aircraft-balance.service.comisariato.spec` (OTROS_DIRECTOS_VUELO en
+      OTROS), `expenses.service.medio-domiciliado.spec` (EFECTIVO_EMPRESA solo
+      oficina), `grupos-reparto.util.spec`, `ubicacion-balance-gasto.util.spec`
+      y `gasto-avion.*`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12792,6 +12843,16 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   dólares del balance cambian centavos o dólares (son informativos); los
   pesos, no. Rollback: API ⇒ 0.0.97 (pyservices nuevo sin banderas pinta
   lo de siempre).
+- **20-oct-2026 — 0.0.99, migraciones `20261020000001`
+  (`categoria_gasto` + PAQUETERIA), `20261020000002` (+ OTROS_DIRECTOS_VUELO)
+  y `20261020000003` (`medio_pago` + EFECTIVO_EMPRESA)** (invariante 97;
+  rama `lote-b1-enums`). Orden: las 3 migraciones por MCP (una por archivo,
+  dry-run antes; verificar `pg_enum`) ⇒ API 0.0.99 (`GET /v1/version` =
+  `0.0.99`) ⇒ pyservices `04288c8` (sugiere PAQUETERIA: con el API previo el
+  alta rebotaría con `IsEnum`) ⇒ panel ⇒ APK 1.1.3+87 (el usuario). Un
+  `ADD VALUE` no se revierte sin recrear el tipo: rollback = API ⇒ 0.0.98
+  (los valores quedan sin uso). Humo SOLO lecturas: `/v1/version` y que el
+  panel ofrezca las dos categorías y el medio.
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera

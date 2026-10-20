@@ -110,7 +110,10 @@ import {
 } from '../facturacion/gasto-facturas.lector';
 import type { FacturaDeGasto } from '../facturacion/gasto-facturas.util';
 import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
-import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
+import {
+  MEDIOS_SOLO_OFICINA,
+  mensajeMedioSoloOficina,
+} from '../../common/medio-pago.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { gastoFacturasDisponible } from '../../common/gasto-facturas-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
@@ -703,10 +706,13 @@ export class ExpensesService {
     // Reporte de EFECTIVOS por persona (pedido de oficina, ago 2026): cuánto
     // trae cada quien en efectivo y cuánto de eso ya se facturó — por moneda,
     // que un total MXN+USD mezclado sería mentira numérica.
+    // El «Efectivo de la empresa» (20-oct-2026, invariante 97) no lo trae
+    // nadie: va en su propio renglón («Efectivo de la empresa …»).
     const porPersona = new Map<string, number>();
     for (const g of data) {
       const x = g;
-      if ((x.medio_pago as string) !== 'EFECTIVO') continue;
+      const deLaEmpresa = (x.medio_pago as string) === 'EFECTIVO_EMPRESA';
+      if ((x.medio_pago as string) !== 'EFECTIVO' && !deLaEmpresa) continue;
       const monto = Number(x.monto);
       if (!Number.isFinite(monto)) continue;
       const nombre =
@@ -723,7 +729,9 @@ export class ExpensesService {
           : esNoFacturable(estatusFact)
             ? 'no facturable'
             : 'POR FACTURAR';
-      const clave = `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
+      const clave = deLaEmpresa
+        ? `Efectivo de la empresa ${facturado} (${(x.moneda as string) ?? '?'})`
+        : `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
       porPersona.set(clave, (porPersona.get(clave) ?? 0) + monto);
     }
     for (const [clave, total] of [...porPersona.entries()].sort()) {
@@ -2356,13 +2364,15 @@ export class ExpensesService {
     // de campo lo paga. ANTES de tocar la BD (y antes de la regla del
     // visitante, para que el mensaje sea el mismo en los tres roles). SOLO
     // en el alta: la app re-manda el medio vigente al editar un gasto que la
-    // oficina ya puso en DOMICILIADO y esa edición no debe rebotar.
+    // oficina ya puso en DOMICILIADO y esa edición no debe rebotar. Desde el
+    // 20-oct-2026 (invariante 97) también el «Efectivo de la empresa».
     if (
       (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE) &&
-      dto.medio_pago === MedioPago.DOMICILIADO
+      dto.medio_pago != null &&
+      MEDIOS_SOLO_OFICINA.has(dto.medio_pago)
     ) {
       throw new BadRequestException({
-        message: MENSAJE_MEDIO_SOLO_OFICINA,
+        message: mensajeMedioSoloOficina(dto.medio_pago),
         error: 'MEDIO_SOLO_OFICINA',
       });
     }

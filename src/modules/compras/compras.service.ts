@@ -79,6 +79,9 @@ const CATEGORIAS_NO_LIGABLES = [
   // COMISARIATO (13-oct-2026, invariante 63): los snacks y bebidas de los
   // pasajeros no son costo de bodega de una refacción.
   'COMISARIATO',
+  // 20-oct-2026 (invariante 97): tampoco los otros gastos directos del vuelo.
+  // (PAQUETERIA sí se liga: el envío de una pieza es costo de la compra.)
+  'OTROS_DIRECTOS_VUELO',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 
