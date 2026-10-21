@@ -168,6 +168,10 @@ describe('Entregas a socios', () => {
             socio_id: 's-1',
             monto: 1000,
             moneda: 'USD',
+            // La cuenta es en PESOS (invariante 99): toda entrega lleva T.C.
+            // (en USD, para saber cuántos pesos descuenta); el dinero se
+            // valida ANTES del candado del mes.
+            tc_usd_mxn: 18.5,
             fecha_pago: '2026-09-30',
             metodo: 'TRANSFERENCIA',
           } as never,

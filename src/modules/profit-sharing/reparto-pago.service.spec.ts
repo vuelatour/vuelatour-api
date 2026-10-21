@@ -24,25 +24,28 @@ import {
 } from './reparto-cuenta.fixture-spec';
 import type { RepartoAvionInput } from './reparto-cuenta.util';
 
-/** N4142R en OCTUBRE (mes en curso): solo Mauricio con `m` (parcial). */
+/** N4142R en OCTUBRE (mes en curso): solo Mauricio con `m` MXN (parcial). */
 function octubreN4142R(m: number): RepartoAvionInput {
   const a = avionN4142R();
   return {
     ...a,
     reparto: a.reparto.map((r) => ({
       ...r,
-      monto_usd: r.socio_id === MAURICIO ? m : 0,
+      monto_mxn: r.socio_id === MAURICIO ? m : 0,
     })),
   };
 }
 
 /**
  * ENTREGAS A LA CUENTA DEL SOCIO (v2, 2-oct-2026) contra la BD en memoria:
- * alta USD/MXN, el ADELANTO del audio (70,000 MXN a 18.5) con 409 y con
+ * alta MXN/USD, el ADELANTO del audio (70,000 MXN a 18.5) con 409 y con
  * `aceptar_exceso`, «corresponde a» mes/avión, idempotencia y carreras,
  * PATCH con el saldo sin la propia entrega y CAS, soft delete, comprobante,
  * listado por fechas (SOCIO solo las suyas, 410 por mes) y sin la migración.
  * Mauricio Roque: septiembre 2026 generó $1,395.94 (69 % de $2,023.10).
+ * EN PESOS desde el 0.0.101 (invariante 99): el mundo se lee en MXN, las
+ * entregas del spec son de pesos a T.C. 18.5 (una en USD descuenta monto ×
+ * T.C.) y el 70,000 MXN del audio descuenta 70,000 (antes, sus 3,783.78 USD).
  */
 const ADMIN = { userId: ALE, rol: Rol.ADMIN };
 const MARY_FACT = { userId: MARY, rol: Rol.FACTURACION };
@@ -51,7 +54,8 @@ function dtoAlta(p: Partial<CrearPagoSocioDto> = {}): CrearPagoSocioDto {
   return {
     socio_id: MAURICIO,
     monto: 1395.94,
-    moneda: 'USD',
+    moneda: 'MXN',
+    tc_usd_mxn: 18.5,
     fecha_pago: '2026-10-01',
     metodo: 'TRANSFERENCIA',
     ...p,
@@ -68,7 +72,7 @@ const ADELANTO_70K: Partial<CrearPagoSocioDto> = {
 };
 
 describe('RepartoPagoService.crear', () => {
-  it('entrega USD que «corresponde a» septiembre y al avión: saldo antes guardado, entregó = el actor; cuenta recalculada', async () => {
+  it('entrega en PESOS que «corresponde a» septiembre y al avión: saldo antes guardado (en pesos), entregó = el actor; cuenta recalculada', async () => {
     const { pagos, tablas } = mundo();
     const r = await pagos.crear(
       dtoAlta({
@@ -85,11 +89,15 @@ describe('RepartoPagoService.crear', () => {
         aeronave_id: N4142R,
         periodo: '2026-09-01',
         monto: 1395.94,
-        moneda: 'USD',
-        tc_usd_mxn: null,
-        monto_usd: 1395.94,
+        moneda: 'MXN',
+        tc_usd_mxn: 18.5,
+        // Dólares informativos (1,395.94 ÷ 18.5); lo que descuenta: pesos.
+        monto_usd: 75.46,
+        monto_mxn: 1395.94,
         utilidad_snapshot_usd: null,
-        saldo_snapshot_usd: 1395.94,
+        // El candado se decidió en pesos: el snapshot en USD queda null.
+        saldo_snapshot_usd: null,
+        saldo_snapshot_mxn: 1395.94,
         entregado_por: ALE,
         created_by: ALE,
         referencia: 'SPEI 1',
@@ -103,15 +111,15 @@ describe('RepartoPagoService.crear', () => {
     });
     expect(r.cuenta).toMatchObject({
       socio: { id: MAURICIO },
-      generado_usd: 1395.94,
-      entregado_usd: 1395.94,
-      por_entregar_usd: 0,
+      generado_mxn: 1395.94,
+      entregado_mxn: 1395.94,
+      por_entregar_mxn: 0,
       estado: 'AL_CORRIENTE',
     });
     expect(r).not.toHaveProperty('idempotente');
   });
 
-  it('el ADELANTO de 70,000 MXN a 18.5: 409 PAGO_EXCEDE_SALDO sin escribir; con aceptar_exceso y la MISMA llave se guarda y la cuenta queda ADELANTADA', async () => {
+  it('el ADELANTO de 70,000 MXN a 18.5 (descuenta 70,000, en pesos desde el 0.0.101): 409 PAGO_EXCEDE_SALDO sin escribir; con aceptar_exceso y la MISMA llave se guarda y la cuenta queda ADELANTADA', async () => {
     const { pagos, tablas } = mundo();
     const e = await errorDe(
       pagos.crear(dtoAlta({ ...ADELANTO_70K, client_request_id: KEY }), ADMIN),
@@ -120,13 +128,13 @@ describe('RepartoPagoService.crear', () => {
       status: 409,
       code: 'PAGO_EXCEDE_SALDO',
       message:
-        'Esta entrega de $3,783.78 USD supera lo que hay por entregar ($1,395.94 USD). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $2,387.84 USD. ¿Registrar?',
+        'Esta entrega de $70,000 MXN supera lo que hay por entregar ($1,395.94 MXN). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $68,604.06 MXN. ¿Registrar?',
       details: {
-        por_entregar_usd: 1395.94,
-        mes_en_curso_usd: 0,
-        monto_usd: 3783.78,
-        exceso_usd: 2387.84,
-        saldo_despues_usd: -2387.84,
+        por_entregar_mxn: 1395.94,
+        mes_en_curso_mxn: 0,
+        monto_mxn: 70000,
+        exceso_mxn: 68604.06,
+        saldo_despues_mxn: -68604.06,
       },
     });
     expect(tablas.reparto_pago).toHaveLength(0);
@@ -146,15 +154,17 @@ describe('RepartoPagoService.crear', () => {
         moneda: 'MXN',
         tc_usd_mxn: 18.5,
         monto_usd: 3783.78,
-        saldo_snapshot_usd: 1395.94,
+        monto_mxn: 70000,
+        saldo_snapshot_usd: null,
+        saldo_snapshot_mxn: 1395.94,
         metodo: 'EFECTIVO',
         recibido_por: 'El socio en persona',
       }),
     ]);
     expect(r.pago).toMatchObject({ mes: null, aeronave: null });
     expect(r.cuenta).toMatchObject({
-      entregado_usd: 3783.78,
-      por_entregar_usd: -2387.84,
+      entregado_mxn: 70000,
+      por_entregar_mxn: -68604.06,
       estado: 'ADELANTADO',
     });
   });
@@ -168,16 +178,17 @@ describe('RepartoPagoService.crear', () => {
     });
     const r = await neg.pagos.crear(dtoAlta({ monto: 1395.94 }), ADMIN);
     expect(neg.tablas.reparto_pago).toEqual([
-      // El snapshot guarda el número contra el que se decidió (cerrado).
+      // El snapshot guarda el número contra el que se decidió (cerrado), en
+      // pesos.
       expect.objectContaining({
-        monto_usd: 1395.94,
-        saldo_snapshot_usd: 1395.94,
+        monto_mxn: 1395.94,
+        saldo_snapshot_mxn: 1395.94,
       }),
     ]);
     expect(r.cuenta).toMatchObject({
-      por_entregar_usd: -345,
-      mes_en_curso_usd: -345,
-      por_entregar_cerrado_usd: 0,
+      por_entregar_mxn: -345,
+      mes_en_curso_mxn: -345,
+      por_entregar_cerrado_mxn: 0,
     });
     // La escritura decide con utilidades FRESCAS (sin la memoria de 10 min).
     expect(neg.utilidadesSociosPorMes).toHaveBeenCalledWith(
@@ -198,13 +209,13 @@ describe('RepartoPagoService.crear', () => {
       status: 409,
       code: 'PAGO_EXCEDE_SALDO',
       message:
-        'Esta entrega de $1,895.94 USD supera lo que hay por entregar ($1,395.94 USD, sin contar el mes en curso: $500 USD). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $500 USD. ¿Registrar?',
+        'Esta entrega de $1,895.94 MXN supera lo que hay por entregar ($1,395.94 MXN, sin contar el mes en curso: $500 MXN). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $500 MXN. ¿Registrar?',
       details: {
-        por_entregar_usd: 1395.94,
-        mes_en_curso_usd: 500,
-        monto_usd: 1895.94,
-        exceso_usd: 500,
-        saldo_despues_usd: -500,
+        por_entregar_mxn: 1395.94,
+        mes_en_curso_mxn: 500,
+        monto_mxn: 1895.94,
+        exceso_mxn: 500,
+        saldo_despues_mxn: -500,
       },
     });
     expect(pos.tablas.reparto_pago).toHaveLength(0);
@@ -235,13 +246,22 @@ describe('RepartoPagoService.crear', () => {
     expect(utilidadesSociosPorMes).toHaveBeenCalledTimes(1);
   });
 
-  it('reglas de forma: T.C. según moneda y banda, fecha no futura, mes no futuro, quién entregó activo', async () => {
+  it('reglas de forma: T.C. en las DOS monedas (y banda), fecha no futura, mes no futuro, quién entregó activo; una entrega en USD descuenta sus pesos', async () => {
     const { pagos, tablas } = mundo();
     const code = async (p: Partial<CrearPagoSocioDto>) =>
       (await errorDe(pagos.crear(dtoAlta(p), ADMIN))).code;
-    expect(await code({ moneda: 'MXN', monto: 100 })).toBe('TC_REQUERIDO');
-    expect(await code({ tc_usd_mxn: 18.2 })).toBe('TC_NO_APLICA');
+    expect(
+      await code({ moneda: 'MXN', monto: 100, tc_usd_mxn: undefined }),
+    ).toBe('TC_REQUERIDO');
+    // Hasta el 0.0.100 un USD con T.C. era TC_NO_APLICA; en pesos (invariante
+    // 99) es al revés: el USD SIN T.C. no sabe cuántos pesos descuenta.
+    expect(
+      await code({ moneda: 'USD', monto: 100, tc_usd_mxn: undefined }),
+    ).toBe('TC_REQUERIDO');
     expect(await code({ moneda: 'MXN', monto: 70000, tc_usd_mxn: 1.85 })).toBe(
+      'TC_FUERA_DE_RANGO',
+    );
+    expect(await code({ moneda: 'USD', monto: 10, tc_usd_mxn: 1.85 })).toBe(
       'TC_FUERA_DE_RANGO',
     );
     expect(await code({ fecha_pago: '2026-10-02' })).toBe('FECHA_PAGO_FUTURA');
@@ -255,6 +275,26 @@ describe('RepartoPagoService.crear', () => {
     expect(tablas.reparto_pago[0]).toMatchObject({
       entregado_por: MARY,
       created_by: ALE,
+    });
+    // Una entrega en DÓLARES con T.C.: válida; el T.C. NO se persiste (el
+    // CHECK de la tabla lo reserva a MXN) y descuenta monto × T.C. en pesos.
+    const usd = await pagos.crear(
+      dtoAlta({ moneda: 'USD', monto: 50, tc_usd_mxn: 18.5 }),
+      ADMIN,
+    );
+    expect(tablas.reparto_pago[1]).toMatchObject({
+      moneda: 'USD',
+      monto: 50,
+      tc_usd_mxn: null,
+      monto_usd: 50,
+      monto_mxn: 925,
+      saldo_snapshot_mxn: 1295.94,
+    });
+    // 1,395.94 − 100 − 925
+    expect(usd.cuenta).toMatchObject({
+      entregado_mxn: 1025,
+      por_entregar_mxn: 370.94,
+      estado: 'POR_ENTREGAR',
     });
   });
 
@@ -270,7 +310,7 @@ describe('RepartoPagoService.crear', () => {
     );
     expect(b.idempotente).toBe(true);
     expect(b.pago.id).toBe(a.pago.id);
-    expect(b.cuenta.por_entregar_usd).toBe(395.94);
+    expect(b.cuenta.por_entregar_mxn).toBe(395.94);
     expect(tablas.reparto_pago).toHaveLength(1);
     expect(
       await errorDe(
@@ -330,10 +370,10 @@ describe('RepartoPagoService.crear', () => {
       status: 409,
       code: 'PAGO_EXCEDE_SALDO',
       details: {
-        por_entregar_usd: 395.94,
-        monto_usd: 1000,
-        exceso_usd: 604.06,
-        saldo_despues_usd: -604.06,
+        por_entregar_mxn: 395.94,
+        monto_mxn: 1000,
+        exceso_mxn: 604.06,
+        saldo_despues_mxn: -604.06,
       },
     });
     const vivas = tablas.reparto_pago.filter((f) => f.deleted_at == null);
@@ -357,8 +397,8 @@ describe('RepartoPagoService.crear', () => {
       [ADMIN, MARY_FACT][perdedora],
     );
     expect(r.cuenta).toMatchObject({
-      entregado_usd: 2000,
-      por_entregar_usd: -604.06,
+      entregado_mxn: 2000,
+      por_entregar_mxn: -604.06,
       estado: 'ADELANTADO',
     });
   });
@@ -380,7 +420,7 @@ describe('RepartoPagoService.crear', () => {
     expect(await errorDe(pagos.crear(dtoAlta(), ADMIN))).toMatchObject({
       status: 503,
       code: 'CUENTA_SOCIO_NO_DISPONIBLE',
-      details: { migracion: '20261002000001' },
+      details: { migracion: '20261020000006' },
     });
   });
 });
@@ -390,7 +430,7 @@ describe('RepartoPagoService.actualizar', () => {
 
   it('solo metadatos: no re-valida el saldo y escribe SOLO lo que cambió', async () => {
     const { pagos, escrituras } = mundo({
-      pagos: [pagoFila({ monto: 3000, monto_usd: 3000 })],
+      pagos: [pagoFila({ monto: 3000 })],
     });
     const r = await pagos.actualizar(
       PAGO,
@@ -405,24 +445,61 @@ describe('RepartoPagoService.actualizar', () => {
       updated_by: ALE,
     });
     expect(r.cuenta).toMatchObject({
-      por_entregar_usd: -1604.06,
+      por_entregar_mxn: -1604.06,
       estado: 'ADELANTADO',
     });
   });
 
-  it('subir el monto se mide contra el saldo SIN esta entrega; con aceptar_exceso pasa y renueva saldo_snapshot', async () => {
+  it('solo metadatos de una entrega en DÓLARES: el T.C. implícito (monto_mxn ÷ monto) no rebota TC_REQUERIDO; bajar el monto conserva ese T.C.; cambiar de moneda sin T.C. sí lo exige (hallazgo de los specs, 20-oct-2026)', async () => {
+    // $50 USD a 18.5 ⇒ tc_usd_mxn null (CHECK) y monto_mxn 925.
+    const { pagos, escrituras } = mundo({
+      pagos: [pagoFila({ moneda: 'USD', monto: 50 })],
+    });
+    const r = await pagos.actualizar(
+      PAGO,
+      { notas: 'Recibió su contador' },
+      ADMIN,
+    );
+    const upd = escrituras.filter((e) => e.op === 'update');
+    expect(upd).toHaveLength(1);
+    expect(upd[0].valor).toEqual({
+      notas: 'Recibió su contador',
+      updated_by: ALE,
+    });
+    expect(r.pago).toMatchObject({
+      moneda: 'USD',
+      monto: 50,
+      monto_mxn: 925,
+      tc_usd_mxn: null,
+    });
+    // Bajar a $40 USD: 40 × 18.5 = 740 pesos; el T.C. sigue implícito.
+    await pagos.actualizar(PAGO, { monto: 40 }, ADMIN);
+    const upd2 = escrituras.filter((e) => e.op === 'update');
+    expect(upd2).toHaveLength(2);
+    expect(upd2[1].valor).toMatchObject({
+      monto: 40,
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      monto_usd: 40,
+      monto_mxn: 740,
+    });
+    const e = await errorDe(pagos.actualizar(PAGO, { moneda: 'MXN' }, ADMIN));
+    expect(e).toMatchObject({ status: 400, code: 'TC_REQUERIDO' });
+  });
+
+  it('subir el monto (en pesos) se mide contra el saldo SIN esta entrega; con aceptar_exceso pasa y renueva saldo_snapshot_mxn', async () => {
     const { pagos, tablas } = mundo({
-      pagos: [pagoFila({ saldo_snapshot_usd: 999 })],
+      pagos: [pagoFila({ saldo_snapshot_mxn: 999 })],
     });
     const e = await errorDe(pagos.actualizar(PAGO, { monto: 1500 }, ADMIN));
     expect(e).toMatchObject({
       status: 409,
       code: 'PAGO_EXCEDE_SALDO',
       details: {
-        por_entregar_usd: 1395.94,
-        monto_usd: 1500,
-        exceso_usd: 104.06,
-        saldo_despues_usd: -104.06,
+        por_entregar_mxn: 1395.94,
+        monto_mxn: 1500,
+        exceso_mxn: 104.06,
+        saldo_despues_mxn: -104.06,
       },
     });
     const r = await pagos.actualizar(
@@ -432,36 +509,58 @@ describe('RepartoPagoService.actualizar', () => {
     );
     expect(tablas.reparto_pago[0]).toMatchObject({
       monto: 1500,
-      monto_usd: 1500,
-      saldo_snapshot_usd: 1395.94,
+      monto_mxn: 1500,
+      // 1,500 ÷ 18.5, informativo.
+      monto_usd: 81.08,
+      saldo_snapshot_mxn: 1395.94,
     });
-    expect(r.cuenta.por_entregar_usd).toBe(-104.06);
+    expect(r.cuenta.por_entregar_mxn).toBe(-104.06);
   });
 
-  it('bajar el monto nunca se bloquea; pasar a MXN exige T.C.; a USD lo limpia', async () => {
+  it('bajar el monto nunca se bloquea; cambiar de moneda exige el T.C. (las DOS monedas); en USD el T.C. no se persiste y los pesos van en monto_mxn', async () => {
     const { pagos, tablas } = mundo({
-      pagos: [pagoFila({ monto: 3000, monto_usd: 3000 })],
+      pagos: [pagoFila({ monto: 3000 })],
     });
     await pagos.actualizar(PAGO, { monto: 2000 }, ADMIN);
-    expect(tablas.reparto_pago[0]).toMatchObject({ monto_usd: 2000 });
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      monto_mxn: 2000,
+      monto_usd: 108.11,
+    });
+    // Pasar a USD sin T.C.: no se sabe cuántos pesos descuenta.
     expect(
-      (await errorDe(pagos.actualizar(PAGO, { moneda: 'MXN' }, ADMIN))).code,
+      (await errorDe(pagos.actualizar(PAGO, { moneda: 'USD' }, ADMIN))).code,
+    ).toBe('TC_REQUERIDO');
+    // $100 USD a 18.5 = 1,850 MXN (baja de 2,000: no se bloquea); el T.C.
+    // queda implícito en monto_mxn ÷ monto (el CHECK reserva la columna a MXN).
+    await pagos.actualizar(
+      PAGO,
+      { moneda: 'USD', monto: 100, tc_usd_mxn: 18.5 },
+      ADMIN,
+    );
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      monto_usd: 100,
+      monto_mxn: 1850,
+    });
+    // Volver a MXN exige T.C. (su dólar informativo); con él se persiste.
+    expect(
+      (
+        await errorDe(
+          pagos.actualizar(PAGO, { moneda: 'MXN', monto: 1500 }, ADMIN),
+        )
+      ).code,
     ).toBe('TC_REQUERIDO');
     await pagos.actualizar(
       PAGO,
-      { moneda: 'MXN', monto: 20000, tc_usd_mxn: 18.5 },
+      { moneda: 'MXN', monto: 1500, tc_usd_mxn: 18.5 },
       ADMIN,
     );
     expect(tablas.reparto_pago[0]).toMatchObject({
       moneda: 'MXN',
       tc_usd_mxn: 18.5,
-      monto_usd: 1081.08,
-    });
-    await pagos.actualizar(PAGO, { moneda: 'USD', monto: 100 }, ADMIN);
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      moneda: 'USD',
-      tc_usd_mxn: null,
-      monto_usd: 100,
+      monto_usd: 81.08,
+      monto_mxn: 1500,
     });
   });
 
@@ -473,7 +572,7 @@ describe('RepartoPagoService.actualizar', () => {
     expect(tablas.reparto_pago[0]).toMatchObject({ referencia: 'SPEI 999' });
     expect(r.cuenta).toMatchObject({
       socio: { id: PILOTO },
-      por_entregar_usd: -1000,
+      por_entregar_mxn: -1000,
       estado: 'ADELANTADO',
     });
     expect(
@@ -552,8 +651,8 @@ describe('RepartoPagoService.eliminar', () => {
     expect(r).toMatchObject({
       deleted: true,
       cuenta: {
-        entregado_usd: 0,
-        por_entregar_usd: 1395.94,
+        entregado_mxn: 0,
+        por_entregar_mxn: 1395.94,
         estado: 'POR_ENTREGAR',
       },
     });

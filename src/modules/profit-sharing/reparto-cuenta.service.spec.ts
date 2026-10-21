@@ -23,7 +23,9 @@ import {
  * CUENTA CORRIENTE DEL SOCIO (v2, 2-oct-2026) contra la BD en memoria:
  * resumen (cuenta default vs configurada, totales, SOCIO solo la suya),
  * estado de cuenta (saldo anterior, 403/404, rango), configuración de la
- * cuenta y sin la migración ⇒ disponible:false / 503.
+ * cuenta y sin la migración ⇒ disponible:false / 503. EN PESOS desde el
+ * 0.0.101 (invariante 99): las cifras del mundo se leen como MXN y las
+ * entregas del mundo son de pesos a T.C. 18.5 (`pagoFila`).
  */
 const ADMIN = { userId: ALE, rol: Rol.ADMIN };
 
@@ -41,7 +43,7 @@ describe('RepartoCuentaService.resumen', () => {
       { fresco: false },
     );
     expect(
-      r.socios.map((s) => [s.socio.nombre, s.por_entregar_usd, s.estado]),
+      r.socios.map((s) => [s.socio.nombre, s.por_entregar_mxn, s.estado]),
     ).toEqual([
       ['Aero Charter Cancun S.A. de C.V.', 586.7, 'POR_ENTREGAR'],
       ['Alexander E. Saab', 40.46, 'POR_ENTREGAR'],
@@ -57,12 +59,12 @@ describe('RepartoCuentaService.resumen', () => {
       },
       cuenta: {
         cuenta_desde: '2026-09',
-        saldo_inicial_usd: 0,
+        saldo_inicial_mxn: 0,
         configurada: false,
       },
-      generado_usd: 1395.94,
-      mes_en_curso_usd: 0,
-      entregado_usd: 0,
+      generado_mxn: 1395.94,
+      mes_en_curso_mxn: 0,
+      entregado_mxn: 0,
       ultimo_pago: null,
       aviones: [
         {
@@ -76,10 +78,10 @@ describe('RepartoCuentaService.resumen', () => {
       ],
     });
     expect(r.totales).toEqual({
-      generado_usd: 2023.1,
-      entregado_usd: 0,
-      por_entregar_usd: 2023.1,
-      adelantado_usd: 0,
+      generado_mxn: 2023.1,
+      entregado_mxn: 0,
+      por_entregar_mxn: 2023.1,
+      adelantado_mxn: 0,
       socios_por_entregar: 3,
       socios_adelantados: 0,
     });
@@ -91,7 +93,9 @@ describe('RepartoCuentaService.resumen', () => {
         {
           socio_id: MAURICIO,
           cuenta_desde: '2026-08-01',
-          saldo_inicial_usd: '500.00',
+          saldo_inicial_mxn: '500.00',
+          // Informativo (no se lee): el mismo saldo en dólares.
+          saldo_inicial_usd: '27.03',
           notas: 'Pendiente de julio',
           created_by: ALE,
           created_at: '2026-10-01T15:00:00Z',
@@ -99,14 +103,14 @@ describe('RepartoCuentaService.resumen', () => {
           updated_at: '2026-10-01T15:00:00Z',
         },
       ],
-      pagos: [pagoFila({ monto: 1000, monto_usd: 1000 })],
+      pagos: [pagoFila({ monto: 1000 })],
       utilidades: {
         '2026-08': [avionN4142R('cero')],
         '2026-09': [avionN4142R()],
         '2026-10': [
           {
             ...avionN4142R(),
-            reparto: [{ ...avionN4142R().reparto[0], monto_usd: 207 }],
+            reparto: [{ ...avionN4142R().reparto[0], monto_mxn: 207 }],
           },
         ],
       },
@@ -122,21 +126,23 @@ describe('RepartoCuentaService.resumen', () => {
     expect(m).toMatchObject({
       cuenta: {
         cuenta_desde: '2026-08',
-        saldo_inicial_usd: 500,
+        saldo_inicial_mxn: 500,
         notas: 'Pendiente de julio',
         configurada: true,
       },
-      generado_usd: 1602.94,
-      mes_en_curso_usd: 207,
-      entregado_usd: 1000,
+      generado_mxn: 1602.94,
+      mes_en_curso_mxn: 207,
+      entregado_mxn: 1000,
       // 500 + 1,395.94 + 207 − 1,000
-      por_entregar_usd: 1102.94,
+      por_entregar_mxn: 1102.94,
       estado: 'POR_ENTREGAR',
       ultimo_pago: {
         fecha_pago: '2026-10-01',
         monto: 1000,
-        moneda: 'USD',
-        monto_usd: 1000,
+        moneda: 'MXN',
+        // Lo que descontó, en pesos; los dólares son informativos.
+        monto_mxn: 1000,
+        monto_usd: 54.05,
         metodo: 'TRANSFERENCIA',
       },
     });
@@ -144,7 +150,7 @@ describe('RepartoCuentaService.resumen', () => {
 
   it('SOCIO: solo su renglón y SIN totales (la lectura ya va acotada a él)', async () => {
     const { cuentas } = mundo({
-      pagos: [pagoFila({ socio_id: AERO, monto: 10, monto_usd: 10 })],
+      pagos: [pagoFila({ socio_id: AERO, monto: 10 })],
     });
     const r = await cuentas.resumen({ userId: MAURICIO, rol: Rol.SOCIO });
     expect(r.socios.map((s) => s.socio.id)).toEqual([MAURICIO]);
@@ -159,7 +165,6 @@ describe('RepartoCuentaService.resumen', () => {
           socio_id: PILOTO,
           aeronave_id: null,
           monto: 5,
-          monto_usd: 5,
         }),
       ],
     });
@@ -168,9 +173,9 @@ describe('RepartoCuentaService.resumen', () => {
     expect(p).toMatchObject({
       socio: { nombre: 'Piloto X' },
       aviones: [],
-      generado_usd: 0,
-      entregado_usd: 5,
-      por_entregar_usd: -5,
+      generado_mxn: 0,
+      entregado_mxn: 5,
+      por_entregar_mxn: -5,
       estado: 'ADELANTADO',
     });
   });
@@ -200,24 +205,23 @@ describe('RepartoCuentaService.estadoDeCuenta', () => {
         pagoFila({
           comprobante_path: `${MAURICIO}/p1/u.pdf`,
           monto: 1000,
-          monto_usd: 1000,
         }),
       ],
     });
     const r = await cuentas.estadoDeCuenta(MAURICIO, {}, ADMIN);
     if (!r.disponible) throw new Error('debía estar disponible');
-    expect([r.desde, r.hasta, r.saldo_anterior_usd]).toEqual([
+    expect([r.desde, r.hasta, r.saldo_anterior_mxn]).toEqual([
       '2026-09',
       '2026-10',
       0,
     ]);
-    expect(r.movimientos.map((m) => [m.tipo, m.concepto, m.saldo_usd])).toEqual(
+    expect(r.movimientos.map((m) => [m.tipo, m.concepto, m.saldo_mxn])).toEqual(
       [
         ['SALDO_INICIAL', 'Arranque de la cuenta (saldo inicial $0)', 0],
         ['UTILIDAD', 'Utilidad sep 2026 · N4142R 69 %', 1395.94],
         [
           'ENTREGA',
-          'Entrega · Transferencia · ref SPEI 001 · corresponde a sep 2026 · N4142R',
+          'Entrega · Transferencia · $1,000 MXN a T.C. 18.5 · ref SPEI 001 · corresponde a sep 2026 · N4142R',
           395.94,
         ],
       ],
@@ -229,15 +233,15 @@ describe('RepartoCuentaService.estadoDeCuenta', () => {
       comprobante_url: `https://firmada/reparto-comprobantes/${MAURICIO}/p1/u.pdf?exp=28800`,
     });
     expect(r.totales).toMatchObject({
-      por_entregar_usd: 395.94,
+      por_entregar_mxn: 395.94,
       estado: 'POR_ENTREGAR',
     });
     expect(
       r.por_mes.map((m) => [
         m.mes,
-        m.utilidad_usd,
+        m.utilidad_mxn,
         m.en_curso,
-        m.entregado_usd,
+        m.entregado_mxn,
       ]),
     ).toEqual([
       ['2026-09', 1395.94, false, 0],
@@ -247,9 +251,7 @@ describe('RepartoCuentaService.estadoDeCuenta', () => {
 
   it('desde = octubre: SALDO_ANTERIOR con lo de septiembre', async () => {
     const { cuentas } = mundo({
-      pagos: [
-        pagoFila({ fecha_pago: '2026-09-20', monto: 200, monto_usd: 200 }),
-      ],
+      pagos: [pagoFila({ fecha_pago: '2026-09-20', monto: 200 })],
     });
     const r = await cuentas.estadoDeCuenta(
       MAURICIO,
@@ -257,12 +259,12 @@ describe('RepartoCuentaService.estadoDeCuenta', () => {
       ADMIN,
     );
     if (!r.disponible) throw new Error('debía estar disponible');
-    expect(r.saldo_anterior_usd).toBe(1195.94);
+    expect(r.saldo_anterior_mxn).toBe(1195.94);
     expect(r.movimientos).toEqual([
       expect.objectContaining({
         tipo: 'SALDO_ANTERIOR',
         concepto: 'Saldo al cierre de sep 2026',
-        saldo_usd: 1195.94,
+        saldo_mxn: 1195.94,
       }),
     ]);
   });
@@ -321,11 +323,14 @@ describe('RepartoCuentaService.estadoDeCuenta', () => {
 describe('RepartoCuentaService.configurarCuenta', () => {
   it('sin fila ⇒ INSERT (created_by); con fila ⇒ UPDATE que CONSERVA created_by; responde el renglón recalculado', async () => {
     const { cuentas, tablas } = mundo();
+    // El saldo inicial que cuenta es el de PESOS (invariante 99); el de
+    // dólares es informativo y opcional.
     const r1 = await cuentas.configurarCuenta(
       MAURICIO,
       {
         cuenta_desde: '2026-08',
-        saldo_inicial_usd: -1500.25,
+        saldo_inicial_mxn: -1500.25,
+        saldo_inicial_usd: -81.09,
         notas: '  Ya adelantado  ',
       },
       ADMIN,
@@ -334,7 +339,8 @@ describe('RepartoCuentaService.configurarCuenta', () => {
       expect.objectContaining({
         socio_id: MAURICIO,
         cuenta_desde: '2026-08-01',
-        saldo_inicial_usd: -1500.25,
+        saldo_inicial_mxn: -1500.25,
+        saldo_inicial_usd: -81.09,
         notas: 'Ya adelantado',
         created_by: ALE,
         updated_by: ALE,
@@ -344,34 +350,36 @@ describe('RepartoCuentaService.configurarCuenta', () => {
     expect(r1).toMatchObject({
       cuenta: {
         cuenta_desde: '2026-08',
-        saldo_inicial_usd: -1500.25,
+        saldo_inicial_mxn: -1500.25,
         configurada: true,
       },
-      por_entregar_usd: -104.31,
+      por_entregar_mxn: -104.31,
       estado: 'ADELANTADO',
     });
     const r2 = await cuentas.configurarCuenta(
       MAURICIO,
-      { cuenta_desde: '2026-09', saldo_inicial_usd: 0 },
+      { cuenta_desde: '2026-09', saldo_inicial_mxn: 0 },
       { userId: MARY, rol: Rol.FACTURACION },
     );
     expect(tablas.reparto_cuenta_socio).toHaveLength(1);
     expect(tablas.reparto_cuenta_socio[0]).toMatchObject({
       cuenta_desde: '2026-09-01',
+      saldo_inicial_mxn: 0,
+      // Sin el dato informativo se guarda 0 (la columna es NOT NULL).
       saldo_inicial_usd: 0,
       notas: null,
       created_by: ALE,
       updated_by: MARY,
     });
     expect(r2).toMatchObject({
-      por_entregar_usd: 1395.94,
+      por_entregar_mxn: 1395.94,
       estado: 'POR_ENTREGAR',
     });
   });
 
   it('reglas: socio fuera de aeronave_socio, arranque futuro o de hace más de 36 meses, saldo con 3 decimales; sin migración ⇒ 503', async () => {
     const { cuentas, tablas } = mundo();
-    const dto = { cuenta_desde: '2026-09', saldo_inicial_usd: 0 };
+    const dto = { cuenta_desde: '2026-09', saldo_inicial_mxn: 0 };
     expect(
       await errorDe(cuentas.configurarCuenta(PILOTO, dto, ADMIN)),
     ).toMatchObject({
@@ -400,6 +408,16 @@ describe('RepartoCuentaService.configurarCuenta', () => {
       await errorDe(
         cuentas.configurarCuenta(
           MAURICIO,
+          { ...dto, saldo_inicial_mxn: 1.005 },
+          ADMIN,
+        ),
+      ),
+    ).toMatchObject({ code: 'SALDO_INICIAL_INVALIDO' });
+    // El informativo en dólares también debe ser dinero válido.
+    expect(
+      await errorDe(
+        cuentas.configurarCuenta(
+          MAURICIO,
           { ...dto, saldo_inicial_usd: 1.005 },
           ADMIN,
         ),
@@ -412,7 +430,7 @@ describe('RepartoCuentaService.configurarCuenta', () => {
     ).toMatchObject({
       status: 503,
       code: 'CUENTA_SOCIO_NO_DISPONIBLE',
-      details: { migracion: '20261002000001' },
+      details: { migracion: '20261020000006' },
     });
   });
 
@@ -420,12 +438,12 @@ describe('RepartoCuentaService.configurarCuenta', () => {
     const { cuentas } = mundo();
     const r = await cuentas.configurarCuenta(
       SAAB,
-      { cuenta_desde: '2026-09', saldo_inicial_usd: 0 },
+      { cuenta_desde: '2026-09', saldo_inicial_mxn: 0 },
       ADMIN,
     );
     expect(r).toMatchObject({
       socio: { id: SAAB, rol: 'PILOTO' },
-      por_entregar_usd: 40.46,
+      por_entregar_mxn: 40.46,
     });
   });
 });

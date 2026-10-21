@@ -242,6 +242,8 @@ export function cobradoAlCorte(
   cobros: ReadonlyArray<CobroParaCorte>,
   tcVuelo: number | string | null | undefined,
   ultimoDia: string,
+  /** T.C. CAPTURADO en la cotización (pesos primero, 20-oct-2026). */
+  kCotizacion?: number | string | null,
 ): CobrosUsd {
   const hastaCorte = cobros.filter((c) => {
     const f = c.fecha_cobro;
@@ -253,7 +255,7 @@ export function cobradoAlCorte(
     }
   });
   const tc = tcVuelo != null && Number(tcVuelo) > 0 ? Number(tcVuelo) : null;
-  return cobrosEnUsd(hastaCorte, tc);
+  return cobrosEnUsd(hastaCorte, tc, kCotizacion);
 }
 
 export type MotivoDiferir = 'SIN_COBRO' | 'COBRO_PARCIAL' | 'COBRO_POSTERIOR';
@@ -261,7 +263,14 @@ export type MotivoDiferir = 'SIN_COBRO' | 'COBRO_PARCIAL' | 'COBRO_POSTERIOR';
 export interface VueloParaDiferir {
   estado: string | null | undefined;
   monto_total_usd: number | string | null | undefined;
+  /** Cadena de respaldo (K de la cotización ?? oficial del día). */
   tc_usd_mxn?: number | string | null | undefined;
+  /**
+   * T.C. CAPTURADO en la cotización, APARTE del respaldo (pesos primero,
+   * 20-oct-2026, invariante 99): con él los cobros MXN se cuentan al precio
+   * en pesos. Omitido ⇒ regla de siempre (T.C. del cobro ?? `tc_usd_mxn`).
+   */
+  k_cotizacion?: number | string | null | undefined;
   /** Cliente interno / de servicio: nada que cobrar. */
   cliente_interno?: boolean | null;
 }
@@ -313,8 +322,9 @@ export function decisionDiferir(
   const total = Number(v.monto_total_usd);
   const venta = Number.isFinite(total) && total > 0 ? round2(total) : 0;
   const tc = v.tc_usd_mxn ?? null;
-  const alCorte = cobradoAlCorte(cobros, tc, ultimoDia);
-  const todos = cobradoAlCorte(cobros, tc, '9999-12-31');
+  const k = v.k_cotizacion ?? null;
+  const alCorte = cobradoAlCorte(cobros, tc, ultimoDia, k);
+  const todos = cobradoAlCorte(cobros, tc, '9999-12-31', k);
   if (estado === 'COMPLETADO') {
     if (venta <= 0 || v.cliente_interno === true) return null;
     if (alCorte.total_usd >= venta - TOLERANCIA_COBRADO_USD) return null;
@@ -497,6 +507,26 @@ export function leyendaPasaA(destino: string, d: DatosLeyendaCierre): string {
   return `Pasa a ${etiquetaMesMinuscula(destino)} · pendiente de cobro: cobrado ${dineroTexto(
     d.cobrado_usd,
   )} de ${dineroTexto(d.venta_usd)}`;
+}
+
+/**
+ * INCLUIR EN EL MES (21-oct-2026, pedido del cliente: «ya se cobraron varios
+ * de los vuelos… en octubre… que dé la opción de poder incluirlos en
+ * septiembre»): el vuelo COBRO_POSTERIOR que la oficina deja en el mes M al
+ * cerrar. «Se queda en septiembre 2026 · cobrado el 2-oct, después del
+ * 30-sep (al 30-sep: $0.00 de $4,931.16 USD)». Empieza con «Se queda» a
+ * propósito: el panel colorea por el prefijo «Pasa a».
+ */
+export function leyendaSeQueda(
+  periodo: string,
+  destino: string,
+  d: DatosLeyendaCierre,
+): string {
+  const corte = diaCortoDeDia(corteDeDestino(destino));
+  return `Se queda en ${etiquetaMesMinuscula(periodo)} · ${cobradoDespuesTexto(
+    destino,
+    d,
+  )} (al ${corte}: ${dineroTexto(d.cobrado_usd)} de ${dineroTexto(d.venta_usd)})`;
 }
 
 /**

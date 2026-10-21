@@ -5515,7 +5515,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       directo) y `conciliacion.controller.cobros-lote.spec` (HTTP real: DTO,
       roles, 503 con `code`).
 
-57. **REFACCIÓN A INVENTARIO/TIENDA DESDE EL ALTA DE GASTO (12-oct-2026,
+57. **[DEPRECADA el 21-oct-2026 por la invariante 101: el panel ya no manda `inventario`; el API lo acepta por compatibilidad] REFACCIÓN A INVENTARIO/TIENDA DESDE EL ALTA DE GASTO (12-oct-2026,
     API 0.0.72, sin migración).** Pedido del cliente: «si se selecciona un
     avión al dar de alta un gasto de un artículo de inventario, una nota
     visual: entra a inventario pero se asignará/venderá a ese avión,
@@ -10625,10 +10625,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Asimetrías documentadas**: los gastos MXN sin T.C. y los otros
       ingresos MXN sin T.C. SÍ cuentan en pesos (no en dólares); los cobros
       MXN sin ningún T.C. (`cobros_sin_tc_mxn`) quedan FUERA de los pesos
-      igual que de los dólares (sin K no hay parte del avión). El reparto
-      pasa los gastos USD con el oficial de SU día (como `toUsd` con los MXN)
-      y el balance con `tc_gasto` ?? el T.C. de sus hojas: en pesos pueden
-      diferir por lo mismo que ya difieren en dólares (invariante 67).
+      igual que de los dólares (sin K no hay parte del avión). Hasta el
+      0.0.100 el reparto pasaba los gastos USD con el oficial de SU día y el
+      balance con `tc_gasto` ?? el T.C. de sus hojas (podían diferir en
+      pesos); desde el 0.0.101 (invariante 99) los DOS usan el oficial del
+      día del gasto (`buildHoja`, opción `tcMxnDeGasto`).
     - **Sin mover dólares**: `resolverTcOficial` gana un 4.º parámetro
       OPCIONAL (`{gastosUsd, dias}` ⇒ `gastoUsd`, `porDia`; los demás
       llamadores no lo mandan) y `compute()` le pasa TODOS los vuelos, pero
@@ -11251,6 +11252,262 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `auto-cruce.util.spec` («la cuenta del gasto manda»),
       `providers.service.spec`, `bank-accounts.service.spec` y el Excel
       (`expenses.service.xlsx.spec`).
+
+99. **LA CASCADA DEL BALANCE / PESOS PRIMERO / CUENTA EN PESOS (20-oct-2026,
+    API 0.0.101, migraciones `20261020000005` y `20261020000006`).** Pedido
+    del cliente del 20-oct-2026 con el Excel del balance de N621TX/N4142R
+    (sep-2026) contra la card del reparto y «Pagos a socios»: «es un peso de
+    diferencia… como que pasa por 2 tipos de cambio… dejaremos el peso como
+    prioridad», «los gastos indirectos y directos no cuadran», «una pantalla
+    por avión… todo el histórico… filtrar por mes», «la reserva de overhaul
+    no se resta… cuánto debe guardar cada socio… opción por avión y por
+    socio de restarla o solo dar el dato», «las cuentas de dispersión en la
+    pantalla del avión… todo en pesos, pagamos realmente en pesos», «el
+    monto de las utilidades no cuadra, le pagamos menos».
+    - **Diagnóstico (prod)**: (a) el peso: `cobrosEnUsd` convertía cada
+      cobro MXN con SU `tc_usd_mxn` (el del día del cobro) y el balance con
+      la K de la cotización (`vuelo.tc_usd_mxn`): dos T.C. ⇒ ±1 peso y
+      centavos en «cobrado» (vuelo #332: 4,172.44 vs 4,172.45 USD). (b)
+      indirectos: la categoría `INDIRECTO` sellada al avión era EXCLUIDA en
+      el reparto pero «Gastos Indirectos» en la hoja del balance (7 gastos,
+      70,200 MXN: Excel 388,937.57 vs card 318,737.57). (c) utilidades: la
+      cuenta del socio iba en USD y cada entrega en MXN se pasaba a USD con
+      el T.C. del día ⇒ el «por entregar» no era los pesos entregados;
+      además el reparto restaba la reserva y no la provisión AFAC, al revés
+      que el balance con el que de hecho se le pagó a Mauricio Roque.
+    - **PESOS PRIMERO en los cobros** (`common/cobros-usd.util.ts`):
+      `cobrosEnUsd(cobros, tcFallback, kCotizacion?)` / `cobroEnUsd` ganan
+      la K capturada de la cotización; con K, TODO cobro MXN se convierte
+      con K (su `tc_usd_mxn` propio se ignora: así pesos ÷ K = la venta en
+      pesos del balance, byte a byte); sin K, como antes (T.C. del cobro ??
+      fallback). Nuevo `cobrosEnMxn(cobros, k)` = `{total_mxn, sin_tc_count,
+      sin_tc_usd}` (MXN tal cual; USD × (T.C. propio ?? K); sin ninguno ⇒
+      `sin_tc_*`). TODOS los llamadores pasan K = `pos(v.tc_usd_mxn)`
+      (balance, reparto, vuelos, cobro-recibo, facturas, flight-report,
+      grupos, pilotos, dinero, cotizaciones; `comisionesCobrosUsd`,
+      `cobrosParaCobradoDeMas`, `entradaCobradoDeMas.kCotizacion`,
+      `cobradoAlCorte`, `decisionDiferir.k_cotizacion`). Consecuencia: la
+      bandera `vuelo.cobrado` puede cambiar en vuelos con cobros MXN:
+      **`POST /v1/flights/recalcular-cobrado?desde&hasta`** (ADMIN;
+      `{revisados, cambiados[{id, folio, antes, despues}], errores[]}`,
+      cortes Cancún, hasta 5,000 vuelos) la recalcula; correrlo UNA vez tras
+      el deploy (sin rango = todos los vuelos con monto).
+    - **EL REPARTO ES LA CASCADA DEL BALANCE** (`computeAvion`): `saldo =
+      cobrado − comisiones − directos − indirectos − permisos − fijos
+      prorrateados − PROVISIÓN AFAC + otros ingresos del avión`. (1)
+      `INDIRECTO` sellado al avión ⇒ grupo INDIRECTO (`grupos-reparto.util`:
+      {REFACCION, SERVICIOS, INDIRECTO}). (2) PROVISIÓN AFAC =
+      `aeronave.permiso_afac_usd_hr × horas cobradas de la parte del avión`
+      por vuelo (`parte(tiempo_cobrable_hr)`), en pesos con el z del vuelo
+      (promedio de `tc_gasto` de sus gastos MXN sin el pago al vendedor ??
+      K): la MISMA columna T del balance; sin tarifa ⇒ 0 (el balance y el
+      pre-cierre ya lo avisan). Salida: `afac_reservado_usd/_mxn`,
+      `detalle.afac {tarifa_usd_hr, horas_cobradas_hr, monto_usd,
+      monto_mxn}` y por vuelo `horas_cobradas_avion_hr`,
+      `afac_reservado_avion_usd/_mxn`, `tc_costos`. (3) **La reserva de
+      overhaul YA NO RESTA** del saldo: se informa (`reserva_overhaul_*`) y
+      se reparte por socio con residuo mayor (`reparto[].reserva_usd/_mxn`
+      = lo que ese socio debe guardar); `aeronave_socio.
+      descontar_reserva_overhaul` (migración 000005, default false; DTO y
+      PATCH de `aircraft/owners`) decide por avión y socio si VuelaTour se la
+      retiene: `monto_* = utilidad_* − reserva_*` solo con true (si no
+      `monto_* = utilidad_*`), `reparto[].descuenta_reserva`,
+      `reserva_retenida_usd/_mxn` = Σ retenido. Raíz `reparto_como_balance:
+      true` (también en la respuesta vacía; `buildRepartoPayload` la manda a
+      pyservices con las llaves nuevas). **Decisión tomada sin el cliente**
+      (reversible en una línea de `computeAvion`): contradice «el reparto
+      sigue sin AFAC» del 19-oct porque es lo que de hecho se le pagó al
+      socio (el balance); si el cliente lo revierte, quitar `afacR` /
+      `afacMxnR` de la cascada y nada más.
+    - **Balance ≡ reparto también en pesos**: un gasto USD sin `tc_gasto` se
+      pasa a pesos con el oficial de SU día (`buildHoja`, opción
+      `tcMxnDeGasto`; la misma `toMxn` del reparto) y ya no con el T.C.
+      promedio del mes; `balance.socios[]` trae `utilidad_usd/_mxn`,
+      `reserva_usd/_mxn`, `descuenta_reserva` y `monto_*` neto. Specs
+      `aircraft-balance.service.pesos.spec` (golden: en pesos solo se mueve
+      `gastos_indirectos`, 1,912.50 → 1,840) y
+      `profit-sharing.service.cascada-balance.spec` (reparto ≡ balance).
+    - **CUENTA CORRIENTE EN PESOS (migración 000006)**: `reparto_pago.
+      monto_mxn` NOT NULL (MXN = monto; USD = monto × T.C.; CHECKs
+      `reparto_pago_monto_mxn_chk` y `reparto_pago_monto_mxn_mxn_chk`),
+      `reparto_pago.saldo_snapshot_mxn`, `reparto_cuenta_socio.
+      saldo_inicial_mxn` NOT NULL DEFAULT 0 (backfill `saldo_inicial_usd ×
+      oficial(< cuenta_desde)` ⇒ −105,483.67 para el socio `f0250661…` =
+      −6,193.70 USD × 17.0308: **la oficina lo revisa**); `tg_reparto_
+      bitacora` audita las tres. `reparto-cuenta.util.ts`: TODO `*_usd` →
+      `*_mxn`, `TOLERANCIA_CUENTA_MXN = 1`; `reparto-pago.util.ts`:
+      `PagoSocio.monto_mxn` / `saldo_snapshot_mxn`, `montoMxnDePago`,
+      `validarDineroPago` EXIGE T.C. en las DOS monedas (USD: «cuántos pesos
+      descuenta»; `TC_NO_APLICA` ya no existe; `tc_usd_mxn` persistido sigue
+      SOLO en MXN por el CHECK `reparto_pago_tc_moneda_chk`: en USD queda
+      implícito = `monto_mxn ÷ monto`); `reparto-pago.service.ts`: candado
+      del adelanto y 409 `PAGO_EXCEDE_SALDO` en pesos (`details.*_mxn`),
+      inserta `monto_mxn` / `saldo_snapshot_mxn` (`saldo_snapshot_usd`
+      null); `PUT socios/:id/cuenta` recibe `saldo_inicial_mxn`
+      (obligatorio) y `saldo_inicial_usd` informativo; pre-cierre
+      `socios_por_entregar` / `socios_adelantados` en `monto_mxn`;
+      `cierres.socios_snapshot` con `monto_mxn`.
+    - **PANTALLA POR AVIÓN**: `GET /v1/profit-sharing/aviones/:id?desde&
+      hasta` (`avionDetalle`; ADMIN, ANALISTA, FACTURACION, SOCIO) = el
+      avión del compute con `detalle.gastos[]` (`FilaGastoDetalle`: gasto
+      por gasto con grupo, clave, pesos y dólares TAL CUAL se sumaron; solo
+      con `compute(…, {detalleGastos: true})`), `socios[]` (utilidad /
+      reserva / descuenta / monto / entregado / por entregar DE ESE AVIÓN en
+      MXN; entregas «corresponde a» ese avión en los meses del periodo) y
+      `entregas[]`; `GET …/historico?desde=AAAA-MM&hasta=AAAA-MM`
+      (`avionHistorico`; default inicio oficial → mes en curso; ≤ 36 meses;
+      un compute por mes) = cascada en pesos mes a mes, reparto y entregado
+      por socio por mes, totales y socios acumulados. SOCIO: solo su renglón
+      y sus entregas. 404 `AERONAVE_NO_EXISTE`, 400 `RANGO_INVALIDO`.
+    - **Despliegue**: «Migraciones y despliegue», lote 0.0.101.
+    - Specs: `cobros-usd.util.spec` (K primero; el #332 da 4,172.45 porque
+      la K de 6 decimales no reproduce los pesos: 7 centavos de más,
+      documentado), `cobrado-de-mas.util.spec`,
+      `flights.service.cobrado-de-mas.spec`,
+      `profit-sharing.service.cascada-balance.spec`,
+      `profit-sharing.service.avion.spec` (pantalla por avión e histórico),
+      `…reparto-pesos.spec` (golden `libros-pesos.golden-0101.json`; el 0093
+      se retiró), `…comisiones.spec`, `…otros-ingresos-avion.spec`,
+      `aircraft-balance.service.{pesos,reserva,comisiones-general}.spec` y
+      los de la cuenta (`reparto-cuenta.*`, `reparto-pago.*`,
+      `profit-sharing.controller.reparto-pago.spec`, `…pagos-socios.spec`).
+
+100. **ENTREGAS A SOCIOS EN EL BALANCE POR AVIÓN Y GENERAL (21-oct-2026, API
+     0.0.102, SIN migración).** Pedido del cliente: «debemos agregar en el
+     balance general y por avión los pagos que se vayan dando a los socios».
+     En `balance.socios[]` de cada libro de avión (individual y cada bloque de
+     avión del general; EXTERNOS y el consolidado FLOTA no), ADITIVO y SOLO
+     con la cuenta corriente disponible (lector `lectorCuentaSocios`:
+     `disponible()` false o `SIN_MIGRACION` ⇒ ninguna llave viaja, jamás un 0
+     inventado; otro fallo de lectura tumba el libro): `entregado_mxn` (Σ
+     `monto_mxn` de sus entregas VIVAS de `reparto_pago` «corresponde a» ESTE
+     avión cuyo mes acreditado —`mesAcreditadoDeEntrega` = `periodo` ?? mes de
+     `fecha_pago`, fuente única PURA de `reparto-pago.util` que también usa
+     `avionDetalle`— cae en los meses calendario del periodo), `entregado_usd`
+     (informativo), `entregas` (conteo) y `por_entregar_mxn` =
+     round2(`monto_mxn` − entregado) (null sin pesos; NEGATIVO = se le
+     adelantó); al final del socio, tras `reserva_mxn`. Por avión
+     `entregado_socios_mxn` / `por_entregar_socios_mxn` (Σ; null si algún
+     socio es null), justo después de `reserva_overhaul_*`. Helper PURO
+     `entregasPorSocioDelAvion` (aircraft-balance.service); `buildPayload`
+     recibe `entregasSocios` (el general lee UNA vez en `payloadGeneral`; el
+     individual lee él). Un socio con entregas que ya no está vigente entra
+     como renglón con porcentaje 0 y montos 0 (nombre por
+     `aeronave_socio`/`usuario`, «Socio» si no existe; si fuera `es_empresa`
+     aparecería con 0 en las participaciones de VUELATOUR); dos vigencias del
+     mismo socio: las entregas en la de mayor % y 0 en la otra. Entregas sin
+     avión (adelantos a cuenta) no aparecen en ningún balance; este «por
+     entregar» es del avión y del periodo, NO el saldo de la cuenta corriente
+     del socio (saldo inicial y otros meses viven en «Pagos a socios»). Tipos
+     en `pyservices.service.ts` (`BalanceAvionSocioPayload`,
+     `BalanceAvionBalancePayload`). Specs:
+     `aircraft-balance.service.entregas-socios.spec` (mundo de
+     `reparto-pesos.fixture-spec` + `reparto_pago`) y los goldens ajustados
+     solo para quitar las llaves aditivas (`pesos.spec`
+     `quitarEntregasSocios`, `comisiones-general.spec`,
+     `otros-ingresos-avion.spec`). Skew: pyservices viejo ignora las llaves;
+     orden pyservices ⇒ API.
+
+101. **EL GASTO DE UNA COMPRA SE REGISTRA DESDE LA COMPRA; LA REFACCIÓN DEL
+     ALTA ES UN GASTO NORMAL (21-oct-2026, API 0.0.102, sin migración).**
+     Pedido del cliente: quitar «¿a dónde va la refacción?», registrar la
+     entrada en Inventario cuando llega aunque el gasto ya exista, y «que no
+     se registre la compra en gastos hasta que le den en un botón de
+     "Registrar gasto" y les pida sí o sí el tipo de cambio». (a) `POST
+     /v1/expenses` con `inventario` queda DEPRECADO (sigue aceptado por
+     compatibilidad; el panel no lo manda; la app nunca lo usó; invariante 57
+     retirada en la práctica): una REFACCION es un gasto normal (con avión,
+     indirecto del avión; sin avión, de la empresa). (b) `POST
+     /v1/compras/:id/registrar-gasto`
+     (`CompraGastoController`/`CompraGastoService` en `ExpensesModule`
+     —ExpensesModule importa ComprasModule, nunca al revés—) crea UN gasto
+     REFACCION por `resumen.total_factura` (líneas + `cargos_factura`; nunca
+     los pagos-cargo) en la moneda de la compra, por el alta de siempre
+     (`ExpensesService.create` con `opts.compra` ⇒ `compra_id`+`compra_rol` en
+     el MISMO INSERT), sin avión/vuelo; exige `tc_usd_mxn` en las dos monedas
+     con banda 15–25 (`compra-gasto.util.ts`, misma que `TC_PAGO_SOCIO_*`),
+     `fecha_gasto` y `medio_pago`; cuenta solo con medio que la lleva
+     (invariante 98); bajo `ComprasService.bajoCandado`; 409
+     `COMPRA_GASTO_YA_REGISTRADO` si ya hay pago MERCANCIA (idempotente), 400
+     `COMPRA_SIN_LINEAS`/`COMPRA_SIN_MONTO`/`TC_REQUERIDO`/`TC_FUERA_DE_RANGO`;
+     fija el T.C. de la compra solo si no tenía y sigue ABIERTA. (c)
+     `resumen.gasto_estado` (`SIN_GASTO`/`PARCIAL`/`REGISTRADO`,
+     `estadoGastoCompra` puro, tolerancia 1 %), `total_factura`,
+     `gasto_mercancia`, `gasto_faltante` viajan en lista y detalle (ADITIVOS).
+     (d) `GET /v1/compras/gastos-candidatos` (sin compra, sin cargo de bodega,
+     categoría ligable; `rol_sugerido`, `puede_mercancia`, ventana default 120
+     días, `truncado`) y `POST /v1/compras/entrada-desde-gasto` (compra de UNA
+     línea con el gasto como mercancía, costo = monto ÷ unidades por
+     `lineaCompraDeRefaccion`, `cargos_factura: []`, T.C. capturado ?? del
+     gasto ?? oficial del día; si recibir falla la compra queda ABIERTA con el
+     gasto ligado y `recibida:false` + aviso).
+     `CreateCompraDto.cargos_factura` manda sobre lo derivado del gasto.
+     Panel: la salida de inventario al avión arranca en MXN
+     (`ventaInicialSalida`); ver su AGENTS.md. Specs:
+     `compra-gasto.util.spec`, `compra-gasto.service.spec`,
+     `compra-gasto.controller.spec`, `expenses.service.compra-del-gasto.spec`,
+     `compras.service.candidatos.spec`, `compras.calculo.spec`.
+
+102. **INCLUIR EN EL MES AL CERRAR: los vuelos cobrados DESPUÉS del corte se
+    pueden quedar (21-oct-2026, API 0.0.102, sin migración).** Pedido del
+    cliente: «ya se cobraron varios de los vuelos que no se habían cobrado
+    pero se cobraron en octubre pero aún no se cierra, que dé la opción de
+    poder incluirlos en septiembre». Hasta el 0.0.101 el cierre pasaba al mes
+    siguiente TODO lo no cobrado al último día (invariante 89), aunque ya
+    estuviera cobrado en octubre (motivo `COBRO_POSTERIOR`).
+    - **`GET /v1/cierres/:periodo/previa?incluir=id,id`**
+      (`PreviaCierreQuery`): la previa se recalcula con esos vuelos ADENTRO:
+      salen de `vuelos_que_pasan`, entran en **`vuelos_incluidos`** (misma
+      forma, sin `destino`, leyenda «Se queda en septiembre 2026 · cobrado el
+      2-oct, después del 30-sep (al 30-sep: $0.00 USD de $1,000.00 USD)»,
+      `leyendaSeQueda` en `mes-contable.util.ts`), `totales.incluidos` y el
+      reparto «después» los cuenta (solo se excluyen los que siguen
+      pasando). Sin `incluir`: la previa de siempre con `vuelos_incluidos: []`
+      e `incluidos: 0`. Un id que no está entre los candidatos se ignora en
+      la previa.
+    - **`POST /v1/cierres/:periodo` con `incluir_vuelos: string[]`**: SOLO
+      `COBRO_POSTERIOR` (otro motivo ⇒ 400 `INCLUIR_VUELO_NO_COBRADO` con
+      `details {vuelo_id, folio, motivo}`: un vuelo sin cobrar no se puede
+      quedar); un id que ya no es candidato ⇒ 409 `PREVIA_CAMBIO` (lista
+      rancia). **`vuelos_esperados` = la lista COMPLETA que vio el diálogo**
+      (los que pasan + los que se quedan): se compara contra los candidatos.
+      Los incluidos NO se tocan (`periodo_contable` intacto, sin fila en
+      `cierre_mes_vuelo`): el mes cerrado los cuenta por `fecha_contable` y
+      su cobro de octubre entra al reparto congelado de septiembre; octubre
+      no los recibe. `cierre_mes.totales` guarda `vuelos_incluidos` e
+      `incluidos[] {id, folio, cobrado_posterior_usd, fecha_cobro_posterior}`;
+      el aviso a ADMIN dice «N vuelo(s) cobrados después del corte se quedan
+      en septiembre 2026»; la respuesta trae `incluidos[]`. Reabrir no
+      necesita nada (no se movieron).
+    - **Panel** (`cierre-mes-acciones.tsx`, `lib/admin/cierre-mes.ts`):
+      casilla «Se queda en septiembre» por fila SOLO para `COBRO_POSTERIOR`
+      (`puedeQuedarseEnMes`), cada cambio relee la previa con `?incluir=`
+      (el reparto antes/después se recalcula), tabla «Se quedan en
+      septiembre 2026 (cobrados después del corte)», `vuelos_esperados` =
+      `idsVistosEnPrevia(previa)`, `incluir_vuelos` solo si hay alguno; toast
+      «… 1 vuelo cobrado después del corte se queda en septiembre 2026.».
+    - Specs: `cierres.service.spec` («INCLUIR EN EL MES»), `cierres.
+      controller.spec`; panel `cierre-mes.test`, `cierre-actions.test`,
+      `cierre-mes-ui.test`.
+
+103. **ALERTA «TRANSPORTE PAGADO SIN COTIZAR»: TAXI ES DE LA TRIPULACIÓN
+    (21-oct-2026, API 0.0.102).** Pedido del cliente: «la alerta de
+    transportes no cotizados… está contemplando el taxi del piloto».
+    `pareceTransporteDePasajeros` (`common/transporte-pasajeros.util.ts`)
+    solo mira gastos de **OPERACIONES** con señal FUERTE (traslado,
+    transporte, transfer, camioneta, van, shuttle) y sin veto; la categoría
+    «Taxi / estacionamiento» YA NO cuenta aunque el texto diga «transporte»
+    (#320 «transporte Master Ruben») o «privado» (#351): ya no hay señales
+    DÉBILES (`RE_TRANSPORTE_DEBIL` se retiró). El `detalle` del renglón lo
+    dice: «Los gastos «Taxi / estacionamiento» son de la TRIPULACIÓN y no
+    cuentan: un traslado de pasajeros se captura en Operaciones con
+    «Traslado» o «Transfer» en el concepto». Falso negativo aceptado: un
+    traslado de pasajeros capturado como TAXI. Specs: `transporte-pasajeros.
+    util.spec` (los casos TAXI reales se conservan con resultado false),
+    `transporte-pagado-sin-cotizar.util.spec`, `…pre-cierre-inversos.spec`
+    (el mundo captura el #190 como OPERACIONES). No existe (ni existía en el
+    0.0.101) ninguna alerta «Refacciones sin registrar en el avión» en API
+    ni panel: el cliente preguntó por ella el 21-oct-2026.
 
 ## Convenciones NestJS
 
@@ -11990,6 +12247,43 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **ORDEN DE DESPLIEGUE DEL LOTE 0.0.101 (20-oct-2026; invariante 99).**
+  El 21-oct-2026 se le sumó el lote 0.0.102 (invariantes 100–103: entregas
+  a socios en los balances, Compras/refacción, «se queda en el mes» al
+  cerrar, alerta de transporte sin TAXI): UN solo push con el MISMO orden
+  de abajo; la versión que debe responder `/v1/version` es 0.0.102.
+  Nada tiene push: el 0.0.100 TAMPOCO está en prod (Railway nunca tomó
+  `9189e0a3`; prod sigue en 0.0.99: confirmar con `GET /v1/version` antes
+  de empezar), pyservices y el panel (rama `lote-b2`, commit `3cb74af` sin
+  push + lo nuevo) están en el working tree. Prod = `bjesduasnzbzywofukbf`.
+  1. **Migraciones, inmediatamente ANTES del push del API**: `20261020000005`
+     (`aeronave_socio.descontar_reserva_overhaul`; aditiva, inocua con
+     cualquier API) y `20261020000006` (cuenta en pesos: `reparto_pago.
+     monto_mxn` NOT NULL con backfill, `saldo_snapshot_mxn`,
+     `reparto_cuenta_socio.saldo_inicial_mxn`, bitácora). **Desde que se
+     aplica la 000006, el API viejo en prod ya NO puede registrar entregas**
+     (no manda `monto_mxn`): avisar a la oficina (sin entregas en la
+     ventana) y subir el API enseguida. Por MCP: dry-run de la cabecera con
+     `execute_sql` (`begin … rollback`, filas de prueba DESPUÉS del DDL,
+     `DRYRUN_OK`) ⇒ `apply_migration` SOLO con el cuerpo (sin drop/delete/
+     revoke) ⇒ postchecks ⇒ `get_advisors`. Los DOS dry-run ya corrieron
+     en prod el 20-oct-2026 (`DRYRUN_OK`, incluido el literal 'DELETE' del
+     cuerpo del trigger: el MCP no lo rechaza).
+  2. **pyservices** (push `main`, Railway; confirmar el deployment ACTIVO):
+     aditivo; sin `reparto_como_balance` el PDF y el Excel salen byte a
+     byte, así que es seguro con el API viejo.
+  3. **API 0.0.101** (push `main`; confirmar `GET /v1/version` = 0.0.101).
+     Después, UNA vez, `POST /v1/flights/recalcular-cobrado` como ADMIN (sin
+     rango) y guardar la respuesta (`cambiados[]`).
+  4. **Panel** (`lote-b2` + la pantalla por avión y los pesos; push `main`,
+     Vercel). Hasta entonces el panel de prod sigue leyendo `*_usd` de la
+     cuenta: las páginas de «Pagos a socios» mostrarán vacíos en la ventana
+     entre 3 y 4 — hacerla corta.
+  5. **La oficina revisa** `reparto_cuenta_socio.saldo_inicial_mxn` del socio
+     `f0250661…` (−105,483.67 MXN: backfill de −6,193.70 USD con el oficial
+     del 31-ago-2026) y lo corrige con `PUT socios/:id/cuenta` si no es lo
+     que de hecho se le había adelantado en pesos.
 
 - **ORDEN DE DESPLIEGUE DEL LOTE 0.0.75 (lote 2 del 13-oct-2026;
   CONSOLIDADO en la revisión del 14-oct-2026 — manda sobre lo que diga cada

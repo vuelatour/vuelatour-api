@@ -229,12 +229,12 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     ).toBe(403);
   });
 
-  it('PUT socios/:socioId/cuenta: ADMIN/FACTURACION; DTO (mes AAAA-MM, saldo con ≤ 2 decimales y negativo válido, notas recortadas); otros roles 403', async () => {
+  it('PUT socios/:socioId/cuenta: ADMIN/FACTURACION; DTO (mes AAAA-MM, saldo EN PESOS con ≤ 2 decimales y negativo válido, dólares informativos opcionales, notas recortadas); otros roles 403', async () => {
     const ok = await request(http())
       .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
       .send({
         cuenta_desde: '2026-08',
-        saldo_inicial_usd: -1500.25,
+        saldo_inicial_mxn: -1500.25,
         notas: '  Ya adelantado ',
       });
     expect(ok.status).toBe(200);
@@ -242,17 +242,42 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
       MAURICIO,
       {
         cuenta_desde: '2026-08',
-        saldo_inicial_usd: -1500.25,
+        saldo_inicial_mxn: -1500.25,
         notas: 'Ya adelantado',
       },
       expect.objectContaining({ userId: USER }),
     );
+    // El informativo en dólares (invariante 99) pasa al service tal cual.
+    const conUsd = await request(http())
+      .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
+      .send({
+        cuenta_desde: '2026-08',
+        saldo_inicial_mxn: -1500.25,
+        saldo_inicial_usd: -81.09,
+      });
+    expect(conUsd.status).toBe(200);
+    expect(configurarCuenta).toHaveBeenLastCalledWith(
+      MAURICIO,
+      expect.objectContaining({
+        saldo_inicial_mxn: -1500.25,
+        saldo_inicial_usd: -81.09,
+      }),
+      expect.objectContaining({ userId: USER }),
+    );
     for (const malo of [
-      { cuenta_desde: '2026-08-01', saldo_inicial_usd: 0 },
-      { cuenta_desde: '2026-08', saldo_inicial_usd: 1.005 },
+      { cuenta_desde: '2026-08-01', saldo_inicial_mxn: 0 },
+      { cuenta_desde: '2026-08', saldo_inicial_mxn: 1.005 },
       { cuenta_desde: '2026-08' },
-      { cuenta_desde: '2026-08', saldo_inicial_usd: 0, notas: 'n'.repeat(501) },
-      { cuenta_desde: '2026-08', saldo_inicial_usd: 0, socio_id: MAURICIO },
+      // Cuerpo del panel ≤ 0.0.100 (solo dólares): el saldo en pesos es
+      // obligatorio.
+      { cuenta_desde: '2026-08', saldo_inicial_usd: 0 },
+      {
+        cuenta_desde: '2026-08',
+        saldo_inicial_mxn: 0,
+        saldo_inicial_usd: 1.005,
+      },
+      { cuenta_desde: '2026-08', saldo_inicial_mxn: 0, notas: 'n'.repeat(501) },
+      { cuenta_desde: '2026-08', saldo_inicial_mxn: 0, socio_id: MAURICIO },
     ]) {
       const res = await request(http())
         .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
@@ -268,7 +293,7 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
         (
           await request(http())
             .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
-            .send({ cuenta_desde: '2026-09', saldo_inicial_usd: 0 })
+            .send({ cuenta_desde: '2026-09', saldo_inicial_mxn: 0 })
         ).status,
       ).toBe(403);
     }
@@ -277,10 +302,10 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
       (
         await request(http())
           .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
-          .send({ cuenta_desde: '2026-09', saldo_inicial_usd: 0 })
+          .send({ cuenta_desde: '2026-09', saldo_inicial_mxn: 0 })
       ).status,
     ).toBe(200);
-    expect(configurarCuenta).toHaveBeenCalledTimes(2);
+    expect(configurarCuenta).toHaveBeenCalledTimes(3);
   });
 
   it('GET pagos: rango de fechas y socio al service; ?mes= (y ?mes=&aeronave_id= del panel 0.0.49) llega al service y su 410 sale con code; COORDINADOR ⇒ 403', async () => {
@@ -436,17 +461,17 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     ).toBe(201);
   });
 
-  it('el 409 del ADELANTO y el 503 sin migración llegan con code y details por el filtro', async () => {
+  it('el 409 del ADELANTO (details en pesos) y el 503 sin migración llegan con code y details por el filtro', async () => {
     crear.mockRejectedValueOnce(
       new ConflictException({
-        message:
-          'Esta entrega de $3,783.78 USD supera lo que hay por entregar…',
+        message: 'Esta entrega de $70,000 MXN supera lo que hay por entregar…',
         error: 'PAGO_EXCEDE_SALDO',
         details: {
-          por_entregar_usd: 1395.94,
-          monto_usd: 3783.78,
-          exceso_usd: 2387.84,
-          saldo_despues_usd: -2387.84,
+          por_entregar_mxn: 1395.94,
+          mes_en_curso_mxn: 0,
+          monto_mxn: 70000,
+          exceso_mxn: 68604.06,
+          saldo_despues_mxn: -68604.06,
         },
       }),
     );
@@ -456,13 +481,13 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     expect(r409.status).toBe(409);
     expect(r409.body).toMatchObject({
       code: 'PAGO_EXCEDE_SALDO',
-      details: { exceso_usd: 2387.84 },
+      details: { monto_mxn: 70000, exceso_mxn: 68604.06 },
     });
     crear.mockRejectedValueOnce(
       new ServiceUnavailableException({
         message: 'no disponible',
         error: 'CUENTA_SOCIO_NO_DISPONIBLE',
-        details: { migracion: '20261002000001' },
+        details: { migracion: '20261020000006' },
       }),
     );
     const r503 = await request(http())

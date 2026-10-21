@@ -412,7 +412,7 @@ export class FlightReportService {
     );
     // Total cobrado por la fuente canónica: cada cobro convertido a USD con su
     // TC (o el del vuelo). Antes se sumaban MXN y USD crudos → saldos absurdos.
-    const conv = cobrosEnUsd(cobrosRes.data ?? [], tcVuelo);
+    const conv = cobrosEnUsd(cobrosRes.data ?? [], tcVuelo, kCapturado);
     const totalCobrado = conv.total_usd;
     if (conv.sin_tc_count > 0) {
       notasHoras.push(
@@ -431,6 +431,7 @@ export class FlightReportService {
           tc_usd_mxn: c.tc_usd_mxn,
         })),
       tcVuelo,
+      kCapturado,
     );
     const comisionesBancoUsd = comisionesConv.total_usd;
 

@@ -413,12 +413,14 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
     const [sep] = await svc.utilidadesSociosPorMes(['2026-09'], '2026-10');
     const socios = (m: typeof sep) =>
       m.aviones.find((x) => x.aeronave.id === AV)!.socios;
+    // LA CUENTA ES EN PESOS (20-oct-2026, invariante 99): el ingreso de
+    // 46,550.80 MXN (2,586.16 USD) suma TAL CUAL a los socios del avión.
     const total = (m: typeof sep) =>
-      r2(socios(m).reduce((s, x) => s + x.monto_usd, 0));
-    expect(r2(total(sep) - total(sepSin))).toBe(2586.16);
-    const mau = socios(sep).find((s) => s.socio_id === MAU)!.monto_usd;
-    const mauSin = socios(sepSin).find((s) => s.socio_id === MAU)!.monto_usd;
-    expect(Math.abs(r2(mau - mauSin) - 0.71 * 2586.16)).toBeLessThanOrEqual(
+      r2(socios(m).reduce((s, x) => s + x.monto_mxn, 0));
+    expect(r2(total(sep) - total(sepSin))).toBe(46550.8);
+    const mau = socios(sep).find((s) => s.socio_id === MAU)!.monto_mxn;
+    const mauSin = socios(sepSin).find((s) => s.socio_id === MAU)!.monto_mxn;
+    expect(Math.abs(r2(mau - mauSin) - 0.71 * 46550.8)).toBeLessThanOrEqual(
       0.01,
     );
   });

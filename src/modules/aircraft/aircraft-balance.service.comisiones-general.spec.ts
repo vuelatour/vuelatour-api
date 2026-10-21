@@ -503,6 +503,20 @@ function sinCascadaPesos(
   resto.socios = b.socios.map((s) => {
     const c: Record<string, unknown> = { ...s };
     delete c.monto_mxn;
+    // Invariante 99 (20-oct-2026): la reserva por socio, ADITIVA; sus
+    // números los prueba `aircraft-balance.service.reserva.spec`.
+    delete c.utilidad_usd;
+    delete c.utilidad_mxn;
+    delete c.reserva_usd;
+    delete c.reserva_mxn;
+    delete c.descuenta_reserva;
+    // Invariante 100 (21-oct-2026): lo entregado / por entregar por socio,
+    // ADITIVO (las dos Σ del bloque terminan en `_mxn` y ya salieron); sus
+    // números los prueba `aircraft-balance.service.entregas-socios.spec`.
+    delete c.entregado_mxn;
+    delete c.entregado_usd;
+    delete c.entregas;
+    delete c.por_entregar_mxn;
     return c;
   });
   return resto;

@@ -137,6 +137,13 @@ const LLAVES_RESERVA = [
 function sinReserva(b: BalanceAvionPayload['balance']) {
   const c = { ...b } as Record<string, unknown>;
   for (const k of LLAVES_RESERVA) delete c[k];
+  // Invariante 99: la parte de la reserva de cada socio también es «reserva».
+  c.socios = (c.socios as Array<Record<string, unknown>>).map((s) => {
+    const t = { ...s };
+    delete t.reserva_usd;
+    delete t.reserva_mxn;
+    return t;
+  });
   return c;
 }
 
@@ -159,19 +166,26 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
     expect(b.reserva_overhaul_tc).toBe(r.detalle.reserva.tc);
   });
 
-  it('REGLA B: el USD del balance convierte gasto por gasto como el reparto ⇒ utilidad cobrada USD = saldo del reparto + reserva + fijos prorrateados (las dos restas que el balance NO hace)', async () => {
+  it('REGLA B: el USD del balance convierte gasto por gasto como el reparto ⇒ utilidad cobrada USD = saldo del reparto + fijos prorrateados (la única resta que el balance NO hace; la reserva ya no resta en ninguno, invariante 99)', async () => {
     const b = (await libro()).balance;
     const r = await reparto();
     expect(b.utilidad_cobrada_usd).toBe(
       Math.round(
-        (r.saldo_disponible_usd +
-          r.reserva_overhaul_usd +
-          r.gastos.otros_prorrateados_usd) *
-          100,
+        (r.saldo_disponible_usd + r.gastos.otros_prorrateados_usd) * 100,
       ) / 100,
     );
-    // 4,838.80 = 4,348.80 + 140 + 350 en este mundo.
+    // 4,838.80 = 4,488.80 + 350 en este mundo (la reserva de 140 se informa
+    // en los dos libros, por socio, y no resta en ninguno).
     expect(b.utilidad_cobrada_usd).toBe(4838.8);
+    expect(r.reserva_overhaul_usd).toBe(140);
+    expect(r.reparto.map((s) => [s.reserva_usd, s.descuenta_reserva])).toEqual([
+      [57.29, false],
+      [82.71, false],
+    ]);
+    expect(b.socios.map((s) => [s.reserva_usd, s.descuenta_reserva])).toEqual([
+      [82.71, false],
+      [57.29, false],
+    ]);
   });
 
   it('NO resta de nada: sin la tarifa de reserva, el bloque es el MISMO salvo las llaves de la reserva (USD y pesos)', async () => {

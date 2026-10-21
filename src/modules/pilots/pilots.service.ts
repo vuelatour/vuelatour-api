@@ -515,6 +515,7 @@ export class PilotsService {
         const conv = cobrosEnUsd(
           porVuelo.get(v.id as string) ?? [],
           v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+          v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
         );
         totalCobradoMes += conv.total_usd;
         cobradoSinTcMxn += conv.sin_tc_mxn;

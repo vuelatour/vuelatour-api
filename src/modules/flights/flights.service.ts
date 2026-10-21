@@ -1082,6 +1082,7 @@ export class FlightsService {
     const conv = cobrosEnUsd(
       (previos ?? []) as unknown as CobroLike[],
       Number(vuelo.tc_usd_mxn) || null,
+      Number(vuelo.tc_usd_mxn) || null,
     );
     // Tolerancia: 1 USD o 5 % del precio, lo que sea mayor (redondeos de TC
     // de un cobro en pesos capturado en campo no son un doble cobro).
@@ -3468,7 +3469,7 @@ export class FlightsService {
     // de `cobrosEnUsd` con la misma cadena.
     const tcCobros =
       Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null;
-    const conv = cobrosEnUsd(cobros, tcCobros);
+    const conv = cobrosEnUsd(cobros, tcCobros, tcCobros);
     // La app esconde la captura de tacómetros con esta bandera: true cuando el
     // solicitante va de APOYO y esa es su ÚNICA relación con el vuelo (no es
     // piloto, ni copiloto, ni piloto de tramo) — misma regla que el candado
@@ -3573,7 +3574,7 @@ export class FlightsService {
       // al corregir un cobro.
       cobros: cobros.map((c) => ({
         ...c,
-        monto_usd: cobroEnUsd(c, tcCobros),
+        monto_usd: cobroEnUsd(c, tcCobros, tcCobros),
       })),
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
       cobros_sin_tc_count: conv.sin_tc_count,
@@ -12024,6 +12025,7 @@ export class FlightsService {
       const conv = cobrosEnUsd(
         grupos.get(id) ?? [],
         tcPorVuelo.get(id) ?? null,
+        tcPorVuelo.get(id) ?? null,
       );
       out[id] = {
         total_cobrado: Math.round(conv.total_usd * 100) / 100,
@@ -14112,6 +14114,7 @@ export class FlightsService {
     const neto = cobrosEnUsd(
       cobros,
       vuelo.tc_usd_mxn as number | null,
+      vuelo.tc_usd_mxn as number | null,
     ).total_usd;
     const reembolsoUsd = !esMxn
       ? dto.monto
@@ -14270,11 +14273,15 @@ export class FlightsService {
   async refreshCobradoFlag(
     vueloId: string,
     userId: string | null,
-  ): Promise<void> {
+  ): Promise<{ antes: boolean; despues: boolean }> {
     const cobros = await this.listCobros(vueloId);
     const vuelo = await this.findById(vueloId);
+    // PESOS PRIMERO (20-oct-2026, invariante 99): con K capturado, los cobros
+    // MXN cuentan al precio en pesos (#332 pagado completo en pesos ya no
+    // «debe» 0.04 USD por el T.C. del día tecleado en cada cobro).
     const { total_usd } = cobrosEnUsd(
       cobros,
+      vuelo.tc_usd_mxn as number | null,
       vuelo.tc_usd_mxn as number | null,
     );
     // Un vuelo SIN precio (total $0 = aún sin cotizar) nunca está "cobrado":
@@ -14307,6 +14314,63 @@ export class FlightsService {
           `refreshCobradoFlag ${vueloId}: no se pudo actualizar la bandera cobrado: ${error.message}`,
         );
     }
+    return { antes: vuelo.cobrado === true, despues: cobradoDeberiaSer };
+  }
+
+  /**
+   * Recalcula la bandera `cobrado` de los vuelos CON precio en un rango de
+   * `fecha_vuelo` (días Cancún, inclusivos; sin rango, todos) — 20-oct-2026,
+   * invariante 99: al cambiar la regla de conversión (pesos primero) las
+   * banderas persistidas se vuelven a derivar con la fuente única. Solo
+   * escribe las que cambian; un fallo por vuelo no detiene el barrido.
+   */
+  async recalcularCobrado(
+    q: { desde?: string; hasta?: string },
+    userId: string | null,
+  ): Promise<{
+    revisados: number;
+    cambiados: Array<{
+      id: string;
+      folio: number | null;
+      antes: boolean;
+      despues: boolean;
+    }>;
+    errores: Array<{ id: string; folio: number | null; error: string }>;
+  }> {
+    let sel = this.supabase.service
+      .from('vuelo')
+      .select('id, folio')
+      .gt('monto_total_usd', 0)
+      .order('fecha_vuelo', { ascending: true })
+      .limit(5000);
+    // Cortes en hora Cancún (invariante 4).
+    if (q.desde) sel = sel.gte('fecha_vuelo', `${q.desde}T00:00:00-05:00`);
+    if (q.hasta) sel = sel.lte('fecha_vuelo', `${q.hasta}T23:59:59-05:00`);
+    const { data, error } = await sel;
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as Array<{ id: string; folio: number | null }>;
+    const cambiados: Array<{
+      id: string;
+      folio: number | null;
+      antes: boolean;
+      despues: boolean;
+    }> = [];
+    const errores: Array<{ id: string; folio: number | null; error: string }> =
+      [];
+    for (const v of filas) {
+      try {
+        const r = await this.refreshCobradoFlag(v.id, userId);
+        if (r.antes !== r.despues)
+          cambiados.push({ id: v.id, folio: v.folio ?? null, ...r });
+      } catch (e) {
+        errores.push({
+          id: v.id,
+          folio: v.folio ?? null,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    return { revisados: filas.length, cambiados, errores };
   }
 
   /**

@@ -56,7 +56,7 @@ import {
 
 const GOLDEN = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, '../profit-sharing/libros-pesos.golden-0093.json'),
+    path.join(__dirname, '../profit-sharing/libros-pesos.golden-0101.json'),
     'utf8',
   ),
 ) as Record<string, unknown>;
@@ -127,6 +127,12 @@ function limpiarBloque(b: Record<string, unknown> | undefined): void {
   for (const k of Object.keys(b)) if (k.endsWith('_mxn')) delete b[k];
   for (const s of (b.socios as Array<Record<string, unknown>>) ?? []) {
     delete s.monto_mxn;
+    // Invariante 99 (20-oct-2026): la reserva por socio, aditiva.
+    delete s.utilidad_usd;
+    delete s.utilidad_mxn;
+    delete s.reserva_usd;
+    delete s.reserva_mxn;
+    delete s.descuenta_reserva;
   }
 }
 
@@ -233,6 +239,25 @@ const CAMBIOS_0098_GENERAL = [
   'gen.empresa.resultado_usd: 2301.28 -> 2291.01',
 ];
 
+/**
+ * CASCADA DEL BALANCE (20-oct-2026, API 0.0.101, invariante 99): el gasto en
+ * USD SIN T.C. propio se pasa a pesos con el oficial de SU día (la MISMA
+ * conversión del reparto) y ya no con el T.C. promedio del mes. Son las
+ * ÚNICAS celdas EN PESOS que se mueven contra el golden: 100 USD × 18.40 =
+ * 1,840 en vez de 100 × 19.125 = 1,912.50. Así los indirectos del balance
+ * son los mismos pesos del reparto (el cliente vio que «no cuadraban»).
+ */
+const CAMBIOS_0101_INDIVIDUAL = [
+  'ind.gastos_indirectos.filas.0.monto_mxn: 1912.5 -> 1840',
+  'ind.gastos_indirectos.total_mxn: 1912.5 -> 1840',
+];
+const CAMBIOS_0101_GENERAL = [
+  'gen.consolidado.gastos_indirectos.filas.0.monto_mxn: 1912.5 -> 1840',
+  'gen.consolidado.gastos_indirectos.total_mxn: 1912.5 -> 1840',
+  'gen.aviones.0.gastos_indirectos.filas.0.monto_mxn: 1912.5 -> 1840',
+  'gen.aviones.0.gastos_indirectos.total_mxn: 1912.5 -> 1840',
+];
+
 /** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
@@ -243,6 +268,26 @@ function quitar0098(p: Record<string, unknown> | undefined): void {
       if (k.startsWith('reserva_overhaul_')) delete b[k];
   for (const v of (p.vuelos as Array<Record<string, unknown>>) ?? [])
     delete v.ganancia_antes_comisiones_usd;
+}
+
+/**
+ * Lo ADITIVO de las ENTREGAS A SOCIOS (21-oct-2026, invariante 100): por
+ * socio lo entregado / por entregar y, en el bloque, las dos Σ. Sin entregas
+ * en el mundo valen 0 (y por entregar = el monto en pesos): sus números los
+ * prueba `aircraft-balance.service.entregas-socios.spec`.
+ */
+function quitarEntregasSocios(p: Record<string, unknown> | undefined): void {
+  if (!p) return;
+  const b = p.balance as Record<string, unknown> | undefined;
+  if (!b) return;
+  delete b.entregado_socios_mxn;
+  delete b.por_entregar_socios_mxn;
+  for (const s of (b.socios as Array<Record<string, unknown>>) ?? []) {
+    delete s.entregado_mxn;
+    delete s.entregado_usd;
+    delete s.entregas;
+    delete s.por_entregar_mxn;
+  }
 }
 
 /** Rutas donde `a` (hoy) difiere de `b` (golden): `ruta: antes -> ahora`. */
@@ -275,22 +320,25 @@ const LLAVES_PESOS_BLOQUE = [
 ];
 
 describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: el libro individual sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98', async () => {
+  it('GOLDEN: el libro individual sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98 y el USD sin T.C. al oficial del día del 0.0.101', async () => {
     const hoy = libroSinPesos(await libro());
     quitar0098(hoy);
-    expect(difs(hoy, GOLDEN.balance_individual, 'ind')).toEqual(
-      CAMBIOS_0098_INDIVIDUAL,
+    quitarEntregasSocios(hoy);
+    expect(difs(hoy, GOLDEN.balance_individual, 'ind').sort()).toEqual(
+      [...CAMBIOS_0098_INDIVIDUAL, ...CAMBIOS_0101_INDIVIDUAL].sort(),
     );
   });
 
-  it('GOLDEN: el general sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98', async () => {
+  it('GOLDEN: el general sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98 y el USD sin T.C. al oficial del día del 0.0.101', async () => {
     const hoy = generalSinPesos(await general());
     delete hoy.usd_por_gasto;
     quitar0098(hoy.consolidado as Record<string, unknown>);
-    for (const a of hoy.aviones as Array<Record<string, unknown>>)
+    for (const a of hoy.aviones as Array<Record<string, unknown>>) {
       quitar0098(a);
-    expect(difs(hoy, GOLDEN.balance_general, 'gen')).toEqual(
-      CAMBIOS_0098_GENERAL,
+      quitarEntregasSocios(a);
+    }
+    expect(difs(hoy, GOLDEN.balance_general, 'gen').sort()).toEqual(
+      [...CAMBIOS_0098_GENERAL, ...CAMBIOS_0101_GENERAL].sort(),
     );
   });
 

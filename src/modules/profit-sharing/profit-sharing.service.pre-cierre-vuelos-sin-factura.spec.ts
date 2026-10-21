@@ -841,7 +841,7 @@ describe('ProfitSharingService.preCierre — cobros en cancelados (14-oct-2026, 
       ...extra,
     });
 
-  it('devuelto exacto al mismo T.C. ⇒ fuera; N4 (otro T.C.) ⇒ dentro con «diferencia cambiaria»; #215 ⇒ dentro sin la marca; detalle literal', async () => {
+  it('devuelto exacto ⇒ fuera, también a OTRO T.C. del cobro (pesos primero: con K no hay diferencia cambiaria fantasma); #215 ⇒ dentro sin la marca; detalle literal', async () => {
     const { svc } = armar({
       aeronave: AERONAVES,
       cliente: CLIENTES,
@@ -873,12 +873,14 @@ describe('ProfitSharingService.preCierre — cobros en cancelados (14-oct-2026, 
     });
     const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
     const item = r.items.find((i) => i.clave === 'cobros_en_cancelados')!;
-    expect(item.vuelos).toEqual([
-      { id: 'k2', folio: 471, cobrado_usd: 19.82, diferencia_cambiaria: true },
-      { id: 'k215', folio: 215, cobrado_usd: 907.61 },
-    ]);
-    expect(item.count).toBe(2);
-    expect(item.monto_usd).toBe(927.43);
+    // k2: 30,000 MXN cobrados y 30,000 MXN devueltos; con el K de la
+    // cotización (pesos primero, 20-oct-2026, invariante 99) los dos cuentan
+    // al mismo T.C. y no queda nada retenido (antes, 19.82 USD de «diferencia
+    // cambiaria» por el 17.5 del reembolso). k215: 15,750 MXN retenidos al K
+    // 17.300002 = 910.40 (antes 907.61 con el 17.2414 del reembolso).
+    expect(item.vuelos).toEqual([{ id: 'k215', folio: 215, cobrado_usd: 910.4 }]);
+    expect(item.count).toBe(1);
+    expect(item.monto_usd).toBe(910.4);
     expect(item.informativo).toBe(true);
     expect(item.detalle).toBe(
       'Cargo por cancelación o anticipo no reembolsado: entra íntegro como venta del avión (repartido entre los aviones si el vuelo voló en más de uno), sin saldo pendiente. Confirma que no se haya devuelto al cliente; si se devolvió, regístralo como reembolso en el detalle del vuelo (no elimines el cobro: el reembolso deja el rastro). «(diferencia cambiaria)»: el dinero ya se devolvió completo y lo que queda es la diferencia entre el T.C. del cobro y el del reembolso, que el reparto cuenta como venta; para que no cuente, captura el reembolso con el T.C. del cobro.',

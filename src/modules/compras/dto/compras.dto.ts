@@ -155,6 +155,135 @@ export class CreateCompraDto {
   @ValidateNested({ each: true })
   @Type(() => CompraLineaDto)
   lineas?: CompraLineaDto[];
+
+  @ApiPropertyOptional({
+    type: [CargoFacturaDto],
+    description:
+      'Cargos impresos en la factura de mercancía (Shipping, Tax…), en su moneda (21-oct-2026). Si vienen, mandan sobre los derivados del gasto; `[]` = ninguno.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CargoFacturaDto)
+  cargos_factura?: CargoFacturaDto[];
+}
+
+/**
+ * ENTRADA DE INVENTARIO VINCULADA A UN GASTO YA REGISTRADO (21-oct-2026,
+ * invariante 101, caso del cliente «ya registramos el gasto; cuando llegue,
+ * vincular»): el API arma la compra de UNA línea con ese gasto como factura
+ * de mercancía (costo unitario = monto del gasto ÷ unidades, fuente única
+ * `lineaCompraDeRefaccion`) y la recibe. El panel manda solo lo capturado.
+ */
+export class EntradaDesdeGastoDto {
+  @ApiProperty({ description: 'Gasto REFACCION/OTRO/OPERACIONES sin compra' })
+  @IsUUID()
+  gasto_id!: string;
+
+  @ApiProperty({ description: 'Artículo de Inventario/Tienda que entra' })
+  @IsUUID()
+  item_id!: string;
+
+  @ApiProperty({ description: 'Unidades que entran (> 0)' })
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  cantidad!: number;
+
+  @ApiPropertyOptional({
+    example: '2026-10-21',
+    description:
+      'Día (Cancún) en que llegó la pieza: fecha de la compra y de la ENTRADA. Default hoy.',
+  })
+  @IsOptional()
+  @Matches(FECHA_YMD, { message: 'fecha debe ser YYYY-MM-DD' })
+  @IsISO8601({ strict: true }, { message: 'fecha inválida (YYYY-MM-DD)' })
+  fecha?: string;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  referencia?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'TC de la compra (MXN por USD). Default: el del gasto; en pesos sin ninguno, el oficial del día (400 TC_REQUERIDO si tampoco).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({ description: 'Default: el proveedor del gasto' })
+  @IsOptional()
+  @IsUUID()
+  proveedor_id?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notas?: string;
+}
+
+/**
+ * Gastos que pueden ser PAGO de una compra (selector «Vincular gasto ya
+ * registrado», 21-oct-2026): sin compra, que no sean el cargo contable de
+ * una salida de bodega y de categoría ligable. Ventana por fecha del gasto
+ * (día Cancún), búsqueda libre y, opcionalmente, solo los que pueden ser la
+ * factura de MERCANCÍA.
+ */
+export class GastosCandidatosQuery {
+  @ApiPropertyOptional({
+    description: 'Texto: notas, folio, proveedor o monto',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  q?: string;
+
+  @ApiPropertyOptional({
+    example: '2026-06-23',
+    description: 'Default: hasta − 120 días',
+  })
+  @IsOptional()
+  @Matches(FECHA_YMD, { message: 'desde debe ser YYYY-MM-DD' })
+  @IsISO8601({ strict: true }, { message: 'desde inválida (YYYY-MM-DD)' })
+  desde?: string;
+
+  @ApiPropertyOptional({
+    example: '2026-10-21',
+    description: 'Default: hoy (Cancún)',
+  })
+  @IsOptional()
+  @Matches(FECHA_YMD, { message: 'hasta debe ser YYYY-MM-DD' })
+  @IsISO8601({ strict: true }, { message: 'hasta inválida (YYYY-MM-DD)' })
+  hasta?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  proveedor_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'true = solo gastos que pueden ser la factura de mercancía (REFACCION, OTRO, OPERACIONES)',
+    default: false,
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  solo_mercancia?: boolean;
+
+  @ApiPropertyOptional({ default: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(300)
+  limite: number = 100;
 }
 
 export class UnirComprasDto {

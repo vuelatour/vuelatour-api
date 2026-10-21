@@ -1,0 +1,65 @@
+-- 20-oct-2026 · RESERVA DE OVERHAUL POR SOCIO: SE DESCUENTA O SOLO SE INFORMA.
+-- API 0.0.101, invariante 99 del CLAUDE.md del API.
+--
+-- PEDIDO DEL CLIENTE (20-oct-2026, capturas del reparto y del balance):
+-- «el reserva de overhaul también debe venir en la card o la nueva pantalla,
+-- porque recuerda que eso no se resta, y debe venir cuánto es lo que debe
+-- guardar cada socio. Además debemos contemplar una opción para poder
+-- seleccionar en cada avión en cada socio si se les restamos en las
+-- utilidades o solo darles el dato para que ellos lo vayan contemplando».
+--
+-- QUÉ HACE:
+--   `aeronave_socio.descontar_reserva_overhaul boolean not null default
+--   false`: por AVIÓN y SOCIO (la fila de la vigencia). false = la reserva
+--   del periodo solo se INFORMA al socio (su parte = reserva × su %); true =
+--   su parte de la reserva se le DESCUENTA de la utilidad (VuelaTour la
+--   retiene para el overhaul). La lee el reparto a socios (`fetchSocios`), el
+--   balance por avión (`balance.socios[]`) y la cuenta corriente (vía el
+--   reparto). La escribe `POST /v1/aircraft/:id/owners` y
+--   `PATCH /v1/aircraft/owners/:id` (ADMIN).
+--
+-- DEPENDENCIA DURA DEL API 0.0.101: `fetchSocios` del reparto y el select de
+-- socios del balance nombran la columna ⇒ ESTA MIGRACIÓN VA ANTES DEL PUSH
+-- DEL API. Inocua para el 0.0.100 (nadie la lee).
+--
+-- ROLLBACK: el API ≤ 0.0.100 no la nombra; la columna puede quedarse. Para
+-- quitarla (solo SQL Editor): alter table public.aeronave_socio drop column
+-- descontar_reserva_overhaul;
+--
+-- Por MCP se aplica SOLO el CUERPO (apply_migration, name
+-- '20261020000005_aeronave_socio_descontar_reserva'). Sin palabras
+-- destructivas.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN (ANTES de aplicar). UNA sentencia por MCP `execute_sql`; el `raise
+-- exception` final revierte todo. Orden: cuerpo → filas de prueba → pruebas.
+--
+-- do $dry$
+-- declare
+--   v_s uuid; v_flag boolean;
+-- begin
+--   if exists (select 1 from information_schema.columns where table_schema = 'public'
+--              and table_name = 'aeronave_socio' and column_name = 'descontar_reserva_overhaul') then
+--     raise exception 'DRYRUN_FALLA A: la columna ya existe';
+--   end if;
+--   <CUERPO pegado tal cual>
+--   select id into v_s from public.aeronave_socio order by created_at limit 1;
+--   select descontar_reserva_overhaul into v_flag from public.aeronave_socio where id = v_s;
+--   if v_flag is distinct from false then raise exception 'DRYRUN_FALLA B: default distinto de false'; end if;
+--   update public.aeronave_socio set descontar_reserva_overhaul = true where id = v_s;
+--   select descontar_reserva_overhaul into v_flag from public.aeronave_socio where id = v_s;
+--   if v_flag is distinct from true then raise exception 'DRYRUN_FALLA C: no se pudo escribir true'; end if;
+--   begin
+--     update public.aeronave_socio set descontar_reserva_overhaul = null where id = v_s;
+--     raise exception 'DRYRUN_FALLA D: aceptó null';
+--   exception when not_null_violation then null;
+--   end;
+--   raise exception 'DRYRUN_OK 20261020000005 · columna + default + not null';
+-- end $dry$;
+-- ---------------------------------------------------------------------------
+
+alter table public.aeronave_socio
+  add column if not exists descontar_reserva_overhaul boolean not null default false;
+
+comment on column public.aeronave_socio.descontar_reserva_overhaul is
+  'Reserva de overhaul por socio y avión (20-oct-2026, invariante 99): false = su parte (reserva × %) solo se informa; true = se le descuenta de la utilidad y VuelaTour la retiene.';

@@ -161,6 +161,7 @@ export class CobroReciboService {
         const conv = cobrosEnUsd(
           (cobros ?? []).filter((c) => c.vuelo_id === h.id),
           h.tc_usd_mxn as number | null,
+          h.tc_usd_mxn as number | null,
         );
         cobradoTotal += conv.total_usd;
         sinTcCount += conv.sin_tc_count;
@@ -359,7 +360,11 @@ export class CobroReciboService {
 
     // Cobrado a la fecha NETO: fuente ÚNICA cobrosEnUsd sobre TODOS los
     // cobros del vuelo (los reembolsos RESTAN — no se filtran de la suma).
-    const conv = cobrosEnUsd(todos, v.tc_usd_mxn as number | null);
+    const conv = cobrosEnUsd(
+      todos,
+      v.tc_usd_mxn as number | null,
+      v.tc_usd_mxn as number | null,
+    );
     const totalCotizacion = Number(v.monto_total_usd) || 0;
     const saldo = Math.max(
       0,

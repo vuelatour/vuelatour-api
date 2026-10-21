@@ -54,6 +54,41 @@ export class CerrarMesDto {
   @ArrayMaxSize(2000)
   @IsUUID('all', { each: true })
   vuelos_esperados?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'INCLUIR EN EL MES (21-oct-2026): ids de vuelos de «pasan al mes siguiente» que ya se cobraron DESPUÉS del corte (motivo COBRO_POSTERIOR) y que la oficina deja en este mes en vez de pasarlos. Otro motivo ⇒ 400 INCLUIR_VUELO_NO_COBRADO; un id que ya no está en la lista ⇒ 409 PREVIA_CAMBIO.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(2000)
+  @IsUUID('all', { each: true })
+  incluir_vuelos?: string[];
+}
+
+/** `GET /v1/cierres/:periodo/previa?incluir=id,id` (21-oct-2026). */
+export class PreviaCierreQuery {
+  @ApiPropertyOptional({
+    description:
+      'Ids (separados por coma) de vuelos «que pasan» ya cobrados después del corte que se quedarían en este mes: la previa (lista, totales y reparto después) se recalcula con ellos adentro. Un id desconocido se ignora.',
+    type: String,
+  })
+  @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === 'string'
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s !== '')
+      : Array.isArray(value)
+        ? value
+        : undefined,
+  )
+  @IsArray()
+  @ArrayMaxSize(2000)
+  @IsUUID('all', { each: true })
+  incluir?: string[];
 }
 
 /** `POST /v1/cierres/:periodo/reabrir`. */

@@ -11,6 +11,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -18,6 +19,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CerrarMesDto,
+  PreviaCierreQuery,
   ReabrirMesDto,
   validarPeriodoCierre,
 } from './dto/cierres.dto';
@@ -43,10 +45,10 @@ export class CierresController {
   @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Qué pasaría al cerrar el mes: bloqueantes, vuelos que pasan al mes siguiente y reparto antes/después',
+      'Qué pasaría al cerrar el mes: bloqueantes, vuelos que pasan al mes siguiente y reparto antes/después. ?incluir=id,id (21-oct-2026): vuelos ya cobrados después del corte que se quedarían en el mes (vuelos_incluidos).',
   })
-  previa(@Param('periodo') periodo: string) {
-    return this.cierres.previa(validarPeriodoCierre(periodo));
+  previa(@Param('periodo') periodo: string, @Query() q: PreviaCierreQuery) {
+    return this.cierres.previa(validarPeriodoCierre(periodo), q.incluir);
   }
 
   @Post(':periodo')
@@ -54,7 +56,7 @@ export class CierresController {
   @Roles(Rol.ADMIN, Rol.FACTURACION)
   @ApiOperation({
     summary:
-      'Cierra el mes: congela el reparto y pasa al mes siguiente los vuelos no cobrados al último día',
+      'Cierra el mes: congela el reparto y pasa al mes siguiente los vuelos no cobrados al último día. incluir_vuelos (21-oct-2026): los ya cobrados después del corte que se quedan en el mes.',
   })
   cerrar(
     @Param('periodo') periodo: string,

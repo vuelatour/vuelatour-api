@@ -580,6 +580,11 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         'aviones.0.reparto.0.monto_mxn',
         'aviones.0.reparto.1.monto_mxn',
         'aviones.0.saldo_disponible_mxn',
+        // Invariante 99: la parte de cada socio ANTES de la reserva.
+        'aviones.0.reparto.0.utilidad_usd',
+        'aviones.0.reparto.0.utilidad_mxn',
+        'aviones.0.reparto.1.utilidad_usd',
+        'aviones.0.reparto.1.utilidad_mxn',
       ].sort(),
     );
     // Antes de la vigencia una «(VuelaTour)» tampoco resta: la paga VuelaTour.
@@ -785,33 +790,49 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
   });
 
   it('utilidades por mes (cuenta corriente): los socios reciben su parte del saldo DESPUÉS de comisiones; el pago capturado en octubre de un vuelo de septiembre resta en SEPTIEMBRE', async () => {
+    // LA CUENTA ES EN PESOS (20-oct-2026, invariante 99): la cuenta LEE
+    // `reparto[].monto_mxn` del reparto del mes. En dólares (informativo)
+    // los socios recibían 1,262.39 / 515.63 y, con el pago, 1,205.59 /
+    // 492.43: en pesos, lo MISMO que el reparto de septiembre dice.
     const { svc } = armar(mundoReparto());
     const [sep] = await svc.utilidadesSociosPorMes(['2026-09'], '2026-10');
-    expect(
-      sep.aviones
-        .find((x) => x.aeronave.id === AV)!
-        .socios.map((s) => [s.socio_id, s.monto_usd]),
-    ).toEqual([
+    const repSep = (
+      await svc.compute({ desde: '2026-09-01', hasta: '2026-09-30' })
+    ).aviones.find((x) => x.aeronave.id === AV)!;
+    expect(repSep.reparto.map((s) => [s.socio_id, s.monto_usd])).toEqual([
       [MAU, 1262.39],
       [ACC, 515.63],
     ]);
+    expect(
+      sep.aviones
+        .find((x) => x.aeronave.id === AV)!
+        .socios.map((s) => [s.socio_id, s.monto_mxn]),
+    ).toEqual(repSep.reparto.map((s) => [s.socio_id, s.monto_mxn]));
     const conPago = armar(conPagoReal(1600, { fecha_gasto: '2026-10-05' }));
     const [sep2, oct2] = await conPago.svc.utilidadesSociosPorMes(
       ['2026-09', '2026-10'],
       '2026-11',
     );
-    expect(
-      sep2.aviones
-        .find((x) => x.aeronave.id === AV)!
-        .socios.map((s) => [s.socio_id, s.monto_usd]),
-    ).toEqual([
+    const repSep2 = (
+      await conPago.svc.compute({ desde: '2026-09-01', hasta: '2026-09-30' })
+    ).aviones.find((x) => x.aeronave.id === AV)!;
+    expect(repSep2.reparto.map((s) => [s.socio_id, s.monto_usd])).toEqual([
       [MAU, 1205.59],
       [ACC, 492.43],
     ]);
+    expect(
+      sep2.aviones
+        .find((x) => x.aeronave.id === AV)!
+        .socios.map((s) => [s.socio_id, s.monto_mxn]),
+    ).toEqual(repSep2.reparto.map((s) => [s.socio_id, s.monto_mxn]));
+    // El pago resta en pesos en septiembre (menos para los dos socios).
+    for (const [i, s] of repSep2.reparto.entries()) {
+      expect(s.monto_mxn).toBeLessThan(repSep.reparto[i].monto_mxn);
+    }
     // Octubre: nada del pago (su vuelo es de septiembre).
     const octTst = oct2.aviones.find((x) => x.aeronave.id === AV);
     expect(
-      r2((octTst?.socios ?? []).reduce((s, x) => s + x.monto_usd, 0)),
+      r2((octTst?.socios ?? []).reduce((s, x) => s + x.monto_mxn, 0)),
     ).toBe(0);
   });
 

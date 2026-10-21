@@ -588,3 +588,119 @@ describe('pre-cierre con un bloqueante SIN VERIFICAR (P3)', () => {
     ).toBe('Gastos por pagar sin confirmar: 3');
   });
 });
+
+describe('INCLUIR EN EL MES (21-oct-2026): los cobrados después del corte se quedan', () => {
+  it('previa ?incluir=#2: #2 sale de «pasan» y entra en vuelos_incluidos con «Se queda en…»; totales y reparto después lo cuentan', async () => {
+    const { svc } = armar();
+    const p = await svc.previa('2026-09', [ids.v2]);
+    expect(p.vuelos_que_pasan.map((v) => v.id)).toEqual([ids.v3, ids.v5]);
+    expect(p.vuelos_incluidos.map((v) => v.id)).toEqual([ids.v2]);
+    expect(p.vuelos_incluidos[0]).toMatchObject({
+      motivo: 'COBRO_POSTERIOR',
+      venta_usd: 1000,
+      cobrado_usd: 0,
+      cobrado_posterior_usd: 1000,
+      fecha_cobro_posterior: '2026-10-02',
+      leyenda:
+        'Se queda en septiembre 2026 · cobrado el 2-oct, después del 30-sep (al 30-sep: $0.00 USD de $1,000.00 USD)',
+    });
+    expect(p.vuelos_incluidos[0]).not.toHaveProperty('destino');
+    expect(p.totales).toMatchObject({
+      pasan: 2,
+      incluidos: 1,
+      pasan_venta_usd: 2000,
+      pasan_cobrado_posterior_usd: 0,
+    });
+    // El reparto «después» ya no le quita el #2 a septiembre.
+    expect(p.reparto?.antes[0].cobrado_usd).toBe(2500);
+    expect(p.reparto?.despues[0].cobrado_usd).toBe(2000);
+    // Sin marcar: como siempre (y la llave viaja vacía).
+    const sin = await svc.previa('2026-09');
+    expect(sin.vuelos_incluidos).toEqual([]);
+    expect(sin.totales.incluidos).toBe(0);
+    // Un id desconocido en la previa se ignora.
+    const raro = await svc.previa('2026-09', [ids.v1]);
+    expect(raro.vuelos_que_pasan).toHaveLength(3);
+  });
+
+  it('solo COBRO_POSTERIOR: incluir #3 (parcial) o #5 (sin cobro) ⇒ 400 INCLUIR_VUELO_NO_COBRADO', async () => {
+    const { svc } = armar();
+    for (const id of [ids.v3, ids.v5]) {
+      const e = await atrapa(svc.previa('2026-09', [id]));
+      expect(e.status).toBe(400);
+      expect(e.body.error).toBe('INCLUIR_VUELO_NO_COBRADO');
+      expect(String(e.body.message)).toContain(
+        'no se puede quedar en septiembre 2026',
+      );
+    }
+  });
+
+  it('cerrar con incluir_vuelos [#2]: #2 se queda (periodo_contable intacto, sin bitácora), #3 y #5 pasan; totales, aviso y respuesta lo dicen; septiembre lo cuenta cobrado', async () => {
+    const { svc, f, ps, avisos } = armar();
+    const r = await svc.cerrar(
+      '2026-09',
+      {
+        confirmar: true,
+        vuelos_esperados: [ids.v2, ids.v3, ids.v5],
+        incluir_vuelos: [ids.v2],
+      },
+      actor(),
+    );
+    expect(r.diferidos.map((d) => d.id)).toEqual([ids.v3, ids.v5]);
+    expect(r.incluidos.map((d) => d.id)).toEqual([ids.v2]);
+    const porId = new Map(f.tablas.vuelo.map((v) => [v.id, v]));
+    expect(porId.get(ids.v2)?.periodo_contable).toBeNull();
+    for (const id of [ids.v3, ids.v5]) {
+      expect(porId.get(id)?.periodo_contable).toBe(PERIODO_OCT);
+    }
+    expect(f.tablas.cierre_mes_vuelo.map((b) => b.vuelo_id)).toEqual([
+      ids.v3,
+      ids.v5,
+    ]);
+    expect(f.tablas.cierre_mes[0].totales).toMatchObject({
+      vuelos_diferidos: 2,
+      vuelos_incluidos: 1,
+      incluidos: [
+        {
+          id: ids.v2,
+          folio: 2,
+          cobrado_posterior_usd: 1000,
+          fecha_cobro_posterior: '2026-10-02',
+        },
+      ],
+    });
+    expect(avisos[0].cuerpo).toContain('2 vuelo(s) pasan a octubre 2026');
+    expect(avisos[0].cuerpo).toContain(
+      '1 vuelo(s) cobrados después del corte se quedan en septiembre 2026',
+    );
+    // Septiembre congelado CON el #2 (cobrado el 2-oct) y octubre sin él.
+    const vivo = await ps.compute({ desde: '2026-09-01', hasta: '2026-09-30' });
+    expect(vivo.cierre?.estado).toBe('CERRADO');
+    expect(vivo.aviones[0].ingresos.cobrado_usd).toBe(2000);
+    expect(vivo.cierre?.diferidos_salen.map((d) => d.id)).toEqual([
+      ids.v3,
+      ids.v5,
+    ]);
+    const oct = await ps.compute({ desde: '2026-10-01', hasta: '2026-10-31' });
+    expect(oct.aviones[0].ingresos.cobrado_usd).toBe(500);
+    expect(oct.cierre?.diferidos_entran).toHaveLength(2);
+  });
+
+  it('incluir un id que ya no está entre los que pasan ⇒ 409 PREVIA_CAMBIO (lista rancia), nada se escribe', async () => {
+    const { svc, f } = armar();
+    const e = await atrapa(
+      svc.cerrar(
+        '2026-09',
+        {
+          confirmar: true,
+          vuelos_esperados: [ids.v2, ids.v3, ids.v5],
+          incluir_vuelos: [ids.v1],
+        },
+        actor(),
+      ),
+    );
+    expect(e.status).toBe(409);
+    expect(e.body.error).toBe('PREVIA_CAMBIO');
+    expect(f.tablas.cierre_mes).toHaveLength(0);
+  });
+});

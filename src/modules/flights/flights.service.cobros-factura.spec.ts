@@ -174,7 +174,9 @@ function armar(db: Tablas, opts: OpcionesCobrosParciales = {}) {
     {} as PilotsService,
   );
   // La bandera `cobrado` lee el vuelo completo: fuera de este spec.
-  jest.spyOn(svc, 'refreshCobradoFlag').mockResolvedValue(undefined);
+  jest
+    .spyOn(svc, 'refreshCobradoFlag')
+    .mockResolvedValue({ antes: false, despues: false });
   return { svc, db, log: f.log, escrituras: f.escrituras };
 }
 

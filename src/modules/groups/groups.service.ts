@@ -3334,7 +3334,11 @@ export class GroupsService {
       if (propias.length > 0) {
         restar.set(
           h.id,
-          cobrosEnUsd(propias, num(h.tc_usd_mxn) || null).total_usd,
+          cobrosEnUsd(
+            propias,
+            num(h.tc_usd_mxn) || null,
+            num(h.tc_usd_mxn) || null,
+          ).total_usd,
         );
       }
     }

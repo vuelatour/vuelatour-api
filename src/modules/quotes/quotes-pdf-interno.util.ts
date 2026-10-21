@@ -692,7 +692,7 @@ export function armarCotizacionInternaPayload(
   const cobrosOut: CotizacionInternaCobroPdf[] = cobrosOrdenados.map((c) => {
     const monto = num(c.monto) ?? 0;
     const comision = num(c.comision_banco_monto);
-    const conv = cobrosEnUsd([c], tcVuelo);
+    const conv = cobrosEnUsd([c], tcVuelo, tcVuelo);
     const metodo = str(c.metodo_cobro) ?? 'OTRO';
     const sobre = c.cobro_grupo ?? null;
     return {
@@ -719,7 +719,7 @@ export function armarCotizacionInternaPayload(
       registrado_por: nombreDe(c.registrado_por),
     };
   });
-  const conv = cobrosEnUsd(cobros, tcVuelo);
+  const conv = cobrosEnUsd(cobros, tcVuelo, tcVuelo);
   const totalCobrado = conv.total_usd;
   // Comisiones bancarias a USD con la MISMA regla (pseudo-cobros).
   const comisionesConv = cobrosEnUsd(
@@ -730,6 +730,7 @@ export function armarCotizacionInternaPayload(
         moneda: c.moneda,
         tc_usd_mxn: c.tc_usd_mxn,
       })),
+    tcVuelo,
     tcVuelo,
   );
   const comisionBancoUsd = comisionesConv.total_usd;

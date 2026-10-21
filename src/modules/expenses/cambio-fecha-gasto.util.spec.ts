@@ -960,13 +960,15 @@ describe('alcanceRepartoPorFecha — espejo del ternario de computeAvion', () =>
     'OTROS_DIRECTOS_VUELO',
     'REFACCION',
     'SERVICIOS',
+    // 20-oct-2026 (invariante 99): la categoría INDIRECTO sellada al avión
+    // cuenta en el grupo INDIRECTO (la hoja «Gastos Indirectos» del balance).
+    'INDIRECTO',
     'PERMISO',
   ];
   const NULO = [
     'TUAS',
     'COMISION_VENDEDOR',
     'COMISION_VENDEDOR_AVION',
-    'INDIRECTO',
     'NOMINA',
     'OTRO',
     'GASOLINA',

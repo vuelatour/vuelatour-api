@@ -64,6 +64,21 @@ import {
   nombreDeRelacionUsuario,
 } from '../../common/registrado-por.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+// ENTREGAS A SOCIOS EN EL BALANCE (21-oct-2026, invariante 100): lo YA
+// entregado a cada socio «por este avión» en los meses del periodo, con la
+// MISMA regla de la pantalla por avión del reparto — el lector ÚNICO de la
+// cuenta corriente (sonda de la migración 20261020000006) y los helpers
+// PUROS de la entrega (`aPagoSocio` da los pesos que descuenta cada una).
+import {
+  SIN_MIGRACION,
+  lectorCuentaSocios,
+} from '../profit-sharing/reparto-cuenta.lector';
+import { mesesEntre } from '../profit-sharing/reparto-cuenta.util';
+import {
+  aPagoSocio,
+  mesAcreditadoDeEntrega,
+  type RepartoPagoRow,
+} from '../profit-sharing/reparto-pago.util';
 import {
   reservaOverhaulIncompleta,
   reservaOverhaulPeriodoUsd,
@@ -147,6 +162,7 @@ import {
   type BalanceAvionHojaGastosPayload,
   type BalanceVinculoGastoPayload,
   type BalanceAvionPayload,
+  type BalanceAvionSocioPayload,
   type BalanceGeneralPayload,
   type BalanceAvionVueloPayload,
   type BalanceGeneralResumenFilaPayload,
@@ -563,6 +579,11 @@ interface SocioRow {
   porcentaje: string | number;
   vigente_desde: string;
   vigente_hasta: string | null;
+  /**
+   * RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99, migración
+   * `20261020000005`): true = su parte de la reserva se le descuenta.
+   */
+  descontar_reserva_overhaul?: boolean | null;
   usuario:
     | { nombre?: string; es_empresa?: boolean | null }
     | { nombre?: string; es_empresa?: boolean | null }[]
@@ -604,6 +625,46 @@ function round2(x: number): number {
 
 function r2(x: number | null): number | null {
   return x == null ? null : round2(x);
+}
+
+/** Σ de las entregas de UN socio que cuentan en el balance de un avión. */
+interface EntregasDeSocio {
+  /** Σ `monto_mxn` (lo que cada entrega descuenta del saldo, en pesos). */
+  mxn: number;
+  /** Σ `monto_usd` (informativo). */
+  usd: number;
+  /** Conteo de entregas. */
+  n: number;
+}
+
+/**
+ * ENTREGAS QUE CUENTAN en el balance de un avión (21-oct-2026, invariante
+ * 100), por socio: entregas VIVAS cuyo «corresponde a» es ESE avión y cuyo
+ * mes acreditado (`periodo` ?? mes de `fecha_pago`, `mesAcreditadoDeEntrega`)
+ * cae en los meses calendario del periodo — la MISMA regla de
+ * `ProfitSharingService.avionDetalle`. Una entrega de otro avión, de otro
+ * mes, sin avión o borrada NO cuenta. Pesos y dólares como los da
+ * `aPagoSocio` (la fuente única de `monto_mxn`), a centavos.
+ */
+export function entregasPorSocioDelAvion(
+  entregas: ReadonlyArray<RepartoPagoRow>,
+  aircraftId: string,
+  desde: string,
+  hasta: string,
+): Map<string, EntregasDeSocio> {
+  const meses = new Set(mesesEntre(desde.slice(0, 7), hasta.slice(0, 7)));
+  const out = new Map<string, EntregasDeSocio>();
+  for (const r of entregas) {
+    if (r.deleted_at != null || r.aeronave_id !== aircraftId) continue;
+    if (!meses.has(mesAcreditadoDeEntrega(r))) continue;
+    const p = aPagoSocio(r);
+    const acc = out.get(r.socio_id) ?? { mxn: 0, usd: 0, n: 0 };
+    acc.mxn = round2(acc.mxn + p.monto_mxn);
+    acc.usd = round2(acc.usd + p.monto_usd);
+    acc.n += 1;
+    out.set(r.socio_id, acc);
+  }
+  return out;
 }
 
 /** "$1,234.00 MXN + $56.00 USD" — resumen por moneda para los avisos. */
@@ -1016,6 +1077,10 @@ export class AircraftBalanceService {
     const ingresosPartidos = partirIngresosPorAvion(
       await leerIngresosDeResultado(this.supabase.service, d, h),
     );
+    // ENTREGAS A SOCIOS (21-oct-2026, invariante 100): UNA lectura de las
+    // entregas vivas para TODOS los bloques de avión del general (cada
+    // libro filtra las suyas). `null` = cuenta corriente no disponible.
+    const entregasSocios = await this.entregasSociosVivas();
 
     // `libros` = TODO lo que consolida el general (aviones + EXTERNOS):
     // hoja maestra, cobranza, hojas de gastos, totales de flota.
@@ -1178,6 +1243,7 @@ export class AircraftBalanceService {
             memoFactura,
             vigenciaComisiones,
             ingresosPartidos,
+            entregasSocios,
           ),
         ),
         (a.color_calendario as string | null) ?? null,
@@ -1198,6 +1264,7 @@ export class AircraftBalanceService {
           memoFactura,
           vigenciaComisiones,
           ingresosPartidos,
+          entregasSocios,
         ),
       ),
       null,
@@ -2127,6 +2194,7 @@ export class AircraftBalanceService {
           monto_total_usd: v.monto_total_usd,
           tc_usd_mxn:
             pos(v.tc_usd_mxn) ?? ctx.tcOficialPorVuelo.get(v.id)?.tc ?? null,
+          k_cotizacion: pos(v.tc_usd_mxn),
           cliente_interno: v.cliente_id
             ? ctx.clientesInternos.has(v.cliente_id)
             : false,
@@ -2234,6 +2302,70 @@ export class AircraftBalanceService {
     };
   }
 
+  /**
+   * ENTREGAS A SOCIOS VIVAS (21-oct-2026, invariante 100): TODAS las filas
+   * sin borrar de `reparto_pago` (cada libro filtra las de su avión y sus
+   * meses con `entregasPorSocioDelAvion`); UNA lectura por libro individual
+   * y UNA para todo el general. `null` = la cuenta corriente de los socios
+   * no está disponible (migración `20261020000006` sin aplicar: el lector
+   * dice que no o responde `SIN_MIGRACION`) ⇒ las llaves de entregas NO
+   * viajan — jamás un 0 inventado. Cualquier OTRO fallo de lectura TUMBA el
+   * libro, como el de cobros o gastos (nunca un Excel con la columna vacía
+   * en silencio).
+   */
+  private async entregasSociosVivas(): Promise<RepartoPagoRow[] | null> {
+    const lector = lectorCuentaSocios(this.supabase.service);
+    if (!(await lector.disponible())) return null;
+    let vivas: RepartoPagoRow[] | typeof SIN_MIGRACION;
+    try {
+      vivas = await lector.entregasVivas();
+    } catch (e: unknown) {
+      throw new Error(
+        `Balance: fallo al leer las entregas a socios: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+    return vivas === SIN_MIGRACION ? null : vivas;
+  }
+
+  /**
+   * Nombre y `es_empresa` de socios que recibieron entregas «por este
+   * avión» pero NO están vigentes en el periodo (invariante 100): primero
+   * su fila de `aeronave_socio` de otra vigencia (ya leída), si no, una
+   * lectura de `usuario` por lote (el lector de la cuenta).
+   */
+  private async identidadSociosFuera(
+    ids: ReadonlyArray<string>,
+    sociosAll: ReadonlyArray<SocioRow>,
+  ): Promise<Map<string, { nombre: string; es_empresa: boolean }>> {
+    const out = new Map<string, { nombre: string; es_empresa: boolean }>();
+    for (const s of sociosAll) {
+      if (!ids.includes(s.socio_id) || out.has(s.socio_id)) continue;
+      const u = Array.isArray(s.usuario) ? s.usuario[0] : s.usuario;
+      if (u?.nombre) {
+        out.set(s.socio_id, {
+          nombre: u.nombre,
+          es_empresa: u.es_empresa === true,
+        });
+      }
+    }
+    const faltan = ids.filter((id) => !out.has(id));
+    if (faltan.length > 0) {
+      const usuarios = await lectorCuentaSocios(this.supabase.service).usuarios(
+        faltan,
+      );
+      for (const id of faltan) {
+        const u = usuarios.get(id);
+        out.set(id, {
+          nombre: u?.nombre ?? 'Socio',
+          es_empresa: u?.es_empresa === true,
+        });
+      }
+    }
+    return out;
+  }
+
   private async buildPayload(
     aircraftId: string | null,
     desde: string,
@@ -2251,6 +2383,11 @@ export class AircraftBalanceService {
     // invariante 67): el general los lee UNA vez para todos sus libros y
     // «otros movimientos»; sin ellos (libro individual) se leen aquí.
     ingresosPartidos?: IngresosDeResultadoPartidos,
+    // ENTREGAS A SOCIOS (21-oct-2026, invariante 100): las filas VIVAS de
+    // `reparto_pago`, leídas UNA vez por el general para todos sus bloques;
+    // sin ellas (`undefined`, libro individual) se leen aquí. `null` = la
+    // cuenta corriente no está disponible ⇒ las llaves no viajan.
+    entregasSocios?: RepartoPagoRow[] | null,
   ): Promise<BalanceAvionPayload> {
     const sb = this.supabase.service;
     const modoExternos = aircraftId == null;
@@ -2558,7 +2695,7 @@ export class AircraftBalanceService {
             .select(
               // `es_empresa` (6-oct-2026): la propia empresa como socia —
               // alimenta el bloque «VUELATOUR (empresa)» del general.
-              'socio_id, porcentaje, vigente_desde, vigente_hasta, usuario:socio_id(nombre, es_empresa)',
+              'socio_id, porcentaje, vigente_desde, vigente_hasta, descontar_reserva_overhaul, usuario:socio_id(nombre, es_empresa)',
             )
             .eq('aeronave_id', aircraftId)
         : Promise.resolve(vacio),
@@ -2869,14 +3006,18 @@ export class AircraftBalanceService {
       typeof g.fecha_gasto === 'string' && g.fecha_gasto
         ? g.fecha_gasto.slice(0, 10)
         : null;
-    const diasGastosMxnSinTc = new Set<string>();
+    // Días de los gastos SIN `tc_gasto` en CUALQUIER moneda (20-oct-2026,
+    // invariante 99): los MXN lo piden para su USD informativo (regla B) y
+    // los USD para sus PESOS en las hojas (`tcMxnDeGastoUsd`, abajo), con el
+    // MISMO oficial del día que usa el reparto (`toMxn`).
+    const diasGastosSinTc = new Set<string>();
     for (const g of [...gastosVuelo, ...gastosAvion, ...gastosGasMes]) {
-      if (g.moneda !== 'MXN' || pos(g.tc_gasto) != null) continue;
+      if (pos(g.tc_gasto) != null) continue;
       const dia = diaGasto(g);
-      if (dia) diasGastosMxnSinTc.add(dia);
+      if (dia) diasGastosSinTc.add(dia);
     }
     const oficialPorDiaGasto = await this.tcOficialDeDias(
-      [...diasGastosMxnSinTc],
+      [...diasGastosSinTc],
       memoTc,
     );
     // Con qué T.C. pasa a DÓLARES un gasto en pesos (fuente única de la
@@ -3215,7 +3356,7 @@ export class AircraftBalanceService {
       // (los costos siguen restando: es la pérdida real del cancelado).
       // MULTI-AVIÓN: lo retenido también se reparte (parteAvion).
       const cobrosCancelado =
-        cancelado && conParte ? cobrosEnUsd(vCobros, K) : null;
+        cancelado && conParte ? cobrosEnUsd(vCobros, K, kCapturado) : null;
       let I: number | null;
       let J: number | null;
       if (cobrosCancelado != null) {
@@ -4297,7 +4438,7 @@ export class AircraftBalanceService {
         cobradoMxn = L ?? cobradoRealMxn;
       } else if (K != null && p != null) {
         const cobradoAvionUsd = parteAvion(
-          cobradoParteAvion(cobrosEnUsd(vCobros, K).total_usd, p),
+          cobradoParteAvion(cobrosEnUsd(vCobros, K, kCapturado).total_usd, p),
         );
         cobradoMxn = round2(cobradoAvionUsd * K);
       } else {
@@ -5238,6 +5379,20 @@ export class AircraftBalanceService {
       const conv = tcUsdDeGastoMxn(g, tcHojas, 'T.C. promedio de las hojas');
       return conv ? monto / conv.tc : null;
     };
+    // PESOS DE UN GASTO EN DÓLARES SIN `tc_gasto` (20-oct-2026, invariante
+    // 99): el T.C. oficial de SU día —la MISMA regla del reparto (`toMxn`:
+    // USD × tc_gasto ?? oficial del día)— antes del respaldo de siempre (el
+    // T.C. promedio de las hojas). Así la hoja «Gastos Indirectos» del
+    // balance y el grupo INDIRECTO del reparto dicen los MISMOS pesos.
+    const tcMxnDeGastoUsd = (
+      g: GastoRow,
+    ): { tc: number; lugar: string } | null => {
+      const dia = diaGasto(g);
+      const det = dia ? oficialPorDiaGasto.get(dia) : undefined;
+      return det != null
+        ? { tc: det.tc, lugar: `T.C. oficial del ${det.fecha_dato}` }
+        : null;
+    };
     // Nombre de PESTAÑA con el que los pendientes citan la hoja (2-sep-2026):
     // el libro individual pinta `gastos_indirectos` y `otros_gastos` en UNA
     // sola pestaña "Gastos Indirectos" (antes 'gastos indirectos de avión' y
@@ -5249,7 +5404,7 @@ export class AircraftBalanceService {
       horasVoladas,
       'Gastos Indirectos',
       pendientes,
-      { usdDeGasto: usdDeGastoHoja },
+      { usdDeGasto: usdDeGastoHoja, tcMxnDeGasto: tcMxnDeGastoUsd },
     );
     // Hoja "refacciones": mismo ledger + el id del movimiento de cardex y
     // el `tc_gasto` de SU gasto por fila (mismo orden estable por fecha que
@@ -5262,7 +5417,7 @@ export class AircraftBalanceService {
       horasVoladas,
       'refacciones',
       pendientes,
-      { usdDeGasto: usdDeGastoHoja },
+      { usdDeGasto: usdDeGastoHoja, tcMxnDeGasto: tcMxnDeGastoUsd },
     );
     const hojaRefacciones = {
       ...hojaRefaccionesBase,
@@ -5279,7 +5434,7 @@ export class AircraftBalanceService {
       horasVoladas,
       'Gastos Indirectos',
       pendientes,
-      { usdDeGasto: usdDeGastoHoja },
+      { usdDeGasto: usdDeGastoHoja, tcMxnDeGasto: tcMxnDeGastoUsd },
     );
     // T.C. por fila + MONTO MXN como fórmula en la hoja 'permisos'
     // (13-oct-2026, invariante 59): SOLO esta hoja lleva `tc_aplicado` por
@@ -5290,7 +5445,11 @@ export class AircraftBalanceService {
       horasVoladas,
       'permisos',
       pendientes,
-      { tcPorFila: true, usdDeGasto: usdDeGastoHoja },
+      {
+        tcPorFila: true,
+        usdDeGasto: usdDeGastoHoja,
+        tcMxnDeGasto: tcMxnDeGastoUsd,
+      },
     );
     // Pagos de AFAC marcados (invariante 90): MISMA conversión que la hoja
     // «permisos» (tc_gasto ?? T.C. de las hojas); NO entran a la cascada.
@@ -5302,7 +5461,11 @@ export class AircraftBalanceService {
             horasVoladas,
             'pagos AFAC',
             pendientes,
-            { tcPorFila: true, usdDeGasto: usdDeGastoHoja },
+            {
+              tcPorFila: true,
+              usdDeGasto: usdDeGastoHoja,
+              tcMxnDeGasto: tcMxnDeGastoUsd,
+            },
           )
         : null;
     const hojaCombustibleBase = this.buildHoja(
@@ -5311,7 +5474,7 @@ export class AircraftBalanceService {
       horasVoladas,
       'combustible',
       pendientes,
-      { usdDeGasto: usdDeGastoHoja },
+      { usdDeGasto: usdDeGastoHoja, tcMxnDeGasto: tcMxnDeGastoUsd },
     );
     const litrosPorFila = [...gastosGas]
       .sort((a, b) => (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? ''))
@@ -5556,35 +5719,40 @@ export class AircraftBalanceService {
     );
 
     // Socios vigentes en el periodo (mismo criterio de vigencia que el módulo
-    // de reparto) con nombre real desde usuario.
-    const socios = sociosAll
+    // de reparto) con nombre real desde usuario. `sociosVigentes` queda
+    // alineado por índice con `socios` (invariante 100: las entregas se
+    // casan por `socio_id` sin meter el id al payload).
+    const sociosVigentes = sociosAll
       .filter(
         (s) =>
           s.vigente_desde <= hasta &&
           (s.vigente_hasta === null || s.vigente_hasta >= desde),
       )
-      .sort((a, b) => Number(b.porcentaje) - Number(a.porcentaje))
-      .map((s) => {
-        const u = Array.isArray(s.usuario) ? s.usuario[0] : s.usuario;
-        const pct = Number(s.porcentaje);
-        return {
-          nombre: u?.nombre ?? 'Socio',
-          porcentaje: pct,
-          monto_usd:
-            utilidadCobrada != null
-              ? round2((pct / 100) * utilidadCobrada)
-              : null,
-          // ADITIVO (6-oct-2026, API 0.0.59): la empresa como socia. El
-          // bloque «VUELATOUR (empresa)» del general suma ESTE monto.
-          es_empresa: u?.es_empresa === true,
-          // ADITIVO (18-oct-2026, API 0.0.94, invariante 92): lo que le toca
-          // EN PESOS de la utilidad cobrada en pesos (lo que se transfiere).
-          monto_mxn:
-            utilidadCobradaMxn != null
-              ? round2((pct / 100) * utilidadCobradaMxn)
-              : null,
-        };
-      });
+      .sort((a, b) => Number(b.porcentaje) - Number(a.porcentaje));
+    const socios = sociosVigentes.map((s) => {
+      const u = Array.isArray(s.usuario) ? s.usuario[0] : s.usuario;
+      const pct = Number(s.porcentaje);
+      return {
+        nombre: u?.nombre ?? 'Socio',
+        porcentaje: pct,
+        monto_usd:
+          utilidadCobrada != null
+            ? round2((pct / 100) * utilidadCobrada)
+            : null,
+        // ADITIVO (6-oct-2026, API 0.0.59): la empresa como socia. El
+        // bloque «VUELATOUR (empresa)» del general suma ESTE monto.
+        es_empresa: u?.es_empresa === true,
+        // ADITIVO (18-oct-2026, API 0.0.94, invariante 92): lo que le toca
+        // EN PESOS de la utilidad cobrada en pesos (lo que se transfiere).
+        monto_mxn:
+          utilidadCobradaMxn != null
+            ? round2((pct / 100) * utilidadCobradaMxn)
+            : null,
+        // RESERVA POR SOCIO (20-oct-2026, invariante 99): se completa
+        // abajo, cuando ya se conoce la reserva del periodo.
+        descuenta_reserva: s.descontar_reserva_overhaul === true,
+      };
+    });
 
     // ===== Pendientes a nivel avión (los de ficha/socios/servicio no
     // aplican al libro EXTERNOS: no es un avión) =====
@@ -5708,6 +5876,135 @@ export class AircraftBalanceService {
         ),
       };
     }
+    // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la MISMA
+    // regla del reparto a socios — su parte (reserva × %) se INFORMA siempre
+    // (`reserva_*`, «cuánto debe guardar») y, solo al socio que lo pidió
+    // (`descontar_reserva_overhaul`), se le DESCUENTA de `monto_*`:
+    // `utilidad_*` conserva su parte de la utilidad cobrada ANTES de la
+    // reserva. Sin reserva (EXTERNOS, 0 horas): reserva 0 y nada cambia.
+    const sociosConReserva = socios.map((s) => {
+      const pct = s.porcentaje;
+      const reservaUsd = reservaBalance
+        ? round2((pct / 100) * reservaBalance.reserva_overhaul_usd)
+        : 0;
+      const reservaMxn = reservaBalance
+        ? reservaBalance.reserva_overhaul_mxn == null
+          ? null
+          : round2((pct / 100) * reservaBalance.reserva_overhaul_mxn)
+        : 0;
+      const descuenta = s.descuenta_reserva;
+      return {
+        ...s,
+        monto_usd:
+          s.monto_usd == null
+            ? null
+            : round2(s.monto_usd - (descuenta ? reservaUsd : 0)),
+        monto_mxn:
+          s.monto_mxn == null || (descuenta && reservaMxn == null)
+            ? null
+            : round2(s.monto_mxn - (descuenta ? (reservaMxn ?? 0) : 0)),
+        utilidad_usd: s.monto_usd,
+        utilidad_mxn: s.monto_mxn,
+        reserva_usd: reservaUsd,
+        reserva_mxn: reservaMxn,
+      };
+    });
+    // ENTREGAS A SOCIOS (21-oct-2026, invariante 100). Pedido del cliente:
+    // «agregar en el balance general y por avión los pagos que se vayan
+    // dando a los socios». Por socio, ADITIVO: lo YA entregado «por este
+    // avión» en los meses del periodo (`entregasPorSocioDelAvion`: la MISMA
+    // regla de la pantalla por avión del reparto) EN PESOS con el USD
+    // informativo y el conteo, y lo que FALTA (`monto_mxn` − entregado; null
+    // sin pesos; NEGATIVO = se le adelantó). Por avión, las Σ. Un socio con
+    // entregas que ya no está vigente entra como renglón con porcentaje 0 y
+    // montos 0: ese dinero no desaparece del libro. Dos vigencias del mismo
+    // socio: sus entregas van en la primera (la de mayor %); la otra, 0.
+    // Sin la cuenta corriente (`entregasPeriodo` null) NADA de esto viaja:
+    // el bloque y los socios quedan como hasta el 0.0.101. EXTERNOS no
+    // tiene socios: tampoco.
+    const entregasPeriodo =
+      modoExternos || aircraftId == null
+        ? null
+        : entregasSocios === undefined
+          ? await this.entregasSociosVivas()
+          : entregasSocios;
+    let sociosPayload: BalanceAvionSocioPayload[] = sociosConReserva;
+    let entregasAvion: {
+      entregado_socios_mxn: number;
+      por_entregar_socios_mxn: number | null;
+    } | null = null;
+    if (entregasPeriodo != null && aircraftId != null) {
+      const porSocio = entregasPorSocioDelAvion(
+        entregasPeriodo,
+        aircraftId,
+        desde,
+        hasta,
+      );
+      const vistos = new Set<string>();
+      const conEntregas: BalanceAvionSocioPayload[] = sociosConReserva.map(
+        (s, i) => {
+          const id = sociosVigentes[i].socio_id;
+          const e = vistos.has(id) ? undefined : porSocio.get(id);
+          vistos.add(id);
+          const entregadoMxn = e?.mxn ?? 0;
+          return {
+            ...s,
+            entregado_mxn: entregadoMxn,
+            entregado_usd: e?.usd ?? 0,
+            entregas: e?.n ?? 0,
+            por_entregar_mxn:
+              s.monto_mxn == null ? null : round2(s.monto_mxn - entregadoMxn),
+          };
+        },
+      );
+      const fuera = [...porSocio.keys()].filter((id) => !vistos.has(id));
+      if (fuera.length > 0) {
+        const identidad = await this.identidadSociosFuera(fuera, sociosAll);
+        const nombreDe = (id: string) => identidad.get(id)?.nombre ?? 'Socio';
+        // Orden estable para el libro: por nombre (es-MX) y luego por id.
+        fuera.sort(
+          (a, b) =>
+            nombreDe(a).localeCompare(nombreDe(b), 'es-MX') ||
+            a.localeCompare(b),
+        );
+        for (const id of fuera) {
+          const e = porSocio.get(id)!;
+          const u = identidad.get(id);
+          conEntregas.push({
+            nombre: nombreDe(id),
+            porcentaje: 0,
+            monto_usd: 0,
+            es_empresa: u?.es_empresa === true,
+            monto_mxn: 0,
+            descuenta_reserva: false,
+            utilidad_usd: 0,
+            utilidad_mxn: 0,
+            reserva_usd: 0,
+            reserva_mxn: 0,
+            entregado_mxn: e.mxn,
+            entregado_usd: e.usd,
+            entregas: e.n,
+            por_entregar_mxn: round2(0 - e.mxn),
+          });
+        }
+      }
+      sociosPayload = conEntregas;
+      entregasAvion = {
+        entregado_socios_mxn: round2(
+          conEntregas.reduce((acc, s) => acc + (s.entregado_mxn ?? 0), 0),
+        ),
+        por_entregar_socios_mxn: conEntregas.some(
+          (s) => s.por_entregar_mxn == null,
+        )
+          ? null
+          : round2(
+              conEntregas.reduce(
+                (acc, s) => acc + (s.por_entregar_mxn ?? 0),
+                0,
+              ),
+            ),
+      };
+    }
     if (modoExternos) {
       // Sin avión de flota: sin programa de servicio que vigilar.
     } else if (intervalosServicio.filter((n) => n > 0).length === 0) {
@@ -5755,7 +6052,10 @@ export class AircraftBalanceService {
         utilidad_despues_usd: utilidadDespues,
         por_cobrar_usd: porCobrarUsdTotal,
         utilidad_cobrada_usd: utilidadCobrada,
-        socios,
+        // Con su parte de la reserva de overhaul y, si la descuentan, el
+        // monto neto (20-oct-2026, invariante 99); desde el 21-oct-2026
+        // (invariante 100) con lo entregado / por entregar por socio.
+        socios: sociosPayload,
         // LA CASCADA EN PESOS (18-oct-2026, API 0.0.94, invariante 92),
         // ADITIVA: la misma cascada con lo que el libro ya tiene en pesos.
         // pyservices la pinta como la PRINCIPAL (con `balance_en_pesos`) y
@@ -5776,6 +6076,10 @@ export class AircraftBalanceService {
         // RESERVA DE OVERHAUL INFORMATIVA (19-oct-2026, API 0.0.98,
         // invariante 96; ADITIVA, nunca en EXTERNOS): NO se resta de nada.
         ...(reservaBalance ?? {}),
+        // ENTREGAS A SOCIOS DEL AVIÓN (21-oct-2026, invariante 100;
+        // ADITIVAS, solo con la cuenta corriente disponible): Σ entregado y
+        // Σ por entregar de `socios[]`, en pesos.
+        ...(entregasAvion ?? {}),
         ...(libroConReglaComisiones
           ? {
               comisiones_mxn: comisionesMxnPeriodo,
@@ -7345,6 +7649,7 @@ export class AircraftBalanceService {
               tc_usd_mxn: c.tc_usd_mxn,
             })),
             tc ?? undefined,
+            pos(v.tc_usd_mxn),
           ).total_usd;
           const exceso = sobrecobroUsd(cobradoUsd, p);
           if (exceso >= 0.01) {
@@ -7412,6 +7717,7 @@ export class AircraftBalanceService {
               tc_usd_mxn: c.tc_usd_mxn,
             })),
             tc ?? undefined,
+            pos(v.tc_usd_mxn),
           ).total_usd;
           if (pendienteCobro(p.total_usd, cobradoUsd) > 0) {
             porCobrarVt = Math.max(
@@ -7628,6 +7934,13 @@ export class AircraftBalanceService {
        * llega a dólares (null) deja la hoja sin USD. Los PESOS no cambian.
        */
       usdDeGasto?: (g: GastoRow) => number | null;
+      /**
+       * PESOS DE UN GASTO EN DÓLARES SIN `tc_gasto` (20-oct-2026, invariante
+       * 99): el T.C. (y de dónde salió) con que la fila pasa a pesos ANTES
+       * del respaldo `tcPromedio` — el oficial de su día, la MISMA regla del
+       * reparto. Sin la opción, el respaldo de siempre (byte a byte).
+       */
+      tcMxnDeGasto?: (g: GastoRow) => { tc: number; lugar: string } | null;
     } = {},
   ): BalanceAvionHojaGastosPayload {
     const filas: BalanceAvionGastoFilaPayload[] = [...gastos]
@@ -7656,7 +7969,10 @@ export class AircraftBalanceService {
         if (g.moneda === 'MXN') {
           mxn = round2(monto);
         } else {
-          const tc = pos(g.tc_gasto) ?? tcPromedio;
+          const propio = pos(g.tc_gasto);
+          const oficial =
+            propio == null ? (opciones.tcMxnDeGasto?.(g) ?? null) : null;
+          const tc = propio ?? oficial?.tc ?? tcPromedio;
           mxn = tc != null ? round2(monto * tc) : null;
           // EXACTAMENTE el número que multiplicó, sin re-redondear:
           // pyservices lo cita en la fórmula y debe reproducir el centavo.
@@ -7667,7 +7983,7 @@ export class AircraftBalanceService {
                 g.moneda ?? 'USD'
               } por $${monto.toLocaleString('en-US')} sin ningún TC — fila sin monto MXN`,
             );
-          } else if (pos(g.tc_gasto) == null && monto > 5000) {
+          } else if (propio == null && monto > 5000) {
             // Defensa anti-moneda-equivocada (caso real 26-ago: salida de
             // bodega de aceite capturada como $39,799.92 "USD" → ~$730k MXN
             // falsos con el TC promedio): un gasto USD grande sin TC propio
@@ -7675,7 +7991,9 @@ export class AircraftBalanceService {
             pendientes.push(
               `Hoja "${nombreHoja}" (${g.fecha_gasto ?? 'sin fecha'}): gasto GRANDE en ${
                 g.moneda ?? 'USD'
-              } por $${monto.toLocaleString('en-US')} sin TC propio, convertido con TC promedio (~$${mxn.toLocaleString('es-MX', { maximumFractionDigits: 0 })} MXN) — VERIFICAR moneda y TC en Gastos`,
+              } por $${monto.toLocaleString('en-US')} sin TC propio, convertido con ${
+                oficial != null ? oficial.lugar : 'TC promedio'
+              } (~$${mxn.toLocaleString('es-MX', { maximumFractionDigits: 0 })} MXN) — VERIFICAR moneda y TC en Gastos`,
             );
           }
         }

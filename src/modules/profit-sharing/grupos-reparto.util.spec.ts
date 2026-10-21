@@ -34,8 +34,11 @@ describe('grupos-reparto.util — membresía congelada', () => {
     );
   });
 
-  it('INDIRECTO = {REFACCION, SERVICIOS}; PERMISO = {PERMISO}; FIJO y TUAS_CAT', () => {
-    expect([...INDIRECTO].sort()).toEqual(['REFACCION', 'SERVICIOS']);
+  it('INDIRECTO = {REFACCION, SERVICIOS, INDIRECTO (20-oct-2026, invariante 99)}; PERMISO = {PERMISO}; FIJO y TUAS_CAT', () => {
+    // La CATEGORÍA INDIRECTO sellada a un avión cuenta como gasto indirecto
+    // del avión, igual que en la hoja «Gastos Indirectos» del balance
+    // (decisión del cliente del 20-oct-2026: «que cuadren»).
+    expect([...INDIRECTO].sort()).toEqual(['INDIRECTO', 'REFACCION', 'SERVICIOS']);
     expect([...PERMISO]).toEqual(['PERMISO']);
     expect(FIJO).toBe('FIJO');
     expect(TUAS_CAT).toBe('TUAS');
@@ -48,9 +51,8 @@ describe('grupos-reparto.util — membresía congelada', () => {
     for (const c of todas) expect(enumValores).toContain(c);
   });
 
-  it('la CATEGORÍA INDIRECTO, NOMINA, OTRO y el pago al vendedor NO están en ningún grupo (caen a EXCLUIDO)', () => {
+  it('NOMINA, OTRO y el pago al vendedor NO están en ningún grupo (caen a EXCLUIDO)', () => {
     for (const c of [
-      'INDIRECTO',
       'NOMINA',
       'OTRO',
       'GASOLINA',

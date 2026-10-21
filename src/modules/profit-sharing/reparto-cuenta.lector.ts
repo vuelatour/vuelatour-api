@@ -10,8 +10,8 @@
  * cliente Supabase (registro `WeakMap`, el patrón de `columnaOpcional`).
  *
  * Reglas de la sonda (mecánica de `columnaOpcional`, sobre la columna
- * `reparto_pago.saldo_snapshot_usd`, que crea la MISMA migración que la
- * tabla `reparto_cuenta_socio`):
+ * `reparto_pago.saldo_snapshot_mxn`, de la migración de PESOS
+ * `20261020000006`, invariante 99; antes `saldo_snapshot_usd` de la v2):
  *  - Éxito ⇒ `true` memorizado para siempre.
  *  - Columna ausente (42703/PGRST204) o tabla ausente (42P01/PGRST205) ⇒
  *    `false`, re-sondeo cada ≤ 10 min: aplicar la migración la enciende
@@ -93,7 +93,7 @@ export class LectorCuentaSocios {
     private readonly ahora: () => number = () => Date.now(),
   ) {}
 
-  /** ¿Está aplicada la migración 20261002000001? (memorizado; re-sondeo ≤ 10 min). */
+  /** ¿Está aplicada la migración de pesos 20261020000006? (memorizado; re-sondeo ≤ 10 min). */
   async disponible(): Promise<boolean> {
     if (this.estado === true) return true;
     if (

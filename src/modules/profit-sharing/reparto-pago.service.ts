@@ -58,12 +58,15 @@ import {
   MOTIVO_BAJA_PAGO_MAX,
   MOTIVO_BAJA_PAGO_MIN,
   TABLA_REPARTO_PAGO,
+  aPagoSocio,
   compararCaptura,
   esFechaDia,
   esMes,
   pathComprobantePago,
   periodoDeMes,
   textoOpcional,
+  dineroDePago,
+  tcDePago,
   validarDineroPago,
   validarFechaPago,
   type PagoSocio,
@@ -100,12 +103,13 @@ export interface ArchivoComprobantePago {
  * adelanto); `mes_en_curso_usd` (ADITIVO) = lo que lleva el mes abierto, que
  * NO cuenta. `exceso_usd`/`saldo_despues_usd` se miden contra lo cerrado.
  */
+/** `details` del 409 `PAGO_EXCEDE_SALDO`, EN PESOS (invariante 99). */
 interface DetalleExceso {
-  por_entregar_usd: number;
-  mes_en_curso_usd: number;
-  monto_usd: number;
-  exceso_usd: number;
-  saldo_despues_usd: number;
+  por_entregar_mxn: number;
+  mes_en_curso_mxn: number;
+  monto_mxn: number;
+  exceso_mxn: number;
+  saldo_despues_mxn: number;
 }
 
 function pagoNoExiste(id: string): NotFoundException {
@@ -423,11 +427,12 @@ export class RepartoPagoService {
       aeronaveId: dto.aeronave_id,
     });
     // Meses CERRADOS: el mes en curso todavía se mueve (ver invariante 38).
-    const porEntregar = ctx.fila.por_entregar_cerrado_usd;
-    const enCurso = ctx.fila.mes_en_curso_usd;
+    // EN PESOS (invariante 99): el candado compara pesos con pesos.
+    const porEntregar = ctx.fila.por_entregar_cerrado_mxn;
+    const enCurso = ctx.fila.mes_en_curso_mxn;
     const ex = excedeSaldo({
-      por_entregar_usd: porEntregar,
-      monto_usd: dinero.monto_usd,
+      por_entregar_mxn: porEntregar,
+      monto_mxn: dinero.monto_mxn,
     });
     if (ex.excede && dto.aceptar_exceso !== true) {
       // Doble envío con la MISMA llave: la 1.ª pudo insertar entre la
@@ -436,11 +441,11 @@ export class RepartoPagoService {
       const replay = await this.replaySiYaQuedo(dto);
       if (replay) return replay;
       throw this.excede({
-        por_entregar_usd: porEntregar,
-        mes_en_curso_usd: enCurso,
-        monto_usd: dinero.monto_usd,
-        exceso_usd: ex.exceso_usd,
-        saldo_despues_usd: ex.saldo_despues_usd,
+        por_entregar_mxn: porEntregar,
+        mes_en_curso_mxn: enCurso,
+        monto_mxn: dinero.monto_mxn,
+        exceso_mxn: ex.exceso_mxn,
+        saldo_despues_mxn: ex.saldo_despues_mxn,
       });
     }
 
@@ -454,8 +459,10 @@ export class RepartoPagoService {
         moneda: dinero.moneda,
         tc_usd_mxn: dinero.tc_usd_mxn,
         monto_usd: dinero.monto_usd,
+        monto_mxn: dinero.monto_mxn,
         utilidad_snapshot_usd: null,
-        saldo_snapshot_usd: porEntregar,
+        saldo_snapshot_usd: null,
+        saldo_snapshot_mxn: porEntregar,
         fecha_pago: fecha.fecha,
         metodo: dto.metodo,
         referencia: textoOpcional(dto.referencia),
@@ -480,7 +487,7 @@ export class RepartoPagoService {
     if (dto.aceptar_exceso !== true) {
       // Saldo inicial + generado en meses cerrados (todo menos entregas).
       const disponible =
-        Math.round((porEntregar + ctx.fila.entregado_usd) * 100) / 100;
+        Math.round((porEntregar + ctx.fila.entregado_mxn) * 100) / 100;
       const perdio = await this.perdioCarreraDeAlta(
         row,
         disponible,
@@ -490,7 +497,7 @@ export class RepartoPagoService {
       if (perdio) throw this.excede(perdio);
     }
     this.logger.log(
-      `Entrega a socio ${row.id}: socio ${row.socio_id}, ${row.monto} ${row.moneda} (${row.monto_usd} USD), por entregar antes ${porEntregar} USD (meses cerrados; mes en curso ${enCurso} USD), por ${actor.userId}${ex.excede ? ' — ADELANTO (aceptado)' : ''}`,
+      `Entrega a socio ${row.id}: socio ${row.socio_id}, ${row.monto} ${row.moneda} (${row.monto_mxn} MXN), por entregar antes ${porEntregar} MXN (meses cerrados; mes en curso ${enCurso} MXN), por ${actor.userId}${ex.excede ? ' — ADELANTO (aceptado)' : ''}`,
     );
     const despues = await this.despues(dto.socio_id, ctx.utilidades);
     return { pago: await this.pagoDe(despues, row.id), cuenta: despues.fila };
@@ -521,18 +528,24 @@ export class RepartoPagoService {
    */
   private async perdioCarreraDeAlta(
     row: RepartoPagoRow,
-    disponibleUsd: number,
-    mesEnCursoUsd: number,
+    disponibleMxn: number,
+    mesEnCursoMxn: number,
     actor: ActorPagos,
   ): Promise<DetalleExceso | null> {
     let r: ReturnType<typeof excedeSaldoEnOrdenDeCaptura>;
     try {
       const vivos = await this.lector.entregasVivas({ socio_id: row.socio_id });
       if (vivos === SIN_MIGRACION) return null;
+      // EN PESOS (invariante 99): `monto_mxn` de cada entrega viva.
+      const enPesos = (p: RepartoPagoRow) => ({
+        id: p.id,
+        created_at: p.created_at,
+        monto_mxn: aPagoSocio(p).monto_mxn,
+      });
       r = excedeSaldoEnOrdenDeCaptura({
-        disponible_usd: disponibleUsd,
-        vivos,
-        nuevo: row,
+        disponible_mxn: disponibleMxn,
+        vivos: vivos.map(enPesos),
+        nuevo: enPesos(row),
       });
     } catch (e) {
       this.logger.warn(
@@ -556,21 +569,21 @@ export class RepartoPagoService {
       .maybeSingle();
     if (error || !data) {
       this.logger.error(
-        `Entrega a socio ${row.id}: perdió la carrera de altas (rebasa lo por entregar por ${r.exceso_usd} USD) y NO se pudo dar de baja: ${error?.message ?? 'la fila ya no estaba viva'}. Queda registrada; el pre-cierre la avisa como adelanto.`,
+        `Entrega a socio ${row.id}: perdió la carrera de altas (rebasa lo por entregar por ${r.exceso_mxn} MXN) y NO se pudo dar de baja: ${error?.message ?? 'la fila ya no estaba viva'}. Queda registrada; el pre-cierre la avisa como adelanto.`,
       );
       return null;
     }
+    const monto = aPagoSocio(row).monto_mxn;
     this.logger.warn(
-      `Entrega a socio ${row.id} dada de baja por carrera de altas: ${row.monto_usd} USD sobre ${r.por_entregar_antes_usd} USD por entregar (socio ${row.socio_id}).`,
+      `Entrega a socio ${row.id} dada de baja por carrera de altas: ${monto} MXN sobre ${r.por_entregar_antes_mxn} MXN por entregar (socio ${row.socio_id}).`,
     );
-    const monto = Number(row.monto_usd);
     return {
-      por_entregar_usd: r.por_entregar_antes_usd,
-      mes_en_curso_usd: mesEnCursoUsd,
-      monto_usd: monto,
-      exceso_usd: r.exceso_usd,
-      saldo_despues_usd:
-        Math.round((r.por_entregar_antes_usd - monto) * 100) / 100,
+      por_entregar_mxn: r.por_entregar_antes_mxn,
+      mes_en_curso_mxn: mesEnCursoMxn,
+      monto_mxn: monto,
+      exceso_mxn: r.exceso_mxn,
+      saldo_despues_mxn:
+        Math.round((r.por_entregar_antes_mxn - monto) * 100) / 100,
     };
   }
 
@@ -632,17 +645,29 @@ export class RepartoPagoService {
     const actual = await this.pagoVivo(id);
 
     const moneda = dto.moneda ?? actual.moneda;
+    // INVARIANTE 99: en USD el T.C. no se persiste (CHECK de la tabla):
+    // queda implícito en monto_mxn ÷ monto (`tcDePago`). Una corrección que
+    // NO toca el dinero (notas, «corresponde a», comprobante…) reusa el
+    // dinero de la fila tal cual: re-validarlo rebotaba TODA corrección de
+    // una entrega en dólares con TC_REQUERIDO (hallazgo de los specs,
+    // 20-oct-2026).
+    const tocaDinero =
+      dto.monto !== undefined ||
+      dto.moneda !== undefined ||
+      dto.tc_usd_mxn !== undefined;
     let tc: unknown;
     if (dto.tc_usd_mxn !== undefined) tc = dto.tc_usd_mxn;
     else if (dto.moneda !== undefined && dto.moneda !== actual.moneda) {
-      // Pasar a USD limpia el T.C.; pasar a MXN lo exige (TC_REQUERIDO).
+      // Cambiar de moneda exige el T.C. (TC_REQUERIDO en las DOS monedas).
       tc = null;
-    } else tc = actual.tc_usd_mxn;
-    const dinero = validarDineroPago({
-      monto: dto.monto ?? actual.monto,
-      moneda,
-      tc_usd_mxn: tc,
-    });
+    } else tc = tcDePago(actual);
+    const dinero = tocaDinero
+      ? validarDineroPago({
+          monto: dto.monto ?? actual.monto,
+          moneda,
+          tc_usd_mxn: tc,
+        })
+      : dineroDePago(actual);
     if (!dinero.ok) throw bad(dinero.codigo, dinero.mensaje);
     if (dto.fecha_pago !== undefined) {
       const f = validarFechaPago(dto.fecha_pago, this.cuentas.hoy());
@@ -673,13 +698,16 @@ export class RepartoPagoService {
     const tcActual =
       actual.tc_usd_mxn == null ? null : Number(actual.tc_usd_mxn);
     const montoUsdActual = Number(actual.monto_usd);
+    // EN PESOS (invariante 99): lo que descuenta hoy y lo que descontaría.
+    const montoMxnActual = aPagoSocio(actual).monto_mxn;
     const cambiaDinero =
       dinero.monto !== Number(actual.monto) ||
       dinero.moneda !== actual.moneda ||
       dinero.tc_usd_mxn !== tcActual ||
-      Math.round(dinero.monto_usd * 100) !== Math.round(montoUsdActual * 100);
+      Math.round(dinero.monto_usd * 100) !== Math.round(montoUsdActual * 100) ||
+      Math.round(dinero.monto_mxn * 100) !== Math.round(montoMxnActual * 100);
     const sube =
-      Math.round(dinero.monto_usd * 100) > Math.round(montoUsdActual * 100);
+      Math.round(dinero.monto_mxn * 100) > Math.round(montoMxnActual * 100);
 
     const ctx = await this.contexto(actual.socio_id, {
       exigirSocio: false,
@@ -688,20 +716,20 @@ export class RepartoPagoService {
     // Lo por entregar de meses cerrados SIN esta entrega (la cuenta ya la
     // descontó).
     const sinEsta =
-      Math.round((ctx.fila.por_entregar_cerrado_usd + montoUsdActual) * 100) /
+      Math.round((ctx.fila.por_entregar_cerrado_mxn + montoMxnActual) * 100) /
       100;
     if (sube && dto.aceptar_exceso !== true) {
       const ex = excedeSaldo({
-        por_entregar_usd: sinEsta,
-        monto_usd: dinero.monto_usd,
+        por_entregar_mxn: sinEsta,
+        monto_mxn: dinero.monto_mxn,
       });
       if (ex.excede) {
         throw this.excede({
-          por_entregar_usd: sinEsta,
-          mes_en_curso_usd: ctx.fila.mes_en_curso_usd,
-          monto_usd: dinero.monto_usd,
-          exceso_usd: ex.exceso_usd,
-          saldo_despues_usd: ex.saldo_despues_usd,
+          por_entregar_mxn: sinEsta,
+          mes_en_curso_mxn: ctx.fila.mes_en_curso_mxn,
+          monto_mxn: dinero.monto_mxn,
+          exceso_mxn: ex.exceso_mxn,
+          saldo_despues_mxn: ex.saldo_despues_mxn,
         });
       }
     }
@@ -712,7 +740,8 @@ export class RepartoPagoService {
       patch.moneda = dinero.moneda;
       patch.tc_usd_mxn = dinero.tc_usd_mxn;
       patch.monto_usd = dinero.monto_usd;
-      patch.saldo_snapshot_usd = sinEsta;
+      patch.monto_mxn = dinero.monto_mxn;
+      patch.saldo_snapshot_mxn = sinEsta;
     }
     const comparar = (col: keyof RepartoPagoRow, nuevo: unknown) => {
       if (nuevo !== (actual[col] ?? null)) patch[col] = nuevo;

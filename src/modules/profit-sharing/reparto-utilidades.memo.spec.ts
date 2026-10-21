@@ -42,6 +42,7 @@ describe('UtilidadesMensualesSocios', () => {
   });
 
   it('fresco (escrituras): recalcula los meses cerrados aunque estén memoizados y RENUEVA la memoria', async () => {
+    // La utilidad memoizada viaja EN PESOS (`monto_mxn`, invariante 99).
     let version = 0;
     const calcular = jest.fn((mes: string, enCurso: boolean) => {
       version += 1;
@@ -51,24 +52,24 @@ describe('UtilidadesMensualesSocios', () => {
           {
             aeronave: { id: 'n4142r', matricula: 'N4142R' },
             reparto_porcentaje_total: 100,
-            socios: [{ socio_id: 'm', porcentaje: 69, monto_usd: version }],
+            socios: [{ socio_id: 'm', porcentaje: 69, monto_mxn: version }],
           },
         ],
       });
     });
     const memo = new UtilidadesMensualesSocios(calcular, { ahoraMs: () => 0 });
     const leida = await memo.deMeses(['2026-09'], '2026-10');
-    expect(leida[0].aviones[0].socios[0].monto_usd).toBe(1);
+    expect(leida[0].aviones[0].socios[0].monto_mxn).toBe(1);
     // Un cobro tardío de septiembre: la lectura memoizada no lo ve…
     const vieja = await memo.deMeses(['2026-09'], '2026-10');
-    expect(vieja[0].aviones[0].socios[0].monto_usd).toBe(1);
+    expect(vieja[0].aviones[0].socios[0].monto_mxn).toBe(1);
     // …la escritura (candado del adelanto) sí, y deja la memoria al día.
     const fresca = await memo.deMeses(['2026-09'], '2026-10', {
       fresco: true,
     });
-    expect(fresca[0].aviones[0].socios[0].monto_usd).toBe(2);
+    expect(fresca[0].aviones[0].socios[0].monto_mxn).toBe(2);
     const despues = await memo.deMeses(['2026-09'], '2026-10');
-    expect(despues[0].aviones[0].socios[0].monto_usd).toBe(2);
+    expect(despues[0].aviones[0].socios[0].monto_mxn).toBe(2);
     expect(calcular).toHaveBeenCalledTimes(2);
   });
 

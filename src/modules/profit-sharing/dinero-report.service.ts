@@ -642,7 +642,8 @@ export class DineroReportService {
       // Lo retenido en USD (solo cancelados; los MXN sin TC quedan fuera del
       // monto, como en todo el sistema, pero se ven en la lista de cobros).
       const retenidoUsd = esCancelado
-        ? cobrosEnUsd(cobrosPorVuelo.get(v.id as string) ?? [], tc).total_usd
+        ? cobrosEnUsd(cobrosPorVuelo.get(v.id as string) ?? [], tc, tc)
+            .total_usd
         : null;
       // IVA retenido: iva_pct del vuelo (fracción 0.16 o porcentaje 16); sin
       // IVA en la cotización, nada que derivar.
@@ -1924,6 +1925,7 @@ export class DineroReportService {
             estado: 'COMPLETADO',
             monto_total_usd: v.monto_total_usd as string | number | null,
             tc_usd_mxn: k(v),
+            k_cotizacion: k(v),
             cliente_interno: internos.has(v.cliente_id as string),
           },
           ctx.cobrosPorVuelo.get(v.id as string) ?? [],

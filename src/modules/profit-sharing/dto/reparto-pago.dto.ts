@@ -124,7 +124,7 @@ export class CrearPagoSocioDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'T.C. USD→MXN: OBLIGATORIO en MXN y prohibido en USD. Se guarda con 6 decimales (no se rechazan decimales de más: se normalizan).',
+      'T.C. USD→MXN: OBLIGATORIO en las dos monedas (la cuenta es en pesos, invariante 99: en USD dice cuántos pesos descuenta; en MXN, su dólar informativo). 6 decimales (los de más se normalizan). En USD no se persiste en tc_usd_mxn: queda implícito en monto_mxn ÷ monto.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -252,7 +252,7 @@ export class ActualizarPagoSocioDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'Al pasar a USD se limpia solo; al pasar a MXN es obligatorio.',
+      'Obligatorio en las dos monedas (invariante 99); al cambiar de moneda hay que mandarlo.',
   })
   @IsOptional()
   @Type(() => Number)

@@ -293,7 +293,7 @@ export async function facturasDeVuelos(
     // del vuelo (el mismo de `total_cobrado` del snapshot): insumo de la
     // regla 2 del anticipo devuelto (14-oct-2026).
     const tcVuelo = Number(v?.tc_usd_mxn) > 0 ? Number(v?.tc_usd_mxn) : null;
-    const cobrado = cobrosEnUsd(cobros, tcVuelo);
+    const cobrado = cobrosEnUsd(cobros, tcVuelo, tcVuelo);
     const exigencia = vueloExigeFactura(cobros, cobrado);
     const solicitud = solicitudDeFila(v);
     const yaNoAplica = solicitudYaNoAplica(solicitud, exigencia);

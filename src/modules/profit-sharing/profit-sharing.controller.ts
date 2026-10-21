@@ -32,7 +32,10 @@ import {
   LIMITE_MULTER_FACTURA_BYTES,
   type ArchivoMultipart,
 } from '../flights/factura-cliente.util';
-import { ProfitSharingQuery } from './dto/profit-sharing.dto';
+import {
+  HistoricoAvionQuery,
+  ProfitSharingQuery,
+} from './dto/profit-sharing.dto';
 import {
   ConfigurarCuentaSocioDto,
   EstadoCuentaQuery,
@@ -124,7 +127,7 @@ export class ProfitSharingController {
   @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
   @ApiOperation({
     summary:
-      'Configura la cuenta del socio: mes de arranque (AAAA-MM, no futuro, ≤ 36 meses atrás), saldo inicial en USD (negativo = ya se le había adelantado) y notas. Responde su renglón del resumen. 400 SOCIO_INVALIDO / CUENTA_DESDE_FUTURA / CUENTA_DESDE_FUERA_DE_RANGO / SALDO_INICIAL_INVALIDO; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
+      'Configura la cuenta del socio: mes de arranque (AAAA-MM, no futuro, ≤ 36 meses atrás), saldo inicial EN PESOS (MXN; negativo = ya se le había adelantado) y notas. Responde su renglón del resumen. 400 SOCIO_INVALIDO / CUENTA_DESDE_FUTURA / CUENTA_DESDE_FUERA_DE_RANGO / SALDO_INICIAL_INVALIDO; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
   })
   configurarCuentaSocio(
     @Param('socioId', ParseUUIDPipe) socioId: string,
@@ -151,7 +154,7 @@ export class ProfitSharingController {
   @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
   @ApiOperation({
     summary:
-      'Registra una ENTREGA a la cuenta del socio («corresponde a» mes/avión opcional; sin mes = adelanto a cuenta). 201 {pago, cuenta}; replay de client_request_id ⇒ 200 idempotente:true. 400 SOCIO_INVALIDO / SOCIO_NO_ES_DE_LA_AERONAVE / TC_REQUERIDO / TC_NO_APLICA / TC_FUERA_DE_RANGO / FECHA_PAGO_FUTURA / MES_FUTURO / ENTREGADO_POR_INVALIDO; 409 PAGO_EXCEDE_SALDO si rebasa lo por entregar de MESES CERRADOS (el mes en curso no cuenta; details.mes_en_curso_usd) — adelanto: confirmar con aceptar_exceso y la MISMA llave; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
+      'Registra una ENTREGA a la cuenta del socio («corresponde a» mes/avión opcional; sin mes = adelanto a cuenta). 201 {pago, cuenta}; replay de client_request_id ⇒ 200 idempotente:true. 400 SOCIO_INVALIDO / SOCIO_NO_ES_DE_LA_AERONAVE / TC_REQUERIDO (las DOS monedas) / TC_FUERA_DE_RANGO / FECHA_PAGO_FUTURA / MES_FUTURO / ENTREGADO_POR_INVALIDO; 409 PAGO_EXCEDE_SALDO si rebasa lo por entregar de MESES CERRADOS (el mes en curso no cuenta; details.mes_en_curso_mxn) — adelanto: confirmar con aceptar_exceso y la MISMA llave; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
   })
   async crearPagoSocio(
     @Body() dto: CrearPagoSocioDto,
@@ -167,7 +170,7 @@ export class ProfitSharingController {
   @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
   @ApiOperation({
     summary:
-      'Corrige una entrega (no cambia el socio; «corresponde a» avión/mes sí). Re-valida el dinero sobre el estado fusionado; si el monto en USD sube, vuelve a revisar el saldo de meses cerrados (409 PAGO_EXCEDE_SALDO salvo aceptar_exceso). {pago, cuenta}. 404 PAGO_NO_EXISTE, 409 PAGO_CAMBIO_CONCURRENTE.',
+      'Corrige una entrega (no cambia el socio; «corresponde a» avión/mes sí). Re-valida el dinero sobre el estado fusionado; si el monto EN PESOS sube, vuelve a revisar el saldo de meses cerrados (409 PAGO_EXCEDE_SALDO salvo aceptar_exceso). {pago, cuenta}. 404 PAGO_NO_EXISTE, 409 PAGO_CAMBIO_CONCURRENTE.',
   })
   actualizarPagoSocio(
     @Param('id', ParseUUIDPipe) id: string,
@@ -230,6 +233,36 @@ export class ProfitSharingController {
       },
       c,
     );
+  }
+
+  // ===== PANTALLA POR AVIÓN (20-oct-2026, invariante 99) =====
+
+  @Get('aviones/:aeronaveId')
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Reparto de UN avión en el periodo con el detalle gasto por gasto (detalle.gastos[]: grupo, clave, pesos), las entregas «corresponde a» ese avión en los meses del periodo y, por socio, lo generado / entregado / por entregar DE ESE AVIÓN en pesos. 404 AERONAVE_NO_EXISTE.',
+  })
+  avionDetalle(
+    @Param('aeronaveId', ParseUUIDPipe) aeronaveId: string,
+    @Query() q: ProfitSharingQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.profitSharing.avionDetalle(aeronaveId, q, c);
+  }
+
+  @Get('aviones/:aeronaveId/historico')
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Histórico de UN avión mes a mes (un reparto por mes, EN PESOS): cascada, reparto por socio con su reserva, lo entregado de ese avión por mes y acumulados del rango. ?desde=AAAA-MM&hasta=AAAA-MM (default: del inicio oficial al mes en curso; máximo 36 meses). 400 RANGO_INVALIDO, 404 AERONAVE_NO_EXISTE.',
+  })
+  avionHistorico(
+    @Param('aeronaveId', ParseUUIDPipe) aeronaveId: string,
+    @Query() q: HistoricoAvionQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.profitSharing.avionHistoricoDefault(aeronaveId, q, c);
   }
 
   @Get('pdf')

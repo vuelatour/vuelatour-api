@@ -1,6 +1,5 @@
 import {
   RE_EXTRA_TRANSPORTE,
-  RE_TRANSPORTE_DEBIL,
   RE_TRANSPORTE_FUERTE,
   RE_TRANSPORTE_VETO,
   TEXTO_GASTO_TRANSPORTE_MAX,
@@ -17,6 +16,12 @@ import {
  * OPERACIONES/COMIDA con palabras de transporte; SELECT por MCP del
  * 15-oct-2026). `lugar`, `notas` (primera línea + resto) y el proveedor de la
  * IA tal cual están en la BD.
+ *
+ * 21-oct-2026 (pedido del cliente: «está contemplando el taxi del piloto»):
+ * TAXI es la categoría de la TRIPULACIÓN y YA NO cuenta, aunque el texto
+ * diga «transporte» (#320) o «privado» (#351). Los casos TAXI de abajo se
+ * conservan con su etiqueta original y el resultado nuevo (false): son los
+ * textos reales y documentan qué dejó de marcarse.
  */
 const g = (
   categoria: string,
@@ -40,7 +45,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'Servicio de taxi puerto y aeropuerto, round trip privado · Proveedor: Costa Maya Taxis',
         'Costa Maya Taxis',
       ),
-      true,
+      false,
     ],
     [
       '6970df1d #104 (FUERTE «Transfers»/«Traslado»)',
@@ -49,7 +54,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'City Taxi Transfers & Tours - Agencia Turística · Traslado privado redondo Aeropuerto de Chetumal - Taco Loco',
         'City Taxi Transfers & Tours - Agencia Turística',
       ),
-      true,
+      false,
     ],
     [
       '0fbb6275 #134 (FUERTE)',
@@ -58,7 +63,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'Coati Transfers & Tours · Traslado privado redondo Aeropuerto Chetumal - VIPS',
         'Coati Transfers & Tours',
       ),
-      true,
+      false,
     ],
     [
       '66d575d8 #190 (FUERTE «Transporte»)',
@@ -67,7 +72,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         "Costa Maya Transportes Turísticos S.A. · Transporte Chetumal a Carl's Jr\n\n[IA al sincronizar]\nCOSTA MAYA TRANSPORTES TURISTICOS S.A. · Servicio de taxi Chetumal - Carls Jr (round trip)",
         'COSTA MAYA TRANSPORTES TURISTICOS S.A.',
       ),
-      true,
+      false,
     ],
     [
       '37b8a58f #351 (FUERTE «TRANSPORTES»)',
@@ -76,7 +81,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'COSTA MAYA TRANSPORTES TURISTICOS S.A. · Servicio de taxi privado Chetumal - Plaza (ida), 2 pasajeros PENDIENTE FACTURA',
         'COSTA MAYA TRANSPORTES TURISTICOS S.A.',
       ),
-      true,
+      false,
     ],
     [
       'b7a60bde #404 (DÉBIL «privado»)',
@@ -85,7 +90,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'CITY TAXI, SAFE & FAST S.A. DE C.V. · Servicio de taxi privado, origen Aeropuerto Internacional de Chetumal, 1 pax',
         'CITY TAXI, SAFE & FAST S.A. DE C.V.',
       ),
-      true,
+      false,
     ],
     [
       '1cccba02 #320 (gasto; el vuelo no está COMPLETADO)',
@@ -94,7 +99,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'transporte Master Ruben · Proveedor: Ruben Lozano · Matrícula: N4142R',
         'Ruben Lozano',
       ),
-      true,
+      false,
     ],
     [
       'b79fb798 #450 (gasto; EN_VUELO hoy)',
@@ -103,7 +108,7 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
         'COSTA MAYA TRANSPORTES TURISTICOS S.A. · Servicio de taxi puerto y aeropuerto, round trip privado, Chetumal',
         'COSTA MAYA TRANSPORTES TURISTICOS S.A.',
       ),
-      true,
+      false,
     ],
     // ── #74: viajes en app de la tripulación (TODOS fuera) ───────────────
     [
@@ -304,15 +309,26 @@ describe('pareceTransporteDePasajeros — textos reales de prod', () => {
     }
   });
 
-  it('DÉBIL solo en TAXI: «privado» en OPERACIONES no basta; FUERTE sí', () => {
+  it('TAXI NUNCA cuenta (tripulación, 21-oct-2026): ni «privado» ni «transporte»; en OPERACIONES solo las señales FUERTES', () => {
     expect(
       pareceTransporteDePasajeros(g('OPERACIONES', 'Servicio privado')),
     ).toBe(false);
     expect(pareceTransporteDePasajeros(g('TAXI', 'Servicio privado'))).toBe(
-      true,
+      false,
     );
+    // #320 real: el taxi del piloto, capturado como TAXI con «transporte».
+    expect(
+      pareceTransporteDePasajeros(
+        g('TAXI', 'transporte Master Ruben · Proveedor: Ruben Lozano'),
+      ),
+    ).toBe(false);
     expect(
       pareceTransporteDePasajeros(g('OPERACIONES', 'Camioneta a la terminal')),
+    ).toBe(true);
+    expect(
+      pareceTransporteDePasajeros(
+        g('OPERACIONES', 'Traslado de pasajeros aeropuerto - centro'),
+      ),
     ).toBe(true);
   });
 });
@@ -321,11 +337,6 @@ describe('regex: límites de palabra', () => {
   it('«Traslado» y «privado» NO disparan el veto «ado»; «ADO» suelto sí', () => {
     expect(RE_TRANSPORTE_VETO.test('Traslado privado')).toBe(false);
     expect(RE_TRANSPORTE_VETO.test('taxi a la terminal ADO')).toBe(true);
-  });
-  it('«turista» no es «turístic»; «Turística»/«turistico» sí', () => {
-    expect(RE_TRANSPORTE_DEBIL.test('clase turista')).toBe(false);
-    expect(RE_TRANSPORTE_DEBIL.test('Agencia Turística')).toBe(true);
-    expect(RE_TRANSPORTE_DEBIL.test('servicio turistico')).toBe(true);
   });
   it('«transferencia» no es transfer (ni fuerte ni extra); «Transfers» sí', () => {
     expect(RE_TRANSPORTE_FUERTE.test('rembolso en transferencia')).toBe(false);

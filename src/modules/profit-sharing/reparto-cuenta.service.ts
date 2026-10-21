@@ -88,7 +88,7 @@ export interface ContextoSocio {
   fila: FilaCuentaSocio;
 }
 
-/** 503 estructurado: la migración 20261002000001 aún no está aplicada. */
+/** 503 estructurado: la migración de pesos 20261020000006 aún no está aplicada. */
 export function errorCuentaNoDisponible(): ServiceUnavailableException {
   return new ServiceUnavailableException({
     message: MENSAJE_CUENTA_SOCIO_NO_DISPONIBLE,
@@ -404,7 +404,15 @@ export class RepartoCuentaService {
       await inicioOficialDe(this.configuracion),
     );
     if (!v.ok) throw bad(v.codigo, v.mensaje, v.details);
-    if (!saldoInicialValido(dto.saldo_inicial_usd)) {
+    // EN PESOS (invariante 99): el saldo inicial que cuenta es el de pesos;
+    // el de dólares es informativo (opcional).
+    if (!saldoInicialValido(dto.saldo_inicial_mxn)) {
+      throw bad('SALDO_INICIAL_INVALIDO', MENSAJE_SALDO_INICIAL_INVALIDO);
+    }
+    if (
+      dto.saldo_inicial_usd != null &&
+      !saldoInicialValido(dto.saldo_inicial_usd)
+    ) {
       throw bad('SALDO_INICIAL_INVALIDO', MENSAJE_SALDO_INICIAL_INVALIDO);
     }
     const notas = textoOpcional(dto.notas ?? null);
@@ -422,7 +430,12 @@ export class RepartoCuentaService {
     }
     const valores = {
       cuenta_desde: `${v.mes}-01`,
-      saldo_inicial_usd: Math.round(dto.saldo_inicial_usd * 100) / 100,
+      saldo_inicial_mxn: Math.round(dto.saldo_inicial_mxn * 100) / 100,
+      // Informativo; la columna es NOT NULL: sin dato, 0.
+      saldo_inicial_usd:
+        dto.saldo_inicial_usd == null
+          ? 0
+          : Math.round(dto.saldo_inicial_usd * 100) / 100,
       notas,
       updated_by: actor.userId,
     };
@@ -461,7 +474,7 @@ export class RepartoCuentaService {
       throw new Error(error.message);
     }
     this.logger.log(
-      `Cuenta del socio ${socioId} configurada por ${actor.userId}: desde ${v.mes}, saldo inicial ${valores.saldo_inicial_usd} USD`,
+      `Cuenta del socio ${socioId} configurada por ${actor.userId}: desde ${v.mes}, saldo inicial ${valores.saldo_inicial_mxn} MXN`,
     );
     const ctx = await this.contextoSocio(socioId);
     if (!ctx) {

@@ -315,6 +315,15 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
         'balance.otros_ingresos_avion_mxn',
         'balance.socios.0.monto_mxn',
         'balance.socios.1.monto_mxn',
+        // Invariante 99: la parte de cada socio ANTES de la reserva.
+        'balance.socios.0.utilidad_usd',
+        'balance.socios.0.utilidad_mxn',
+        'balance.socios.1.utilidad_usd',
+        'balance.socios.1.utilidad_mxn',
+        // Invariante 100: por entregar = monto en pesos − entregado (0 aquí).
+        'balance.socios.0.por_entregar_mxn',
+        'balance.socios.1.por_entregar_mxn',
+        'balance.por_entregar_socios_mxn',
         'balance.utilidad_cobrada_mxn',
         'balance.utilidad_despues_mxn',
         'otros_ingresos_avion.filas.0',

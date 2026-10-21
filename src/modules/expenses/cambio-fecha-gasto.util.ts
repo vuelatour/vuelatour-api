@@ -342,10 +342,11 @@ export function errorMedioNoBancario(
  *  - con partes de reparto manual y categoría repartible ⇒ sus aviones;
  *  - FIJO sin reparto ⇒ toda la flota (pool prorrateado);
  *  - otra categoría de EMPRESA sin reparto ⇒ null (EXCLUIDA);
- *  - DIRECTO, INDIRECTO (REFACCION, SERVICIOS) y PERMISO ⇒ su avión
+ *  - DIRECTO, INDIRECTO (REFACCION, SERVICIOS y, desde el 20-oct-2026
+ *    —invariante 99—, la categoría INDIRECTO) y PERMISO ⇒ su avión
  *    (`avionDeGastoEmbebido`, la regla de `avionDelGasto`) o null sin avión;
- *  - el resto (la categoría INDIRECTO y NOMINA sin reparto,
- *    PERSONAL_DUENO, categorías futuras) ⇒ null.
+ *  - el resto (NOMINA sin reparto, PERSONAL_DUENO, categorías futuras) ⇒
+ *    null.
  */
 export function alcanceRepartoPorFecha(
   g: GastoCambioFecha,

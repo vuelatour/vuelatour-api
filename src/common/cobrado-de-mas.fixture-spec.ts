@@ -582,7 +582,7 @@ export const ESPERADO_REAL: ReadonlyArray<{
   {
     folio: 217,
     causa: 'IVA_NO_COTIZADO',
-    excedente: 495.99,
+    excedente: 496, // pesos primero (20-oct-2026): 495.99 con el T.C. de cada cobro
     requiere_revision: true,
   },
   {

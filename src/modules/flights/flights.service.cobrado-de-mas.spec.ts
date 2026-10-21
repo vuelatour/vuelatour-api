@@ -172,15 +172,15 @@ describe('snapshot — cobrado_de_mas (invariante 77, D13)', () => {
   it('#217 (ADMIN): IVA que la cotización no lleva, con lo cobrado = total_cobrado y SIN leer otros vuelos', async () => {
     const { svc, log } = armar(mundo(cobrosDe(217)));
     const snap = (await svc.snapshot(ID(217), ADMIN)) as Snap;
-    expect(snap.total_cobrado).toBe(3595.99);
+    expect(snap.total_cobrado).toBe(3596);
     expect(snap.cobrado_de_mas).toMatchObject({
       causa: 'IVA_NO_COTIZADO',
-      excedente_usd: 495.99,
-      cobrado_usd: 3595.99,
+      excedente_usd: 496,
+      cobrado_usd: 3596,
       total_usd: 3100,
       requiere_revision: true,
       tono: 'AVISO',
-      titulo: 'Cobrado de más: $495.99 USD',
+      titulo: 'Cobrado de más: $496 USD',
       referencia: null,
       sin_tc: null,
     });
@@ -307,7 +307,7 @@ describe('snapshot — cobrado_de_mas (invariante 77, D13)', () => {
     const snap = (await svc.snapshot(ID(217), ADMIN)) as Snap;
     expect(snap).not.toHaveProperty('cobrado_de_mas');
     // Lo demás del snapshot sigue (el total cobrado sale de los cobros).
-    expect(snap.total_cobrado).toBe(3595.99);
+    expect(snap.total_cobrado).toBe(3596);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining(
         `Snapshot del vuelo ${ID(217)}: no se pudo leer la fila de precios`,
@@ -357,7 +357,7 @@ describe('snapshot — cobros[i].monto_usd con la MISMA cadena de T.C. que total
     const { svc } = armar(mundo(cobros));
     const snap = (await svc.snapshot(ID(217), ADMIN)) as Snap;
     const porId = new Map(snap.cobros.map((c) => [c.id, c.monto_usd]));
-    expect(porId.get('8da8501d-5b75-4d03-8e25-eca232a06085')).toBe(3595.99);
+    expect(porId.get('8da8501d-5b75-4d03-8e25-eca232a06085')).toBe(3596);
     expect(porId.get('c-sin-tc-propio')).toBe(
       cobroEnUsd({ monto: 5000, moneda: 'MXN' }, 16.959955),
     );
@@ -383,6 +383,8 @@ describe('snapshot — cobros[i].monto_usd con la MISMA cadena de T.C. que total
     const snap = (await svc.snapshot(ID(217), ADMIN)) as Snap;
     const sinTc = snap.cobros.find((c) => c.id === 'c-sin-tc')!;
     expect(sinTc.monto_usd).toBeNull();
+    // Sin K en el vuelo rige la regla de siempre (T.C. de cada cobro):
+    // 3,595.99 / 495.99, no los 3,596 / 496 de pesos primero.
     expect(snap).toMatchObject({
       total_cobrado: 3595.99,
       cobros_sin_tc_count: 1,

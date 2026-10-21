@@ -86,6 +86,7 @@ import { FacturaClienteService } from './factura-cliente.service';
 import { FacturaSolicitudService } from './factura-solicitud.service';
 import { SolicitarFacturaDto } from './dto/solicitud-factura.dto';
 import { AlinearFechaTramosDto } from './dto/alinear-fecha.dto';
+import { RecalcularCobradoDto } from './dto/recalcular-cobrado.dto';
 import { SinCamposComprobanteDto } from './dto/cobros.dto';
 import { errorFacturasNoDisponibles } from '../../common/factura-emitida-disponible.util';
 import { FlightReportService } from './flight-report.service';
@@ -133,6 +134,19 @@ export class FlightsController {
   }
 
   // ============ Vuelos ============
+
+  @Post('recalcular-cobrado')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Recalcula la bandera «cobrado» de los vuelos con precio (pesos primero, 20-oct-2026, invariante 99): con el T.C. capturado en la cotización los cobros MXN cuentan al precio en pesos. Rango opcional de fecha_vuelo (YYYY-MM-DD, Cancún). Solo escribe las banderas que cambian.',
+  })
+  recalcularCobrado(
+    @Body() dto: RecalcularCobradoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.recalcularCobrado(dto, c.userId);
+  }
 
   @Get(':id/reporte.pdf')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO)

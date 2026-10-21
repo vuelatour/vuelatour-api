@@ -111,8 +111,11 @@ describe('cobradoDeMas — los 7 vuelos REALES del pedido (prod 15-oct-2026)', (
     for (const { folio, causa } of ESPERADO_REAL) {
       if (causa === null) continue;
       const v = VUELOS_REALES[folio];
+      // Misma cadena que la entrada: K de la cotización como respaldo Y como
+      // K (pesos primero, 20-oct-2026).
       const cobrado = cobrosEnUsd(
         cobrosDe(folio),
+        Number(v.tc_usd_mxn),
         Number(v.tc_usd_mxn),
       ).total_usd;
       const balance = sobrecobroUsd(cobrado, particionIngresoVuelo(v));
@@ -125,16 +128,18 @@ describe('cobradoDeMas — los 7 vuelos REALES del pedido (prod 15-oct-2026)', (
   it('#217 — IVA que la cotización no lleva: textos exactos (es-MX, «Posible causa»)', () => {
     const r = cobradoDeMas(entradaReal(217))!;
     expect(r).toEqual<CobradoDeMas>({
-      excedente_usd: 495.99,
-      cobrado_usd: 3595.99,
+      // PESOS PRIMERO (20-oct-2026, invariante 99): los cobros MXN cuentan al
+      // K de la cotización (antes 3,595.99 / 495.99 con el T.C. de cada cobro).
+      excedente_usd: 496,
+      cobrado_usd: 3596,
       total_usd: 3100,
       causa: 'IVA_NO_COTIZADO',
       causa_etiqueta: 'IVA que la cotización no lleva',
       requiere_revision: true,
       tono: 'AVISO',
-      titulo: 'Cobrado de más: $495.99 USD',
+      titulo: 'Cobrado de más: $496 USD',
       explicacion:
-        'Lo cobrado ($3,595.99 USD) rebasa el monto total ($3,100 USD). Posible causa: el cliente pagó el total más 16 % de IVA ($3,100 × 1.16 = $3,596 USD) y esta cotización no lleva IVA.',
+        'Lo cobrado ($3,596 USD) rebasa el monto total ($3,100 USD). Posible causa: el cliente pagó el total más 16 % de IVA ($3,100 × 1.16 = $3,596 USD) y esta cotización no lleva IVA.',
       que_hacer:
         'Si se le facturó con IVA, corrige la cotización para que lleve IVA (así el IVA no cuenta como venta). Si no se le facturó, el cliente tiene un saldo a favor: regístralo como reembolso o aplícalo a su siguiente vuelo.',
       referencia: null,

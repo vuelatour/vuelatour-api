@@ -120,9 +120,10 @@ describe('RepartoCuentaService — inicio oficial', () => {
 
   it('configurar cuenta en agosto ⇒ 400 CUENTA_ANTES_DEL_INICIO', async () => {
     try {
+      // El saldo inicial va EN PESOS desde el 0.0.101 (invariante 99).
       await armar(INICIO).svc.configurarCuenta(
         's1',
-        { cuenta_desde: '2026-08', saldo_inicial_usd: 0 },
+        { cuenta_desde: '2026-08', saldo_inicial_mxn: 0 },
         ACTOR,
       );
       throw new Error('no lanzó');

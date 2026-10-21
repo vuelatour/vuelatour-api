@@ -12,6 +12,14 @@
  * textos de la salida al avión y los AVISOS de cada etapa que pudo fallar.
  * La orquestación (compra → recibir → precio → salida) vive en
  * `ExpensesService.entrarRefaccionAInventario`. Aquí no hay red.
+ *
+ * DEPRECADO DESDE EL 21-oct-2026 (invariante 101): el panel ya NO manda el
+ * bloque `inventario` (el alta de una refacción es un gasto normal; la
+ * bodega se alimenta desde Compras: «Registrar gasto», «Vincular gasto ya
+ * registrado» y «Entrada desde un gasto»). El bloque sigue aceptado por
+ * compatibilidad y este archivo se conserva porque `lineaCompraDeRefaccion`
+ * (monto del gasto ÷ unidades) es la fuente única que reutiliza
+ * `ComprasService.entradaDesdeGasto`. No agregar funcionalidad al bloque.
  */
 
 export const CATEGORIA_REFACCION = 'REFACCION';

@@ -9,6 +9,10 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { findOrCreateItem } from '../inventory/compras.service';
 import { TipoMovimientoInventario } from '../inventory/dto/inventory.dto';
+// PURO (sin Nest ni BD): la línea «monto del gasto ÷ unidades» es la MISMA
+// que usaba la refacción a inventario desde el alta (invariante 57).
+import { lineaCompraDeRefaccion } from '../expenses/refaccion-inventario.util';
+import { hoyCancun } from '../../common/fecha-cancun.util';
 import {
   calcularCompra,
   parsearCantidadConcepto,
@@ -25,6 +29,8 @@ import {
   type AddPagoCompraDto,
   type CompraLineaDto,
   type CreateCompraDto,
+  type EntradaDesdeGastoDto,
+  type GastosCandidatosQuery,
   type ListComprasQuery,
   type UnirComprasDto,
   type UpdateCompraDto,
@@ -50,8 +56,18 @@ const PAGO_SEL =
 const GASTO_FUENTE_SEL =
   'id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, notas, compra_id, valor_ia_extraido, aeronave_id, vuelo_id, escala_id, medio_pago, inventario_movimiento_id, proveedor:proveedor!proveedor_id(nombre)';
 
+// Candidatos de «Vincular gasto ya registrado» (21-oct-2026): lo de arriba
+// más el folio, el embed con id y si el banco ya lo cubrió.
+const GASTO_CANDIDATO_SEL =
+  'id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, notas, compra_id, valor_ia_extraido, medio_pago, inventario_movimiento_id, folio_ticket, conciliado, proveedor:proveedor!proveedor_id(id, nombre)';
+
+/** Tope de filas que se leen para los candidatos (la ventana manda; `truncado` lo dice). */
+const TOPE_CANDIDATOS = 500;
+/** Ventana por default de los candidatos: 120 días hacia atrás. */
+export const DIAS_CANDIDATOS_DEFAULT = 120;
+
 /** Categorías de gasto que pueden ser la factura de MERCANCÍA. */
-const CATEGORIAS_MERCANCIA = ['REFACCION', 'OTRO', 'OPERACIONES'];
+export const CATEGORIAS_MERCANCIA = ['REFACCION', 'OTRO', 'OPERACIONES'];
 /**
  * Categorías que JAMÁS son pago de una compra de refacciones: dinero
  * personal del dueño, gastos de visita, gasolina de coches, combustible de
@@ -84,6 +100,62 @@ const CATEGORIAS_NO_LIGABLES = [
   'OTROS_DIRECTOS_VUELO',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
+
+/** Texto del 400 `TC_REQUERIDO` de «Entrada desde un gasto» en pesos. */
+export const MENSAJE_ENTRADA_TC_REQUERIDO =
+  'La compra es en pesos y no hay tipo de cambio (ni en el gasto ni oficial del día): captura el tipo de cambio.';
+
+/** Aviso cuando la compra nació con el gasto pero la recepción falló. */
+export function avisoEntradaNoRecibida(folio: number, motivo: string): string {
+  return `La compra #${folio} quedó registrada con el gasto vinculado, pero la pieza NO entró a bodega: ${motivo} Recíbela desde Compras.`;
+}
+
+/**
+ * Rol que se sugiere para un gasto candidato (PURO): lo que dicen sus
+ * textos (envío / impuestos) y, si no dicen nada, mercancía para una
+ * refacción y «otro» para lo demás.
+ */
+export function rolSugeridoCandidato(
+  categoria: string,
+  textoLibre: string,
+): RolPagoCompra {
+  const porTexto = rolPorTexto(textoLibre);
+  if (porTexto !== 'OTRO') return porTexto;
+  return categoria === 'REFACCION' ? 'MERCANCIA' : 'OTRO';
+}
+
+/** Texto normalizado para buscar: sin acentos ni mayúsculas. */
+function normalizarBusqueda(t: string): string {
+  return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+}
+
+/** Resta días a un día YYYY-MM-DD (mediodía UTC: sin saltos de zona). */
+function restarDias(dia: string, dias: number): string {
+  const d = new Date(`${dia}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - dias);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Lo que el selector «Vincular gasto ya registrado» pinta de cada gasto. */
+export interface GastoCandidatoCompra {
+  id: string;
+  /** Día Cancún del gasto. */
+  fecha_gasto: string;
+  categoria: string;
+  monto: number;
+  moneda: string;
+  tc_gasto: number | null;
+  medio_pago: string | null;
+  folio_ticket: string | null;
+  /** Primera línea de las notas. */
+  descripcion: string | null;
+  proveedor: { id: string; nombre: string } | null;
+  conciliado: boolean;
+  /** Sugerencia (la oficina confirma): mercancía, envío, impuestos u otro. */
+  rol_sugerido: RolPagoCompra;
+  /** ¿Puede ser la factura de MERCANCÍA? (REFACCION, OTRO, OPERACIONES). */
+  puede_mercancia: boolean;
+}
 
 type CompraRow = {
   id: string;
@@ -201,6 +273,15 @@ export class ComprasService {
     private readonly inventory: InventoryService,
   ) {}
 
+  /**
+   * El candado por compra, para quien orquesta desde fuera (`CompraGastoService`
+   * del módulo de gastos: «Registrar gasto», invariante 101): un doble clic
+   * se serializa y el segundo ve el gasto que creó el primero (409).
+   */
+  bajoCandado<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    return this.conCandado(id, fn);
+  }
+
   private async conCandado<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const previo = this.candados.get(id) ?? Promise.resolve();
     // Se encadena tras el anterior aunque ese haya fallado; al terminar se
@@ -256,9 +337,215 @@ export class ComprasService {
         total: resumen.total,
         total_mxn: resumen.total_mxn,
         total_usd: resumen.total_usd,
+        // ADITIVOS 21-oct-2026 (invariante 101): qué le falta a la compra.
+        recibida_at: c.recibida_at,
+        tc_usd_mxn: tcDe(c.tc_usd_mxn),
+        total_factura: resumen.total_factura,
+        gasto_estado: resumen.gasto_estado,
+        gasto_mercancia: resumen.gasto_mercancia,
+        gasto_faltante: resumen.gasto_faltante,
       };
     });
     return { data: rows, count: count ?? 0 };
+  }
+
+  /**
+   * La compra con su cálculo (fuente única `calcularCompra`) para quien
+   * decide algo con ella sin armar el detalle: «Registrar gasto» (módulo de
+   * gastos, invariante 101). 404 si no existe.
+   */
+  async calcularDe(id: string) {
+    const compra = await this.findCompra(id);
+    const [lineasMap, pagosMap] = await Promise.all([
+      this.lineasDe([id]),
+      this.pagosDe([id]),
+    ]);
+    const lineas = lineasMap.get(id) ?? [];
+    const pagos = pagosMap.get(id) ?? [];
+    const { resumen } = calcularCompra(compra, lineas, pagos);
+    return { compra, lineas, pagos, resumen };
+  }
+
+  /**
+   * Fija el T.C. de la compra SOLO si no tenía y sigue ABIERTA (al
+   * registrar su gasto, invariante 101): así recibirla en pesos no vuelve a
+   * pedirlo. Una compra RECIBIDA no se toca aquí (sus ENTRADAS ya llevan su
+   * T.C.; cambiarlo es «Recalcular» con el candado de siempre). Devuelve si
+   * lo fijó.
+   */
+  async fijarTcSiFalta(
+    id: string,
+    tc: number,
+    userId: string,
+  ): Promise<boolean> {
+    if (!(tc > 0)) return false;
+    const { data, error } = await this.supabase.service
+      .from('compra')
+      .update({ tc_usd_mxn: tc, updated_by: userId })
+      .eq('id', id)
+      .eq('estado', 'ABIERTA')
+      .is('tc_usd_mxn', null)
+      .select('id');
+    if (error) throw new Error(error.message);
+    return (data ?? []).length > 0;
+  }
+
+  // ===== Candidatos a pago («Vincular gasto ya registrado») =====
+
+  /**
+   * Gastos SIN compra que pueden ligarse como pago (21-oct-2026): ni cargos
+   * contables de bodega ni categorías no ligables; ventana por fecha del
+   * gasto (día Cancún), búsqueda libre sobre notas/folio/proveedor/monto y,
+   * con `solo_mercancia`, solo los que pueden ser la factura de mercancía.
+   * Se leen hasta `TOPE_CANDIDATOS` filas de la ventana (fecha desc); si
+   * había más, `truncado` lo dice — nunca un «ninguno» falso.
+   */
+  async gastosCandidatos(q: GastosCandidatosQuery) {
+    const hasta = q.hasta ?? hoyCancun();
+    const desde = q.desde ?? restarDias(hasta, DIAS_CANDIDATOS_DEFAULT);
+    let query = this.supabase.service
+      .from('gasto')
+      .select(GASTO_CANDIDATO_SEL)
+      .is('compra_id', null)
+      .is('inventario_movimiento_id', null)
+      .gte('fecha_gasto', `${desde}T00:00:00-05:00`)
+      .lte('fecha_gasto', `${hasta}T23:59:59-05:00`)
+      .order('fecha_gasto', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(TOPE_CANDIDATOS);
+    if (q.proveedor_id) query = query.eq('proveedor_id', q.proveedor_id);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as unknown as Array<
+      GastoFuente & {
+        folio_ticket: string | null;
+        conciliado: boolean | null;
+        proveedor?: { id: string; nombre: string } | null;
+      }
+    >;
+    const busqueda = normalizarBusqueda(q.q ?? '');
+    const candidatos: GastoCandidatoCompra[] = [];
+    for (const g of filas) {
+      // Cinturón sobre lo que ya filtra la consulta: jamás un gasto que ya
+      // es de una compra ni el cargo contable de una salida de bodega.
+      if (g.compra_id || g.inventario_movimiento_id) continue;
+      if (g.medio_pago === 'BODEGA') continue;
+      if (CATEGORIAS_NO_LIGABLES.includes(g.categoria)) continue;
+      const puedeMercancia = CATEGORIAS_MERCANCIA.includes(g.categoria);
+      if (q.solo_mercancia && !puedeMercancia) continue;
+      const descripcion = primeraLinea(g.notas) || null;
+      if (busqueda) {
+        const pajar = normalizarBusqueda(
+          [
+            g.notas ?? '',
+            g.folio_ticket ?? '',
+            g.proveedor?.nombre ?? '',
+            String(Number(g.monto)),
+            Number(g.monto).toFixed(2),
+          ].join('\n'),
+        );
+        if (!pajar.includes(busqueda)) continue;
+      }
+      candidatos.push({
+        id: g.id,
+        fecha_gasto: diaCancun(g.fecha_gasto),
+        categoria: g.categoria,
+        monto: Number(g.monto),
+        moneda: g.moneda,
+        tc_gasto: tcDe(g.tc_gasto),
+        medio_pago: g.medio_pago,
+        folio_ticket: g.folio_ticket ?? null,
+        descripcion,
+        proveedor: g.proveedor ?? null,
+        conciliado: g.conciliado === true,
+        rol_sugerido: rolSugeridoCandidato(g.categoria, this.textoDe(g)),
+        puede_mercancia: puedeMercancia,
+      });
+    }
+    return {
+      data: candidatos.slice(0, q.limite),
+      total: candidatos.length,
+      truncado: filas.length >= TOPE_CANDIDATOS,
+      ventana: { desde, hasta },
+    };
+  }
+
+  // ===== Entrada de inventario desde un gasto ya registrado =====
+
+  /**
+   * «Ya registramos el gasto; cuando llegue, vincular» (21-oct-2026,
+   * invariante 101): compra de UNA línea con el gasto como factura de
+   * mercancía (costo unitario = monto ÷ unidades, `lineaCompraDeRefaccion`),
+   * recibida en el acto (la ENTRADA del cardex con la fecha de llegada). Si
+   * la recepción falla, la compra queda ABIERTA con el gasto ya ligado y se
+   * dice qué pasó (`recibida: false` + aviso): nada se deshace a medias.
+   */
+  async entradaDesdeGasto(dto: EntradaDesdeGastoDto, userId: string) {
+    const gasto = await this.findGasto(dto.gasto_id);
+    this.assertGastoLigable(gasto, 'MERCANCIA');
+    const item = await this.inventory.findItem(dto.item_id);
+    const moneda: MonedaCompra = gasto.moneda === 'MXN' ? 'MXN' : 'USD';
+    const fecha = dto.fecha ?? hoyCancun();
+    let tc = dto.tc_usd_mxn ?? tcDe(gasto.tc_gasto);
+    if (tc == null && moneda === 'MXN') {
+      tc = (await this.inventory.tcOficialDe(fecha))?.tc ?? null;
+      if (tc == null) {
+        throw new BadRequestException({
+          message: MENSAJE_ENTRADA_TC_REQUERIDO,
+          error: 'TC_REQUERIDO',
+        });
+      }
+    }
+    const texto = (v: unknown): string | undefined =>
+      typeof v === 'string' && v.trim() ? v.trim() : undefined;
+    const linea = lineaCompraDeRefaccion(
+      gasto.monto,
+      { cantidad: dto.cantidad },
+      {
+        item_id: dto.item_id,
+        nombre: texto(item.nombre) ?? CATEGORIA_ITEM_DEFAULT,
+        numero_parte: texto(item.numero_parte),
+        categoria: texto(item.categoria),
+      },
+    );
+    const creada = await this.create(
+      {
+        gasto_mercancia_id: gasto.id,
+        moneda,
+        ...(tc != null ? { tc_usd_mxn: tc } : {}),
+        fecha,
+        ...(dto.referencia?.trim()
+          ? { referencia: dto.referencia.trim() }
+          : {}),
+        ...(dto.proveedor_id ? { proveedor_id: dto.proveedor_id } : {}),
+        ...(dto.notas?.trim() ? { notas: dto.notas.trim() } : {}),
+        lineas: [linea],
+        // El monto ENTERO del gasto ya es el costo de la línea: los cargos
+        // que la IA hubiera leído en ese gasto no se suman aparte.
+        cargos_factura: [],
+      },
+      userId,
+    );
+    try {
+      const recibida = await this.recibir(creada.id, userId, false);
+      return {
+        compra: recibida,
+        recibida: true,
+        entrada_id: recibida.lineas[0]?.inventario_movimiento_id ?? null,
+        avisos: recibida.avisos,
+      };
+    } catch (e) {
+      const motivo = e instanceof Error ? e.message : String(e);
+      this.logger.warn(
+        `entrada desde gasto ${gasto.id}: la compra ${creada.id} no se recibió: ${motivo}`,
+      );
+      return {
+        compra: await this.getDetail(creada.id),
+        recibida: false,
+        entrada_id: null,
+        avisos: [avisoEntradaNoRecibida(creada.folio, motivo)],
+      };
+    }
   }
 
   async getDetail(id: string) {
@@ -478,6 +765,15 @@ export class ComprasService {
         ? dto.lineas
         : (derivado?.lineas ?? []);
 
+    // Cargos impresos en la factura (21-oct-2026): los capturados mandan
+    // sobre los que la IA leyó en el gasto; `[]` explícito = ninguno.
+    const cargosFactura: CargoFactura[] = dto.cargos_factura
+      ? dto.cargos_factura.map((c) => ({
+          concepto: c.concepto.trim(),
+          monto: round(c.monto, 2),
+        }))
+      : (derivado?.cargos_factura ?? []);
+
     const { data, error } = await this.supabase.service
       .from('compra')
       .insert({
@@ -487,7 +783,7 @@ export class ComprasService {
         moneda,
         tc_usd_mxn: tc,
         estado: 'ABIERTA',
-        cargos_factura: derivado?.cargos_factura ?? [],
+        cargos_factura: cargosFactura,
         notas: dto.notas ?? null,
         created_by: userId,
         updated_by: userId,

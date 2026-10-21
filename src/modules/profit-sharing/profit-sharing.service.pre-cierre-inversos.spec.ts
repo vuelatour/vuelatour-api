@@ -266,9 +266,13 @@ function gasto(id: string, vueloId: string, extra: Fila = {}): Fila {
   };
 }
 
-/** Taxi REAL de prod (66d575d8, #190). */
+/**
+ * Transporte REAL de prod (66d575d8, #190). En prod era TAXI; desde el
+ * 21-oct-2026 TAXI es de la tripulación y no dispara el renglón, así que el
+ * mundo lo captura como OPERACIONES (la regla nueva).
+ */
 const TAXI_190: Fila = {
-  categoria: 'TAXI',
+  categoria: 'OPERACIONES',
   monto: 400,
   notas:
     "Costa Maya Transportes Turísticos S.A. · Transporte Chetumal a Carl's Jr",
@@ -668,7 +672,7 @@ describe('ProfitSharingService.preCierre — renglones inversos (15-oct-2026)', 
       vuelos: [],
       lectura_fallida: true,
       detalle:
-        'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos «Taxi / estacionamiento» de cada vuelo contra su cotización antes de cerrar.',
+        'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos de Operaciones con traslados de pasajeros de cada vuelo contra su cotización antes de cerrar.',
     });
     expect(r.listo).toBe(true);
   });

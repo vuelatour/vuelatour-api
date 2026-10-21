@@ -42,16 +42,23 @@ export const DIRECTO: ReadonlySet<string> = new Set([
   // `computeAvion`. Sus PARTES de reparto manual sí van al avión.
 ]);
 /** Talleres, aceites, refacciones, mecanicos. */
-// OJO: la CATEGORÍA de gasto 'INDIRECTO' (captura sin vuelo, jul 2026) NO
-// está en ningún set A PROPÓSITO: cae al else y el reparto la ignora hasta
-// que el equipo decida su tratamiento. No "arreglarlo" sin esa decisión.
-// NOMINA (29-ago) es espejo EXACTO de la categoría INDIRECTO: tampoco está
-// en ningún set (sin repartir = EXCLUIDA, gasto de la empresa); repartida a
-// mano SÍ cuenta al avión (grupo INDIRECTO, ver compute).
+// La CATEGORÍA de gasto 'INDIRECTO' (captura sin vuelo, jul 2026) estuvo
+// FUERA de todo set «hasta que el equipo decida su tratamiento»: el reparto
+// la EXCLUÍA mientras el balance por avión la pintaba en su hoja «Gastos
+// Indirectos». DECISIÓN DEL CLIENTE (20-oct-2026, invariante 99): «el total
+// de Gastos indirectos no cuadra [388,937.57 en el Excel vs 318,737.57 en el
+// reparto]… debemos hacer que cuadren» — eran 7 gastos INDIRECTO de N621TX
+// (piloto/mecánico/administrativo de dos quincenas + una propina, 70,200
+// MXN) que el balance cuenta. Desde hoy un INDIRECTO sellado a un avión
+// cuenta como gasto INDIRECTO del avión, igual que en el balance.
+// NOMINA (29-ago) NO: sin repartir = EXCLUIDA (gasto de la empresa,
+// invariante 91); repartida a mano SÍ cuenta al avión (grupo INDIRECTO, ver
+// compute).
 // SERVICIOS (29-ago) es espejo de REFACCION: gasto directo del avión.
 export const INDIRECTO: ReadonlySet<string> = new Set([
   'REFACCION',
   'SERVICIOS',
+  'INDIRECTO',
 ]);
 export const PERMISO: ReadonlySet<string> = new Set(['PERMISO']);
 /**

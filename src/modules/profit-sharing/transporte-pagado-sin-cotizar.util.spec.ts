@@ -29,11 +29,15 @@ function cand(
   };
 }
 
-/** 66d575d8 (#190): «Transporte Chetumal a Carl's Jr», $400 MXN (real). */
+/**
+ * 66d575d8 (#190): «Transporte Chetumal a Carl's Jr», $400 MXN (real). En
+ * prod era TAXI; desde el 21-oct-2026 TAXI es de la tripulación y no cuenta,
+ * así que el mundo lo captura como OPERACIONES (la regla nueva).
+ */
 const T190 = {
   id: '66d575d8-0000-0000-0000-000000000000',
   vuelo_id: 'v-190',
-  categoria: 'TAXI',
+  categoria: 'OPERACIONES',
   monto: '400.00',
   moneda: 'MXN',
   lugar: null,
@@ -45,17 +49,25 @@ const T190 = {
 const matriculas = new Map([['av-pev', 'XB-PEV']]);
 
 describe('vuelosConTransportePagadoSinCotizar', () => {
-  it('revisión 0.0.81 (a): gasto TAXI «Taxi privado…» y extra «Taxi privado» ⇒ cotizado, fuera', () => {
+  it('revisión 0.0.81 (a): gasto de Operaciones «Transfer privado…» y extra «Taxi privado» ⇒ cotizado, fuera (21-oct-2026: un TAXI ya no dispara)', () => {
     const taxi = {
       id: 'g-taxi',
       vuelo_id: 'v-1',
-      categoria: 'TAXI',
+      categoria: 'OPERACIONES',
       monto: '900.00',
       moneda: 'MXN',
       lugar: null,
-      notas: 'Taxi privado pasajeros Tulum',
+      notas: 'Transfer privado pasajeros Tulum',
       valor_ia_extraido: null,
     };
+    // El mismo texto como TAXI (tripulación) no cuenta desde el 21-oct-2026.
+    expect(
+      vuelosConTransportePagadoSinCotizar({
+        candidatos: [cand('v-1', 1)],
+        gastos: [{ ...taxi, categoria: 'TAXI' }],
+        matriculas,
+      }),
+    ).toEqual([]);
     expect(
       vuelosConTransportePagadoSinCotizar({
         candidatos: [cand('v-1', 1)],
@@ -199,11 +211,11 @@ describe('vuelosConTransportePagadoSinCotizar', () => {
         {
           id: 'g-c',
           vuelo_id: 'v-404',
-          categoria: 'TAXI',
+          categoria: 'OPERACIONES',
           monto: '400',
           moneda: 'MXN',
           notas:
-            'CITY TAXI, SAFE & FAST S.A. DE C.V. · Servicio de taxi privado, origen Aeropuerto Internacional de Chetumal, 1 pax',
+            'CITY TAXI, SAFE & FAST S.A. DE C.V. · Transfer privado, origen Aeropuerto Internacional de Chetumal, 1 pax',
         },
         {
           id: 'g-a',
@@ -216,7 +228,7 @@ describe('vuelosConTransportePagadoSinCotizar', () => {
         {
           id: 'g-0',
           vuelo_id: 'v-404',
-          categoria: 'TAXI',
+          categoria: 'OPERACIONES',
           monto: '300',
           moneda: 'MXN',
           notas: 'Camioneta pasajeros',
@@ -224,13 +236,14 @@ describe('vuelosConTransportePagadoSinCotizar', () => {
       ],
       matriculas,
     });
-    // «Traslado … hotel» se veta (falso negativo aceptado).
+    // g-b es TAXI (tripulación, fuera desde el 21-oct-2026; antes se vetaba
+    // por «hotel»).
     expect(v.gastos.map((g) => g.id)).toEqual(['g-0', 'g-a', 'g-c']);
     expect(v.monto_mxn).toBe(700);
     expect(v.monto_usd).toBe(50.5);
     expect(v.matricula).toBeNull();
     expect(v.gastos[2].texto).toBe(
-      'Servicio de taxi privado, origen Aeropuerto Internacional d…',
+      'Transfer privado, origen Aeropuerto Internacional de Chetum…',
     );
   });
 
@@ -267,10 +280,10 @@ describe('vuelosConTransportePagadoSinCotizar', () => {
       'Vuelos con transporte pagado sin transporte cotizado',
     );
     expect(DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR).toBe(
-      'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.',
+      'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto de Operaciones que parece transporte de PASAJEROS (traslado, transfer, camioneta, van, shuttle) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los gastos «Taxi / estacionamiento» son de la TRIPULACIÓN y no cuentan: un traslado de pasajeros se captura en Operaciones con «Traslado» o «Transfer» en el concepto. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.',
     );
     expect(DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA).toBe(
-      'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos «Taxi / estacionamiento» de cada vuelo contra su cotización antes de cerrar.',
+      'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos de Operaciones con traslados de pasajeros de cada vuelo contra su cotización antes de cerrar.',
     );
   });
 });

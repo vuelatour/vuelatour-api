@@ -4,6 +4,7 @@
       "desde": "2026-09-01",
       "hasta": "2026-09-30"
     },
+    "reparto_como_balance": true,
     "gastos_sin_tc": {
       "count": 0,
       "monto_mxn": 0
@@ -89,12 +90,17 @@
         "reserva_overhaul_usd": 0,
         "reserva_overhaul_incompleta": false,
         "saldo_disponible_usd": -350,
+        "afac_reservado_usd": 0,
+        "reserva_retenida_usd": 0,
         "reparto": [
           {
             "socio_id": "u-mau",
             "socio_nombre": "Mauricio Roque",
             "porcentaje": 100,
-            "monto_usd": -350
+            "monto_usd": -350,
+            "utilidad_usd": -350,
+            "reserva_usd": 0,
+            "descuenta_reserva": false
           }
         ],
         "reparto_porcentaje_total": 100,
@@ -104,6 +110,11 @@
           "reserva": {
             "horas_hr": 0,
             "tarifa_hora_usd": 0,
+            "monto_usd": 0
+          },
+          "afac": {
+            "tarifa_usd_hr": null,
+            "horas_cobradas_hr": 0,
             "monto_usd": 0
           },
           "otros_ingresos_vuelatour": {
@@ -156,19 +167,27 @@
         },
         "reserva_overhaul_usd": 140,
         "reserva_overhaul_incompleta": false,
-        "saldo_disponible_usd": 4348.8,
+        "saldo_disponible_usd": 4488.8,
+        "afac_reservado_usd": 0,
+        "reserva_retenida_usd": 0,
         "reparto": [
           {
             "socio_id": "u-hernan",
             "socio_nombre": "Hernán Pérez",
             "porcentaje": 40.92,
-            "monto_usd": 1779.53
+            "monto_usd": 1836.82,
+            "utilidad_usd": 1836.82,
+            "reserva_usd": 57.29,
+            "descuenta_reserva": false
           },
           {
             "socio_id": "u-acc",
             "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
             "porcentaje": 59.08,
-            "monto_usd": 2569.27
+            "monto_usd": 2651.98,
+            "utilidad_usd": 2651.98,
+            "reserva_usd": 82.71,
+            "descuenta_reserva": false
           }
         ],
         "reparto_porcentaje_total": 100,
@@ -204,7 +223,10 @@
               "comisiones_avion_usd": 15.7,
               "comision_banco_avion_usd": 15.7,
               "comision_vendedor_prov_usd": 0,
-              "comision_vendedor_real_usd": 0
+              "comision_vendedor_real_usd": 0,
+              "horas_cobradas_avion_hr": 2,
+              "afac_reservado_avion_usd": 0,
+              "tc_costos": 20
             },
             {
               "id": "v-3",
@@ -236,7 +258,10 @@
               "comisiones_avion_usd": 30,
               "comision_banco_avion_usd": 30,
               "comision_vendedor_prov_usd": 0,
-              "comision_vendedor_real_usd": 0
+              "comision_vendedor_real_usd": 0,
+              "horas_cobradas_avion_hr": 1.5,
+              "afac_reservado_avion_usd": 0,
+              "tc_costos": 18.25
             }
           ],
           "gastos_por_categoria": [
@@ -301,6 +326,11 @@
             "tarifa_hora_usd": 40,
             "monto_usd": 140
           },
+          "afac": {
+            "tarifa_usd_hr": null,
+            "horas_cobradas_hr": 3.5,
+            "monto_usd": 0
+          },
           "otros_ingresos_vuelatour": {
             "vuelos": 1,
             "desglose": {
@@ -339,6 +369,7 @@
       "desde": "2026-09-01",
       "hasta": "2026-09-30"
     },
+    "reparto_como_balance": true,
     "gastos_sin_tc": {
       "count": 0,
       "monto_mxn": 0
@@ -422,12 +453,17 @@
         "reserva_overhaul_usd": 0,
         "reserva_overhaul_incompleta": false,
         "saldo_disponible_usd": -350,
+        "afac_reservado_usd": 0,
+        "reserva_retenida_usd": 0,
         "reparto": [
           {
             "socio_id": "u-mau",
             "socio_nombre": "Mauricio Roque",
             "porcentaje": 100,
-            "monto_usd": -350
+            "monto_usd": -350,
+            "utilidad_usd": -350,
+            "reserva_usd": 0,
+            "descuenta_reserva": false
           }
         ],
         "reparto_porcentaje_total": 100,
@@ -437,6 +473,11 @@
           "reserva": {
             "horas_hr": 0,
             "tarifa_hora_usd": 0,
+            "monto_usd": 0
+          },
+          "afac": {
+            "tarifa_usd_hr": null,
+            "horas_cobradas_hr": 0,
             "monto_usd": 0
           },
           "otros_ingresos_vuelatour": {
@@ -489,19 +530,27 @@
         },
         "reserva_overhaul_usd": 140,
         "reserva_overhaul_incompleta": false,
-        "saldo_disponible_usd": 1930.24,
+        "saldo_disponible_usd": 2070.24,
+        "afac_reservado_usd": 0,
+        "reserva_retenida_usd": 0,
         "reparto": [
           {
             "socio_id": "u-hernan",
             "socio_nombre": "Hernán Pérez",
             "porcentaje": 40.92,
-            "monto_usd": 789.85
+            "monto_usd": 847.14,
+            "utilidad_usd": 847.14,
+            "reserva_usd": 57.29,
+            "descuenta_reserva": false
           },
           {
             "socio_id": "u-acc",
             "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
             "porcentaje": 59.08,
-            "monto_usd": 1140.39
+            "monto_usd": 1223.1,
+            "utilidad_usd": 1223.1,
+            "reserva_usd": 82.71,
+            "descuenta_reserva": false
           }
         ],
         "reparto_porcentaje_total": 100,
@@ -537,7 +586,10 @@
               "comisiones_avion_usd": 15.7,
               "comision_banco_avion_usd": 15.7,
               "comision_vendedor_prov_usd": 0,
-              "comision_vendedor_real_usd": 0
+              "comision_vendedor_real_usd": 0,
+              "horas_cobradas_avion_hr": 2,
+              "afac_reservado_avion_usd": 0,
+              "tc_costos": 20
             },
             {
               "id": "v-3",
@@ -569,7 +621,10 @@
               "comisiones_avion_usd": 30,
               "comision_banco_avion_usd": 30,
               "comision_vendedor_prov_usd": 0,
-              "comision_vendedor_real_usd": 0
+              "comision_vendedor_real_usd": 0,
+              "horas_cobradas_avion_hr": 1.5,
+              "afac_reservado_avion_usd": 0,
+              "tc_costos": null
             }
           ],
           "gastos_por_categoria": [
@@ -634,6 +689,11 @@
             "tarifa_hora_usd": 40,
             "monto_usd": 140
           },
+          "afac": {
+            "tarifa_usd_hr": null,
+            "horas_cobradas_hr": 3.5,
+            "monto_usd": 0
+          },
           "otros_ingresos_vuelatour": {
             "vuelos": 1,
             "desglose": {
@@ -672,6 +732,7 @@
       "desde": "2026-09-01",
       "hasta": "2026-09-30"
     },
+    "reparto_como_balance": true,
     "gastos_sin_tc": {
       "count": 0,
       "monto_mxn": 0
@@ -780,10 +841,17 @@
           {
             "socio_nombre": "Mauricio Roque",
             "porcentaje": 100,
-            "monto_usd": -350
+            "monto_usd": -350,
+            "utilidad_usd": -350,
+            "reserva_usd": 0,
+            "descuenta_reserva": false
           }
         ],
         "vuelos": [],
+        "afac_reservado_usd": 0,
+        "afac_horas_cobradas_hr": 0,
+        "afac_tarifa_usd_hr": null,
+        "reserva_retenida_usd": 0,
         "otros_ingresos_avion_usd": 0,
         "otros_ingresos_avion_sin_tc_mxn": 0,
         "otros_ingresos_avion": []
@@ -809,7 +877,7 @@
         "permisos_usd": 27.78,
         "otros_usd": 350,
         "reserva_overhaul_usd": 140,
-        "saldo_usd": 4348.8,
+        "saldo_usd": 4488.8,
         "gastos_sin_tc_mxn": 0,
         "cobros_sin_tc_mxn": 0,
         "gastos_tc_oficial": {
@@ -823,12 +891,18 @@
           {
             "socio_nombre": "Hernán Pérez",
             "porcentaje": 40.92,
-            "monto_usd": 1779.53
+            "monto_usd": 1836.82,
+            "utilidad_usd": 1836.82,
+            "reserva_usd": 57.29,
+            "descuenta_reserva": false
           },
           {
             "socio_nombre": "Aero Charter Cancun S.A. de C.V.",
             "porcentaje": 59.08,
-            "monto_usd": 2569.27
+            "monto_usd": 2651.98,
+            "utilidad_usd": 2651.98,
+            "reserva_usd": 82.71,
+            "descuenta_reserva": false
           }
         ],
         "vuelos": [
@@ -855,6 +929,10 @@
             "tramos_avion": null
           }
         ],
+        "afac_reservado_usd": 0,
+        "afac_horas_cobradas_hr": 3.5,
+        "afac_tarifa_usd_hr": null,
+        "reserva_retenida_usd": 0,
         "otros_ingresos_avion_usd": 2586.16,
         "otros_ingresos_avion_sin_tc_mxn": 0,
         "otros_ingresos_avion": [
@@ -871,6 +949,7 @@
         ]
       }
     ],
+    "reparto_como_balance": true,
     "comision_vendedor_solo_gasto_real": true
   },
   "balance_individual": {

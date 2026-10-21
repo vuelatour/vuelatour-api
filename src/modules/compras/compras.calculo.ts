@@ -18,6 +18,19 @@ export type MonedaCompra = 'USD' | 'MXN';
 export type RolPagoCompra = 'MERCANCIA' | 'ENVIO' | 'IMPUESTOS' | 'OTRO';
 export type EstadoCompra = 'ABIERTA' | 'RECIBIDA';
 
+/**
+ * ¿La compra ya tiene su GASTO? (21-oct-2026, invariante 101). Derivado de
+ * los pagos ligados, nunca una columna:
+ *  - `SIN_GASTO`: ningún pago ligado (la factura todavía no se registró en
+ *    Gastos ni se vinculó);
+ *  - `PARCIAL`: hay pagos pero falta la factura de mercancía (solo envío /
+ *    impuestos), o la de mercancía no cubre `total_factura` (tolerancia 1 %);
+ *  - `REGISTRADO`: la factura de mercancía está ligada y cubre lo que dicen
+ *    las líneas + los cargos impresos en ella (o no se puede verificar por
+ *    falta de T.C.: el aviso de siempre lo dice).
+ */
+export type GastoEstadoCompra = 'SIN_GASTO' | 'PARCIAL' | 'REGISTRADO';
+
 export interface CargoFactura {
   concepto: string;
   /** En la moneda de la compra. */
@@ -83,6 +96,77 @@ export interface ResumenCompra {
    * un costo incompleto en bodega jamás debe entrar en silencio.
    */
   cargos_sin_tc: CargoSinTc[];
+  /**
+   * Lo que vale la FACTURA de mercancía = líneas + cargos impresos en ella
+   * (`cargos_factura`), en la moneda de la compra. Es el monto del gasto que
+   * la paga («Registrar gasto», invariante 101); NO incluye los pagos-cargo
+   * (envío/impuestos), que ya son sus propios gastos.
+   */
+  total_factura: number;
+  /** ¿La compra ya tiene su gasto de mercancía? (ver `GastoEstadoCompra`). */
+  gasto_estado: GastoEstadoCompra;
+  /**
+   * Lo ligado con rol MERCANCIA en la moneda de la compra (0 sin pago de
+   * mercancía; null cuando hay uno en otra moneda sin TC: no se sabe).
+   */
+  gasto_mercancia: number | null;
+  /** Lo que falta de la factura de mercancía cuando el gasto es PARCIAL; null si no. */
+  gasto_faltante: number | null;
+}
+
+/**
+ * Estado del gasto de una compra (PURO, fuente única de la lista, el detalle
+ * y «Registrar gasto»). Misma tolerancia del cuadre de la factura (1 %,
+ * mínimo un centavo).
+ */
+export function estadoGastoCompra(p: {
+  total_factura: number;
+  hayPagos: boolean;
+  hayPagoMercancia: boolean;
+  mercanciaSinTc: boolean;
+  pagadoMercancia: number;
+}): {
+  gasto_estado: GastoEstadoCompra;
+  gasto_mercancia: number | null;
+  gasto_faltante: number | null;
+} {
+  const esperado = round(p.total_factura, 2);
+  if (!p.hayPagos) {
+    return {
+      gasto_estado: 'SIN_GASTO',
+      gasto_mercancia: 0,
+      gasto_faltante: null,
+    };
+  }
+  if (!p.hayPagoMercancia) {
+    // Solo cargos (envío, impuestos…): la factura de mercancía falta entera.
+    return {
+      gasto_estado: 'PARCIAL',
+      gasto_mercancia: 0,
+      gasto_faltante: esperado > 0 ? esperado : null,
+    };
+  }
+  if (p.mercanciaSinTc) {
+    return {
+      gasto_estado: 'REGISTRADO',
+      gasto_mercancia: null,
+      gasto_faltante: null,
+    };
+  }
+  const pagado = round(p.pagadoMercancia, 2);
+  const tolerancia = Math.max(0.01, esperado * 0.01);
+  if (esperado > 0 && pagado < esperado - tolerancia) {
+    return {
+      gasto_estado: 'PARCIAL',
+      gasto_mercancia: pagado,
+      gasto_faltante: round(esperado - pagado, 2),
+    };
+  }
+  return {
+    gasto_estado: 'REGISTRADO',
+    gasto_mercancia: pagado,
+    gasto_faltante: null,
+  };
 }
 
 export function round(n: number, decimales: number): number {
@@ -164,9 +248,11 @@ export function calcularCompra<L extends LineaCalcInput>(
   let pagadoMercancia = 0;
   let hayPagoMercancia = false;
   let mercanciaSinTc = false;
+  let hayPagos = false;
   for (const p of pagos) {
     const monto = num(p.monto);
     if (monto === 0) continue;
+    hayPagos = true;
     const tcPago = num(p.tc_gasto) > 0 ? num(p.tc_gasto) : tc;
     const monedaPago = (p.moneda ?? moneda).toUpperCase();
     const enMoneda = convertirMoneda(monto, monedaPago, moneda, tcPago);
@@ -270,6 +356,17 @@ export function calcularCompra<L extends LineaCalcInput>(
   const totalUsd = moneda === 'USD' ? total : tc ? round(total / tc, 2) : null;
   const totalMxn = moneda === 'MXN' ? total : tc ? round(total * tc, 2) : null;
 
+  // El gasto de la compra (invariante 101): lo que vale la factura de
+  // mercancía y si ya está ligada.
+  const totalFactura = round(totalMercancia + cargosFactura, 2);
+  const gasto = estadoGastoCompra({
+    total_factura: totalFactura,
+    hayPagos,
+    hayPagoMercancia,
+    mercanciaSinTc,
+    pagadoMercancia,
+  });
+
   return {
     lineas: lineasCalc,
     resumen: {
@@ -284,6 +381,8 @@ export function calcularCompra<L extends LineaCalcInput>(
       total_mxn: totalMxn,
       avisos,
       cargos_sin_tc: cargosSinTc,
+      total_factura: totalFactura,
+      ...gasto,
     },
   };
 }

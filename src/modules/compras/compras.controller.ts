@@ -19,6 +19,8 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   AddPagoCompraDto,
   CreateCompraDto,
+  EntradaDesdeGastoDto,
+  GastosCandidatosQuery,
   ListComprasQuery,
   RecibirCompraDto,
   UnirComprasDto,
@@ -31,6 +33,12 @@ import { ComprasService } from './compras.service';
  * Compras de refacciones (28-ago-2026): une la factura de mercancía con sus
  * cargos (envío/aduana) y reparte el costo a cada refacción; al recibir
  * genera las ENTRADAS del cardex. Solo oficina.
+ *
+ * El flujo desde el 21-oct-2026 (invariante 101): registrar la compra
+ * (ABIERTA = pedida, sin recibir) → recibirla en bodega (RECIBIDA) → su
+ * GASTO: «Registrar gasto» (`POST /v1/compras/:id/registrar-gasto`, vive en
+ * el módulo de gastos: `CompraGastoController`) o «Vincular gasto ya
+ * registrado» (`POST :id/pagos`, candidatos en `GET gastos-candidatos`).
  */
 @ApiTags('Compras')
 @ApiBearerAuth()
@@ -62,6 +70,27 @@ export class ComprasController {
   })
   unir(@Body() dto: UnirComprasDto, @CurrentUser() c: AuthenticatedUser) {
     return this.compras.unir(dto, c.userId);
+  }
+
+  @Get('gastos-candidatos')
+  @ApiOperation({
+    summary:
+      'Gastos sin compra que pueden ligarse como pago («Vincular gasto ya registrado»): ventana por fecha (default 120 días), búsqueda libre, solo_mercancia. Devuelve rol_sugerido y puede_mercancia por gasto.',
+  })
+  gastosCandidatos(@Query() q: GastosCandidatosQuery) {
+    return this.compras.gastosCandidatos(q);
+  }
+
+  @Post('entrada-desde-gasto')
+  @ApiOperation({
+    summary:
+      'Entrada de inventario vinculada a un gasto YA registrado: crea la compra de una línea (costo = monto del gasto ÷ unidades) con ese gasto como mercancía y la recibe. Si la recepción falla, la compra queda ABIERTA con el gasto ligado (recibida=false + aviso).',
+  })
+  entradaDesdeGasto(
+    @Body() dto: EntradaDesdeGastoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.compras.entradaDesdeGasto(dto, c.userId);
   }
 
   @Get(':id')

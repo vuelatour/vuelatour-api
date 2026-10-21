@@ -108,7 +108,7 @@ describe('CierresController por HTTP', () => {
     expect(
       (await request(http()).get('/v1/cierres/2026-09/previa')).status,
     ).toBe(200);
-    expect(previa).toHaveBeenCalledWith('2026-09');
+    expect(previa).toHaveBeenCalledWith('2026-09', undefined);
     rol = Rol.SOCIO;
     expect(
       (await request(http()).get('/v1/cierres/2026-09/previa')).status,

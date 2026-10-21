@@ -22,6 +22,13 @@ import { RepartoPagoService } from './reparto-pago.service';
  * Cancun $586.70 · Alexander E. Saab $40.46. «Hoy» = 1-oct-2026 13:00
  * Cancún ⇒ mes en curso 2026-10.
  *
+ * LA CUENTA ES EN PESOS desde el 0.0.101 (20-oct-2026, invariante 99): la
+ * cuenta LEE `reparto[].monto_mxn` y las entregas descuentan `monto_mxn`.
+ * Este mundo conserva las MISMAS cifras de la v2 leídas como PESOS (un
+ * saldo de $2,023.10 MXN; en prod los pesos son ≈ 18.5× los dólares): lo
+ * que cambia es la conversión de las entregas (`TC_MUNDO`): una de $1,000
+ * MXN descuenta 1,000 y una de $1,000 USD a 18.5 descuenta 18,500.
+ *
  * `*-spec.ts` (sin punto) ⇒ fuera del build y fuera de jest.
  */
 export type Fila = Record<string, unknown>;
@@ -41,6 +48,12 @@ export const KEY2 = 'eeeeeeee-0000-4000-8000-000000000002';
 
 export const HOY = new Date('2026-10-01T18:00:00Z'); // 13:00 Cancún
 
+/** T.C. con que se registran las entregas del mundo (banda 15–25). */
+export const TC_MUNDO = 18.5;
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** El reparto del mes que LEE la cuenta: `monto_mxn` (invariante 99). */
 export function avionN4142R(
   saldo: '2023.10' | 'cero' = '2023.10',
 ): RepartoAvionInput {
@@ -52,19 +65,19 @@ export function avionN4142R(
         socio_id: MAURICIO,
         socio_nombre: 'Mauricio Roque',
         porcentaje: 69,
-        monto_usd: m(1395.94),
+        monto_mxn: m(1395.94),
       },
       {
         socio_id: AERO,
         socio_nombre: 'Aero Charter Cancun S.A. de C.V.',
         porcentaje: 29,
-        monto_usd: m(586.7),
+        monto_mxn: m(586.7),
       },
       {
         socio_id: SAAB,
         socio_nombre: 'Alexander E. Saab',
         porcentaje: 2,
-        monto_usd: m(40.46),
+        monto_mxn: m(40.46),
       },
     ],
   };
@@ -113,12 +126,13 @@ export function fakeDb(datos: Record<string, Fila[]>, opts: OpcionesDb = {}) {
             },
           };
         }
-        if (t === 'reparto_pago' && cols.includes('saldo_snapshot_usd')) {
+        // La SONDA del lector es `saldo_snapshot_mxn` (invariante 99).
+        if (t === 'reparto_pago' && cols.includes('saldo_snapshot_mxn')) {
           return {
             data: null,
             error: {
               code: '42703',
-              message: 'column reparto_pago.saldo_snapshot_usd does not exist',
+              message: 'column reparto_pago.saldo_snapshot_mxn does not exist',
             },
           };
         }
@@ -272,18 +286,31 @@ export function fakeDb(datos: Record<string, Fila[]>, opts: OpcionesDb = {}) {
   };
 }
 
+/**
+ * Fila de `reparto_pago`. EN PESOS (invariante 99): por default una entrega
+ * de $1,000 MXN a T.C. 18.5 (= $54.05 USD informativo) que descuenta 1,000
+ * de la cuenta; `saldo_snapshot_mxn` = lo por entregar de septiembre.
+ * `monto_usd` / `monto_mxn` se derivan de `monto`, `moneda` y el T.C. del
+ * mundo salvo que el caso los fije. Una fila en USD lleva `tc_usd_mxn` null
+ * (el CHECK de la tabla lo reserva a MXN) y sus pesos van directos en
+ * `monto_mxn` (= monto × `TC_MUNDO`).
+ */
 export function pagoFila(p: Partial<Fila> = {}): Fila {
+  const moneda = typeof p.moneda === 'string' ? p.moneda : 'MXN';
+  const monto = p.monto == null ? 1000 : Number(p.monto);
   return {
     id: 'dddddddd-0000-4000-8000-000000000001',
     aeronave_id: N4142R,
     socio_id: MAURICIO,
     periodo: '2026-09-01',
-    monto: 1000,
-    moneda: 'USD',
-    tc_usd_mxn: null,
-    monto_usd: 1000,
+    monto,
+    moneda,
+    tc_usd_mxn: moneda === 'MXN' ? TC_MUNDO : null,
+    monto_usd: moneda === 'USD' ? monto : round2(monto / TC_MUNDO),
+    monto_mxn: moneda === 'MXN' ? monto : round2(monto * TC_MUNDO),
     utilidad_snapshot_usd: null,
-    saldo_snapshot_usd: 1395.94,
+    saldo_snapshot_usd: null,
+    saldo_snapshot_mxn: 1395.94,
     fecha_pago: '2026-10-01',
     metodo: 'TRANSFERENCIA',
     referencia: 'SPEI 001',

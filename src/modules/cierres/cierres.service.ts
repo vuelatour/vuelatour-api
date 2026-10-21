@@ -57,6 +57,7 @@ import {
   etiquetaMes,
   etiquetaMesMinuscula,
   leyendaPasaA,
+  leyendaSeQueda,
   MES_PRIMER_CIERRE,
   mesAnteriorDe,
   mesSiguienteDe,
@@ -172,6 +173,8 @@ export interface TotalesPrevia {
   pasan_mxn: number;
   pasan_usd_nativo: number;
   se_quedan_en_cero: number;
+  /** INCLUIR EN EL MES (21-oct-2026): cuántos de «pasan» se quedan por decisión de la oficina. */
+  incluidos: number;
 }
 
 export interface PreviaCierre {
@@ -183,6 +186,12 @@ export interface PreviaCierre {
   bloqueantes: BloqueantePrevia[];
   vuelos_que_pasan: VueloDiferidoSalida[];
   vuelos_que_vienen: VueloDiferidoSalida[];
+  /**
+   * INCLUIR EN EL MES (21-oct-2026): los de «pasan» que la oficina marcó
+   * (`?incluir=` / `incluir_vuelos`) y se QUEDAN en el mes; ya no están en
+   * `vuelos_que_pasan`. Leyenda «Se queda en …». Sin marcados: [].
+   */
+  vuelos_incluidos: VueloDiferidoSalida[];
   totales: TotalesPrevia;
   reparto: {
     antes: RepartoAvionPrevia[];
@@ -334,13 +343,18 @@ export class CierresService {
   // GET /v1/cierres/:periodo/previa
   // ===================================================================
 
-  async previa(periodo: string): Promise<PreviaCierre> {
+  async previa(periodo: string, incluir?: string[]): Promise<PreviaCierre> {
     CierresService.validarPeriodo(periodo);
     await this.assertDisponible();
     const { mes: mesIni, inicio } = await this.mesInicio();
     this.assertDesdeInicio(periodo, inicio, mesIni);
     const filas = await leerCierresMes(this.sb);
-    const p = await this.prepararCierre(periodo, filas, mesIni);
+    const p = await this.prepararCierre(
+      periodo,
+      filas,
+      mesIni,
+      new Set(incluir ?? []),
+    );
     return p.previa;
   }
 
@@ -352,9 +366,15 @@ export class CierresService {
     periodo: string,
     filas: CierreMesLeido[],
     mesIni: string,
+    incluir: ReadonlySet<string> = new Set(),
   ): Promise<{
     previa: PreviaCierre;
+    /** Los que PASAN (candidatos − incluidos). */
     diferidos: CierreRepartoVuelo[];
+    /** INCLUIR EN EL MES (21-oct-2026): los candidatos que se quedan. */
+    incluidos: CierreRepartoVuelo[];
+    /** Ids de `incluir` que ya no están entre los candidatos (lista rancia). */
+    desconocidos: string[];
     despues: ResultadoCompute | null;
     precierre: { listo: boolean; items: BloqueantePrevia[] };
   }> {
@@ -396,8 +416,28 @@ export class CierresService {
     const vivo = await this.profitSharing.compute({ desde, hasta });
     const bloque: CierreRepartoBloque | null =
       'cierre' in vivo && vivo.cierre ? vivo.cierre : null;
-    const diferidos =
+    // INCLUIR EN EL MES (21-oct-2026): de los que pasarían (`candidatos`, la
+    // lista completa que vio el diálogo), los marcados por la oficina se
+    // QUEDAN. Solo COBRO_POSTERIOR (ya cobrados después del corte): un vuelo
+    // sin cobrar no se puede quedar (400); un id que ya no es candidato se
+    // reporta (`desconocidos`) y `cerrar` lo trata como lista rancia.
+    const candidatos =
       fila?.estado === 'CERRADO' ? [] : (bloque?.pendientes_que_pasarian ?? []);
+    const destinoMes = mesSiguienteDe(periodo);
+    const incluidos = candidatos.filter((d) => incluir.has(d.id));
+    for (const d of incluidos) {
+      if (d.motivo !== 'COBRO_POSTERIOR') {
+        throw new BadRequestException({
+          message: `El vuelo #${d.folio ?? '?'} no se puede quedar en ${etiquetaMesMinuscula(periodo)}: no está cobrado al cierre (${leyendaPasaA(destinoMes, d)}). Solo se quedan los cobrados después del corte.`,
+          error: 'INCLUIR_VUELO_NO_COBRADO',
+          details: { vuelo_id: d.id, folio: d.folio, motivo: d.motivo },
+        });
+      }
+    }
+    const desconocidos = [...incluir].filter(
+      (id) => !candidatos.some((d) => d.id === id),
+    );
+    const diferidos = candidatos.filter((d) => !incluir.has(d.id));
     const vienen = bloque?.diferidos_entran ?? [];
     const despues =
       diferidos.length > 0
@@ -441,6 +481,10 @@ export class CierresService {
       leyenda: d.destino ? leyendaPasaA(d.destino, d) : d.leyenda,
     });
     const pasan = diferidos.map(salida);
+    const seQueda = (d: CierreRepartoVuelo): VueloDiferidoSalida => {
+      const { destino: _destino, ...sin } = salida(d);
+      return { ...sin, leyenda: leyendaSeQueda(periodo, destinoMes, d) };
+    };
     const sum = (f: (d: CierreRepartoVuelo) => number) =>
       r2(diferidos.reduce((a, d) => a + f(d), 0));
     const totales: TotalesPrevia = {
@@ -455,6 +499,7 @@ export class CierresService {
       pasan_mxn: nativos.mxn,
       pasan_usd_nativo: nativos.usd,
       se_quedan_en_cero: conteos.en_cero,
+      incluidos: incluidos.length,
     };
     const resumenAviones = (r: ResultadoCompute | null): RepartoAvionPrevia[] =>
       (r?.aviones ?? []).map((a) => ({
@@ -478,6 +523,7 @@ export class CierresService {
       bloqueantes,
       vuelos_que_pasan: pasan,
       vuelos_que_vienen: vienen.map(salida),
+      vuelos_incluidos: incluidos.map(seQueda),
       totales,
       reparto: despues
         ? { antes: resumenAviones(vivo), despues: resumenAviones(despues) }
@@ -486,6 +532,8 @@ export class CierresService {
     return {
       previa,
       diferidos,
+      incluidos,
+      desconocidos,
       despues,
       precierre: { listo: pre.listo, items },
     };
@@ -590,7 +638,8 @@ export class CierresService {
       );
     }
     // 6) Pre-cierre listo; 7) la lista que vio el diálogo.
-    const prep = await this.prepararCierre(periodo, filas, mesIni);
+    const incluir = new Set(dto.incluir_vuelos ?? []);
+    const prep = await this.prepararCierre(periodo, filas, mesIni, incluir);
     if (!prep.precierre.listo) {
       throw conflicto(
         'PRECIERRE_NO_LISTO',
@@ -600,12 +649,18 @@ export class CierresService {
         { bloqueantes: prep.previa.bloqueantes },
       );
     }
-    if (dto.vuelos_esperados) {
-      const esperados = new Set(dto.vuelos_esperados);
-      const reales = new Set(prep.diferidos.map((d) => d.id));
+    // La lista que vio el diálogo = los que pasan + los que marcó para
+    // quedarse; un «incluir» que ya no es candidato también es lista rancia.
+    if (dto.vuelos_esperados || prep.desconocidos.length > 0) {
+      const esperados = new Set(dto.vuelos_esperados ?? []);
+      const reales = new Set(
+        [...prep.diferidos, ...prep.incluidos].map((d) => d.id),
+      );
       const igual =
-        esperados.size === reales.size &&
-        [...reales].every((id) => esperados.has(id));
+        prep.desconocidos.length === 0 &&
+        (!dto.vuelos_esperados ||
+          (esperados.size === reales.size &&
+            [...reales].every((id) => esperados.has(id))));
       if (!igual) {
         throw conflicto(
           'PREVIA_CAMBIO',
@@ -642,6 +697,15 @@ export class CierresService {
       diferidos_por_cobrar_usd: prep.previa.totales.pasan_por_cobrar_usd,
       saldo_total_usd: r2(porAvion.reduce((s, a) => s + a.saldo_usd, 0)),
       por_avion: porAvion,
+      // INCLUIR EN EL MES (21-oct-2026): los cobrados después del corte que
+      // la oficina dejó en el mes (su `periodo_contable` no se toca).
+      vuelos_incluidos: prep.incluidos.length,
+      incluidos: prep.incluidos.map((d) => ({
+        id: d.id,
+        folio: d.folio,
+        cobrado_posterior_usd: d.cobrado_posterior_usd ?? 0,
+        fecha_cobro_posterior: d.fecha_cobro_posterior ?? null,
+      })),
     };
     const snapshots = {
       precierre_snapshot: prep.precierre,
@@ -697,11 +761,15 @@ export class CierresService {
             (prep.diferidos.length > 0
               ? `${prep.diferidos.length} vuelo(s) pasan a ${etiquetaMesMinuscula(destino)} (por cobrar al cierre: US$${totales.diferidos_por_cobrar_usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}). `
               : 'Ningún vuelo pasa al mes siguiente. ') +
+            (prep.incluidos.length > 0
+              ? `${prep.incluidos.length} vuelo(s) cobrados después del corte se quedan en ${etiquetaMesMinuscula(periodo)}. `
+              : '') +
             `Saldo del reparto: US$${totales.saldo_total_usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
           data: {
             periodo,
             version,
             vuelos_diferidos: prep.diferidos.length,
+            vuelos_incluidos: prep.incluidos.length,
           },
           link: `/admin/reportes?desde=${rangoDelMes(periodo).desde}&hasta=${rangoDelMes(periodo).hasta}`,
         },
@@ -721,6 +789,8 @@ export class CierresService {
         },
       },
       diferidos: prep.previa.vuelos_que_pasan,
+      // INCLUIR EN EL MES (21-oct-2026).
+      incluidos: prep.previa.vuelos_incluidos,
       totales: prep.previa.totales,
       reparto: {
         aviones: porAvion.map((a) => ({

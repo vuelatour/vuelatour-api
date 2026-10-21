@@ -133,6 +133,18 @@ import {
 // compra → recibir → precio → salida. Opcionales: sin los módulos (specs) el
 // alta normal no se entera.
 import { ComprasService } from '../compras/compras.service';
+import type { RolPagoCompra } from '../compras/compras.calculo';
+
+/**
+ * Compra a la que nace ligado un gasto (INTERNO, invariante 101: «Registrar
+ * gasto» de una compra, `CompraGastoService`). Va en el MISMO INSERT:
+ * `compra_id` + `compra_rol` (el CHECK `gasto_compra_rol_chk` las exige
+ * juntas); nunca por el DTO público.
+ */
+export interface CompraDelGasto {
+  id: string;
+  rol: RolPagoCompra;
+}
 import { InventoryService } from '../inventory/inventory.service';
 import { TipoMovimientoInventario } from '../inventory/dto/inventory.dto';
 import {
@@ -2057,12 +2069,21 @@ export class ExpensesService {
    * luego se encadena compra → recibir → precio de venta → salida. El gasto
    * YA creado nunca se borra: cada etapa que falle se DICE en
    * `inventario.avisos` (candados de dinero, el patrón del reparto).
+   *
+   * **`inventario` está DEPRECADO desde el 21-oct-2026 (invariante 101)**: el
+   * panel ya no lo manda (una refacción se da de alta como un gasto normal
+   * y la bodega se alimenta desde Compras: «Registrar gasto» / «Vincular
+   * gasto ya registrado» / «Entrada desde un gasto»). Se acepta por
+   * compatibilidad con clientes previos; la app móvil nunca lo usó.
+   *
+   * `opts.compra` (INTERNO, invariante 101): el gasto nace ya ligado a esa
+   * compra con ese rol, en el MISMO INSERT (`compra_id` + `compra_rol`).
    */
   async create(
     dto: CreateGastoDto,
     userId: string,
     rol?: Rol,
-    opts?: { notificar?: boolean },
+    opts?: { notificar?: boolean; compra?: CompraDelGasto },
   ) {
     // VARIOS CARGOS → UN GASTO, «Créalo por la suma» (14-oct-2026, API
     // 0.0.77, invariante 76): con la llave, el alta y la liga con los cargos
@@ -2330,7 +2351,7 @@ export class ExpensesService {
     rol?: Rol,
     // notificar:false = flujos en lote (carga masiva de combustibles): una
     // carga de 50 filas no debe disparar 50 push a admin.
-    opts?: { notificar?: boolean },
+    opts?: { notificar?: boolean; compra?: CompraDelGasto },
   ) {
     const r = await this.crearGastoInterno(dto, userId, rol, opts ?? {});
     for (const despues of r.despues) despues();
@@ -2355,7 +2376,13 @@ export class ExpensesService {
     rol: Rol | undefined,
     // `sinPorPagar` (INTERNO, invariante 93): el alta por la suma de cargos
     // del banco (invariante 76) nunca nace «por pagar»: el cargo ES el pago.
-    opts: { notificar?: boolean; autoCruce?: boolean; sinPorPagar?: boolean },
+    // `compra` (INTERNO, invariante 101): nace ligado a la compra (mismo INSERT).
+    opts: {
+      notificar?: boolean;
+      autoCruce?: boolean;
+      sinPorPagar?: boolean;
+      compra?: CompraDelGasto;
+    },
   ) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
@@ -2872,6 +2899,11 @@ export class ExpensesService {
       tarjeta_terminacion: tarjetaTerminacion,
       // La llave SOLO viaja con cuenta (invariante 98).
       ...(cuentaBancariaId ? { cuenta_bancaria_id: cuentaBancariaId } : {}),
+      // «Registrar gasto» de una compra (invariante 101): ligado desde que
+      // nace (el CHECK `gasto_compra_rol_chk` exige las dos llaves juntas).
+      ...(opts.compra
+        ? { compra_id: opts.compra.id, compra_rol: opts.compra.rol }
+        : {}),
       vuelo_id: dto.vuelo_id,
       escala_id: dto.escala_id,
       aeronave_id: aeronaveId,

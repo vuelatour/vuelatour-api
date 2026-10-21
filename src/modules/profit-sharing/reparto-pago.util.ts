@@ -10,9 +10,14 @@
  * forma de la fila, nombres, orden de captura y path del comprobante.
  *
  * Reglas:
- *  - `monto_usd` = lo que la entrega descuenta del saldo: USD = monto; MXN =
- *    round(monto / T.C., 2) con el T.C. normalizado a 6 decimales
- *    (invariante 20) dentro de la banda 15–25 (la del costo externo).
+ *  - **LA CUENTA ES EN PESOS (20-oct-2026, invariante 99)**: `monto_mxn` =
+ *    lo que la entrega descuenta del saldo: MXN = monto; USD = round(monto ×
+ *    T.C., 2). TODA entrega lleva T.C. (6 decimales, invariante 20, banda
+ *    15–25): en USD para saber sus pesos; en MXN para su dólar informativo.
+ *    El T.C. de una entrega en USD NO se persiste en `tc_usd_mxn` (el CHECK
+ *    de la tabla lo reserva a MXN): queda implícito en `monto_mxn ÷ monto`.
+ *  - `monto_usd` (informativo, la columna de siempre): USD = monto; MXN =
+ *    round(monto / T.C., 2).
  *  - `mes` / `aeronave` = «corresponde a» INFORMATIVO (opcional): `mes` null
  *    = ADELANTO A CUENTA.
  *  - Fecha de la entrega: día real y nunca futura (día Cancún).
@@ -96,7 +101,7 @@ export const ROLES_PAGOS_SOCIOS_ESCRITURA: readonly Rol[] = [
 
 /** Columnas de la fila (TODA la fila: el panel la recibe tal cual). */
 export const COLS_REPARTO_PAGO =
-  'id, aeronave_id, socio_id, periodo, monto, moneda, tc_usd_mxn, monto_usd, utilidad_snapshot_usd, saldo_snapshot_usd, fecha_pago, metodo, referencia, entregado_por, recibido_por, factura_folio, comprobante_path, notas, client_request_id, created_by, created_at, updated_by, updated_at, deleted_at, deleted_by, motivo_baja';
+  'id, aeronave_id, socio_id, periodo, monto, moneda, tc_usd_mxn, monto_usd, monto_mxn, utilidad_snapshot_usd, saldo_snapshot_usd, saldo_snapshot_mxn, fecha_pago, metodo, referencia, entregado_por, recibido_por, factura_folio, comprobante_path, notas, client_request_id, created_by, created_at, updated_by, updated_at, deleted_at, deleted_by, motivo_baja';
 
 // ===================================================================
 // Textos (es-MX) — el panel copia los que pinta
@@ -256,6 +261,18 @@ export function mesDeFechaPeriodo(
   return esMes(mes) ? mes : null;
 }
 
+/**
+ * Mes (`YYYY-MM`) al que se ACREDITA una entrega: su «corresponde a»
+ * (`periodo`) o, sin él, el mes de su `fecha_pago`. Regla ÚNICA de la
+ * pantalla por avión del reparto (`ProfitSharingService.mesDeEntrega`) y del
+ * balance por avión / general (21-oct-2026, invariante 100).
+ */
+export function mesAcreditadoDeEntrega(
+  r: Pick<RepartoPagoRow, 'periodo' | 'fecha_pago'>,
+): string {
+  return mesDeFechaPeriodo(r.periodo) ?? String(r.fecha_pago).slice(0, 7);
+}
+
 // ===================================================================
 // Dinero
 // ===================================================================
@@ -293,30 +310,95 @@ export function montoUsdDePago(
   return round2(m / t);
 }
 
+/**
+ * Lo que una entrega descuenta del saldo EN PESOS (20-oct-2026, invariante
+ * 99): MXN = monto; USD = round(monto × T.C., 2) con el T.C. normalizado a
+ * 6 decimales. `null` si el monto no es positivo o un USD no trae T.C.
+ */
+export function montoMxnDePago(
+  monto: unknown,
+  moneda: unknown,
+  tc: unknown,
+): number | null {
+  const m = Number(monto);
+  if (monto == null || monto === '' || !Number.isFinite(m) || m <= 0) {
+    return null;
+  }
+  if (moneda === 'MXN') return round2(m);
+  if (moneda !== 'USD') return null;
+  const t = normalizarTc(tc);
+  if (t == null) return null;
+  return round2(m * t);
+}
+
 export type CodigoErrorPago =
   | 'MONTO_INVALIDO'
   | 'MONEDA_INVALIDA'
   | 'TC_REQUERIDO'
-  | 'TC_NO_APLICA'
   | 'TC_FUERA_DE_RANGO'
   | 'FECHA_PAGO_INVALIDA'
   | 'FECHA_PAGO_FUTURA';
+
+/**
+ * T.C. de una entrega TAL CUAL se registró (invariante 99): en MXN la
+ * columna; en USD el CHECK `reparto_pago_tc_moneda_chk` la deja null y el
+ * T.C. queda IMPLÍCITO en los pesos que descuenta: `monto_mxn ÷ monto`.
+ * Sin pesos (fila anterior a la migración 20261020000006) ⇒ null.
+ */
+export function tcDePago(
+  r: Pick<RepartoPagoRow, 'monto' | 'moneda' | 'tc_usd_mxn' | 'monto_mxn'>,
+): number | null {
+  const propio = normalizarTc(r.tc_usd_mxn);
+  if (propio != null) return propio;
+  if (r.moneda !== 'USD') return null;
+  const monto = num(r.monto);
+  const mxn =
+    r.monto_mxn == null || r.monto_mxn === '' ? null : num(r.monto_mxn);
+  if (mxn == null || !(monto > 0) || !(mxn > 0)) return null;
+  return normalizarTc(mxn / monto);
+}
+
+/**
+ * El dinero de una fila SIN re-validarlo: para una corrección que no toca
+ * monto / moneda / T.C. (notas, «corresponde a», comprobante…). Re-validar
+ * una entrega en USD rebotaba con TC_REQUERIDO (su T.C. no se persiste).
+ */
+export function dineroDePago(
+  r: RepartoPagoRow,
+): Extract<ResultadoDineroPago, { ok: true }> {
+  const p = aPagoSocio(r);
+  return {
+    ok: true,
+    monto: p.monto,
+    moneda: p.moneda,
+    tc_usd_mxn: p.tc_usd_mxn,
+    tc_aplicado: tcDePago(r) ?? 0,
+    monto_usd: p.monto_usd,
+    monto_mxn: p.monto_mxn,
+  };
+}
 
 export type ResultadoDineroPago =
   | {
       ok: true;
       monto: number;
       moneda: MonedaPagoSocio;
+      /** Lo que se PERSISTE en `tc_usd_mxn`: solo en MXN (CHECK de la tabla). */
       tc_usd_mxn: number | null;
+      /** El T.C. con que se convirtió (las dos monedas). */
+      tc_aplicado: number;
       monto_usd: number;
+      /** Lo que descuenta del saldo EN PESOS (invariante 99). */
+      monto_mxn: number;
     }
   | { ok: false; codigo: CodigoErrorPago; mensaje: string };
 
 /**
  * Valida y normaliza el DINERO de una entrega (alta, o el estado FUSIONADO
- * de un PATCH): monto > 0 con ≤ 2 decimales; moneda USD/MXN; MXN exige T.C.
- * (6 decimales, banda 15–25) y USD no lo lleva; el monto en dólares no
- * puede salir en $0.
+ * de un PATCH): monto > 0 con ≤ 2 decimales; moneda USD/MXN; LAS DOS
+ * monedas exigen T.C. (6 decimales, banda 15–25) — en USD para saber los
+ * pesos que descuenta (la cuenta es en pesos, invariante 99); en MXN para su
+ * dólar informativo —; ni los pesos ni los dólares pueden salir en $0.
  */
 export function validarDineroPago(d: {
   monto: unknown;
@@ -347,27 +429,17 @@ export function validarDineroPago(d: {
     };
   }
   const tc = normalizarTc(d.tc_usd_mxn);
-  if (d.moneda === 'USD' && tc != null) {
-    return {
-      ok: false,
-      codigo: 'TC_NO_APLICA',
-      mensaje:
-        'Una entrega en dólares no lleva tipo de cambio: quítalo o cambia la moneda a pesos.',
-    };
-  }
-  if (d.moneda === 'MXN' && tc == null) {
+  if (tc == null) {
     return {
       ok: false,
       codigo: 'TC_REQUERIDO',
       mensaje:
-        'Una entrega en pesos necesita el tipo de cambio para saber cuántos dólares descuenta de la cuenta del socio.',
+        d.moneda === 'USD'
+          ? 'Una entrega en dólares necesita el tipo de cambio para saber cuántos pesos descuenta de la cuenta del socio.'
+          : 'Una entrega en pesos necesita el tipo de cambio del día (para su equivalente informativo en dólares).',
     };
   }
-  if (
-    d.moneda === 'MXN' &&
-    tc != null &&
-    (tc < TC_PAGO_SOCIO_MIN || tc > TC_PAGO_SOCIO_MAX)
-  ) {
+  if (tc < TC_PAGO_SOCIO_MIN || tc > TC_PAGO_SOCIO_MAX) {
     return {
       ok: false,
       codigo: 'TC_FUERA_DE_RANGO',
@@ -375,20 +447,30 @@ export function validarDineroPago(d: {
     };
   }
   const montoUsd = montoUsdDePago(monto, d.moneda, tc);
-  if (montoUsd == null || montoUsd < 0.01) {
+  const montoMxn = montoMxnDePago(monto, d.moneda, tc);
+  if (
+    montoUsd == null ||
+    montoUsd < 0.01 ||
+    montoMxn == null ||
+    montoMxn < 0.01
+  ) {
     return {
       ok: false,
       codigo: 'MONTO_INVALIDO',
       mensaje:
-        'Con ese tipo de cambio la entrega sale en $0 dólares: revisa el monto y el tipo de cambio.',
+        'Con ese tipo de cambio la entrega sale en $0: revisa el monto y el tipo de cambio.',
     };
   }
   return {
     ok: true,
     monto: round2(monto),
     moneda: d.moneda,
+    // El CHECK `reparto_pago_tc_moneda_chk` reserva la columna a MXN: el
+    // T.C. de una entrega en USD queda implícito en monto_mxn ÷ monto.
     tc_usd_mxn: d.moneda === 'MXN' ? tc : null,
+    tc_aplicado: tc,
     monto_usd: montoUsd,
+    monto_mxn: montoMxn,
   };
 }
 
@@ -438,8 +520,15 @@ export interface RepartoPagoRow {
   moneda: string;
   tc_usd_mxn: number | string | null;
   monto_usd: number | string;
+  /**
+   * EN PESOS (20-oct-2026, invariante 99, migración `20261020000006`): lo
+   * que descuenta del saldo. Opcional solo para los specs con filas viejas
+   * (sin ella, un MXN toma `monto`).
+   */
+  monto_mxn?: number | string | null;
   utilidad_snapshot_usd: number | string | null;
   saldo_snapshot_usd: number | string | null;
+  saldo_snapshot_mxn?: number | string | null;
   fecha_pago: string;
   metodo: string;
   referencia: string | null;
@@ -478,15 +567,23 @@ export interface PagoSocio {
   monto: number;
   moneda: MonedaPagoSocio;
   tc_usd_mxn: number | null;
+  /** Dólares informativos (USD = monto; MXN = monto ÷ T.C.). */
   monto_usd: number;
+  /**
+   * LO QUE DESCUENTA DEL SALDO, EN PESOS (20-oct-2026, invariante 99): MXN
+   * = monto; USD = monto × T.C. de la entrega.
+   */
+  monto_mxn: number;
   /** Legado de la v1 (null en las entregas de la v2). */
   utilidad_snapshot_usd: number | null;
   /**
    * Lo por entregar de MESES CERRADOS (sin el mes en curso) ANTES de esta
    * entrega, al registrarla o al corregir su dinero: el número contra el
-   * que se decidió si era adelanto.
+   * que se decidió si era adelanto. Desde el 0.0.101 en pesos
+   * (`saldo_snapshot_mxn`); el `_usd` es el de las entregas previas.
    */
   saldo_snapshot_usd: number | null;
+  saldo_snapshot_mxn: number | null;
   fecha_pago: string;
   metodo: MetodoPagoSocio;
   referencia: string | null;
@@ -543,8 +640,19 @@ export function aPagoSocio(
     moneda: r.moneda === 'MXN' ? 'MXN' : 'USD',
     tc_usd_mxn: tc,
     monto_usd: num(r.monto_usd),
+    // EN PESOS (invariante 99): la columna; sin ella (fila vieja de un
+    // spec) un MXN es su monto y un USD × su T.C. si lo trae.
+    monto_mxn:
+      r.monto_mxn != null && r.monto_mxn !== ''
+        ? num(r.monto_mxn)
+        : r.moneda === 'MXN'
+          ? num(r.monto)
+          : tc != null
+            ? round2(num(r.monto) * tc)
+            : 0,
     utilidad_snapshot_usd: numONull(r.utilidad_snapshot_usd),
     saldo_snapshot_usd: numONull(r.saldo_snapshot_usd),
+    saldo_snapshot_mxn: numONull(r.saldo_snapshot_mxn),
     fecha_pago: r.fecha_pago,
     metodo: (METODOS_PAGO_SOCIO as readonly string[]).includes(r.metodo)
       ? (r.metodo as MetodoPagoSocio)

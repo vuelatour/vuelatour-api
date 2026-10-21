@@ -306,19 +306,28 @@ export function sinLlavesPesos(r: unknown): unknown {
     delete a.reserva_overhaul_mxn;
     delete a.saldo_disponible_mxn;
     delete a.pesos_sin_tc_usd;
-    for (const s of a.reparto as Array<Record<string, unknown>>)
+    // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
+    delete a.afac_reservado_mxn;
+    delete a.reserva_retenida_mxn;
+    for (const s of a.reparto as Array<Record<string, unknown>>) {
       delete s.monto_mxn;
+      delete s.utilidad_mxn;
+      delete s.reserva_mxn;
+    }
     const det = a.detalle as Record<string, unknown>;
     for (const v of det.vuelos as Array<Record<string, unknown>>) {
       delete v.cobrado_avion_mxn;
       delete v.pendiente_avion_mxn;
       delete v.tc_pesos;
+      delete v.afac_reservado_avion_mxn;
     }
     for (const g of det.gastos_por_categoria as Array<Record<string, unknown>>)
       delete g.mxn;
     const res = det.reserva as Record<string, unknown>;
     delete res.monto_mxn;
     delete res.tc;
+    const afac = det.afac as Record<string, unknown> | undefined;
+    if (afac) delete afac.monto_mxn;
     for (const o of det.otros_ingresos_avion as Array<Record<string, unknown>>)
       delete o.mxn;
   }
@@ -344,10 +353,16 @@ export function sinLlavesPesosPayload(p: unknown): unknown {
       'saldo_mxn',
       'pesos_sin_tc_usd',
       'reserva_tc',
+      // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
+      'afac_reservado_mxn',
+      'reserva_retenida_mxn',
     ])
       delete a[k];
-    for (const s of a.reparto as Array<Record<string, unknown>>)
+    for (const s of a.reparto as Array<Record<string, unknown>>) {
       delete s.monto_mxn;
+      delete s.utilidad_mxn;
+      delete s.reserva_mxn;
+    }
     for (const v of a.vuelos as Array<Record<string, unknown>>) {
       delete v.cobrado_mxn;
       delete v.pendiente_mxn;

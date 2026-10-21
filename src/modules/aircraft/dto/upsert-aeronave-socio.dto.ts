@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsDate,
   IsNumber,
   IsOptional,
@@ -46,6 +47,19 @@ export class CreateAeronaveSocioDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  /**
+   * RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): true = su
+   * parte de la reserva del periodo se le DESCUENTA de la utilidad (VuelaTour
+   * la retiene); false/omitido = solo se le informa cuánto debe guardar.
+   */
+  @ApiPropertyOptional({
+    description:
+      'true = su parte de la reserva de overhaul se descuenta de su utilidad; false (default) = solo se le informa.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  descontar_reserva_overhaul?: boolean;
 
   /**
    * PROPIETARIOS (19-oct-2026, invariante 95): ids de `aeronave_socio` del
@@ -105,4 +119,13 @@ export class UpdateAeronaveSocioDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  /** RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99). */
+  @ApiPropertyOptional({
+    description:
+      'true = su parte de la reserva de overhaul se descuenta de su utilidad; false = solo se le informa.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  descontar_reserva_overhaul?: boolean;
 }

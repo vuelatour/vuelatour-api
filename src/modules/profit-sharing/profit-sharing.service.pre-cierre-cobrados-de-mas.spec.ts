@@ -39,7 +39,7 @@ jest.mock('../../common/cierre-mes-disponible.util', () => ({
  * PRE-CIERRE · «VUELOS COBRADOS DE MÁS» (14-oct-2026, API 0.0.78,
  * invariante 77, D14) con los vuelos REALES de prod (15-oct-2026):
  * - agosto 2026 ⇒ #193 y #217 (IVA que la cotización no lleva) CUENTAN
- *   (count 2, $547.99) y #111 (redondeo del T.C.) va en `explicados`;
+ *   (count 2, $548 — pesos primero, 20-oct-2026) y #111 (redondeo del T.C.) va en `explicados`;
  * - julio ⇒ count 0 con #81 y #84 (comisión del link pagada por el
  *   cliente) explicados; septiembre ⇒ count 0 con #259 y #285;
  * - el renglón va JUSTO DESPUÉS de `cobros_pendientes`, NO bloquea (`listo`
@@ -200,7 +200,7 @@ describe('ProfitSharingService.preCierre — «Vuelos cobrados de más» con los
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
-  it('agosto 2026: #193 y #217 cuentan (2 · $547.99, IVA no cotizado) y #111 va en explicados; no bloquea', async () => {
+  it('agosto 2026: #193 y #217 cuentan (2 · $548, IVA no cotizado) y #111 va en explicados; no bloquea', async () => {
     const { svc } = armar(prod());
     const r = (await svc.preCierre(AGOSTO)) as unknown as Respuesta;
     expect(renglon(r)).toEqual({
@@ -209,7 +209,7 @@ describe('ProfitSharingService.preCierre — «Vuelos cobrados de más» con los
       detalle:
         'Lo cobrado rebasa el total del vuelo por más de $1.00 USD y la diferencia no se explica sola: IVA que la cotización no lleva, un cobro capturado dos veces o un depósito de otro vuelo. Revisa la card de cobros de cada vuelo. No bloquea el cierre, pero el excedente se reparte como ingreso de VuelaTour. Además hay 1 vuelo con la diferencia explicada (comisión del link pagada por el cliente o redondeo del tipo de cambio) que no requiere acción.',
       count: 2,
-      monto_usd: 547.99,
+      monto_usd: 548,
       vuelos: [
         {
           id: id(193),
@@ -223,8 +223,8 @@ describe('ProfitSharingService.preCierre — «Vuelos cobrados de más» con los
         {
           id: id(217),
           folio: 217,
-          saldo_usd: 495.99,
-          excedente_usd: 495.99,
+          saldo_usd: 496,
+          excedente_usd: 496,
           causa: 'IVA_NO_COTIZADO',
           causa_etiqueta: 'IVA que la cotización no lleva',
           grupo_folio: null,

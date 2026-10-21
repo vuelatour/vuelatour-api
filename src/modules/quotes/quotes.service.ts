@@ -1891,6 +1891,7 @@ export class QuotesService implements ConfirmadorCotizacion {
     const { total_usd, sin_tc_count, sin_tc_mxn } = cobrosEnUsd(
       cobros,
       current.tc_usd_mxn as number | null,
+      current.tc_usd_mxn as number | null,
     );
     // Neto 0 (cobro reembolsado completo) y nada sin TC: no hay dinero
     // retenido → se puede revisar (regla de arriba).
@@ -4411,6 +4412,7 @@ export class QuotesService implements ConfirmadorCotizacion {
     }
     const { total_usd, sin_tc_count, sin_tc_mxn } = cobrosEnUsd(
       cobros ?? [],
+      vuelo.tc_usd_mxn as number | null,
       vuelo.tc_usd_mxn as number | null,
     );
     // Mismo gate que refreshCobradoFlag: un total $0 (sin cotizar o cliente

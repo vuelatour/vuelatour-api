@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import {
@@ -33,7 +38,7 @@ import {
   PERMISO,
   TUAS_CAT,
 } from './grupos-reparto.util';
-import type { Rol } from '../../common/types/auth.types';
+import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_SIN_AVION,
@@ -170,8 +175,10 @@ import {
 import {
   ROLES_PAGOS_SOCIOS_LECTURA,
   aPagoSocio,
+  mesAcreditadoDeEntrega,
   mesDePeriodo,
   rangoDeMes,
+  type PagoSocio,
 } from './reparto-pago.util';
 import { UtilidadesMensualesSocios } from './reparto-utilidades.memo';
 import { hoyCancun } from '../../common/fecha-cancun.util';
@@ -294,7 +301,7 @@ const DETALLE_COBROS_PENDIENTES_CIERRE =
 
 /** Columnas de `vuelo` del reparto (las de siempre; 0.0.87). */
 const VUELO_REPARTO_COLS =
-  'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, fecha_solicitud, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot';
+  'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, fecha_solicitud, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot, tiempo_cobrable_hr';
 
 /**
  * Embeds del gasto para decidir su EJE contable (invariante 89, solo con la
@@ -443,6 +450,13 @@ interface AeronaveRow {
   id: string;
   matricula: string;
   modelo: string;
+  /**
+   * Aportación AFAC USD/hr (ficha del avión). PROVISIÓN AFAC del reparto
+   * (20-oct-2026, invariante 99): tarifa × horas cobradas de cada vuelo, la
+   * MISMA columna T «PERMISO AFAC (PROVISIÓN)» del balance. Opcional solo
+   * para los specs que arman aviones a mano (sin ella, 0).
+   */
+  permiso_afac_usd_hr?: string | number | null;
 }
 interface VueloRow {
   id: string;
@@ -462,6 +476,11 @@ interface VueloRow {
   monto_total_usd: string | null;
   tc_usd_mxn: string | null;
   cobrado: boolean;
+  /**
+   * Horas COBRADAS del viaje (20-oct-2026, invariante 99): base de la
+   * provisión AFAC (tarifa × horas), como la columna D del balance.
+   */
+  tiempo_cobrable_hr?: string | number | null;
   /**
    * Comisión de quien vendió (pre-IVA). Regla A (28-ago-2026 tarde): es
    * INGRESO DE VUELATOUR (como un extra) — ya viene dentro de
@@ -609,12 +628,43 @@ type GastoVendedorVueloRow = {
   tc_gasto: string | null;
   fecha_gasto: string | null;
 };
+/**
+ * Un gasto del avión en el reparto, tal cual se sumó (pantalla por avión,
+ * 20-oct-2026, invariante 99). `grupo` EXCLUIDO = no resta (su `clave` dice
+ * por qué: TUA, pago al vendedor, pago de AFAC, categoría de empresa…).
+ */
+export interface FilaGastoDetalle {
+  id: string;
+  fecha: string | null;
+  categoria: string;
+  etiqueta: string;
+  clave: string;
+  grupo: 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'FIJO' | 'EXCLUIDO';
+  concepto: string | null;
+  vuelo: { id: string; folio: number | null } | null;
+  monto: number;
+  moneda: string;
+  tc: number | null;
+  /** TUA / extensión embebidas que se le quitaron antes de sumar. */
+  descontado_mxn: number;
+  usd: number | null;
+  mxn: number | null;
+  tc_oficial: boolean;
+  es_reparto_parcial: boolean;
+}
+
 interface SocioRow {
   aeronave_id: string;
   socio_id: string;
   porcentaje: string;
   vigente_desde: string;
   vigente_hasta: string | null;
+  /**
+   * RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99, migración
+   * `20261020000005`): true = su parte de la reserva (reserva × %) se le
+   * DESCUENTA de la utilidad; false/ausente = solo se le informa.
+   */
+  descontar_reserva_overhaul?: boolean | null;
 }
 interface ReservaRow {
   aeronave_id: string;
@@ -633,7 +683,8 @@ export interface ItemPrecierreCuentasSocios {
   mes: string;
   detalle: string;
   count: number;
-  monto_usd: number;
+  /** EN PESOS (20-oct-2026, invariante 99): la cuenta corriente es en MXN. */
+  monto_mxn: number;
   lectura_fallida: boolean;
   [extra: string]: unknown;
 }
@@ -788,6 +839,13 @@ export class ProfitSharingService {
           monto_usd: r.monto_usd,
           // ADITIVO (0.0.94, invariante 92): el mismo reparto EN PESOS.
           monto_mxn: r.monto_mxn,
+          // ADITIVOS (20-oct-2026, invariante 99): su parte del saldo antes
+          // de la reserva, su parte de la reserva y si se le descuenta.
+          utilidad_usd: r.utilidad_usd,
+          utilidad_mxn: r.utilidad_mxn,
+          reserva_usd: r.reserva_usd,
+          reserva_mxn: r.reserva_mxn,
+          descuenta_reserva: r.descuenta_reserva,
         })),
         // Detalle de vuelos del avión (RepartoVueloLinea de pyservices): la
         // PARTE del avión cobrada / pendiente (misma cifra que la card y que
@@ -837,6 +895,15 @@ export class ProfitSharingService {
         saldo_mxn: a.saldo_disponible_mxn,
         pesos_sin_tc_usd: a.pesos_sin_tc_usd,
         reserva_tc: a.detalle.reserva.tc,
+        // ADITIVOS (20-oct-2026, invariante 99; `reparto_como_balance`): la
+        // provisión AFAC que resta y la reserva retenida a los socios que
+        // la descuentan. `reserva_overhaul_*` pasa a ser INFORMATIVA.
+        afac_reservado_usd: a.afac_reservado_usd,
+        afac_reservado_mxn: a.afac_reservado_mxn,
+        afac_horas_cobradas_hr: a.detalle.afac.horas_cobradas_hr,
+        afac_tarifa_usd_hr: a.detalle.afac.tarifa_usd_hr,
+        reserva_retenida_usd: a.reserva_retenida_usd,
+        reserva_retenida_mxn: a.reserva_retenida_mxn,
         // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): los ingresos
         // asignados a este avión. `saldo_usd` YA incluye
         // `otros_ingresos_avion_usd` (pyservices jamás lo vuelve a sumar);
@@ -862,6 +929,10 @@ export class ProfitSharingService {
       // dólares quedan informativos. Viaja SIEMPRE, ANTES de la bandera que
       // los specs fijan como la última.
       reparto_en_pesos: true as const,
+      // ADITIVA (20-oct-2026, invariante 99): la cascada del balance —
+      // provisión AFAC en la cascada y reserva de overhaul informativa (por
+      // socio, descontada solo a quien lo pidió).
+      reparto_como_balance: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real, en dos categorías —
       // `comisiones_venta_usd` = parte del avión de la bancaria + los pagos
@@ -914,6 +985,12 @@ export class ProfitSharingService {
        * byte.
        */
       excluirVuelos?: ReadonlyArray<string>;
+      /**
+       * PANTALLA POR AVIÓN (20-oct-2026, invariante 99): con `true` cada
+       * avión trae `detalle.gastos[]` (gasto por gasto, con su grupo y sus
+       * pesos). Sin él la respuesta es la de siempre (sin la llave).
+       */
+      detalleGastos?: boolean;
     } = {},
   ) {
     if (qPedido.desde > qPedido.hasta) {
@@ -931,6 +1008,8 @@ export class ProfitSharingService {
         // REPARTO EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92):
         // la bandera viaja también en la respuesta vacía.
         reparto_en_pesos: true as const,
+        // LA CASCADA DEL BALANCE (20-oct-2026, invariante 99): ídem.
+        reparto_como_balance: true as const,
         gastos_sin_tc: { count: 0, monto_mxn: 0 },
         gastos_tc_oficial: { count: 0, monto_mxn: 0 },
         tc_oficial: {
@@ -1050,6 +1129,17 @@ export class ProfitSharingService {
     ]);
     const gastosVendedorPorVuelo = gastosDeVuelos.vendedor;
     const gastosExternoPorVuelo = gastosDeVuelos.externos;
+    // T.C. DE COSTOS (z) DE CADA VUELO (20-oct-2026, invariante 99): los
+    // gastos crudos de cada vuelo del reparto, para que la provisión AFAC en
+    // pesos salga con el MISMO z del balance (promedio de `tc_gasto` de sus
+    // gastos MXN sin el pago al vendedor; sin ninguno, el K del vuelo).
+    const gastosPorVuelo = new Map<string, GastoRow[]>();
+    for (const g of gastos) {
+      if (!g.vuelo_id) continue;
+      const list = gastosPorVuelo.get(g.vuelo_id) ?? [];
+      list.push(g);
+      gastosPorVuelo.set(g.vuelo_id, list);
+    }
 
     // Ingreso canónico por vuelo: suma de cobro_vuelo convertida a USD
     // (cobrosEnUsd, la MISMA fuente que la bandera `cobrado` y el reporte por
@@ -1330,6 +1420,9 @@ export class ProfitSharingService {
         otrosPorAvionMxn,
         otrosPorAvionSinPesosUsd,
         tcReserva,
+        // PROVISIÓN AFAC (20-oct-2026, invariante 99): z por vuelo.
+        gastosPorVuelo,
+        conDetalleGastos: opts.detalleGastos === true,
       }),
     );
 
@@ -1352,6 +1445,7 @@ export class ProfitSharingService {
       const conv = cobrosEnUsd(
         cobrosPorVuelo.get(v.id) ?? [],
         pos(v.tc_usd_mxn) ?? tcOficialExt?.tc ?? null,
+        pos(v.tc_usd_mxn),
       );
       if (tcOficialExt != null) extTcOficialCount += 1;
       extCobrado += conv.total_usd;
@@ -1494,6 +1588,12 @@ export class ProfitSharingService {
       // esta bandera el panel pinta los pesos como lo principal. Viaja
       // SIEMPRE (también en la respuesta vacía).
       reparto_en_pesos: true as const,
+      // LA CASCADA DEL BALANCE (20-oct-2026, invariante 99): INDIRECTO
+      // cuenta, la provisión AFAC resta (`afac_reservado_*`) y la reserva de
+      // overhaul SOLO se informa (por socio en `reparto[].reserva_*`; se
+      // descuenta solo a quien lo pidió). Con esta bandera el panel y
+      // pyservices pintan la cascada nueva.
+      reparto_como_balance: true as const,
       ...(cierre ? { cierre } : {}),
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
       // ADITIVO (29-ago): FIJOS del pool convertidos con el TC oficial del
@@ -1721,6 +1821,7 @@ export class ProfitSharingService {
           estado: v.estado,
           monto_total_usd: v.monto_total_usd,
           tc_usd_mxn: ctx.tcVuelo(v),
+          k_cotizacion: pos(v.tc_usd_mxn),
           cliente_interno: v.cliente_id ? internos.has(v.cliente_id) : false,
         },
         ctx.cobrosPorVuelo.get(v.id) ?? [],
@@ -1967,6 +2068,15 @@ export class ProfitSharingService {
       otrosPorAvionMxn?: number;
       otrosPorAvionSinPesosUsd?: number;
       tcReserva?: number | null;
+      /**
+       * PROVISIÓN AFAC (20-oct-2026, invariante 99): gastos CRUDOS de cada
+       * vuelo del reparto (vuelo.id → filas) para el T.C. de costos z con
+       * que la provisión pasa a pesos (el MISMO del balance). Opcional solo
+       * para los specs que arman el ctx a mano (sin él, z = K del vuelo).
+       */
+      gastosPorVuelo?: ReadonlyMap<string, GastoRow[]>;
+      /** `detalle.gastos[]` gasto por gasto (pantalla por avión). */
+      conDetalleGastos?: boolean;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -2059,6 +2169,17 @@ export class ProfitSharingService {
     let pendienteMxn = 0;
     let comisionesMxn = 0;
     let pesosSinTcUsd = 0;
+    // PROVISIÓN AFAC (20-oct-2026, invariante 99): la MISMA columna T
+    // «PERMISO AFAC (PROVISIÓN)» del balance — tarifa USD/hr del avión ×
+    // horas COBRADAS de cada vuelo (la parte de este avión), en USD y en
+    // pesos con el T.C. de costos z del vuelo. Resta del saldo como en el
+    // balance («utilidad antes de gastos» ya la descuenta): el reparto y el
+    // balance dicen la MISMA utilidad. El costo REAL del permiso lo paga
+    // VuelaTour (invariante 90): el avión aporta lo reservado.
+    const tarifaAfac = pos(a.permiso_afac_usd_hr);
+    let afacReservado = 0;
+    let afacReservadoMxn = 0;
+    let horasCobradasAvion = 0;
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
     // que los agregados (misma conversión cobrosEnUsd, misma partición,
     // mismo reparto multi-avión) para que la suma del detalle cuadre exacto
@@ -2155,6 +2276,15 @@ export class ProfitSharingService {
       cobrado_avion_mxn: number | null;
       pendiente_avion_mxn: number | null;
       tc_pesos: number | null;
+      /**
+       * PROVISIÓN AFAC (20-oct-2026, invariante 99), ADITIVOS: horas
+       * cobradas de este avión en el vuelo, su provisión (tarifa × horas) en
+       * USD y en pesos (× z; null = sin ningún T.C. de costos) y el z usado.
+       */
+      horas_cobradas_avion_hr: number;
+      afac_reservado_avion_usd: number;
+      afac_reservado_avion_mxn: number | null;
+      tc_costos: number | null;
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -2168,9 +2298,12 @@ export class ProfitSharingService {
       // si no lo hay, el oficial del día de la cotización (29-ago; el mapa
       // solo trae vuelos que lo necesitan). Misma cadena que el balance.
       const tcOficialVuelo = ctx.tcOficialVuelo.get(v.id);
+      // PESOS PRIMERO (20-oct-2026, invariante 99): K capturado como 3.er
+      // argumento — los cobros MXN cuentan al precio en pesos.
       const conv = cobrosEnUsd(
         ctx.cobrosPorVuelo.get(v.id) ?? [],
         pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
+        pos(v.tc_usd_mxn),
       );
       // VUELO CANCELADO (regla del cliente, 28-ago-2026): lo cobrado y NO
       // reembolsado (cargo por cancelación / anticipo retenido) es ingreso
@@ -2269,6 +2402,41 @@ export class ProfitSharingService {
       if (cobradoAvionMxn != null) cobradoMxn += cobradoAvionMxn;
       else pesosSinTcUsd += cobradoAvion;
       if (pendienteAvionMxn != null) pendienteMxn += pendienteAvionMxn;
+      // ---- PROVISIÓN AFAC del vuelo (20-oct-2026, invariante 99) ----
+      // D = parte de este avión de las horas COBRADAS del viaje (un
+      // cancelado no cobra horas), con el MISMO reparto por residuo mayor
+      // que el dinero (`parte`); X = tarifa × z × D en pesos y tarifa × D en
+      // dólares — byte a byte las fórmulas de la fila del balance. z =
+      // promedio de `tc_gasto` de los gastos MXN del vuelo sin el pago al
+      // vendedor; sin ninguno, el K del vuelo (capturado ?? oficial).
+      const horasCobrablesVuelo = esCancelado
+        ? 0
+        : (pos(v.tiempo_cobrable_hr) ?? 0);
+      const horasAvion =
+        horasCobrablesVuelo > 0 ? parte(horasCobrablesVuelo) : 0;
+      const tcsZ = (ctx.gastosPorVuelo?.get(v.id) ?? [])
+        .filter(
+          (g) => g.moneda === 'MXN' && !categoriaEsPagoVendedor(g.categoria),
+        )
+        .map((g) => pos(g.tc_gasto))
+        .filter((x): x is number => x != null);
+      const zVuelo = tcsZ.length
+        ? tcsZ.reduce((acc, t) => acc + t, 0) / tcsZ.length
+        : kPesos;
+      const afacVueloUsd =
+        tarifaAfac != null && horasAvion > 0
+          ? round2(tarifaAfac * horasAvion)
+          : 0;
+      const afacVueloMxn =
+        tarifaAfac != null && horasAvion > 0
+          ? zVuelo != null
+            ? round2(tarifaAfac * zVuelo * horasAvion)
+            : null
+          : 0;
+      horasCobradasAvion += horasAvion;
+      afacReservado += afacVueloUsd;
+      if (afacVueloMxn != null) afacReservadoMxn += afacVueloMxn;
+      else pesosSinTcUsd += afacVueloUsd;
       if (comisionesVuelo != null) {
         // Las comisiones EN PESOS con el K del balance: si el de los dólares
         // es el mismo, el MISMO cálculo; si no (vuelo sin tc_usd_mxn cuyos
@@ -2427,6 +2595,11 @@ export class ProfitSharingService {
         cobrado_avion_mxn: cobradoAvionMxn,
         pendiente_avion_mxn: pendienteAvionMxn,
         tc_pesos: kPesos,
+        // PROVISIÓN AFAC (20-oct-2026, invariante 99), ADITIVOS.
+        horas_cobradas_avion_hr: round2(horasAvion),
+        afac_reservado_avion_usd: afacVueloUsd,
+        afac_reservado_avion_mxn: afacVueloMxn,
+        tc_costos: zVuelo,
       });
     }
     detalleVuelos.sort(
@@ -2450,6 +2623,14 @@ export class ProfitSharingService {
     // corre antes que el de ingresos; un parcial del reparto comparte el id
     // del padre (sus partes se suman).
     const partesGastoCargadas: ParteGastoCargada[] = [];
+    // PANTALLA POR AVIÓN (20-oct-2026, invariante 99): gasto por gasto, con
+    // el MISMO grupo, la MISMA clave y los MISMOS dólares/pesos con que se
+    // sumó arriba («para saber cuáles son esos permisos, gastos indirectos y
+    // directos de los que habla el Excel»). Solo con `ctx.conDetalleGastos`.
+    const filasGastos: FilaGastoDetalle[] = [];
+    const folioPorVuelo = new Map(
+      ctx.vuelos.map((v) => [v.id, v.folio ?? null] as const),
+    );
     // TUA EMBEBIDO en facturas de aeródromo (regla 7): se descuenta del costo
     // del avión ANTES de convertir y se acumula para una fila informativa
     // del detalle (transparencia: el total de la categoría ya no es la suma
@@ -2655,6 +2836,33 @@ export class ProfitSharingService {
         }
       }
       porCategoria.set(clave, acc);
+      if (ctx.conDetalleGastos) {
+        filasGastos.push({
+          id: g.id,
+          fecha: diaDeFecha(g.fecha_gasto ?? null),
+          categoria: g.categoria,
+          etiqueta: etiquetaCategoriaGasto(g.categoria),
+          clave,
+          grupo,
+          concepto: g.notas?.trim() || null,
+          vuelo: g.vuelo_id
+            ? { id: g.vuelo_id, folio: folioPorVuelo.get(g.vuelo_id) ?? null }
+            : null,
+          monto: round2(Number(g.monto)),
+          moneda: g.moneda,
+          tc: pos(g.tc_gasto),
+          descontado_mxn: descontado > 0 ? descontado : 0,
+          usd: conv === null ? null : round2(conv.usd),
+          mxn: mxnGasto == null ? null : round2(mxnGasto),
+          // Sin T.C. propio y cruzó de moneda con el oficial de SU día:
+          // MXN → USD lo dice `conv.oficial`; USD → MXN, que haya pesos.
+          tc_oficial:
+            pos(g.tc_gasto) == null &&
+            (conv?.oficial === true ||
+              (g.moneda === 'USD' && mxnGasto != null)),
+          es_reparto_parcial: g.es_reparto_parcial === true,
+        });
+      }
     }
     const tcGastoReparto = gastosLigadosDelLibro(partesGastoCargadas);
     if (tuaEmbebidoCount > 0) {
@@ -2881,8 +3089,16 @@ export class ProfitSharingService {
     // de la cascada (otros_prorrateados) — el PDF/XLSX no cambia de shape.
     const otrosR = round2(ctx.otrosPorAvion + fijoManual);
     const reservaR = round2(reservaOverhaul);
+    // PROVISIÓN AFAC (20-oct-2026, invariante 99): resta como en el balance.
+    const afacR = round2(afacReservado);
     // + los otros ingresos del avión (invariante 67; 0 sin ingresos).
     const otrosIngresosAvionR = round2(otrosIngresosAvion);
+    // LA CASCADA DEL BALANCE (20-oct-2026, invariante 99; decisión del
+    // cliente: «que cuadren»): saldo = venta cobrada − comisiones − directos
+    // − indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
+    // ingresos. La RESERVA DE OVERHAUL YA NO RESTA AQUÍ (como en el balance
+    // desde el 0.0.98): se informa, y solo al socio que lo pidió se le
+    // descuenta SU parte (`descontar_reserva_overhaul`, abajo).
     const saldo = round2(
       cobradoR -
         comisionesR -
@@ -2890,7 +3106,7 @@ export class ProfitSharingService {
         indirectosR -
         permisosR -
         otrosR -
-        reservaR +
+        afacR +
         otrosIngresosAvionR,
     );
 
@@ -2905,7 +3121,10 @@ export class ProfitSharingService {
     const permisosMxnR = round2(permisosMxn);
     const otrosMxnR = round2((ctx.otrosPorAvionMxn ?? 0) + fijoManualMxn);
     const reservaMxnR = tcReserva != null ? round2(reservaR * tcReserva) : 0;
-    if (tcReserva == null) pesosSinTcUsd += reservaR;
+    // La reserva ya no entra al saldo: sus dólares sin T.C. solo dejan
+    // incompleta la PARTE de los socios que la descuentan (abajo).
+    const reservaSinPesos = tcReserva == null && reservaR > 0;
+    const afacMxnR = round2(afacReservadoMxn);
     const otrosIngresosAvionMxnR = round2(otrosIngresosMxn);
     pesosSinTcUsd += ctx.otrosPorAvionSinPesosUsd ?? 0;
     const saldoMxn = round2(
@@ -2915,7 +3134,7 @@ export class ProfitSharingService {
         indirectosMxnR -
         permisosMxnR -
         otrosMxnR -
-        reservaMxnR +
+        afacMxnR +
         otrosIngresosAvionMxnR,
     );
 
@@ -2934,14 +3153,47 @@ export class ProfitSharingService {
     const repartoPct = pcts.reduce((acc, p) => acc + p, 0);
     const centsUsd = centavosPorResiduoMayor(pcts, saldo);
     const centsMxn = centavosPorResiduoMayor(pcts, saldoMxn);
-    const reparto = vigentes.map((s, i) => ({
-      socio_id: s.socio_id,
-      socio_nombre: ctx.nombres.get(s.socio_id) ?? 'Socio',
-      porcentaje: pcts[i],
-      monto_usd: centsUsd[i] / 100,
-      // ADITIVO (0.0.94, invariante 92): lo que le toca EN PESOS.
-      monto_mxn: centsMxn[i] / 100,
-    }));
+    // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la parte
+    // de cada socio (reserva × su %, residuo mayor) se INFORMA siempre —
+    // «cuánto es lo que debe guardar cada socio»— y, solo si la fila de
+    // `aeronave_socio` lo pide (`descontar_reserva_overhaul`), se le
+    // DESCUENTA de su utilidad: VuelaTour la retiene para el overhaul
+    // (`reserva_retenida_*`). Sin la bandera, el socio recibe su parte del
+    // saldo completa y el dato de lo que debe guardar.
+    const centsReservaUsd = centavosPorResiduoMayor(pcts, reservaR);
+    const centsReservaMxn = centavosPorResiduoMayor(pcts, reservaMxnR);
+    let reservaRetenidaUsd = 0;
+    let reservaRetenidaMxn = 0;
+    const reparto = vigentes.map((s, i) => {
+      const descuenta = s.descontar_reserva_overhaul === true;
+      const utilidadUsd = centsUsd[i] / 100;
+      const utilidadMxn = centsMxn[i] / 100;
+      const reservaUsd = centsReservaUsd[i] / 100;
+      const reservaMxn = centsReservaMxn[i] / 100;
+      if (descuenta) {
+        reservaRetenidaUsd += reservaUsd;
+        reservaRetenidaMxn += reservaMxn;
+        if (reservaSinPesos) pesosSinTcUsd += reservaUsd;
+      }
+      return {
+        socio_id: s.socio_id,
+        socio_nombre: ctx.nombres.get(s.socio_id) ?? 'Socio',
+        porcentaje: pcts[i],
+        // Lo que se le ENTREGA (neto de su reserva si la descuenta).
+        monto_usd: round2(utilidadUsd - (descuenta ? reservaUsd : 0)),
+        // ADITIVO (0.0.94, invariante 92): lo que le toca EN PESOS.
+        monto_mxn: round2(utilidadMxn - (descuenta ? reservaMxn : 0)),
+        // ADITIVOS (20-oct-2026, invariante 99): su parte del saldo ANTES de
+        // la reserva, su parte de la reserva y si se le descuenta.
+        utilidad_usd: utilidadUsd,
+        utilidad_mxn: utilidadMxn,
+        reserva_usd: reservaUsd,
+        reserva_mxn: reservaMxn,
+        descuenta_reserva: descuenta,
+      };
+    });
+    const reservaRetenidaUsdR = round2(reservaRetenidaUsd);
+    const reservaRetenidaMxnR = round2(reservaRetenidaMxn);
 
     return {
       aeronave: { id: a.id, matricula: a.matricula, modelo: a.modelo },
@@ -3022,6 +3274,9 @@ export class ProfitSharingService {
         permisos_mxn: permisosMxnR,
         otros_prorrateados_mxn: otrosMxnR,
       },
+      // RESERVA DE OVERHAUL (20-oct-2026, invariante 99): INFORMATIVA — ya no
+      // resta del saldo (como en el balance desde el 0.0.98); se reparte por
+      // socio en `reparto[].reserva_*` y solo se descuenta a quien lo pidió.
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
       saldo_disponible_usd: saldo,
@@ -3031,6 +3286,14 @@ export class ProfitSharingService {
       reserva_overhaul_mxn: reservaMxnR,
       saldo_disponible_mxn: saldoMxn,
       pesos_sin_tc_usd: round2(pesosSinTcUsd),
+      // ADITIVOS (20-oct-2026, invariante 99): la PROVISIÓN AFAC que resta
+      // del saldo (como la columna T del balance) y la reserva que VuelaTour
+      // RETIENE de los socios que la descuentan (Σ `reparto[].reserva_*` de
+      // los que llevan `descuenta_reserva`).
+      afac_reservado_usd: afacR,
+      afac_reservado_mxn: afacMxnR,
+      reserva_retenida_usd: reservaRetenidaUsdR,
+      reserva_retenida_mxn: reservaRetenidaMxnR,
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
       // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
@@ -3040,6 +3303,17 @@ export class ProfitSharingService {
       detalle: {
         vuelos: detalleVuelos,
         gastos_por_categoria: detalleGastos,
+        // PANTALLA POR AVIÓN (invariante 99): solo si se pidió.
+        ...(ctx.conDetalleGastos
+          ? {
+              gastos: [...filasGastos].sort(
+                (x, y) =>
+                  (x.fecha ?? '9999-99-99').localeCompare(
+                    y.fecha ?? '9999-99-99',
+                  ) || x.id.localeCompare(y.id),
+              ),
+            }
+          : {}),
         reserva: {
           horas_hr: horasPeriodo,
           tarifa_hora_usd: round2(tarifaReserva),
@@ -3048,6 +3322,14 @@ export class ProfitSharingService {
           // oficial del cierre del periodo con que se pasó (null = sin dato).
           monto_mxn: reservaMxnR,
           tc: tcReserva,
+        },
+        // PROVISIÓN AFAC (20-oct-2026, invariante 99): tarifa de la ficha
+        // del avión × horas COBRADAS del periodo (la parte de este avión).
+        afac: {
+          tarifa_usd_hr: tarifaAfac,
+          horas_cobradas_hr: round2(horasCobradasAvion),
+          monto_usd: afacR,
+          monto_mxn: afacMxnR,
         },
         // Composición de la parte VuelaTour de este avión (alimenta el
         // bloque global `otros_ingresos_vuelatour` de compute()).
@@ -3639,7 +3921,11 @@ export class ProfitSharingService {
       pos(v.tc_usd_mxn) ?? tcOficialPre.vuelo.get(v.id as string)?.tc ?? null;
     /** cobrosEnUsd con la cadena tc de cotización ?? TC oficial del día. */
     const convCobros = (v: Record<string, unknown>) =>
-      cobrosEnUsd(cobrosPorVueloPre.get(v.id as string) ?? [], tcCadena(v));
+      cobrosEnUsd(
+        cobrosPorVueloPre.get(v.id as string) ?? [],
+        tcCadena(v),
+        pos(v.tc_usd_mxn),
+      );
     const cobrosTcOficialVuelos: Array<{ id: string; folio: number }> = [];
     const cobrosSinTcVuelos: Array<{ id: string; folio: number }> = [];
     let cobrosSinTcMxn = 0;
@@ -3808,6 +4094,7 @@ export class ProfitSharingService {
                 estado: 'COMPLETADO',
                 monto_total_usd: v.monto_total_usd as string | number | null,
                 tc_usd_mxn: tcCadena(v),
+                k_cotizacion: pos(v.tc_usd_mxn),
                 cliente_interno: false,
               },
               cobrosPorVueloPre.get(v.id as string) ?? [],
@@ -3840,6 +4127,7 @@ export class ProfitSharingService {
           },
           cobros: cobrosPorVueloPre.get(v.id as string) ?? [],
           tcFallback: tcCadena(v),
+          kCotizacion: pos(v.tc_usd_mxn),
           grupoFolio,
         }),
       );
@@ -3922,6 +4210,7 @@ export class ProfitSharingService {
             pos(h.tc_usd_mxn) ??
               tcOficialHijos.vuelo.get(h.id as string)?.tc ??
               null,
+            pos(h.tc_usd_mxn),
           ).total_usd;
         }
         const saldo = round2(total - cobrado);
@@ -5369,7 +5658,7 @@ export class ProfitSharingService {
       ...base,
       detalle,
       count: 0,
-      monto_usd: 0,
+      monto_mxn: 0,
       socios: [] as ResumenPrecierreCuentas['por_entregar']['socios'],
       lectura_fallida: true,
       disponible,
@@ -5409,8 +5698,8 @@ export class ProfitSharingService {
       const mesAdelantos = mesHastaAdelantosPrecierre(mesRevision, mesActual);
       const filas: Array<{
         socio: { id: string; nombre: string; es_empresa: boolean };
-        por_entregar_hasta_mes_usd: number;
-        por_entregar_cerrado_usd: number;
+        por_entregar_hasta_mes_mxn: number;
+        por_entregar_cerrado_mxn: number;
       }> = [];
       let sinCuenta = 0;
       for (const s of socios) {
@@ -5438,8 +5727,8 @@ export class ProfitSharingService {
             nombre: s.socio.nombre,
             es_empresa: s.socio.es_empresa,
           },
-          por_entregar_hasta_mes_usd: hastaMes[hastaMes.length - 1].saldo_usd,
-          por_entregar_cerrado_usd: cerrado[cerrado.length - 1].saldo_usd,
+          por_entregar_hasta_mes_mxn: hastaMes[hastaMes.length - 1].saldo_mxn,
+          por_entregar_cerrado_mxn: cerrado[cerrado.length - 1].saldo_mxn,
         });
       }
       const r = resumenPrecierreCuentas({
@@ -5452,7 +5741,7 @@ export class ProfitSharingService {
           ...base,
           detalle: r.por_entregar.detalle,
           count: r.por_entregar.count,
-          monto_usd: r.por_entregar.monto_usd,
+          monto_mxn: r.por_entregar.monto_mxn,
           socios: r.por_entregar.socios,
           lectura_fallida: false,
           disponible: true,
@@ -5463,7 +5752,7 @@ export class ProfitSharingService {
           mes,
           detalle: r.adelantados.detalle,
           count: r.adelantados.count,
-          monto_usd: r.adelantados.monto_usd,
+          monto_mxn: r.adelantados.monto_mxn,
           socios: r.adelantados.socios,
           lectura_fallida: false,
           disponible: true,
@@ -5479,10 +5768,314 @@ export class ProfitSharingService {
 
   // ============ fetchers ============
 
+  // ===================================================================
+  // PANTALLA POR AVIÓN (20-oct-2026, invariante 99)
+  // ===================================================================
+
+  /** Entregas VIVAS «corresponde a» este avión, como `PagoSocio` con nombres. */
+  private async entregasDelAvion(
+    aeronaveId: string,
+    actor?: Pick<AuthenticatedUser, 'rol' | 'userId'>,
+  ): Promise<PagoSocio[]> {
+    const lector = lectorCuentaSocios(this.supabase.service);
+    if (!(await lector.disponible())) return [];
+    const vivas = await lector.entregasVivas();
+    if (vivas === SIN_MIGRACION) return [];
+    // SOCIO: solo las suyas (la misma regla de `GET pagos`).
+    const propias = vivas.filter(
+      (r) =>
+        r.aeronave_id === aeronaveId &&
+        (actor?.rol !== Rol.SOCIO || r.socio_id === actor.userId),
+    );
+    if (propias.length === 0) return [];
+    const ids = [
+      ...new Set(
+        propias.flatMap((r) =>
+          [r.entregado_por, r.created_by, r.updated_by].filter(
+            (x): x is string => !!x,
+          ),
+        ),
+      ),
+    ];
+    const [nombres, matriculas] = await Promise.all([
+      this.fetchNombres(ids),
+      this.fetchMatriculas(),
+    ]);
+    return propias.map((r) => aPagoSocio(r, nombres, new Map(), matriculas));
+  }
+
+  /**
+   * Mes al que se ACREDITA una entrega: «corresponde a» o el de su fecha.
+   * Fuente única `mesAcreditadoDeEntrega` (la comparte el balance por avión
+   * y general, invariante 100).
+   */
+  private static mesDeEntrega(p: PagoSocio): string {
+    return mesAcreditadoDeEntrega(p);
+  }
+
+  /**
+   * `GET /v1/profit-sharing/aviones/:id?desde&hasta`: el reparto de UN avión
+   * con el detalle gasto por gasto (`detalle.gastos[]`), las entregas que
+   * «corresponden» a ese avión en los meses del periodo y, por socio, lo
+   * generado / lo entregado / lo por entregar DE ESE AVIÓN (pesos). Es la
+   * pantalla que sustituye a la card del reparto.
+   */
+  async avionDetalle(
+    aeronaveId: string,
+    q: ProfitSharingQuery,
+    actor?: Pick<AuthenticatedUser, 'rol' | 'userId'>,
+  ) {
+    const r = await this.compute(
+      { desde: q.desde, hasta: q.hasta, aeronave_id: aeronaveId },
+      { detalleGastos: true },
+    );
+    const avion = r.aviones.find((a) => a.aeronave.id === aeronaveId);
+    if (!avion) {
+      throw new NotFoundException({
+        message: 'Ese avión no existe o está dado de baja.',
+        error: 'AERONAVE_NO_EXISTE',
+        details: { aeronave_id: aeronaveId },
+      });
+    }
+    const meses = new Set(
+      mesesEntre(r.periodo.desde.slice(0, 7), r.periodo.hasta.slice(0, 7)),
+    );
+    const entregas = (await this.entregasDelAvion(aeronaveId, actor)).filter(
+      (p) => meses.has(ProfitSharingService.mesDeEntrega(p)),
+    );
+    const entregadoPorSocio = new Map<string, number>();
+    for (const p of entregas) {
+      entregadoPorSocio.set(
+        p.socio_id,
+        round2((entregadoPorSocio.get(p.socio_id) ?? 0) + p.monto_mxn),
+      );
+    }
+    // SOCIO: su renglón y sus entregas (como en «Pagos a socios»).
+    const soloSocio = actor?.rol === Rol.SOCIO ? actor.userId : null;
+    const socios = avion.reparto
+      .filter((s) => soloSocio === null || s.socio_id === soloSocio)
+      .map((s) => {
+        const entregado = entregadoPorSocio.get(s.socio_id) ?? 0;
+        return {
+          socio_id: s.socio_id,
+          socio_nombre: s.socio_nombre,
+          porcentaje: s.porcentaje,
+          utilidad_mxn: s.utilidad_mxn,
+          reserva_mxn: s.reserva_mxn,
+          descuenta_reserva: s.descuenta_reserva,
+          monto_mxn: s.monto_mxn,
+          entregado_mxn: entregado,
+          por_entregar_mxn: round2(s.monto_mxn - entregado),
+          // Informativos en dólares.
+          monto_usd: s.monto_usd,
+          reserva_usd: s.reserva_usd,
+        };
+      });
+    return {
+      periodo: r.periodo,
+      reparto_en_pesos: true as const,
+      reparto_como_balance: true as const,
+      avion,
+      socios,
+      entregas: [...entregas].sort(
+        (a, b) =>
+          b.fecha_pago.localeCompare(a.fecha_pago) ||
+          b.created_at.localeCompare(a.created_at),
+      ),
+      ...('cierre' in r && r.cierre ? { cierre: r.cierre } : {}),
+      tc_oficial: r.tc_oficial,
+      gastos_sin_tc: r.gastos_sin_tc,
+    };
+  }
+
+  /** `GET …/historico` con sus defaults: del inicio oficial al mes en curso. */
+  async avionHistoricoDefault(
+    aeronaveId: string,
+    q: { desde?: string; hasta?: string },
+    actor?: Pick<AuthenticatedUser, 'rol' | 'userId'>,
+  ) {
+    const mesActual = mesActualCancun(this.ahora());
+    const inicio = await inicioOficialDe(this.configuracion);
+    const desde = q.desde ?? (inicio ? inicio.slice(0, 7) : mesActual);
+    const hasta = q.hasta ?? mesActual;
+    return this.avionHistorico(aeronaveId, desde, hasta, actor);
+  }
+
+  /**
+   * `GET /v1/profit-sharing/aviones/:id/historico?desde=AAAA-MM&hasta=AAAA-MM`:
+   * la cascada EN PESOS de ese avión mes a mes (un compute por mes, como la
+   * cuenta corriente), lo que generó cada socio y lo que se le entregó de
+   * ese avión en cada mes, y los acumulados del rango.
+   */
+  async avionHistorico(
+    aeronaveId: string,
+    desdeMes: string,
+    hastaMes: string,
+    actor?: Pick<AuthenticatedUser, 'rol' | 'userId'>,
+  ) {
+    const soloSocio = actor?.rol === Rol.SOCIO ? actor.userId : null;
+    const meses = mesesEntre(desdeMes, hastaMes);
+    if (meses.length === 0 || meses.length > 36) {
+      throw new BadRequestException({
+        message:
+          'El rango de meses no es válido (desde ≤ hasta, máximo 36 meses).',
+        error: 'RANGO_INVALIDO',
+        details: { desde: desdeMes, hasta: hastaMes },
+      });
+    }
+    const mesActual = mesActualCancun(this.ahora());
+    const entregas = await this.entregasDelAvion(aeronaveId, actor);
+    const porMes: Array<Record<string, unknown>> = [];
+    let aeronave: { id: string; matricula: string; modelo: string } | null =
+      null;
+    const acumulado = new Map<
+      string,
+      {
+        socio_nombre: string;
+        generado_mxn: number;
+        reserva_mxn: number;
+        entregado_mxn: number;
+      }
+    >();
+    const totales: Record<string, number> = {
+      horas_voladas_hr: 0,
+      vuelos: 0,
+      cobrado_mxn: 0,
+      pendiente_cobro_mxn: 0,
+      comisiones_mxn: 0,
+      directos_mxn: 0,
+      indirectos_mxn: 0,
+      permisos_mxn: 0,
+      otros_mxn: 0,
+      afac_mxn: 0,
+      otros_ingresos_mxn: 0,
+      saldo_mxn: 0,
+      reserva_mxn: 0,
+      reserva_retenida_mxn: 0,
+      entregado_mxn: 0,
+      pesos_sin_tc_usd: 0,
+      saldo_usd: 0,
+    };
+    for (const mes of meses) {
+      if (mes > mesActual) break;
+      const { desde, hasta } = rangoDeMes(mes);
+      const r = await this.compute({ desde, hasta, aeronave_id: aeronaveId });
+      const a = r.aviones.find((x) => x.aeronave.id === aeronaveId);
+      if (!a) continue;
+      aeronave = a.aeronave;
+      const entregasMes = entregas.filter(
+        (p) => ProfitSharingService.mesDeEntrega(p) === mes,
+      );
+      const numeros: Record<string, number> = {
+        horas_voladas_hr: a.horas_voladas_hr,
+        vuelos: a.ingresos.vuelos_cobrados + a.ingresos.vuelos_pendientes,
+        cobrado_mxn: a.ingresos.cobrado_mxn,
+        pendiente_cobro_mxn: a.ingresos.pendiente_cobro_mxn,
+        comisiones_mxn: a.ingresos.comisiones_venta_mxn,
+        directos_mxn: a.gastos.directos_mxn,
+        indirectos_mxn: a.gastos.indirectos_mxn,
+        permisos_mxn: a.gastos.permisos_mxn,
+        otros_mxn: a.gastos.otros_prorrateados_mxn,
+        afac_mxn: a.afac_reservado_mxn,
+        otros_ingresos_mxn: a.ingresos.otros_ingresos_avion_mxn,
+        saldo_mxn: a.saldo_disponible_mxn,
+        reserva_mxn: a.reserva_overhaul_mxn,
+        reserva_retenida_mxn: a.reserva_retenida_mxn,
+        entregado_mxn: round2(
+          entregasMes.reduce((acc, p) => acc + p.monto_mxn, 0),
+        ),
+        pesos_sin_tc_usd: a.pesos_sin_tc_usd,
+        saldo_usd: a.saldo_disponible_usd,
+      };
+      for (const k of Object.keys(totales)) {
+        totales[k] = round2(totales[k] + (numeros[k] ?? 0));
+      }
+      const reparto = a.reparto
+        .filter((s) => soloSocio === null || s.socio_id === soloSocio)
+        .map((s) => ({
+          socio_id: s.socio_id,
+          socio_nombre: s.socio_nombre,
+          porcentaje: s.porcentaje,
+          utilidad_mxn: s.utilidad_mxn,
+          reserva_mxn: s.reserva_mxn,
+          descuenta_reserva: s.descuenta_reserva,
+          monto_mxn: s.monto_mxn,
+          entregado_mxn: round2(
+            entregasMes
+              .filter((p) => p.socio_id === s.socio_id)
+              .reduce((acc, p) => acc + p.monto_mxn, 0),
+          ),
+        }));
+      for (const sr of reparto) {
+        const acc = acumulado.get(sr.socio_id) ?? {
+          socio_nombre: sr.socio_nombre,
+          generado_mxn: 0,
+          reserva_mxn: 0,
+          entregado_mxn: 0,
+        };
+        acc.generado_mxn = round2(acc.generado_mxn + sr.monto_mxn);
+        acc.reserva_mxn = round2(acc.reserva_mxn + sr.reserva_mxn);
+        acc.entregado_mxn = round2(acc.entregado_mxn + sr.entregado_mxn);
+        acumulado.set(sr.socio_id, acc);
+      }
+      porMes.push({
+        mes,
+        en_curso: mes === mesActual,
+        ...numeros,
+        reparto,
+        ...('cierre' in r && r.cierre
+          ? { cierre_estado: r.cierre.estado ?? null }
+          : {}),
+      });
+    }
+    if (!aeronave) {
+      const [sola] = await this.fetchAeronaves(aeronaveId);
+      if (!sola) {
+        throw new NotFoundException({
+          message: 'Ese avión no existe o está dado de baja.',
+          error: 'AERONAVE_NO_EXISTE',
+          details: { aeronave_id: aeronaveId },
+        });
+      }
+      aeronave = {
+        id: sola.id,
+        matricula: sola.matricula,
+        modelo: sola.modelo,
+      };
+    }
+    return {
+      aeronave,
+      desde: desdeMes,
+      hasta: hastaMes,
+      mes_actual: mesActual,
+      reparto_en_pesos: true as const,
+      reparto_como_balance: true as const,
+      meses: porMes,
+      totales,
+      socios: [...acumulado.entries()]
+        .map(([socio_id, s]) => ({
+          socio_id,
+          socio_nombre: s.socio_nombre,
+          generado_mxn: s.generado_mxn,
+          reserva_mxn: s.reserva_mxn,
+          entregado_mxn: s.entregado_mxn,
+          por_entregar_mxn: round2(s.generado_mxn - s.entregado_mxn),
+        }))
+        .sort((x, y) => y.generado_mxn - x.generado_mxn),
+      entregas: entregas
+        .filter((p) => meses.includes(ProfitSharingService.mesDeEntrega(p)))
+        .sort(
+          (a, b) =>
+            b.fecha_pago.localeCompare(a.fecha_pago) ||
+            b.created_at.localeCompare(a.created_at),
+        ),
+    };
+  }
+
   private async fetchAeronaves(aeronaveId?: string): Promise<AeronaveRow[]> {
     let q = this.supabase.service
       .from('aeronave')
-      .select('id, matricula, modelo')
+      .select('id, matricula, modelo, permiso_afac_usd_hr')
       .eq('activa', true)
       .order('matricula', { ascending: true });
     if (aeronaveId) q = q.eq('id', aeronaveId);
@@ -5810,7 +6403,7 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('aeronave_socio')
       .select(
-        'aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta',
+        'aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, descontar_reserva_overhaul',
       );
     if (error) throw new Error(error.message);
     return data ?? [];

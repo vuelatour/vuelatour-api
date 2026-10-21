@@ -20,6 +20,7 @@ import {
   mesDeFechaPeriodo,
   mesDePeriodo,
   microsDeInstante,
+  montoMxnDePago,
   montoUsdDePago,
   pathComprobantePago,
   periodoDeMes,
@@ -34,7 +35,10 @@ import {
  * ENTREGAS A LA CUENTA DEL SOCIO — nivel ENTREGA (v2, 2-oct-2026): dinero
  * (USD/MXN con T.C. de 6 decimales en la banda 15–25), fecha, forma de la
  * fila, orden de captura y path del comprobante. El caso del audio del
- * cliente: $70,000 MXN a 18.5 = $3,783.78 USD.
+ * cliente: $70,000 MXN a 18.5 = $3,783.78 USD informativos; LA CUENTA ES EN
+ * PESOS desde el 0.0.101 (20-oct-2026, invariante 99): lo que descuenta es
+ * `monto_mxn` = 70,000, y toda entrega lleva T.C. (en USD, para sus pesos;
+ * en MXN, para su dólar informativo).
  */
 const N4142R = 'aaaaaaaa-0000-4000-8000-000000004142';
 const MAURICIO = 'bbbbbbbb-0000-4000-8000-000000000069';
@@ -50,8 +54,10 @@ function fila(p: Partial<RepartoPagoRow> = {}): RepartoPagoRow {
     moneda: 'MXN',
     tc_usd_mxn: '18.500000',
     monto_usd: '3783.78',
+    monto_mxn: '70000.00',
     utilidad_snapshot_usd: null,
-    saldo_snapshot_usd: '1395.94',
+    saldo_snapshot_usd: null,
+    saldo_snapshot_mxn: '1395.94',
     fecha_pago: '2026-10-01',
     metodo: 'EFECTIVO',
     referencia: null,
@@ -135,16 +141,40 @@ describe('reparto-pago.util — dinero', () => {
     expect(montoUsdDePago(100, 'EUR', null)).toBeNull();
   });
 
-  it('validarDineroPago: MXN exige T.C., USD no lo lleva, ≤ 2 decimales, nunca $0 USD', () => {
+  it('montoMxnDePago (lo que DESCUENTA de la cuenta, invariante 99): MXN = monto; USD = round(monto × tc, 2) con TC de 6 decimales', () => {
+    // El audio del cliente: «adelántenme 70,000 pesos» descuenta 70,000.
+    expect(montoMxnDePago(70000, 'MXN', 18.5)).toBe(70000);
+    // El T.C. de un MXN no cambia sus pesos.
+    expect(montoMxnDePago(70000, 'MXN', null)).toBe(70000);
+    expect(montoMxnDePago(1000, 'USD', 18.5)).toBe(18500);
+    expect(montoMxnDePago(1395.94, 'USD', 18.5)).toBe(25824.89);
+    expect(montoMxnDePago(100, 'USD', 18.234567)).toBe(1823.46);
+    // TC con decimales de más se normaliza a 6 antes de multiplicar.
+    expect(montoMxnDePago(100, 'USD', 18.2345674)).toBe(1823.46);
+    expect(montoMxnDePago(100, 'USD', '18.2375')).toBe(1823.75);
+    // Un USD SIN T.C. no sabe cuántos pesos descuenta.
+    expect(montoMxnDePago(100, 'USD', null)).toBeNull();
+    expect(montoMxnDePago(100, 'USD', 0)).toBeNull();
+    expect(montoMxnDePago(0, 'MXN', 18.5)).toBeNull();
+    expect(montoMxnDePago(100, 'EUR', 18.5)).toBeNull();
+  });
+
+  it('validarDineroPago: las DOS monedas exigen T.C. (USD para sus pesos, MXN para su dólar informativo), ≤ 2 decimales, nunca $0', () => {
+    // USD con T.C.: válido; `tc_usd_mxn` persistido null (el CHECK de la
+    // tabla lo reserva a MXN), `tc_aplicado` = el T.C., `monto_mxn` = lo
+    // que descuenta de la cuenta (monto × T.C.).
     expect(
-      validarDineroPago({ monto: 1395.94, moneda: 'USD', tc_usd_mxn: null }),
+      validarDineroPago({ monto: 1395.94, moneda: 'USD', tc_usd_mxn: 18.5 }),
     ).toEqual({
       ok: true,
       monto: 1395.94,
       moneda: 'USD',
       tc_usd_mxn: null,
+      tc_aplicado: 18.5,
       monto_usd: 1395.94,
+      monto_mxn: 25824.89,
     });
+    // MXN: descuenta su monto; el T.C. se persiste y da el dólar informativo.
     expect(
       validarDineroPago({ monto: 10000, moneda: 'MXN', tc_usd_mxn: 18.234567 }),
     ).toEqual({
@@ -152,32 +182,55 @@ describe('reparto-pago.util — dinero', () => {
       monto: 10000,
       moneda: 'MXN',
       tc_usd_mxn: 18.234567,
+      tc_aplicado: 18.234567,
       monto_usd: 548.41,
+      monto_mxn: 10000,
     });
-    const codigo = (d: Parameters<typeof validarDineroPago>[0]) => {
+    const resultado = (d: Parameters<typeof validarDineroPago>[0]) => {
       const r = validarDineroPago(d);
       return r.ok ? 'OK' : r.codigo;
     };
-    expect(codigo({ monto: 100, moneda: 'MXN', tc_usd_mxn: null })).toBe(
+    expect(resultado({ monto: 100, moneda: 'MXN', tc_usd_mxn: null })).toBe(
       'TC_REQUERIDO',
     );
-    expect(codigo({ monto: 100, moneda: 'MXN' })).toBe('TC_REQUERIDO');
-    expect(codigo({ monto: 100, moneda: 'USD', tc_usd_mxn: 18.2 })).toBe(
-      'TC_NO_APLICA',
+    expect(resultado({ monto: 100, moneda: 'MXN' })).toBe('TC_REQUERIDO');
+    // Hasta el 0.0.100 un USD con T.C. era `TC_NO_APLICA` y sin T.C. era
+    // válido: desde el 0.0.101 (cuenta en pesos) es AL REVÉS — con T.C. es
+    // válido (arriba) y sin él `TC_REQUERIDO`. `TC_NO_APLICA` ya no se emite.
+    expect(resultado({ monto: 100, moneda: 'USD' })).toBe('TC_REQUERIDO');
+    expect(resultado({ monto: 100, moneda: 'USD', tc_usd_mxn: null })).toBe(
+      'TC_REQUERIDO',
     );
-    // T.C. 0 en USD = «sin T.C.» (no es un T.C. válido).
-    expect(codigo({ monto: 100, moneda: 'USD', tc_usd_mxn: 0 })).toBe('OK');
-    expect(codigo({ monto: 0, moneda: 'USD' })).toBe('MONTO_INVALIDO');
-    expect(codigo({ monto: -5, moneda: 'USD' })).toBe('MONTO_INVALIDO');
-    expect(codigo({ monto: 10.005, moneda: 'USD' })).toBe('MONTO_INVALIDO');
-    expect(codigo({ monto: 100, moneda: 'EUR' })).toBe('MONEDA_INVALIDA');
+    // T.C. 0 = «sin T.C.» (no es un T.C. válido): también en USD.
+    expect(resultado({ monto: 100, moneda: 'USD', tc_usd_mxn: 0 })).toBe(
+      'TC_REQUERIDO',
+    );
+    const mensaje = (d: Parameters<typeof validarDineroPago>[0]) => {
+      const r = validarDineroPago(d);
+      return r.ok ? '' : r.mensaje;
+    };
+    expect(mensaje({ monto: 100, moneda: 'USD' })).toBe(
+      'Una entrega en dólares necesita el tipo de cambio para saber cuántos pesos descuenta de la cuenta del socio.',
+    );
+    expect(mensaje({ monto: 100, moneda: 'MXN' })).toBe(
+      'Una entrega en pesos necesita el tipo de cambio del día (para su equivalente informativo en dólares).',
+    );
+    // El monto y la moneda se revisan ANTES que el T.C.
+    expect(resultado({ monto: 0, moneda: 'USD' })).toBe('MONTO_INVALIDO');
+    expect(resultado({ monto: -5, moneda: 'USD' })).toBe('MONTO_INVALIDO');
+    expect(resultado({ monto: 10.005, moneda: 'USD' })).toBe('MONTO_INVALIDO');
+    expect(resultado({ monto: 100, moneda: 'EUR' })).toBe('MONEDA_INVALIDA');
     // 5 centavos MXN a 18.2 = 0.00 USD: el CHECK monto_usd > 0 reventaría.
-    expect(codigo({ monto: 0.05, moneda: 'MXN', tc_usd_mxn: 18.2 })).toBe(
+    expect(resultado({ monto: 0.05, moneda: 'MXN', tc_usd_mxn: 18.2 })).toBe(
       'MONTO_INVALIDO',
     );
+    // Un centavo de dólar a 15 = $0.15 MXN: cabe (nunca $0 en pesos).
+    expect(
+      validarDineroPago({ monto: 0.01, moneda: 'USD', tc_usd_mxn: 15 }),
+    ).toMatchObject({ ok: true, monto_usd: 0.01, monto_mxn: 0.15 });
   });
 
-  it('T.C. fuera de la banda razonable (15–25, la del costo externo) ⇒ TC_FUERA_DE_RANGO; los bordes pasan', () => {
+  it('T.C. fuera de la banda razonable (15–25, la del costo externo) ⇒ TC_FUERA_DE_RANGO en las DOS monedas; los bordes pasan', () => {
     expect([TC_PAGO_SOCIO_MIN, TC_PAGO_SOCIO_MAX]).toEqual([
       COSTO_EXTERNO_TC_MIN,
       COSTO_EXTERNO_TC_MAX,
@@ -208,6 +261,17 @@ describe('reparto-pago.util — dinero', () => {
     expect(r.ok ? '' : r.mensaje).toBe(
       'El tipo de cambio 1.8 está fuera del rango razonable (15 a 25 pesos por dólar): revisa la captura.',
     );
+    // En USD el T.C. ahora decide los pesos que descuenta (invariante 99):
+    // 1.8 por 18 dividiría entre 10 lo descontado.
+    const usd = validarDineroPago({
+      monto: 100,
+      moneda: 'USD',
+      tc_usd_mxn: 1.8,
+    });
+    expect(usd.ok ? 'OK' : usd.codigo).toBe('TC_FUERA_DE_RANGO');
+    expect(
+      validarDineroPago({ monto: 100, moneda: 'USD', tc_usd_mxn: 25 }),
+    ).toMatchObject({ ok: true, monto_mxn: 2500 });
   });
 
   it('validarFechaPago: día real y nunca después de hoy (Cancún)', () => {
@@ -249,12 +313,65 @@ describe('reparto-pago.util — forma, orden y constantes', () => {
       moneda: 'MXN',
       tc_usd_mxn: 18.5,
       monto_usd: 3783.78,
+      // Lo que descuenta de la cuenta, EN PESOS (invariante 99).
+      monto_mxn: 70000,
       utilidad_snapshot_usd: null,
-      saldo_snapshot_usd: 1395.94,
+      saldo_snapshot_usd: null,
+      saldo_snapshot_mxn: 1395.94,
       entregado_por_nombre: 'Ale Canales',
       created_by_nombre: 'Ale Canales',
       comprobante_url: 'https://firmada',
     });
+    // Una entrega en DÓLARES: el T.C. no se persiste (CHECK) y sus pesos
+    // viajan en la columna `monto_mxn`.
+    expect(
+      aPagoSocio(
+        fila({
+          moneda: 'USD',
+          monto: '1000.00',
+          tc_usd_mxn: null,
+          monto_usd: '1000.00',
+          monto_mxn: '18500.00',
+        }),
+      ),
+    ).toMatchObject({
+      moneda: 'USD',
+      monto: 1000,
+      tc_usd_mxn: null,
+      monto_usd: 1000,
+      monto_mxn: 18500,
+    });
+    // Fila VIEJA sin la columna `monto_mxn` (specs / lectura previa a la
+    // migración 20261020000006): un MXN descuenta su monto; un USD × su T.C.
+    // si lo trae; sin ninguno, 0 (jamás se inventa un T.C.).
+    expect(aPagoSocio(fila({ monto_mxn: undefined })).monto_mxn).toBe(70000);
+    expect(aPagoSocio(fila({ monto_mxn: null })).monto_mxn).toBe(70000);
+    expect(
+      aPagoSocio(
+        fila({
+          moneda: 'USD',
+          monto: '100.00',
+          tc_usd_mxn: '18.5',
+          monto_usd: '100.00',
+          monto_mxn: undefined,
+        }),
+      ).monto_mxn,
+    ).toBe(1850);
+    expect(
+      aPagoSocio(
+        fila({
+          moneda: 'USD',
+          monto: '100.00',
+          tc_usd_mxn: null,
+          monto_usd: '100.00',
+          monto_mxn: undefined,
+        }),
+      ).monto_mxn,
+    ).toBe(0);
+    // Sin la columna `saldo_snapshot_mxn` (fila previa) ⇒ null.
+    expect(
+      aPagoSocio(fila({ saldo_snapshot_mxn: undefined })).saldo_snapshot_mxn,
+    ).toBeNull();
     const conMes = aPagoSocio(
       fila({ aeronave_id: N4142R, periodo: '2026-09-01' }),
       new Map(),

@@ -11,7 +11,7 @@ import {
 } from 'class-validator';
 import {
   NOTAS_CUENTA_MAX,
-  SALDO_INICIAL_MAX_USD,
+  SALDO_INICIAL_MAX_MXN,
 } from '../reparto-cuenta.util';
 import { MENSAJE_MES_INVALIDO, MES_REGEX } from '../reparto-pago.util';
 
@@ -58,13 +58,26 @@ export class ConfigurarCuentaSocioDto {
   @ApiProperty({
     example: 0,
     description:
-      'Saldo al arrancar, en USD (2 decimales): positivo = se le debía al socio; negativo = ya se le había adelantado.',
+      'Saldo al arrancar, EN PESOS (MXN, 2 decimales; invariante 99): positivo = se le debía al socio; negativo = ya se le había adelantado.',
   })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(-SALDO_INICIAL_MAX_USD)
-  @Max(SALDO_INICIAL_MAX_USD)
-  saldo_inicial_usd!: number;
+  @Min(-SALDO_INICIAL_MAX_MXN)
+  @Max(SALDO_INICIAL_MAX_MXN)
+  saldo_inicial_mxn!: number;
+
+  @ApiPropertyOptional({
+    example: 0,
+    nullable: true,
+    description:
+      'Informativo: el mismo saldo en USD (2 decimales). Opcional; sin él se guarda 0.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(-SALDO_INICIAL_MAX_MXN)
+  @Max(SALDO_INICIAL_MAX_MXN)
+  saldo_inicial_usd?: number | null;
 
   @ApiPropertyOptional({ maxLength: NOTAS_CUENTA_MAX, nullable: true })
   @IsOptional()

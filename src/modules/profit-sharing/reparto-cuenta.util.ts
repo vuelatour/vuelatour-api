@@ -9,12 +9,12 @@
  * repartió, la fecha de la entrega y algún comprobante escaneado».
  *
  * Reglas (todas aquí; los servicios solo hacen I/O):
- *  - SALDO (lo POR ENTREGAR) = saldo_inicial_usd + Σ utilidades generadas −
+ *  - SALDO (lo POR ENTREGAR) = saldo_inicial_mxn + Σ utilidades generadas −
  *    Σ entregas vivas. Las utilidades NO se guardan: salen de
  *    `ProfitSharingService.compute(primer día, último día)` de CADA mes
  *    calendario desde `cuenta_desde` hasta el mes EN CURSO inclusive (los %
  *    con vigencia cambian por mes: jamás un compute de todo el rango). Del
- *    reparto de cada avión se LEE `reparto[].monto_usd` (residuo mayor); un
+ *    reparto de cada avión se LEE `reparto[].monto_mxn` (residuo mayor); un
  *    socio con dos vigencias en el mes suma las dos (`partesDeSociosEnAvion`).
  *  - Un mes con PÉRDIDA (utilidad negativa del avión) RESTA en la cuenta:
  *    la cuenta suma lo que dice el reparto, tal cual (decisión v2, ver
@@ -28,10 +28,10 @@
  *    un ADELANTO: se confirma (409 `PAGO_EXCEDE_SALDO` ⇒ `aceptar_exceso`),
  *    no se prohíbe. El candado (alta, corrección, carrera de altas) y el
  *    aviso «adelantados» del pre-cierre miden lo MISMO:
- *    `por_entregar_cerrado_usd` = lo por entregar SIN el mes en curso (su
+ *    `por_entregar_cerrado_mxn` = lo por entregar SIN el mes en curso (su
  *    cifra todavía se mueve: a principios de mes suele ir negativa por los
  *    gastos ya capturados, y a medias positiva con utilidad no realizada).
- *    `por_entregar_usd` (con el mes en curso) es lo que se MUESTRA.
+ *    `por_entregar_mxn` (con el mes en curso) es lo que se MUESTRA.
  *  - Avisos de la cuenta (texto listo): entregas antes del arranque, aviones
  *    dados de baja y meses en que los % de los socios de un avión no suman
  *    100 (vigencias traslapadas o huecos: la cuenta suma lo que diga el
@@ -59,17 +59,22 @@ import {
 // Constantes
 // ===================================================================
 
-/** Migración de la cuenta corriente (columna sonda + tabla de cuentas). */
-export const MIGRACION_REPARTO_CUENTA = '20261002000001';
+/**
+ * Migración que la cuenta corriente NECESITA hoy: la de PESOS (invariante
+ * 99; `reparto_pago.monto_mxn` / `saldo_snapshot_mxn`,
+ * `reparto_cuenta_socio.saldo_inicial_mxn`). La v2 (`20261002000001`) va
+ * antes: sin ella la 000006 no aplica.
+ */
+export const MIGRACION_REPARTO_CUENTA = '20261020000006';
 
 /** Tabla de la configuración de cada cuenta (opcional por socio). */
 export const TABLA_REPARTO_CUENTA_SOCIO = 'reparto_cuenta_socio';
 
-/** Columna SONDA: existe ⇔ la migración 20261002000001 está aplicada. */
-export const COLUMNA_SONDA_CUENTA_SOCIO = 'saldo_snapshot_usd';
+/** Columna SONDA: existe ⇔ la migración 20261020000006 (pesos) está aplicada. */
+export const COLUMNA_SONDA_CUENTA_SOCIO = 'saldo_snapshot_mxn';
 
 export const COLS_REPARTO_CUENTA =
-  'socio_id, cuenta_desde, saldo_inicial_usd, notas, created_by, created_at, updated_by, updated_at';
+  'socio_id, cuenta_desde, saldo_inicial_mxn, notas, created_by, created_at, updated_by, updated_at';
 
 /**
  * Arranque por default de una cuenta SIN fila: septiembre 2026 (el mes que
@@ -78,15 +83,15 @@ export const COLS_REPARTO_CUENTA =
 export const CUENTA_DESDE_DEFAULT = '2026-09';
 
 /** Tolerancia de redondeo, la MISMA de los cobros (`refreshCobradoFlag`). */
-export const TOLERANCIA_CUENTA_USD = 1;
-const TOLERANCIA_CENTAVOS = TOLERANCIA_CUENTA_USD * 100;
+export const TOLERANCIA_CUENTA_MXN = 1;
+const TOLERANCIA_CENTAVOS = TOLERANCIA_CUENTA_MXN * 100;
 
 /** Una cuenta abarca como máximo 36 meses (cada mes es un `compute`). */
 export const MESES_CUENTA_MAX = 36;
 /** Rango máximo del estado de cuenta (meses de la tabla «por mes»). */
 export const MESES_ESTADO_CUENTA_MAX = 120;
 
-export const SALDO_INICIAL_MAX_USD = MONTO_PAGO_MAX;
+export const SALDO_INICIAL_MAX_MXN = MONTO_PAGO_MAX;
 export const NOTAS_CUENTA_MAX = 500;
 
 export const ESTADOS_CUENTA_SOCIO = [
@@ -170,7 +175,7 @@ export function mensajeCuentaAntesDelInicio(inicio: string): string {
 export const MENSAJE_CUENTA_DESDE_FUERA_DE_RANGO = `La cuenta puede arrancar como máximo ${MESES_CUENTA_MAX} meses atrás. Si hubo repartos antes, súmalos en el saldo inicial.`;
 
 export const MENSAJE_SALDO_INICIAL_INVALIDO =
-  'El saldo inicial debe ser un número en dólares con máximo 2 decimales (positivo si se le debía al socio, negativo si ya se le había adelantado).';
+  'El saldo inicial debe ser un número en pesos (MXN) con máximo 2 decimales (positivo si se le debía al socio, negativo si ya se le había adelantado).';
 
 /** Banner del panel cuando la cuenta no está configurada (copia literal). */
 export const TEXTO_CUENTA_NO_CONFIGURADA =
@@ -181,26 +186,26 @@ export const DETALLE_PRECIERRE_CUENTAS_NO_DISPONIBLE =
 export const DETALLE_PRECIERRE_CUENTAS_LECTURA_FALLIDA =
   'No se pudieron leer las cuentas de los socios: revísalas en Tesorería → «Pagos a socios».';
 
-const usd = (n: number) => fmtDineroTexto(n, 'USD');
+const mxn = (n: number) => fmtDineroTexto(n, 'MXN');
 
 /**
  * 409 `PAGO_EXCEDE_SALDO`: se confirma y se reintenta con `aceptar_exceso`
- * y la MISMA llave (texto que el panel copia literal). `por_entregar_usd`
+ * y la MISMA llave (texto que el panel copia literal). `por_entregar_mxn`
  * es lo por entregar de MESES CERRADOS; si el mes en curso ya lleva algo
  * (≠ $0), se dice cuánto y que no cuenta.
  */
 export function mensajeExcedeSaldo(d: {
-  monto_usd: number;
-  por_entregar_usd: number;
-  exceso_usd: number;
+  monto_mxn: number;
+  por_entregar_mxn: number;
+  exceso_mxn: number;
   /** Utilidad del mes EN CURSO (todavía se mueve): no cuenta en el candado. */
-  mes_en_curso_usd?: number | null;
+  mes_en_curso_mxn?: number | null;
 }): string {
   const curso =
-    d.mes_en_curso_usd != null && centavos(d.mes_en_curso_usd) !== 0
-      ? `, sin contar el mes en curso: ${usd(d.mes_en_curso_usd)}`
+    d.mes_en_curso_mxn != null && centavos(d.mes_en_curso_mxn) !== 0
+      ? `, sin contar el mes en curso: ${mxn(d.mes_en_curso_mxn)}`
       : '';
-  return `Esta entrega de ${usd(d.monto_usd)} supera lo que hay por entregar (${usd(d.por_entregar_usd)}${curso}). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por ${usd(d.exceso_usd)}. ¿Registrar?`;
+  return `Esta entrega de ${mxn(d.monto_mxn)} supera lo que hay por entregar (${mxn(d.por_entregar_mxn)}${curso}). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por ${mxn(d.exceso_mxn)}. ¿Registrar?`;
 }
 
 // ===================================================================
@@ -272,24 +277,24 @@ export function estadoCuenta(saldoUsd: number): EstadoCuentaSocio {
 }
 
 /**
- * ¿Una entrega de `monto_usd` rebasa lo por entregar (+ $1.00)? Si sí, es
- * un ADELANTO (se confirma). `exceso_usd` = monto − por entregar =
- * cuánto quedaría a favor de VuelaTour (`saldo_despues_usd` = −exceso).
+ * ¿Una entrega de `monto_mxn` rebasa lo por entregar (+ $1.00)? Si sí, es
+ * un ADELANTO (se confirma). `exceso_mxn` = monto − por entregar =
+ * cuánto quedaría a favor de VuelaTour (`saldo_despues_mxn` = −exceso).
  */
 export function excedeSaldo(d: {
-  por_entregar_usd: number;
-  monto_usd: number;
+  por_entregar_mxn: number;
+  monto_mxn: number;
 }): {
   excede: boolean;
-  exceso_usd: number;
-  saldo_despues_usd: number;
+  exceso_mxn: number;
+  saldo_despues_mxn: number;
 } {
-  const p = centavos(d.por_entregar_usd);
-  const m = centavos(d.monto_usd);
+  const p = centavos(d.por_entregar_mxn);
+  const m = centavos(d.monto_mxn);
   return {
     excede: m > p + TOLERANCIA_CENTAVOS,
-    exceso_usd: (m - p) / 100,
-    saldo_despues_usd: (p - m) / 100,
+    exceso_mxn: (m - p) / 100,
+    saldo_despues_mxn: (p - m) / 100,
   };
 }
 
@@ -297,38 +302,38 @@ export function excedeSaldo(d: {
  * CARRERA DE ALTAS: dos entregas al mismo socio pueden pasar a la vez el
  * candado del saldo (leer y luego insertar). Ya insertada `nuevo`, ¿rebasa
  * lo por entregar contando SOLO las entregas vivas capturadas ANTES que
- * ella? `disponible_usd` = saldo inicial + generado (todo menos entregas).
+ * ella? `disponible_mxn` = saldo inicial + generado (todo menos entregas).
  * Las dos peticiones concluyen lo mismo (orden de captura determinista): la
  * capturada después es la que sobra.
  */
 export function excedeSaldoEnOrdenDeCaptura(d: {
-  disponible_usd: number;
+  disponible_mxn: number;
   vivos: ReadonlyArray<{
     id: string;
     created_at: string;
-    monto_usd: number | string;
+    monto_mxn: number | string;
   }>;
-  nuevo: { id: string; created_at: string; monto_usd: number | string };
-}): { excede: boolean; por_entregar_antes_usd: number; exceso_usd: number } {
+  nuevo: { id: string; created_at: string; monto_mxn: number | string };
+}): { excede: boolean; por_entregar_antes_mxn: number; exceso_mxn: number } {
   const antesC = d.vivos
     .filter((p) => p.id !== d.nuevo.id && compararCaptura(p, d.nuevo) < 0)
-    .reduce((acc, p) => acc + centavos(p.monto_usd), 0);
-  const porEntregarAntes = (centavos(d.disponible_usd) - antesC) / 100;
+    .reduce((acc, p) => acc + centavos(p.monto_mxn), 0);
+  const porEntregarAntes = (centavos(d.disponible_mxn) - antesC) / 100;
   const ex = excedeSaldo({
-    por_entregar_usd: porEntregarAntes,
-    monto_usd: num(d.nuevo.monto_usd),
+    por_entregar_mxn: porEntregarAntes,
+    monto_mxn: num(d.nuevo.monto_mxn),
   });
   return {
     excede: ex.excede,
-    por_entregar_antes_usd: porEntregarAntes,
-    exceso_usd: ex.exceso_usd,
+    por_entregar_antes_mxn: porEntregarAntes,
+    exceso_mxn: ex.exceso_mxn,
   };
 }
 
 /** Saldo inicial válido: finito, ≤ 2 decimales, |x| ≤ tope. */
 export function saldoInicialValido(v: unknown): v is number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return false;
-  if (Math.abs(v) > SALDO_INICIAL_MAX_USD) return false;
+  if (Math.abs(v) > SALDO_INICIAL_MAX_MXN) return false;
   return Math.abs(Math.round(v * 100) - v * 100) < 1e-6;
 }
 
@@ -404,7 +409,7 @@ export interface RepartoAvionInput {
     socio_id: string;
     socio_nombre: string;
     porcentaje: number;
-    monto_usd: number;
+    monto_mxn: number;
   }>;
 }
 
@@ -413,8 +418,8 @@ export interface PartesDeSocio {
   nombre: string;
   /** Σ % (3 decimales). */
   porcentaje: number;
-  /** Σ `monto_usd` en centavos ⇒ USD. */
-  utilidad_usd: number;
+  /** Σ `monto_mxn` en centavos ⇒ MXN. */
+  utilidad_mxn: number;
 }
 
 /**
@@ -430,7 +435,7 @@ export function partesDeSociosEnAvion(
   for (const r of avion.reparto) {
     const s = acc.get(r.socio_id) ?? { nombre: r.socio_nombre, pct: 0, c: 0 };
     s.pct += num(r.porcentaje);
-    s.c += Math.round(num(r.monto_usd) * 100);
+    s.c += Math.round(num(r.monto_mxn) * 100);
     acc.set(r.socio_id, s);
   }
   const out = new Map<string, PartesDeSocio>();
@@ -438,7 +443,7 @@ export function partesDeSociosEnAvion(
     out.set(id, {
       nombre: s.nombre,
       porcentaje: redondearA(s.pct, 3),
-      utilidad_usd: s.c / 100,
+      utilidad_mxn: s.c / 100,
     });
   }
   return out;
@@ -466,7 +471,7 @@ export interface UtilidadMesSocios {
      * tocan el mes suman su % completo cada una) o con hueco: aviso.
      */
     reparto_porcentaje_total: number | null;
-    socios: Array<{ socio_id: string; porcentaje: number; monto_usd: number }>;
+    socios: Array<{ socio_id: string; porcentaje: number; monto_mxn: number }>;
   }>;
 }
 
@@ -498,7 +503,7 @@ export function utilidadMesDesdeAviones(
         socios: [...partesDeSociosEnAvion(a)].map(([socio_id, s]) => ({
           socio_id,
           porcentaje: s.porcentaje,
-          monto_usd: s.utilidad_usd,
+          monto_mxn: s.utilidad_mxn,
         })),
       })),
   };
@@ -507,7 +512,7 @@ export function utilidadMesDesdeAviones(
 export interface UtilidadAvionSocio {
   aeronave: AeronaveCorta;
   porcentaje: number;
-  monto_usd: number;
+  monto_mxn: number;
 }
 
 /** Lo que el socio generó en un mes, por avión (orden por matrícula). */
@@ -522,7 +527,7 @@ export function utilidadDeSocioEnMes(
       out.push({
         aeronave: a.aeronave,
         porcentaje: s.porcentaje,
-        monto_usd: s.monto_usd,
+        monto_mxn: s.monto_mxn,
       });
     }
   }
@@ -537,7 +542,7 @@ export function utilidadDeSocioEnMes(
 export interface CuentaRow {
   socio_id: string;
   cuenta_desde: string;
-  saldo_inicial_usd: number | string;
+  saldo_inicial_mxn: number | string;
   notas: string | null;
   created_by: string | null;
   created_at: string;
@@ -549,7 +554,7 @@ export interface CuentaSocio {
   /** Primer mes que suma utilidades (`YYYY-MM`). */
   cuenta_desde: string;
   /** Positivo = se le debía al arrancar; negativo = ya se le había adelantado. */
-  saldo_inicial_usd: number;
+  saldo_inicial_mxn: number;
   notas: string | null;
   /** false = sin fila: default septiembre 2026 con saldo 0. */
   configurada: boolean;
@@ -561,7 +566,7 @@ export interface CuentaSocio {
 export function cuentaDefault(): CuentaSocio {
   return {
     cuenta_desde: CUENTA_DESDE_DEFAULT,
-    saldo_inicial_usd: 0,
+    saldo_inicial_mxn: 0,
     notas: null,
     configurada: false,
     updated_at: null,
@@ -574,7 +579,7 @@ export function aCuentaSocio(row: CuentaRow | null | undefined): CuentaSocio {
   const mes = String(row.cuenta_desde).slice(0, 7);
   return {
     cuenta_desde: esMes(mes) ? mes : CUENTA_DESDE_DEFAULT,
-    saldo_inicial_usd: centavos(row.saldo_inicial_usd) / 100,
+    saldo_inicial_mxn: centavos(row.saldo_inicial_mxn) / 100,
     notas: row.notas ?? null,
     configurada: true,
     updated_at: row.updated_at ?? null,
@@ -825,11 +830,11 @@ export interface MovimientoCuenta {
    * Lo que SUMA a lo por entregar: utilidad generada (NEGATIVA en un mes
    * con pérdida) o saldo inicial a favor del socio.
    */
-  cargo_usd: number;
+  cargo_mxn: number;
   /** Lo que RESTA (siempre ≥ 0): entregas o saldo inicial ya adelantado. */
-  abono_usd: number;
+  abono_mxn: number;
   /** Lo por entregar DESPUÉS de este movimiento. */
-  saldo_usd: number;
+  saldo_mxn: number;
   /** Utilidad del mes en curso (todavía se mueve). */
   en_curso: boolean;
   pago: PagoSocio | null;
@@ -863,6 +868,8 @@ export function conceptoUtilidad(
 /**
  * «Entrega · Transferencia · ref SPEI 001 · corresponde a sep 2026 · N4142R»
  * o, sin mes, «Adelanto a cuenta · Efectivo · $70,000 MXN a T.C. 18.5».
+ * Una entrega en DÓLARES dice sus pesos (la cuenta es en pesos, invariante
+ * 99): «$1,000.00 USD = $18,500.00 MXN».
  */
 export function conceptoEntrega(
   p: Pick<
@@ -874,7 +881,7 @@ export function conceptoEntrega(
     | 'tc_usd_mxn'
     | 'referencia'
     | 'aeronave'
-  >,
+  > & { monto_mxn?: number | null },
 ): string {
   const partes = [
     p.mes ? 'Entrega' : 'Adelanto a cuenta',
@@ -883,6 +890,10 @@ export function conceptoEntrega(
   if (p.moneda === 'MXN') {
     partes.push(
       `${fmtDineroTexto(num(p.monto), 'MXN')}${p.tc_usd_mxn != null ? ` a T.C. ${num(p.tc_usd_mxn)}` : ''}`,
+    );
+  } else if (p.monto_mxn != null) {
+    partes.push(
+      `${fmtDineroTexto(num(p.monto), 'USD')} = ${fmtDineroTexto(num(p.monto_mxn), 'MXN')}`,
     );
   }
   if (p.referencia) partes.push(`ref ${p.referencia}`);
@@ -929,12 +940,12 @@ export interface EntradaCuenta {
  */
 export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
   type Linea = {
-    m: Omit<MovimientoCuenta, 'saldo_usd'>;
+    m: Omit<MovimientoCuenta, 'saldo_mxn'>;
     delta: number;
     sub: (o: Linea) => number;
   };
   const lineas: Linea[] = [];
-  const ini = centavos(e.cuenta.saldo_inicial_usd);
+  const ini = centavos(e.cuenta.saldo_inicial_mxn);
   lineas.push({
     m: {
       fecha: `${e.cuenta.cuenta_desde}-01`,
@@ -943,8 +954,8 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
       mes: e.cuenta.cuenta_desde,
       aeronave: null,
       porcentaje: null,
-      cargo_usd: ini > 0 ? ini / 100 : 0,
-      abono_usd: ini < 0 ? -ini / 100 : 0,
+      cargo_mxn: ini > 0 ? ini / 100 : 0,
+      abono_mxn: ini < 0 ? -ini / 100 : 0,
       en_curso: false,
       pago: null,
     },
@@ -958,7 +969,7 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
     if (!esMes(u.mes) || u.mes < e.cuenta.cuenta_desde) continue;
     if (e.utilidadesHasta && u.mes > e.utilidadesHasta) continue;
     for (const a of utilidadDeSocioEnMes(u, e.socioId)) {
-      const c = centavos(a.monto_usd);
+      const c = centavos(a.monto_mxn);
       if (c === 0) continue;
       const linea: Linea = {
         m: {
@@ -970,8 +981,8 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
           mes: u.mes,
           aeronave: a.aeronave,
           porcentaje: a.porcentaje,
-          cargo_usd: c / 100,
-          abono_usd: 0,
+          cargo_mxn: c / 100,
+          abono_mxn: 0,
           en_curso: u.en_curso,
           pago: null,
         },
@@ -987,7 +998,7 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
   }
   for (const p of e.pagos) {
     if (p.socio_id !== e.socioId || p.deleted_at != null) continue;
-    const c = centavos(p.monto_usd);
+    const c = centavos(p.monto_mxn);
     lineas.push({
       m: {
         fecha: p.fecha_pago,
@@ -996,8 +1007,8 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
         mes: p.mes,
         aeronave: p.aeronave,
         porcentaje: null,
-        cargo_usd: 0,
-        abono_usd: c / 100,
+        cargo_mxn: 0,
+        abono_mxn: c / 100,
         en_curso: false,
         pago: p,
       },
@@ -1014,25 +1025,25 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
   let saldo = 0;
   return lineas.map((l) => {
     saldo += l.delta;
-    return { ...l.m, saldo_usd: saldo / 100 };
+    return { ...l.m, saldo_mxn: saldo / 100 };
   });
 }
 
 export interface TotalesCuenta {
   /** Σ utilidades generadas desde el arranque (incluye el mes en curso). */
-  generado_usd: number;
-  /** Parte de `generado_usd` del mes EN CURSO (todavía se mueve). */
-  mes_en_curso_usd: number;
+  generado_mxn: number;
+  /** Parte de `generado_mxn` del mes EN CURSO (todavía se mueve). */
+  mes_en_curso_mxn: number;
   /** Σ entregas vivas (todas). */
-  entregado_usd: number;
+  entregado_mxn: number;
   /** saldo inicial + generado − entregado. */
-  por_entregar_usd: number;
+  por_entregar_mxn: number;
   /**
    * ADITIVO: lo por entregar SIN el mes en curso (= por_entregar −
    * mes_en_curso). Contra ESTE número se decide un ADELANTO (409) y el
    * aviso «adelantados» del pre-cierre.
    */
-  por_entregar_cerrado_usd: number;
+  por_entregar_cerrado_mxn: number;
   estado: EstadoCuentaSocio;
 }
 
@@ -1045,19 +1056,19 @@ export function totalesDeMovimientos(
   let ent = 0;
   for (const m of movs) {
     if (m.tipo === 'UTILIDAD') {
-      gen += centavos(m.cargo_usd);
-      if (m.en_curso) curso += centavos(m.cargo_usd);
+      gen += centavos(m.cargo_mxn);
+      if (m.en_curso) curso += centavos(m.cargo_mxn);
     } else if (m.tipo === 'ENTREGA') {
-      ent += centavos(m.abono_usd);
+      ent += centavos(m.abono_mxn);
     }
   }
-  const saldo = movs.length ? movs[movs.length - 1].saldo_usd : 0;
+  const saldo = movs.length ? movs[movs.length - 1].saldo_mxn : 0;
   return {
-    generado_usd: gen / 100,
-    mes_en_curso_usd: curso / 100,
-    entregado_usd: ent / 100,
-    por_entregar_usd: saldo,
-    por_entregar_cerrado_usd: (centavos(saldo) - curso) / 100,
+    generado_mxn: gen / 100,
+    mes_en_curso_mxn: curso / 100,
+    entregado_mxn: ent / 100,
+    por_entregar_mxn: saldo,
+    por_entregar_cerrado_mxn: (centavos(saldo) - curso) / 100,
     estado: estadoCuenta(saldo),
   };
 }
@@ -1071,6 +1082,9 @@ export interface UltimoPago {
   fecha_pago: string;
   monto: number;
   moneda: MonedaPagoSocio;
+  /** Lo que descontó EN PESOS (invariante 99). */
+  monto_mxn: number;
+  /** Dólares informativos. */
   monto_usd: number;
   metodo: MetodoPagoSocio;
 }
@@ -1078,16 +1092,16 @@ export interface UltimoPago {
 export interface FilaCuentaSocio {
   socio: SocioInfo;
   cuenta: CuentaSocio;
-  generado_usd: number;
-  mes_en_curso_usd: number;
-  entregado_usd: number;
-  por_entregar_usd: number;
+  generado_mxn: number;
+  mes_en_curso_mxn: number;
+  entregado_mxn: number;
+  por_entregar_mxn: number;
   /**
    * ADITIVO: lo por entregar SIN el mes en curso. Es contra lo que el API
    * decide un ADELANTO (409 `PAGO_EXCEDE_SALDO`): el diálogo «Registrar
    * entrega» debe mostrar ESTE número como tope sin confirmación.
    */
-  por_entregar_cerrado_usd: number;
+  por_entregar_cerrado_mxn: number;
   estado: EstadoCuentaSocio;
   ultimo_pago: UltimoPago | null;
   aviones: AvionDeSocio[];
@@ -1116,6 +1130,7 @@ export function ultimaEntrega(
         fecha_pago: ult.fecha_pago,
         monto: ult.monto,
         moneda: ult.moneda,
+        monto_mxn: ult.monto_mxn,
         monto_usd: ult.monto_usd,
         metodo: ult.metodo,
       }
@@ -1142,11 +1157,11 @@ export function filaCuentaSocio(e: {
   return {
     socio: e.base.socio,
     cuenta: e.base.cuenta,
-    generado_usd: t.generado_usd,
-    mes_en_curso_usd: t.mes_en_curso_usd,
-    entregado_usd: t.entregado_usd,
-    por_entregar_usd: t.por_entregar_usd,
-    por_entregar_cerrado_usd: t.por_entregar_cerrado_usd,
+    generado_mxn: t.generado_mxn,
+    mes_en_curso_mxn: t.mes_en_curso_mxn,
+    entregado_mxn: t.entregado_mxn,
+    por_entregar_mxn: t.por_entregar_mxn,
+    por_entregar_cerrado_mxn: t.por_entregar_cerrado_mxn,
     estado: t.estado,
     ultimo_pago: ultimaEntrega(pagos),
     aviones: e.base.aviones,
@@ -1161,12 +1176,12 @@ export function filaCuentaSocio(e: {
 }
 
 export interface TotalesCuentas {
-  generado_usd: number;
-  entregado_usd: number;
+  generado_mxn: number;
+  entregado_mxn: number;
   /** Σ de lo por entregar POSITIVO (lo que VuelaTour debe a los socios). */
-  por_entregar_usd: number;
+  por_entregar_mxn: number;
   /** ADITIVO: Σ de lo adelantado (saldos negativos, en positivo). */
-  adelantado_usd: number;
+  adelantado_mxn: number;
   socios_por_entregar: number;
   socios_adelantados: number;
 }
@@ -1180,17 +1195,17 @@ export function totalesCuentas(
   let pos = 0;
   let neg = 0;
   for (const f of filas) {
-    gen += centavos(f.generado_usd);
-    ent += centavos(f.entregado_usd);
-    const s = centavos(f.por_entregar_usd);
+    gen += centavos(f.generado_mxn);
+    ent += centavos(f.entregado_mxn);
+    const s = centavos(f.por_entregar_mxn);
     if (s > 0) pos += s;
     else neg -= s;
   }
   return {
-    generado_usd: gen / 100,
-    entregado_usd: ent / 100,
-    por_entregar_usd: pos / 100,
-    adelantado_usd: neg / 100,
+    generado_mxn: gen / 100,
+    entregado_mxn: ent / 100,
+    por_entregar_mxn: pos / 100,
+    adelantado_mxn: neg / 100,
     socios_por_entregar: filas.filter((f) => f.estado === 'POR_ENTREGAR')
       .length,
     socios_adelantados: filas.filter((f) => f.estado === 'ADELANTADO').length,
@@ -1204,13 +1219,13 @@ export function totalesCuentas(
 export interface PorMesCuenta {
   mes: string;
   /** Σ utilidad del socio en el mes (0 antes del arranque). */
-  utilidad_usd: number;
+  utilidad_mxn: number;
   en_curso: boolean;
   /** ADITIVO (invariante 89): `SNAPSHOT_CIERRE` | `EN_VIVO` (con la migración). */
   origen?: 'SNAPSHOT_CIERRE' | 'EN_VIVO';
   por_avion: UtilidadAvionSocio[];
   /** Σ entregas con `fecha_pago` en ese mes (flujo de dinero). */
-  entregado_usd: number;
+  entregado_mxn: number;
 }
 
 export interface EstadoCuentaSocioDatos {
@@ -1220,16 +1235,16 @@ export interface EstadoCuentaSocioDatos {
   desde: string;
   hasta: string;
   /** Saldo al cierre del mes anterior a `desde` (incluye saldo inicial y entregas previas). */
-  saldo_anterior_usd: number;
+  saldo_anterior_mxn: number;
   movimientos: MovimientoCuenta[];
   por_mes: PorMesCuenta[];
   /** De TODA la cuenta, hoy (mismas cifras que el resumen). */
   totales: TotalesCuenta;
   /** ADITIVO: solo lo que cae en [desde, hasta]. */
   rango: {
-    generado_usd: number;
-    entregado_usd: number;
-    saldo_final_usd: number;
+    generado_mxn: number;
+    entregado_mxn: number;
+    saldo_final_mxn: number;
   };
   avisos: string[];
 }
@@ -1262,7 +1277,7 @@ export function armarEstadoCuenta(e: {
   const dentro = todos.filter(
     (m) => m.fecha >= desdeDia && m.fecha <= hastaDia,
   );
-  const saldoAnterior = antes.length ? antes[antes.length - 1].saldo_usd : 0;
+  const saldoAnterior = antes.length ? antes[antes.length - 1].saldo_mxn : 0;
   const movimientos: MovimientoCuenta[] = [];
   if (antes.length > 0) {
     movimientos.push({
@@ -1272,9 +1287,9 @@ export function armarEstadoCuenta(e: {
       mes: mesAnterior(e.desde),
       aeronave: null,
       porcentaje: null,
-      cargo_usd: 0,
-      abono_usd: 0,
-      saldo_usd: saldoAnterior,
+      cargo_mxn: 0,
+      abono_mxn: 0,
+      saldo_mxn: saldoAnterior,
       en_curso: false,
       pago: null,
     });
@@ -1288,24 +1303,24 @@ export function armarEstadoCuenta(e: {
     const porAvion = cuenta ? utilidadDeSocioEnMes(u, e.base.socio.id) : [];
     return {
       mes,
-      utilidad_usd:
-        porAvion.reduce((acc, a) => acc + centavos(a.monto_usd), 0) / 100,
+      utilidad_mxn:
+        porAvion.reduce((acc, a) => acc + centavos(a.monto_mxn), 0) / 100,
       en_curso: u?.en_curso ?? false,
       // ADITIVO (invariante 89): solo cuando la utilidad trae su origen.
       ...(u?.origen ? { origen: u.origen } : {}),
       por_avion: porAvion,
-      entregado_usd:
+      entregado_mxn:
         pagos
           .filter((p) => p.fecha_pago.slice(0, 7) === mes)
-          .reduce((acc, p) => acc + centavos(p.monto_usd), 0) / 100,
+          .reduce((acc, p) => acc + centavos(p.monto_mxn), 0) / 100,
     };
   });
 
   let genR = 0;
   let entR = 0;
   for (const m of dentro) {
-    if (m.tipo === 'UTILIDAD') genR += centavos(m.cargo_usd);
-    if (m.tipo === 'ENTREGA') entR += centavos(m.abono_usd);
+    if (m.tipo === 'UTILIDAD') genR += centavos(m.cargo_mxn);
+    if (m.tipo === 'ENTREGA') entR += centavos(m.abono_mxn);
   }
   return {
     socio: e.base.socio,
@@ -1313,15 +1328,15 @@ export function armarEstadoCuenta(e: {
     aviones: e.base.aviones,
     desde: e.desde,
     hasta: e.hasta,
-    saldo_anterior_usd: saldoAnterior,
+    saldo_anterior_mxn: saldoAnterior,
     movimientos,
     por_mes,
     totales: totalesDeMovimientos(todos),
     rango: {
-      generado_usd: genR / 100,
-      entregado_usd: entR / 100,
-      saldo_final_usd: movimientos.length
-        ? movimientos[movimientos.length - 1].saldo_usd
+      generado_mxn: genR / 100,
+      entregado_mxn: entR / 100,
+      saldo_final_mxn: movimientos.length
+        ? movimientos[movimientos.length - 1].saldo_mxn
         : saldoAnterior,
     },
     avisos: avisosDeCuenta({
@@ -1345,24 +1360,24 @@ export interface SocioPrecierre {
    * Por entregar: con las utilidades HASTA el mes del cierre. Adelantados:
    * el saldo con el que se decide un adelanto (ver `resumenPrecierreCuentas`).
    */
-  por_entregar_usd: number;
+  por_entregar_mxn: number;
 }
 
 export interface SocioAdelantadoPrecierre extends SocioPrecierre {
   /** Lo adelantado (positivo), sin el mes en curso. */
-  adelantado_usd: number;
+  adelantado_mxn: number;
 }
 
 export interface ResumenPrecierreCuentas {
   por_entregar: {
     count: number;
-    monto_usd: number;
+    monto_mxn: number;
     socios: SocioPrecierre[];
     detalle: string;
   };
   adelantados: {
     count: number;
-    monto_usd: number;
+    monto_mxn: number;
     socios: SocioAdelantadoPrecierre[];
     detalle: string;
   };
@@ -1400,9 +1415,9 @@ export function resumenPrecierreCuentas(e: {
   /** Socios con la cuenta arrancada a ese mes. */
   filas: ReadonlyArray<{
     socio: { id: string; nombre: string; es_empresa?: boolean };
-    por_entregar_hasta_mes_usd: number;
+    por_entregar_hasta_mes_mxn: number;
     /** Saldo con las utilidades hasta `mesHastaAdelantosPrecierre`. */
-    por_entregar_cerrado_usd: number;
+    por_entregar_cerrado_mxn: number;
   }>;
   /** Socios cuya cuenta arranca DESPUÉS del mes (no se revisan). */
   sin_cuenta_en_mes: number;
@@ -1413,7 +1428,7 @@ export function resumenPrecierreCuentas(e: {
     a.socio.id.localeCompare(b.socio.id);
   const pendientes: SocioPrecierre[] = e.filas
     .filter(
-      (f) => estadoCuenta(f.por_entregar_hasta_mes_usd) === 'POR_ENTREGAR',
+      (f) => estadoCuenta(f.por_entregar_hasta_mes_mxn) === 'POR_ENTREGAR',
     )
     .map((f) => ({
       socio: {
@@ -1421,38 +1436,38 @@ export function resumenPrecierreCuentas(e: {
         nombre: f.socio.nombre,
         es_empresa: f.socio.es_empresa === true,
       },
-      por_entregar_usd: f.por_entregar_hasta_mes_usd,
+      por_entregar_mxn: f.por_entregar_hasta_mes_mxn,
     }))
-    .sort((a, b) => b.por_entregar_usd - a.por_entregar_usd || orden(a, b));
+    .sort((a, b) => b.por_entregar_mxn - a.por_entregar_mxn || orden(a, b));
   const adelantados: SocioAdelantadoPrecierre[] = e.filas
-    .filter((f) => estadoCuenta(f.por_entregar_cerrado_usd) === 'ADELANTADO')
+    .filter((f) => estadoCuenta(f.por_entregar_cerrado_mxn) === 'ADELANTADO')
     .map((f) => ({
       socio: {
         id: f.socio.id,
         nombre: f.socio.nombre,
         es_empresa: f.socio.es_empresa === true,
       },
-      por_entregar_usd: f.por_entregar_cerrado_usd,
-      adelantado_usd: -f.por_entregar_cerrado_usd,
+      por_entregar_mxn: f.por_entregar_cerrado_mxn,
+      adelantado_mxn: -f.por_entregar_cerrado_mxn,
     }))
-    .sort((a, b) => b.adelantado_usd - a.adelantado_usd || orden(a, b));
+    .sort((a, b) => b.adelantado_mxn - a.adelantado_mxn || orden(a, b));
   const totalPend =
-    pendientes.reduce((acc, p) => acc + centavos(p.por_entregar_usd), 0) / 100;
+    pendientes.reduce((acc, p) => acc + centavos(p.por_entregar_mxn), 0) / 100;
   const totalAdel =
-    adelantados.reduce((acc, p) => acc + centavos(p.adelantado_usd), 0) / 100;
+    adelantados.reduce((acc, p) => acc + centavos(p.adelantado_mxn), 0) / 100;
   const lista = (
     xs: ReadonlyArray<{ socio: { nombre: string } }>,
     monto: (i: number) => number,
   ) => {
     const primeros = xs
       .slice(0, 5)
-      .map((x, i) => `${x.socio.nombre} ${usd(monto(i))}`)
+      .map((x, i) => `${x.socio.nombre} ${mxn(monto(i))}`)
       .join(', ');
     return `${primeros}${xs.length > 5 ? ` y ${xs.length - 5} más` : ''}`;
   };
   let detallePend: string;
   if (pendientes.length > 0) {
-    detallePend = `${pendientes.length} socio(s) con utilidad por entregar hasta ${et} por ${usd(totalPend)}: ${lista(pendientes, (i) => pendientes[i].por_entregar_usd)}. Regístralo en Tesorería → «Pagos a socios».`;
+    detallePend = `${pendientes.length} socio(s) con utilidad por entregar hasta ${et} por ${mxn(totalPend)}: ${lista(pendientes, (i) => pendientes[i].por_entregar_mxn)}. Regístralo en Tesorería → «Pagos a socios».`;
   } else if (e.filas.length === 0 && e.sin_cuenta_en_mes > 0) {
     detallePend = `Las cuentas de los socios arrancan después de ${et}: no hay nada que revisar en este mes.`;
   } else {
@@ -1460,18 +1475,18 @@ export function resumenPrecierreCuentas(e: {
   }
   const detalleAdel =
     adelantados.length > 0
-      ? `${adelantados.length} socio(s) recibieron más de lo generado en los meses ya cerrados (adelanto) por ${usd(totalAdel)}: ${lista(adelantados, (i) => adelantados[i].adelantado_usd)}. El saldo queda a favor de VuelaTour y se descuenta de las utilidades siguientes; revisa que sea correcto en Tesorería → «Pagos a socios».`
+      ? `${adelantados.length} socio(s) recibieron más de lo generado en los meses ya cerrados (adelanto) por ${mxn(totalAdel)}: ${lista(adelantados, (i) => adelantados[i].adelantado_mxn)}. El saldo queda a favor de VuelaTour y se descuenta de las utilidades siguientes; revisa que sea correcto en Tesorería → «Pagos a socios».`
       : 'Ningún socio tiene entregas por encima de lo generado.';
   return {
     por_entregar: {
       count: pendientes.length,
-      monto_usd: totalPend,
+      monto_mxn: totalPend,
       socios: pendientes.slice(0, PRECIERRE_SOCIOS_MAX),
       detalle: detallePend,
     },
     adelantados: {
       count: adelantados.length,
-      monto_usd: totalAdel,
+      monto_mxn: totalAdel,
       socios: adelantados.slice(0, PRECIERRE_SOCIOS_MAX),
       detalle: detalleAdel,
     },

@@ -766,7 +766,7 @@ export class FacturaSolicitudService {
       const filasAntes = cobrosAntesDelCambio(despues, p.cambio);
       const antes = vueloExigeFactura(
         filasAntes,
-        cobrosEnUsd(filasAntes, f.tc_vuelo ?? null),
+        cobrosEnUsd(filasAntes, f.tc_vuelo ?? null, f.tc_vuelo ?? null),
       );
       const transicion = transicionSolicitudAutomatica(antes, f.exigencia);
       if (!transicion) return nada('SIN_TRANSICION');

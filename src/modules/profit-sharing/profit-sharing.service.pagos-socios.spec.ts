@@ -36,8 +36,12 @@ jest.mock('../../common/cierre-mes-disponible.util', () => ({
  * (saldo SIN el mes en curso < −$1: el mismo número del candado del
  * adelanto), SOLO cuando el periodo es un mes calendario. La
  * utilidad sale del reparto REAL (`computeAvion`): N4142R, septiembre 2026,
- * un vuelo cobrado en $2,023.10 y socios 69 / 29 / 2 ⇒ $1,395.94 · $586.70
- * · $40.46 (residuo mayor en centavos). «Hoy» = 1-oct-2026 (Cancún).
+ * un vuelo cobrado en $2,023.10 USD con T.C. 18.5 en su cotización (el K de
+ * pesos del vuelo, invariante 92) ⇒ $37,427.35 MXN y socios 69 / 29 / 2 ⇒
+ * $25,824.87 · $10,853.93 · $748.55 MXN (residuo mayor en centavos); en
+ * dólares, informativos, $1,395.94 · $586.70 · $40.46. LA CUENTA ES EN
+ * PESOS desde el 0.0.101 (invariante 99): lee `reparto[].monto_mxn` y las
+ * entregas descuentan `monto_mxn`. «Hoy» = 1-oct-2026 (Cancún).
  */
 type Fila = Record<string, unknown>;
 
@@ -47,6 +51,9 @@ const AERO = 'bbbbbbbb-0000-4000-8000-000000000029';
 const SAAB = 'bbbbbbbb-0000-4000-8000-000000000002';
 const ALE = 'cccccccc-0000-4000-8000-0000000000a1';
 const SEPTIEMBRE = { desde: '2026-09-01', hasta: '2026-09-30' };
+/** T.C. de la cotización del vuelo y de las entregas del mundo. */
+const TC = 18.5;
+const r2 = (x: number) => Math.round(x * 100) / 100;
 
 type Privado = {
   computeAvion: (
@@ -54,11 +61,13 @@ type Privado = {
     ctx: Record<string, unknown>,
   ) => {
     saldo_disponible_usd: number;
+    saldo_disponible_mxn: number;
     reparto: Array<{
       socio_id: string;
       socio_nombre: string;
       porcentaje: number;
       monto_usd: number;
+      monto_mxn: number;
     }>;
     aeronave: { id: string; matricula: string; modelo: string };
   };
@@ -72,7 +81,8 @@ function avionN4142R(svc: ProfitSharingService) {
     cliente_id: null,
     estado: 'COMPLETADO',
     monto_total_usd: '2023.10',
-    tc_usd_mxn: null,
+    // T.C. de la cotización ⇒ K con que el reparto pasa el vuelo a pesos.
+    tc_usd_mxn: String(TC),
     cobrado: true,
     comision_vendedor_usd: null,
     subtotal_vuelo_usd: '2023.10',
@@ -156,7 +166,7 @@ interface Opciones {
   pagos?: Fila[];
   cuentas?: Fila[];
   sinMigracion?: boolean;
-  /** Utilidad de Mauricio en OCTUBRE (mes en curso); default: sin avión. */
+  /** Utilidad de Mauricio en OCTUBRE (mes en curso), en MXN; default: sin avión. */
   octubreMauricio?: number;
 }
 
@@ -237,16 +247,17 @@ function armar(opts: Opciones = {}) {
     };
     q.maybeSingle = () => Promise.resolve({ data: null, error: null });
     q.then = (res: (v: unknown) => unknown) => {
+      // La SONDA del lector es `saldo_snapshot_mxn` (invariante 99).
       if (
         opts.sinMigracion &&
         (tabla === 'reparto_cuenta_socio' ||
-          (tabla === 'reparto_pago' && cols.includes('saldo_snapshot_usd')))
+          (tabla === 'reparto_pago' && cols.includes('saldo_snapshot_mxn')))
       ) {
         return Promise.resolve({
           data: null,
           error: {
             code: '42703',
-            message: 'column reparto_pago.saldo_snapshot_usd does not exist',
+            message: 'column reparto_pago.saldo_snapshot_mxn does not exist',
           },
         }).then(res);
       }
@@ -293,10 +304,11 @@ function armar(opts: Opciones = {}) {
           {
             aeronave: avion.aeronave,
             reparto_porcentaje_total: 100,
-            reparto: avion.reparto.map((r) => ({
-              ...r,
-              monto_usd: r.socio_id === MAURICIO ? opts.octubreMauricio : 0,
-            })),
+            reparto: avion.reparto.map((r) => {
+              const mxn = r.socio_id === MAURICIO ? opts.octubreMauricio! : 0;
+              // La cuenta LEE `monto_mxn`; los dólares son informativos.
+              return { ...r, monto_mxn: mxn, monto_usd: r2(mxn / TC) };
+            }),
           },
         ];
   const compute = jest.spyOn(svc, 'compute').mockImplementation((q) =>
@@ -307,18 +319,28 @@ function armar(opts: Opciones = {}) {
   return { svc, compute, avion, consultasPagos };
 }
 
+/**
+ * Una entrega: por default $1,000 MXN a T.C. 18.5 (descuenta 1,000; $54.05
+ * USD informativos). `monto_usd` / `monto_mxn` se derivan de `monto`,
+ * `moneda` y `TC` salvo que el caso los fije; en USD el T.C. no se persiste
+ * (CHECK) y los pesos van en `monto_mxn` (= monto × TC).
+ */
 function entrega(p: Fila): Fila {
+  const moneda = typeof p.moneda === 'string' ? p.moneda : 'MXN';
+  const monto = p.monto == null ? 1000 : Number(p.monto);
   return {
     id: `p-${Math.random()}`,
     aeronave_id: null,
     socio_id: MAURICIO,
     periodo: null,
-    monto: 1000,
-    moneda: 'USD',
-    tc_usd_mxn: null,
-    monto_usd: 1000,
+    monto,
+    moneda,
+    tc_usd_mxn: moneda === 'MXN' ? TC : null,
+    monto_usd: moneda === 'USD' ? monto : r2(monto / TC),
+    monto_mxn: moneda === 'MXN' ? monto : r2(monto * TC),
     utilidad_snapshot_usd: null,
     saldo_snapshot_usd: null,
+    saldo_snapshot_mxn: null,
     fecha_pago: '2026-10-01',
     metodo: 'TRANSFERENCIA',
     entregado_por: ALE,
@@ -338,15 +360,21 @@ const adelantadosDe = (r: Respuesta) =>
   r.items.find((i) => i.clave === CLAVE_PRECIERRE_SOCIOS_ADELANTADOS);
 
 describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
-  it('el reparto REAL de N4142R: $2,023.10 ⇒ 1,395.94 / 586.70 / 40.46', () => {
+  it('el reparto REAL de N4142R: $2,023.10 ⇒ 1,395.94 / 586.70 / 40.46 USD y, a 18.5, $37,427.35 ⇒ 25,824.87 / 10,853.93 / 748.55 MXN (lo que lee la cuenta)', () => {
     const { avion } = armar();
     expect(avion.saldo_disponible_usd).toBe(2023.1);
+    expect(avion.saldo_disponible_mxn).toBe(37427.35);
     expect(
-      avion.reparto.map((r) => [r.socio_nombre, r.porcentaje, r.monto_usd]),
+      avion.reparto.map((r) => [
+        r.socio_nombre,
+        r.porcentaje,
+        r.monto_usd,
+        r.monto_mxn,
+      ]),
     ).toEqual([
-      ['Mauricio Roque', 69, 1395.94],
-      ['Aero Charter Cancun S.A. de C.V.', 29, 586.7],
-      ['Alexander E. Saab', 2, 40.46],
+      ['Mauricio Roque', 69, 1395.94, 25824.87],
+      ['Aero Charter Cancun S.A. de C.V.', 29, 586.7, 10853.93],
+      ['Alexander E. Saab', 2, 40.46, 748.55],
     ]);
   });
 
@@ -365,13 +393,13 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
       titulo: 'Socios con utilidad por entregar',
       mes: '2026-09',
       count: 3,
-      monto_usd: 2023.1,
+      monto_mxn: 37427.35,
       lectura_fallida: false,
       disponible: true,
       socios: [
         {
           socio: { id: MAURICIO, nombre: 'Mauricio Roque' },
-          por_entregar_usd: 1395.94,
+          por_entregar_mxn: 25824.87,
         },
         {
           // La propia empresa como socio viaja MARCADA (la oficina decide).
@@ -380,7 +408,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
             nombre: 'Aero Charter Cancun S.A. de C.V.',
             es_empresa: true,
           },
-          por_entregar_usd: 586.7,
+          por_entregar_mxn: 10853.93,
         },
         {
           socio: {
@@ -388,12 +416,12 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
             nombre: 'Alexander E. Saab',
             es_empresa: false,
           },
-          por_entregar_usd: 40.46,
+          por_entregar_mxn: 748.55,
         },
       ],
     });
     expect(String(porEntregarDe(r)!.detalle)).toContain(
-      '3 socio(s) con utilidad por entregar hasta septiembre 2026 por $2,023.10 USD',
+      '3 socio(s) con utilidad por entregar hasta septiembre 2026 por $37,427.35 MXN',
     );
     expect(porEntregarDe(r)).not.toHaveProperty('informativo');
     // Misma forma que «por entregar» (incluye `disponible`).
@@ -408,26 +436,26 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     expect(compute).toHaveBeenCalledTimes(3);
   });
 
-  it('una entrega de OCTUBRE por la utilidad de septiembre limpia septiembre; el ADELANTO de 70,000 MXN sale en adelantados; las borradas no cuentan', async () => {
+  it('una entrega de OCTUBRE por la utilidad de septiembre limpia septiembre; el ADELANTO de 70,000 MXN (descuenta 70,000) sale en adelantados; las borradas no cuentan', async () => {
     const { svc, consultasPagos } = armar({
       pagos: [
+        // Exactamente lo de septiembre de Mauricio, en pesos.
         entrega({
-          monto: 1395.94,
-          monto_usd: 1395.94,
+          monto: 25824.87,
           periodo: '2026-09-01',
           aeronave_id: N4142R,
         }),
+        // El audio: 70,000 MXN sobre los 10,853.93 generados ⇒ adelanto de
+        // 59,146.07 (hasta el 0.0.100 descontaba sus 3,783.78 USD).
         entrega({
           socio_id: AERO,
           monto: 70000,
           moneda: 'MXN',
-          tc_usd_mxn: 18.5,
-          monto_usd: 3783.78,
           metodo: 'EFECTIVO',
         }),
         entrega({
           socio_id: SAAB,
-          monto_usd: 40.46,
+          monto: 748.55,
           deleted_at: '2026-10-01T16:00:00Z',
         }),
       ],
@@ -438,24 +466,24 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     )) as unknown as Respuesta;
     expect(porEntregarDe(r)).toMatchObject({
       count: 1,
-      monto_usd: 40.46,
-      socios: [{ socio: { id: SAAB }, por_entregar_usd: 40.46 }],
+      monto_mxn: 748.55,
+      socios: [{ socio: { id: SAAB }, por_entregar_mxn: 748.55 }],
     });
     expect(adelantadosDe(r)).toMatchObject({
       titulo: 'Socios con entregas adelantadas (más de lo generado)',
       count: 1,
-      monto_usd: 3197.08,
+      monto_mxn: 59146.07,
       socios: [
         {
           socio: { id: AERO, nombre: 'Aero Charter Cancun S.A. de C.V.' },
-          por_entregar_usd: -3197.08,
-          adelantado_usd: 3197.08,
+          por_entregar_mxn: -59146.07,
+          adelantado_mxn: 59146.07,
         },
       ],
       lectura_fallida: false,
     });
     expect(String(adelantadosDe(r)!.detalle)).toContain(
-      'Aero Charter Cancun S.A. de C.V. $3,197.08 USD',
+      'Aero Charter Cancun S.A. de C.V. $59,146.07 MXN',
     );
     expect(r.listo).toBe(true);
     // Las entregas se leen VIVAS.
@@ -469,8 +497,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
       octubreMauricio: -345,
       pagos: [
         entrega({
-          monto: 1395.94,
-          monto_usd: 1395.94,
+          monto: 25824.87,
           periodo: '2026-09-01',
           aeronave_id: N4142R,
         }),
@@ -483,16 +510,17 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     const ids = (x: Record<string, unknown> | undefined) =>
       (x!.socios as Array<{ socio: { id: string } }>).map((s) => s.socio.id);
     expect(ids(porEntregarDe(r))).toEqual([AERO, SAAB]);
-    // Antes (saldo de HOY, con octubre −345) salía «Mauricio Roque $345 USD
+    // Antes (saldo de HOY, con octubre −345) salía «Mauricio Roque $345 MXN
     // … recibieron más de lo generado».
-    expect(adelantadosDe(r)).toMatchObject({ count: 0, monto_usd: 0 });
+    expect(adelantadosDe(r)).toMatchObject({ count: 0, monto_mxn: 0 });
     expect(ids(adelantadosDe(r))).toEqual([]);
   });
 
   it('mes en curso POSITIVO a medias: una entrega por encima de lo CERRADO sí sale como adelanto en el pre-cierre (utilidad no realizada)', async () => {
     const { svc } = armar({
       octubreMauricio: 500,
-      pagos: [entrega({ monto: 1895.94, monto_usd: 1895.94 })],
+      // 25,824.87 de septiembre + los 500 de octubre que todavía se mueven.
+      pagos: [entrega({ monto: 26324.87 })],
     });
     const r = (await svc.preCierre(
       SEPTIEMBRE,
@@ -500,12 +528,12 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     )) as unknown as Respuesta;
     expect(adelantadosDe(r)).toMatchObject({
       count: 1,
-      monto_usd: 500,
+      monto_mxn: 500,
       socios: [
         {
           socio: { id: MAURICIO, es_empresa: false },
-          por_entregar_usd: -500,
-          adelantado_usd: 500,
+          por_entregar_mxn: -500,
+          adelantado_mxn: 500,
         },
       ],
     });

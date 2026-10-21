@@ -1,5 +1,6 @@
 import {
   calcularCompra,
+  estadoGastoCompra,
   parsearCantidadConcepto,
   RE_CONCEPTO_CARGO,
   rolPorTexto,
@@ -280,5 +281,117 @@ describe('heurísticas de texto', () => {
     ).toBe('IMPUESTOS');
     expect(rolPorTexto('DHL Express envío')).toBe('ENVIO');
     expect(rolPorTexto('Seguro de la pieza')).toBe('OTRO');
+  });
+});
+
+// ===== El GASTO de la compra (21-oct-2026, invariante 101) =====
+
+describe('calcularCompra — total_factura y gasto_estado', () => {
+  const base = {
+    ...COMPRA,
+    cargos_factura: [{ concepto: 'Shipping', monto: 100.8 }],
+  };
+
+  it('total_factura = líneas + cargos impresos en la factura, SIN los pagos-cargo (ya son sus propios gastos)', () => {
+    const { resumen } = calcularCompra(base, LINEAS, PAGOS);
+    expect(resumen.total_factura).toBe(722.9);
+    // El total puesto en bodega sí lleva el pago de UPS prorrateado.
+    expect(resumen.total).toBeGreaterThan(resumen.total_factura);
+  });
+
+  it('sin ningún pago ⇒ SIN_GASTO (mercancía 0, sin faltante)', () => {
+    const { resumen } = calcularCompra(base, LINEAS, []);
+    expect(resumen).toMatchObject({
+      gasto_estado: 'SIN_GASTO',
+      gasto_mercancia: 0,
+      gasto_faltante: null,
+    });
+  });
+
+  it('solo cargos ligados (envío/impuestos) ⇒ PARCIAL: falta la factura de mercancía entera', () => {
+    const { resumen } = calcularCompra(base, LINEAS, [PAGOS[1]]);
+    expect(resumen).toMatchObject({
+      gasto_estado: 'PARCIAL',
+      gasto_mercancia: 0,
+      gasto_faltante: 722.9,
+    });
+  });
+
+  it('la factura de mercancía ligada y que cuadra (±1 %) ⇒ REGISTRADO con lo pagado', () => {
+    const { resumen } = calcularCompra(base, LINEAS, PAGOS);
+    expect(resumen).toMatchObject({
+      gasto_estado: 'REGISTRADO',
+      gasto_mercancia: 722.9,
+      gasto_faltante: null,
+    });
+    // Dentro de la tolerancia del 1 % sigue siendo REGISTRADO (el aviso del cuadre no sale).
+    const casi = calcularCompra(base, LINEAS, [{ ...PAGOS[0], monto: 718 }]);
+    expect(casi.resumen.gasto_estado).toBe('REGISTRADO');
+    expect(casi.resumen.avisos.some((a) => a.includes('no cuadra'))).toBe(
+      false,
+    );
+  });
+
+  it('la factura de mercancía ligada por MENOS de lo que dicen las líneas ⇒ PARCIAL con el faltante', () => {
+    const { resumen } = calcularCompra(base, LINEAS, [
+      { ...PAGOS[0], monto: 500 },
+    ]);
+    expect(resumen).toMatchObject({
+      gasto_estado: 'PARCIAL',
+      gasto_mercancia: 500,
+      gasto_faltante: 222.9,
+    });
+    expect(resumen.avisos.some((a) => a.includes('no cuadra'))).toBe(true);
+  });
+
+  it('pagada de MÁS sigue REGISTRADO (el aviso del cuadre lo dice); en otra moneda sin TC, REGISTRADO sin verificar', () => {
+    const mas = calcularCompra(base, LINEAS, [{ ...PAGOS[0], monto: 800 }]);
+    expect(mas.resumen).toMatchObject({
+      gasto_estado: 'REGISTRADO',
+      gasto_mercancia: 800,
+      gasto_faltante: null,
+    });
+    const sinTc = calcularCompra({ ...base, tc_usd_mxn: null }, LINEAS, [
+      { monto: 13000, moneda: 'MXN', tc_gasto: null, compra_rol: 'MERCANCIA' },
+    ]);
+    expect(sinTc.resumen).toMatchObject({
+      gasto_estado: 'REGISTRADO',
+      gasto_mercancia: null,
+      gasto_faltante: null,
+    });
+  });
+
+  it('una compra SIN líneas con su gasto de mercancía ligado es REGISTRADO (lo que falta son las líneas, no el gasto)', () => {
+    const { resumen } = calcularCompra(
+      { ...base, cargos_factura: [] },
+      [],
+      [PAGOS[0]],
+    );
+    expect(resumen).toMatchObject({
+      total_factura: 0,
+      gasto_estado: 'REGISTRADO',
+      gasto_mercancia: 722.9,
+    });
+  });
+
+  it('estadoGastoCompra es la fuente única (misma tolerancia: 1 %, mínimo un centavo)', () => {
+    expect(
+      estadoGastoCompra({
+        total_factura: 1,
+        hayPagos: true,
+        hayPagoMercancia: true,
+        mercanciaSinTc: false,
+        pagadoMercancia: 0.98,
+      }),
+    ).toMatchObject({ gasto_estado: 'PARCIAL', gasto_faltante: 0.02 });
+    expect(
+      estadoGastoCompra({
+        total_factura: 1,
+        hayPagos: true,
+        hayPagoMercancia: true,
+        mercanciaSinTc: false,
+        pagadoMercancia: 0.99,
+      }),
+    ).toMatchObject({ gasto_estado: 'REGISTRADO' });
   });
 });

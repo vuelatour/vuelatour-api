@@ -27,6 +27,17 @@ export interface RepartoSocioPayload {
    * el API). pyservices lo pinta solo con `reparto_en_pesos`.
    */
   monto_mxn?: number;
+  /**
+   * ADITIVOS (20-oct-2026, invariante 99; `reparto_como_balance`): su parte
+   * del saldo ANTES de la reserva (`utilidad_*`), su parte de la reserva de
+   * overhaul («cuánto debe guardar», `reserva_*`) y si se le descuenta
+   * (`descuenta_reserva` ⇒ `monto_* = utilidad_* − reserva_*`).
+   */
+  utilidad_usd?: number;
+  utilidad_mxn?: number;
+  reserva_usd?: number;
+  reserva_mxn?: number;
+  descuenta_reserva?: boolean;
 }
 
 /**
@@ -143,6 +154,19 @@ export interface RepartoAvionPayload {
   saldo_mxn?: number;
   pesos_sin_tc_usd?: number;
   reserva_tc?: number | null;
+  /**
+   * ADITIVOS (20-oct-2026, invariante 99; `reparto_como_balance`): la
+   * PROVISIÓN AFAC que resta del saldo (tarifa × horas cobradas, la columna
+   * T del balance) y la reserva de overhaul que VuelaTour RETIENE a los
+   * socios que la descuentan. Con la bandera, `reserva_overhaul_*` es solo
+   * informativa (ya no resta del saldo).
+   */
+  afac_reservado_usd?: number;
+  afac_reservado_mxn?: number;
+  afac_horas_cobradas_hr?: number;
+  afac_tarifa_usd_hr?: number | null;
+  reserva_retenida_usd?: number;
+  reserva_retenida_mxn?: number;
 }
 
 /**
@@ -215,6 +239,14 @@ export interface RepartoPdfPayload {
    * al PDF/XLSX (nunca lo mandó: la tabla no se imprime).
    */
   reparto_en_pesos?: true;
+  /**
+   * ADITIVA (20-oct-2026, invariante 99): LA CASCADA DEL BALANCE — la
+   * provisión AFAC resta (`afac_reservado_*`), la reserva de overhaul solo
+   * se informa (por socio: `reparto[].reserva_*`) y se descuenta solo a quien
+   * lleva `descuenta_reserva` (`reserva_retenida_*`). pyservices pinta la
+   * cascada nueva solo con un `true` JSON; sin ella, la de siempre.
+   */
+  reparto_como_balance?: true;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';
@@ -1334,6 +1366,37 @@ export interface BalanceAvionSocioPayload {
    * «balance». Siempre viaja (true/false); un pyservices viejo la ignora.
    */
   es_empresa?: boolean;
+  /**
+   * ADITIVOS (20-oct-2026, invariante 99): su parte de la utilidad cobrada
+   * ANTES de la reserva (`utilidad_*`), su parte de la reserva de overhaul
+   * del periodo (`reserva_*`; «cuánto debe guardar») y si se le descuenta
+   * (`descuenta_reserva` ⇒ `monto_* = utilidad_* − reserva_*`). Sin reserva,
+   * `reserva_* = 0` y `monto_* = utilidad_*`.
+   */
+  utilidad_usd?: number | null;
+  utilidad_mxn?: number | null;
+  reserva_usd?: number;
+  reserva_mxn?: number | null;
+  descuenta_reserva?: boolean;
+  /**
+   * ENTREGAS A SOCIOS (21-oct-2026, invariante 100; ADITIVAS, SOLO con la
+   * cuenta corriente de los socios disponible — sin la migración
+   * `20261020000006` no viajan, jamás un 0 inventado): lo YA entregado a
+   * este socio «por este avión» en los meses del periodo (entregas VIVAS de
+   * `reparto_pago` con `aeronave_id` = el avión y mes acreditado = `periodo`
+   * ?? mes de `fecha_pago`, la regla de la pantalla por avión del reparto),
+   * EN PESOS (`entregado_mxn` = Σ `monto_mxn`, lo que descuenta del saldo),
+   * el USD informativo (`entregado_usd` = Σ `monto_usd`), el conteo y lo
+   * que FALTA por entregar: `por_entregar_mxn` = round2(`monto_mxn` −
+   * `entregado_mxn`) (null si `monto_mxn` es null; NEGATIVO = se le
+   * adelantó). Un socio que recibió entregas y ya no está vigente en
+   * `aeronave_socio` viaja como renglón con porcentaje 0 y montos 0 (solo si
+   * tiene entregas), para que ese dinero no desaparezca del libro.
+   */
+  entregado_mxn?: number;
+  entregado_usd?: number;
+  entregas?: number;
+  por_entregar_mxn?: number | null;
 }
 
 /** Participación de la EMPRESA como socia de UN avión (bloque VUELATOUR). */
@@ -1504,6 +1567,15 @@ export interface BalanceAvionBalancePayload {
   reserva_overhaul_tc_dia?: string | null;
   /** Voló horas y el avión no tiene tarifa de reserva configurada. */
   reserva_overhaul_incompleta?: boolean;
+  /**
+   * ENTREGAS A SOCIOS (21-oct-2026, invariante 100; ADITIVAS, solo con la
+   * cuenta corriente disponible, justo después de la reserva): Σ de
+   * `socios[].entregado_mxn` y Σ de `socios[].por_entregar_mxn` (null si
+   * algún socio no tiene pesos). pyservices pinta las columnas ENTREGADO /
+   * POR ENTREGAR y la fila de totales solo con ellas.
+   */
+  entregado_socios_mxn?: number;
+  por_entregar_socios_mxn?: number | null;
   comisiones_mxn?: number;
   utilidad_antes_comisiones_mxn?: number;
 }

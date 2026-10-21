@@ -232,6 +232,12 @@ export enum EstatusFacturacion {
  * artículo y, con `vender_al_avion`, sale de inmediato vendida al avión del
  * gasto (que recibe el cargo de bodega). El gasto de compra NO carga al
  * avión: el avión lo paga por su salida. Solo al crear.
+ *
+ * @deprecated Desde el 21-oct-2026 (invariante 101) el panel NO manda este
+ * bloque: una refacción se da de alta como un gasto normal y la bodega se
+ * alimenta desde Compras («Registrar gasto», «Vincular gasto ya registrado»,
+ * «Entrada desde un gasto»). Se acepta por compatibilidad; la app móvil
+ * nunca lo usó. No agregar funcionalidad aquí.
  */
 export class RefaccionInventarioDto {
   @ApiPropertyOptional({
@@ -509,8 +515,9 @@ export class CreateGastoDto {
 
   @ApiPropertyOptional({
     type: RefaccionInventarioDto,
+    deprecated: true,
     description:
-      'Solo categoría REFACCION y solo al CREAR (invariante 57): la pieza entra a Inventario/Tienda como compra recibida (ítem nuevo si no existe), con precio de venta obligatorio y salida inmediata al avión si se pide.',
+      'DEPRECADO (21-oct-2026, invariante 101): el panel ya no lo manda; la bodega se alimenta desde Compras (registrar gasto / vincular gasto / entrada desde un gasto). Se acepta por compatibilidad. Solo categoría REFACCION y solo al CREAR (invariante 57): la pieza entra a Inventario/Tienda como compra recibida (ítem nuevo si no existe), con precio de venta obligatorio y salida inmediata al avión si se pide.',
   })
   @IsOptional()
   @ValidateNested()

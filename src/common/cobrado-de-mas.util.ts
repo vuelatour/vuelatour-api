@@ -269,6 +269,7 @@ export interface CobroCrudoCobradoDeMas extends CobroLike {
 export function comisionesCobrosUsd(
   cobros: ReadonlyArray<CobroCrudoCobradoDeMas>,
   tcFallback?: number | null,
+  kCotizacion?: number | null,
 ): number {
   return cobrosEnUsd(
     cobros.map((c) => ({
@@ -277,6 +278,7 @@ export function comisionesCobrosUsd(
       tc_usd_mxn: c.tc_usd_mxn,
     })),
     tcFallback,
+    kCotizacion,
   ).total_usd;
 }
 
@@ -284,12 +286,13 @@ export function comisionesCobrosUsd(
 export function cobrosParaCobradoDeMas(
   cobros: ReadonlyArray<CobroCrudoCobradoDeMas>,
   tcFallback?: number | null,
+  kCotizacion?: number | null,
 ): CobroParaCobradoDeMas[] {
   return cobros.map((c) => ({
     id: texto(c.id) ?? '',
     monto: r2(num(c.monto)),
     moneda: texto(c.moneda) ?? '',
-    usd: cobroEnUsd(c, tcFallback),
+    usd: cobroEnUsd(c, tcFallback, kCotizacion),
     metodo: texto(c.metodo_cobro),
     fecha_cobro: texto(c.fecha_cobro),
     parte_de_sobre: texto(c.cobro_grupo_id) !== null,
@@ -311,11 +314,21 @@ export function entradaCobradoDeMas(p: {
   };
   cobros: ReadonlyArray<CobroCrudoCobradoDeMas>;
   tcFallback: number | null;
+  /**
+   * T.C. CAPTURADO en la cotización (pesos primero, 20-oct-2026): quien
+   * llama lo pasa aparte del respaldo porque `tcFallback` puede ser el
+   * oficial del día. Omitido ⇒ se toma de `vuelo.tc_usd_mxn`.
+   */
+  kCotizacion?: number | null;
   grupoFolio?: number | null;
   otrosCobrosCliente?: ReadonlyArray<OtroCobroDelCliente> | null;
 }): EntradaCobradoDeMas {
   const particion = particionIngresoVuelo(p.vuelo);
-  const conv = cobrosEnUsd([...p.cobros], p.tcFallback);
+  const k =
+    p.kCotizacion !== undefined
+      ? p.kCotizacion
+      : normalizarTc((p.vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn);
+  const conv = cobrosEnUsd([...p.cobros], p.tcFallback, k);
   return {
     total_usd: particion.total_usd,
     cobrado_usd: conv.total_usd,
@@ -324,8 +337,8 @@ export function entradaCobradoDeMas(p: {
     estado_vuelo: texto(p.vuelo.estado),
     cotizacion_abierta: p.vuelo.cotizacion_abierta === true,
     iva_total_usd: particion.iva_total_usd,
-    comisiones_usd: comisionesCobrosUsd(p.cobros, p.tcFallback),
-    cobros: cobrosParaCobradoDeMas(p.cobros, p.tcFallback),
+    comisiones_usd: comisionesCobrosUsd(p.cobros, p.tcFallback, k),
+    cobros: cobrosParaCobradoDeMas(p.cobros, p.tcFallback, k),
     tc_vuelo: normalizarTc(p.tcFallback),
     grupo_folio: p.grupoFolio ?? null,
     otros_cobros_cliente: p.otrosCobrosCliente ?? null,

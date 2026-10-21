@@ -1983,7 +1983,8 @@ export class AircraftService {
     let q = this.supabase.service
       .from('aeronave_socio')
       .select(
-        'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, created_at, updated_at, usuario:socio_id(nombre, email, rol, es_empresa)',
+        // `descontar_reserva_overhaul` (20-oct-2026, invariante 99).
+        'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, descontar_reserva_overhaul, created_at, updated_at, usuario:socio_id(nombre, email, rol, es_empresa)',
       )
       .eq('aeronave_id', aeronaveId)
       .order('vigente_desde', { ascending: false });
@@ -2054,7 +2055,7 @@ export class AircraftService {
       .update(patch)
       .eq('id', ownerId)
       .select(
-        'id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas',
+        'id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, descontar_reserva_overhaul',
       )
       .maybeSingle();
     if (error) {
@@ -2146,10 +2147,16 @@ export class AircraftService {
         vigente_desde: desde,
         vigente_hasta: hasta ?? undefined,
         notas: dto.notas,
+        // RESERVA POR SOCIO (20-oct-2026, invariante 99): default false.
+        ...(dto.descontar_reserva_overhaul !== undefined
+          ? { descontar_reserva_overhaul: dto.descontar_reserva_overhaul }
+          : {}),
         created_by: createdBy,
         updated_by: createdBy,
       })
-      .select('id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas')
+      .select(
+        'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, descontar_reserva_overhaul',
+      )
       .maybeSingle();
     if (error) {
       if (error.code === '23503') {
@@ -2196,6 +2203,9 @@ export class AircraftService {
       patch.vigente_hasta =
         dto.vigente_hasta === null ? null : diaDeDate(dto.vigente_hasta);
     if (dto.notas !== undefined) patch.notas = dto.notas;
+    // RESERVA POR SOCIO (20-oct-2026, invariante 99).
+    if (dto.descontar_reserva_overhaul !== undefined)
+      patch.descontar_reserva_overhaul = dto.descontar_reserva_overhaul;
 
     const desde =
       (patch.vigente_desde as string | undefined) ?? actual.vigente_desde;

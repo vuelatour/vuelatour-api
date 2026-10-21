@@ -7,9 +7,11 @@
  * (`candidatosPrecierreInversos`: completados propios, cliente no interno,
  * total > 0). Un vuelo se lista si algún gasto con su `vuelo_id` (de
  * CUALQUIER fecha, monto > 0) parece transporte de PASAJEROS
- * (`pareceTransporteDePasajeros`, heurística de texto congelada con prod) y
- * lo PACTADO (`extrasPactados`: `calculo_snapshot.extras`, respaldo
- * `vuelo.extras`) no trae ningún extra de transporte (`cotizoTransporte`).
+ * (`pareceTransporteDePasajeros`, heurística de texto congelada con prod;
+ * desde el 21-oct-2026 SOLO gastos de OPERACIONES: «Taxi / estacionamiento»
+ * es de la tripulación y marcaba el taxi del piloto) y lo PACTADO
+ * (`extrasPactados`: `calculo_snapshot.extras`, respaldo `vuelo.extras`) no
+ * trae ningún extra de transporte (`cotizoTransporte`).
  *
  * Hijo de GRUPO (`grupo_id`): cuenta también lo pactado en la CABECERA
  * (`vuelo_grupo.extras_grupo`, argumento `extrasGrupo`). Un extra con
@@ -41,11 +43,11 @@ export const TITULO_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR =
   'Vuelos con transporte pagado sin transporte cotizado';
 
 export const DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR =
-  'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto que parece transporte de PASAJEROS (traslado, transfer, camioneta, taxi privado…) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los traslados de la tripulación (Uber, ADO, estacionamiento, ferry, tren) no cuentan. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.';
+  'Es una SEÑAL, no una certeza: vuelos completados del periodo con un gasto de Operaciones que parece transporte de PASAJEROS (traslado, transfer, camioneta, van, shuttle) y una cotización sin ningún extra de transporte. Revisa si se cobró: si no, agrégalo como extra en la cotización (con «Transfer», «Traslado», «Transporte», «Camioneta», «Van», «Shuttle» o «Taxi» en el concepto: un «Tour» solo no cuenta) o anótalo en el detalle del vuelo → «Seguimiento de la cotización» para cobrarlo después. Los gastos «Taxi / estacionamiento» son de la TRIPULACIÓN y no cuentan: un traslado de pasajeros se captura en Operaciones con «Traslado» o «Transfer» en el concepto. Montos: lo pagado, en la moneda del gasto. No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_TRANSPORTE_PAGADO_SIN_COTIZAR_FALLIDA =
-  'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos «Taxi / estacionamiento» de cada vuelo contra su cotización antes de cerrar.';
+  'No se pudo verificar los transportes pagados de los vuelos del periodo: revisa los gastos de Operaciones con traslados de pasajeros de cada vuelo contra su cotización antes de cerrar.';
 
 export interface GastoTransportePrecierre {
   id: string;

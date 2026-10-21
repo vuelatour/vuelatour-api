@@ -56,13 +56,18 @@ import {
  * T.C. o el oficial de su día, reserva × el oficial del cierre, otros
  * ingresos con su neto en pesos— y el reparto por residuo mayor sobre el
  * saldo en pesos. Todo `*_mxn` es ADITIVO: sin ellos la respuesta y el
- * payload salen BYTE A BYTE como en el 0.0.93 (golden capturado con el
- * código del 0.0.93 sobre ESTE mundo: `libros-pesos.golden-0093.json`).
+ * payload salen BYTE A BYTE como en el golden. HISTORIA: el golden del
+ * 0.0.94 era el del 0.0.93 (los dólares no se movían). El 20-oct-2026
+ * (invariante 99, LA CASCADA DEL BALANCE) los dólares cambiaron A PROPÓSITO
+ * —la reserva de overhaul ya no resta del saldo, la provisión AFAC sí, la
+ * categoría INDIRECTO cuenta— y el golden se volvió a capturar con ese
+ * código: `libros-pesos.golden-0101.json` (4,488.80 de saldo en XB-TST =
+ * 4,348.80 + 140 de reserva que ya no resta).
  */
 
 const GOLDEN = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, 'libros-pesos.golden-0093.json'),
+    path.join(__dirname, 'libros-pesos.golden-0101.json'),
     'utf8',
   ),
 ) as Record<string, unknown>;
@@ -128,7 +133,7 @@ const avion = (r: Resultado, id: string) => {
 };
 
 describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: sin las llaves nuevas, la respuesta es BYTE A BYTE la del 0.0.93 (con oficial, sin oficial y vacía)', async () => {
+  it('GOLDEN: sin las llaves en pesos, la respuesta es BYTE A BYTE la del golden 0.0.101 (con oficial, sin oficial y vacía)', async () => {
     expect(JSON.stringify(sinLlavesPesos(await compute()))).toBe(
       JSON.stringify(GOLDEN.reparto_oficial),
     );
@@ -142,7 +147,7 @@ describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre'
     ).toBe(JSON.stringify(GOLDEN.reparto_vacio));
   });
 
-  it('GOLDEN: el payload del PDF/XLSX sin las llaves nuevas es BYTE A BYTE el del 0.0.93', async () => {
+  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.101', async () => {
     expect(JSON.stringify(sinLlavesPesosPayload(await payload()))).toBe(
       JSON.stringify(GOLDEN.payload_oficial),
     );
@@ -181,8 +186,12 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
       tc: 18.6,
     });
     expect(a.ingresos.otros_ingresos_avion_mxn).toBe(46550.8);
+    // Sin tarifa AFAC en la ficha del avión: provisión 0 (invariante 99).
+    expect(a.afac_reservado_mxn).toBe(0);
+    expect(a.afac_reservado_usd).toBe(0);
     // Saldo = cobrado − comisiones − directos − indirectos − permisos −
-    // otros − reserva + otros ingresos, todo en pesos.
+    // otros − provisión AFAC + otros ingresos, todo en pesos. La RESERVA DE
+    // OVERHAUL YA NO RESTA (20-oct-2026, invariante 99: solo se informa).
     const saldo = r2(
       a.ingresos.cobrado_mxn -
         a.ingresos.comisiones_venta_mxn -
@@ -190,11 +199,12 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
         a.gastos.indirectos_mxn -
         a.gastos.permisos_mxn -
         a.gastos.otros_prorrateados_mxn -
-        a.reserva_overhaul_mxn +
+        a.afac_reservado_mxn +
         a.ingresos.otros_ingresos_avion_mxn,
     );
     expect(a.saldo_disponible_mxn).toBe(saldo);
-    expect(a.saldo_disponible_mxn).toBe(81784.8);
+    // 81,784.80 (0.0.94) + 2,604 de reserva que ya no resta.
+    expect(a.saldo_disponible_mxn).toBe(84388.8);
     expect(a.pesos_sin_tc_usd).toBe(0);
   });
 
@@ -272,6 +282,13 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
         porcentaje: 100,
         monto_usd: -350,
         monto_mxn: -6185,
+        // Invariante 99: su parte antes de la reserva, su reserva (0: XB-DOS
+        // no tiene tarifa ni horas) y que no se le descuenta.
+        utilidad_usd: -350,
+        utilidad_mxn: -6185,
+        reserva_usd: 0,
+        reserva_mxn: 0,
+        descuenta_reserva: false,
       },
     ]);
     expect(d.pesos_sin_tc_usd).toBe(0);
@@ -282,10 +299,10 @@ describe('Reparto a socios EN PESOS — reparto por residuo mayor', () => {
   it('40.92 / 59.08 sobre el saldo en pesos: Σ == saldo al centavo y el centavo del residuo cae en el residuo mayor', async () => {
     const a = avion(await compute(), AV);
     expect(a.reparto.map((x) => [x.porcentaje, x.monto_mxn])).toEqual([
-      // 8,178,480 ¢ × 0.4092 = 3,346,634.016 ⇒ piso 3,346,634; × 0.5908 =
-      // 4,831,845.984 ⇒ piso 4,831,845 + el centavo que falta (residuo mayor).
-      [40.92, 33466.34],
-      [59.08, 48318.46],
+      // 8,438,880 ¢ × 0.4092 = 3,453,189.696 ⇒ piso 3,453,189 + el centavo
+      // que falta (residuo mayor); × 0.5908 = 4,985,690.304 ⇒ piso 4,985,690.
+      [40.92, 34531.9],
+      [59.08, 49856.9],
     ]);
     expect(r2(a.reparto.reduce((s, x) => s + x.monto_mxn, 0))).toBe(
       a.saldo_disponible_mxn,
@@ -353,8 +370,10 @@ describe('Reparto a socios EN PESOS — sin T.C.: lo que no llega a pesos se avi
     });
     // Dólares que entraron al saldo USD sin llegar a pesos: venta del #502
     // (1,000) + su comisión bancaria (30) + REFACCION (100) + su parte del
-    // FIJO USD (150) + reserva (140).
-    expect(a.pesos_sin_tc_usd).toBe(1420);
+    // FIJO USD (150). La reserva (140) ya no entra al saldo (invariante 99):
+    // sin oficial solo dejaría incompleta la parte de un socio que la
+    // descuente, y aquí ninguno lo hace.
+    expect(a.pesos_sin_tc_usd).toBe(1280);
     expect(avion(r, AV2).pesos_sin_tc_usd).toBe(150);
     expect(a.saldo_disponible_mxn).toBe(
       r2(35874.4 - 313.9 - 6900 - 0 - 500 - 3500 - 0 + 46550.8),
@@ -472,7 +491,7 @@ describe('Reparto a socios EN PESOS — payload del PDF/XLSX (§2b, pyservices 1
     expect(tst.otros_ingresos_avion).toEqual([
       expect.objectContaining({ clave: 'ING-14', usd: null, mxn: 46550.8 }),
     ]);
-    expect(tst.pesos_sin_tc_usd).toBe(1420);
+    expect(tst.pesos_sin_tc_usd).toBe(1280);
     expect(tst.reserva_tc).toBeNull();
   });
 });
