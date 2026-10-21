@@ -12269,7 +12269,12 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      `DRYRUN_OK`) ⇒ `apply_migration` SOLO con el cuerpo (sin drop/delete/
      revoke) ⇒ postchecks ⇒ `get_advisors`. Los DOS dry-run ya corrieron
      en prod el 20-oct-2026 (`DRYRUN_OK`, incluido el literal 'DELETE' del
-     cuerpo del trigger: el MCP no lo rechaza).
+     cuerpo del trigger: el MCP no lo rechaza). **APLICADAS el 21-oct-2026
+     13:10 UTC** por MCP (postchecks OK). Railway estaba caído (incidente
+     QH8L8B3E, builds pausados) y prod se quedó en 0.0.99 con la 000006
+     puesta ⇒ se aplicó el PUENTE `20261021000001_reparto_pago_monto_mxn_
+     puente` (trigger que completa `monto_mxn` con la regla del API cuando
+     la escritura no lo manda; inocuo con el 0.0.102; se queda).
   2. **pyservices** (push `main`, Railway; confirmar el deployment ACTIVO):
      aditivo; sin `reparto_como_balance` el PDF y el Excel salen byte a
      byte, así que es seguro con el API viejo.
