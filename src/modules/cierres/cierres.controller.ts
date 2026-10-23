@@ -45,10 +45,13 @@ export class CierresController {
   @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Qué pasaría al cerrar el mes: bloqueantes, vuelos que pasan al mes siguiente y reparto antes/después. ?incluir=id,id (21-oct-2026): vuelos ya cobrados después del corte que se quedarían en el mes (vuelos_incluidos).',
+      'Qué pasaría al cerrar el mes: bloqueantes, vuelos que pasan al mes siguiente y reparto antes/después. ?incluir=id,id (21-oct-2026): vuelos ya cobrados después del corte que se quedarían en el mes (vuelos_incluidos). ?aeronave_id (23-oct-2026, invariante 105): la previa de UN avión.',
   })
   previa(@Param('periodo') periodo: string, @Query() q: PreviaCierreQuery) {
-    return this.cierres.previa(validarPeriodoCierre(periodo), q.incluir);
+    return this.cierres.previa(validarPeriodoCierre(periodo), {
+      incluir: q.incluir,
+      aeronaveId: q.aeronave_id,
+    });
   }
 
   @Post(':periodo')
@@ -56,7 +59,7 @@ export class CierresController {
   @Roles(Rol.ADMIN, Rol.FACTURACION)
   @ApiOperation({
     summary:
-      'Cierra el mes: congela el reparto y pasa al mes siguiente los vuelos no cobrados al último día. incluir_vuelos (21-oct-2026): los ya cobrados después del corte que se quedan en el mes.',
+      'Cierra el mes (por avión con aeronave_id; sin él, todos los aviones activos abiertos): congela el reparto y pasa al mes siguiente los vuelos no cobrados al último día. incluir_vuelos (21-oct-2026): los ya cobrados después del corte que se quedan en el mes.',
   })
   cerrar(
     @Param('periodo') periodo: string,
@@ -71,7 +74,7 @@ export class CierresController {
   @Roles(Rol.ADMIN)
   @ApiOperation({
     summary:
-      'Reabre un mes cerrado (solo ADMIN): los vuelos que pasaron regresan a su mes',
+      'Reabre un mes cerrado (solo ADMIN; por avión con aeronave_id, si no todos los cerrados): los vuelos que pasaron regresan a su mes',
   })
   reabrir(
     @Param('periodo') periodo: string,

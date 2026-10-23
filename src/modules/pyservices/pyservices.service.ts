@@ -78,6 +78,44 @@ export interface RepartoVueloLineaPayload {
   tramos_avion: string | null;
 }
 
+/**
+ * CIERRE POR AVIÓN (23-oct-2026, API 0.0.104, invariante 105; ADITIVO):
+ * `aviones[].cierre_avion` del payload del PDF/XLSX del reparto — el mismo
+ * shape que `GET /v1/profit-sharing` (`RepartoCierreAvion` de pyservices).
+ * Solo viaja con la migración por avión; pyservices lo pinta si llega.
+ */
+export interface RepartoCierreAvionPayload {
+  estado: 'ABIERTO' | 'CERRADO' | 'REABIERTO';
+  cerrado_at: string | null;
+  cerrado_por_nombre: string | null;
+  reabierto_at: string | null;
+  reabierto_por_nombre: string | null;
+  version: number | null;
+  coincide_con_snapshot: boolean | null;
+}
+
+/**
+ * Bloque `cierre` del payload del reparto (invariante 89; `RepartoCierre`
+ * de pyservices). Desde la invariante 105 `estado` puede ser `PARCIAL` y
+ * viajan `aviones_activos` («M») y `aviones_cerrados` (matrículas).
+ */
+export interface RepartoCierrePayload {
+  disponible: true;
+  periodo: string | null;
+  estado: 'ABIERTO' | 'PARCIAL' | 'CERRADO' | 'REABIERTO';
+  cerrado_at: string | null;
+  cerrado_por_nombre: string | null;
+  reabierto_at: string | null;
+  reabierto_por_nombre: string | null;
+  version: number | null;
+  coincide_con_snapshot: boolean | null;
+  diferidos_salen: unknown[];
+  diferidos_entran: unknown[];
+  pendientes_que_pasarian: unknown[];
+  aviones_activos?: number;
+  aviones_cerrados?: string[];
+}
+
 export interface RepartoAvionPayload {
   matricula: string;
   modelo: string;
@@ -258,6 +296,12 @@ export interface RepartoPdfPayload {
    * cascada nueva solo con un `true` JSON; sin ella, la de siempre.
    */
   reparto_como_balance?: true;
+  /**
+   * CIERRE DE MES (invariante 89; ADITIVO, solo con la migración): estado
+   * del mes y las listas de diferidos. Desde la invariante 105 `estado`
+   * puede ser `PARCIAL` + `aviones_activos` / `aviones_cerrados`.
+   */
+  cierre?: RepartoCierrePayload;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';

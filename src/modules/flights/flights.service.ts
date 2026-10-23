@@ -1,6 +1,7 @@
 import {
   assertCobroEnMesAbierto,
   assertMesAbierto,
+  avionesDelVueloCandado,
   cierreDeMes,
   leerDiferimientos,
   leerVueloMesContable,
@@ -13697,10 +13698,13 @@ export class FlightsService {
       realNuevo && realNuevo !== mesRealDeVuelo(v)
         ? [mesRealDeVuelo(v), realNuevo]
         : [];
+    // CIERRE POR AVIÓN (invariante 105): los aviones PARTICIPANTES del
+    // vuelo (sin la migración por avión, ninguno: candado solo global).
     await assertMesAbierto(
       sb,
       [opts.sinMesActual ? null : mesContableDeVuelo(v), nuevo, ...reales],
       'vuelo',
+      await avionesDelVueloCandado(sb, v),
     );
   }
 

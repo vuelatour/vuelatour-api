@@ -444,6 +444,12 @@ export interface CierreParaTexto {
   periodo: string;
   cerrado_at?: string | null;
   cerrado_por_nombre?: string | null;
+  /**
+   * CIERRE POR AVIÓN (23-oct-2026, invariante 105): la matrícula del avión
+   * cerrado cuando el candado es de UN avión («N621TX · Septiembre 2026 ya
+   * está cerrado…»). Ausente/null = cierre de toda la flota (texto de hoy).
+   */
+  matricula?: string | null;
 }
 
 /** 'Ale' de 'Alejandra Pérez' (primer nombre); vacío ⇒ 'la oficina'. */
@@ -453,14 +459,55 @@ export function nombreCorto(nombre: string | null | undefined): string {
   return n.split(/\s+/)[0];
 }
 
-/** «Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.» */
+/**
+ * «Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para
+ * corregir.» Con `matricula` (cierre POR AVIÓN, invariante 105): «N621TX ·
+ * Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para
+ * corregir.»
+ */
 export function textoMesCerrado(c: CierreParaTexto): string {
   const mes = mesDePeriodo(c.periodo) ?? c.periodo;
   const etiqueta = esMesContable(mes) ? etiquetaMes(mes) : mes;
   const quien = nombreCorto(c.cerrado_por_nombre);
   const cuando = diaCortoCancun(c.cerrado_at);
   const paren = cuando ? `${quien}, ${cuando}` : quien;
-  return `${etiqueta} ya está cerrado (${paren}). Reábrelo en Reportes para corregir.`;
+  const mat = (c.matricula ?? '').trim();
+  const prefijo = mat ? `${mat} · ` : '';
+  return `${prefijo}${etiqueta} ya está cerrado (${paren}). Reábrelo en Reportes para corregir.`;
+}
+
+/**
+ * Texto del 409 `OTRO_AVION_CERRADO` (invariante 105): reabrir el avión A no
+ * se puede porque un vuelo que su cierre pasó al mes siguiente lo comparte
+ * con otro avión que sigue cerrado en ese mes.
+ */
+export function textoOtroAvionCerrado(
+  mes: string,
+  matricula: string,
+  otras: ReadonlyArray<string>,
+): string {
+  const lista = otras.length > 0 ? otras.join(', ') : 'otro avión';
+  return `No se puede reabrir ${matricula} en ${etiquetaMesMinuscula(mes)}: comparte vuelos que pasaron al mes siguiente con ${lista}, que sigue cerrado. Reabre primero ${otras.length > 1 ? 'esos aviones' : 'ese avión'}.`;
+}
+
+/**
+ * «Se queda en septiembre 2026 (decidido al cerrar N621TX) · cobrado el
+ * 2-oct, después del 30-sep (al 30-sep: $0.00 USD de $1,000.00 USD)»: un
+ * vuelo multi-avión que el PRIMER avión en cerrar dejó en el mes (regla 2
+ * de la invariante 105); desde el otro avión no se puede diferir.
+ */
+export function leyendaSeQuedaDecidido(
+  periodo: string,
+  destino: string,
+  d: DatosLeyendaCierre,
+  matricula: string | null,
+): string {
+  const base = leyendaSeQueda(periodo, destino, d);
+  const quien = (matricula ?? '').trim() || 'otro avión';
+  return base.replace(
+    `Se queda en ${etiquetaMesMinuscula(periodo)}`,
+    `Se queda en ${etiquetaMesMinuscula(periodo)} (decidido al cerrar ${quien})`,
+  );
 }
 
 /**
@@ -660,6 +707,13 @@ export interface DiferimientoVuelo {
   cobrado_usd: number;
   por_cobrar_usd: number;
   motivo: MotivoDiferir;
+  /**
+   * CIERRE POR AVIÓN (23-oct-2026, invariante 105): el avión cuyo cierre
+   * difirió el vuelo (bitácora `cierre_mes_avion_vuelo.aeronave_id`; en un
+   * multi-avión puede ser el secundario). null = bitácora legada
+   * (`cierre_mes_vuelo`, cierre de toda la flota).
+   */
+  cierre_aeronave_id?: string | null;
 }
 
 /**
@@ -743,6 +797,46 @@ export function motivoNoCerrable(e: {
   }
   if (e.listo === false) return 'PRECIERRE_NO_LISTO';
   return null;
+}
+
+// ===== Estado de un MES hacia afuera con el cierre POR AVIÓN (invariante 105) =====
+
+/**
+ * Estado de un mes para la flota: `ABIERTO` (nada cerrado), `PARCIAL` (al
+ * menos un avión cerrado y la fila global no está CERRADO), `CERRADO` (la
+ * fila global está CERRADO = toda la flota activa cerrada) o `REABIERTO`
+ * (la fila global quedó REABIERTO y ya ningún avión sigue cerrado). Sin la
+ * migración por avión solo salen los tres de siempre.
+ */
+export type EstadoMesFlota = 'ABIERTO' | 'PARCIAL' | 'CERRADO' | 'REABIERTO';
+
+/** Lo mínimo de una fila de cierre (global o de un avión) para derivar. */
+export interface FilaCierreParaEstado {
+  estado: 'CERRADO' | 'REABIERTO';
+}
+
+/**
+ * FUENTE ÚNICA del estado DERIVADO de un mes (invariante 105): `GET
+ * /v1/cierres`, el bloque `cierre` del reparto, del pre-cierre, de los
+ * balances y del Libro Dinero lo calculan con ESTA función. PURA.
+ *  - fila global CERRADO ⇒ 'CERRADO' (es la única verdad de «toda la flota
+ *    cerrada»; los lectores globales no cambian);
+ *  - si no, algún avión CERRADO ⇒ 'PARCIAL' (también cuando la flota estaba
+ *    cerrada y se reabrió UN avión: la fila global queda REABIERTO y los
+ *    demás siguen cerrados);
+ *  - si no, fila global REABIERTO ⇒ 'REABIERTO';
+ *  - si no ⇒ 'ABIERTO'.
+ * `activos` solo informa (`aviones_activos`): la fila global ya resume «la
+ * flota activa completa» porque el API la escribe al cerrar el último.
+ */
+export function estadoMesDerivado(e: {
+  global: FilaCierreParaEstado | null | undefined;
+  aviones: ReadonlyArray<FilaCierreParaEstado>;
+}): EstadoMesFlota {
+  if (e.global?.estado === 'CERRADO') return 'CERRADO';
+  if (e.aviones.some((a) => a.estado === 'CERRADO')) return 'PARCIAL';
+  if (e.global?.estado === 'REABIERTO') return 'REABIERTO';
+  return 'ABIERTO';
 }
 
 /** Texto es-MX del motivo (el panel lo copia en el tooltip). */

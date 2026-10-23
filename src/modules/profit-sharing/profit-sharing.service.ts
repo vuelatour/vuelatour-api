@@ -195,6 +195,7 @@ import {
   leyendaPasaA,
   leyendaPasara,
   leyendaPasaraAlCerrar as leyendaPasaraPrecierre,
+  leyendaSeQuedaDecidido,
   leyendaVieneDe,
   mesCalendarioDeRango,
   motivoNoCerrable,
@@ -206,12 +207,18 @@ import {
   rangoDelMes,
   salidaDeVuelo,
   type DecisionDiferir,
+  type EstadoMesFlota,
   type GastoParaMesContable,
   type MotivoDiferir,
 } from '../../common/mes-contable.util';
 import {
+  bloqueCierreAvion,
+  coincideSaldoAvion,
   leerCierresMes,
+  leerCierresMesAvion,
   leerDiferimientos,
+  resumenCierreFlota,
+  type CierreAvionBloque,
   type CierreMesLeido,
 } from '../../common/cierre-mes.lector';
 import {
@@ -428,6 +435,11 @@ export interface CierreRepartoVuelo {
   cobrado_posterior_usd?: number;
   /** Día Cancún del último cobro después del corte (16-oct-2026, ADITIVO). */
   fecha_cobro_posterior?: string | null;
+  /**
+   * CIERRE POR AVIÓN (invariante 105): solo en `decididos_se_quedan` — el
+   * avión que, al cerrar, dejó este vuelo multi-avión en el mes.
+   */
+  decidido_por?: { aeronave_id: string; matricula: string | null };
 }
 
 /** Bloque ADITIVO `cierre` de `GET /v1/profit-sharing` (invariante 89). */
@@ -435,17 +447,40 @@ export interface CierreRepartoBloque {
   disponible: true;
   /** 'YYYY-MM' solo si el rango es un mes calendario completo. */
   periodo: string | null;
-  estado: 'ABIERTO' | 'CERRADO' | 'REABIERTO';
+  /**
+   * Estado de la FLOTA. `PARCIAL` solo con el cierre por avión (23-oct-2026,
+   * invariante 105): algún avión cerrado y la flota activa no completa.
+   */
+  estado: EstadoMesFlota;
   cerrado_at: string | null;
   cerrado_por_nombre: string | null;
   reabierto_at: string | null;
   reabierto_por_nombre: string | null;
   version: number | null;
+  /** Por avión: AND de los cerrados (null si ninguno). */
   coincide_con_snapshot: boolean | null;
   diferidos_salen: CierreRepartoVuelo[];
   diferidos_entran: CierreRepartoVuelo[];
   pendientes_que_pasarian: CierreRepartoVuelo[];
+  /** CIERRE POR AVIÓN (invariante 105; solo con su migración): «N de M». */
+  aviones_activos?: number;
+  /** Matrículas de los aviones cerrados del mes. */
+  aviones_cerrados?: string[];
+  /**
+   * Vuelos multi-avión que un avión ya CERRADO dejó en el mes («se queda»,
+   * regla 2): siguen pendientes de cobro al corte pero NO pasarán al mes
+   * siguiente; la previa de los demás aviones los lista en
+   * `vuelos_incluidos` con `decidido_por`.
+   */
+  decididos_se_quedan?: CierreRepartoVuelo[];
 }
+
+/** Avión del reparto + `cierre_avion` (invariante 105, solo con la migración por avión). */
+type AvionReparto = Awaited<
+  ReturnType<ProfitSharingService['computeAvion']>
+> & {
+  cierre_avion?: CierreAvionBloque;
+};
 
 interface AeronaveRow {
   id: string;
@@ -930,6 +965,10 @@ export class ProfitSharingService {
         afac_tarifa_usd_hr: a.detalle.afac.tarifa_usd_hr,
         reserva_retenida_usd: a.reserva_retenida_usd,
         reserva_retenida_mxn: a.reserva_retenida_mxn,
+        // CIERRE POR AVIÓN (23-oct-2026, invariante 105, ADITIVO): solo con
+        // la migración por avión (`RepartoCierreAvion` de pyservices). Va
+        // ANTES de las tres llaves que los specs fijan como las últimas.
+        ...(a.cierre_avion ? { cierre_avion: a.cierre_avion } : {}),
         // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): los ingresos
         // asignados a este avión. `saldo_usd` YA incluye
         // `otros_ingresos_avion_usd` (pyservices jamás lo vuelve a sumar);
@@ -1415,7 +1454,7 @@ export class ProfitSharingService {
       ]),
     ]);
 
-    const aviones = aeronaves.map((a) =>
+    const aviones: AvionReparto[] = aeronaves.map((a) =>
       this.computeAvion(a, {
         vuelos,
         cobrosPorVuelo,
@@ -1604,6 +1643,7 @@ export class ProfitSharingService {
           clientes,
           matriculas,
           aviones,
+          participacionPorVuelo,
         })
       : null;
 
@@ -1711,7 +1751,75 @@ export class ProfitSharingService {
     const { desde, hasta } = rangoDeMes(mes);
     const calculo = await this.compute({ desde, hasta }, { sinPiso: true });
     const u = utilidadMesDesdeAviones(mes, calculo.aviones, enCurso);
-    return contable ? { ...u, origen: 'EN_VIVO' } : u;
+    if (!contable) return u;
+    // CIERRE POR AVIÓN (23-oct-2026, invariante 105): un mes PARCIAL
+    // MEZCLA — los aviones cerrados toman su `socios_snapshot` (origen
+    // SNAPSHOT_CIERRE por avión); los abiertos van en vivo. El origen del
+    // MES queda EN_VIVO (todavía se mueve) y cada avión dice el suyo.
+    const porAvion = enCurso
+      ? new Map<string, UtilidadMesSocios['aviones'][number]>()
+      : await this.sociosSnapshotPorAvion(mes);
+    if (porAvion.size === 0) return { ...u, origen: 'EN_VIVO' };
+    const vistos = new Set<string>();
+    const aviones = u.aviones.map((a) => {
+      const s = porAvion.get(a.aeronave.id);
+      vistos.add(a.aeronave.id);
+      return s ? s : { ...a, origen: 'EN_VIVO' as const };
+    });
+    // Un avión cerrado que el compute ya no trae (dado de baja después):
+    // su snapshot sigue contando.
+    for (const [id, s] of porAvion) if (!vistos.has(id)) aviones.push(s);
+    aviones.sort(
+      (a, b) =>
+        a.aeronave.matricula.localeCompare(b.aeronave.matricula, 'es') ||
+        a.aeronave.id.localeCompare(b.aeronave.id),
+    );
+    return { ...u, aviones, origen: 'EN_VIVO' };
+  }
+
+  /**
+   * `socios_snapshot` de cada avión CERRADO del mes (invariante 105):
+   * aeronave_id ⇒ el elemento de `aviones[]` de la utilidad del mes, con
+   * `origen: 'SNAPSHOT_CIERRE'` y `cerrado_at`. Sin la migración por avión
+   * ⇒ mapa vacío. Un snapshot sin la forma esperada se salta con aviso (ese
+   * avión se calcula en vivo).
+   */
+  private async sociosSnapshotPorAvion(
+    mes: string,
+  ): Promise<Map<string, UtilidadMesSocios['aviones'][number]>> {
+    const out = new Map<string, UtilidadMesSocios['aviones'][number]>();
+    const sb = this.supabase.service;
+    const filas = (await leerCierresMesAvion(sb)).filter(
+      (f) => f.periodo === mes && f.estado === 'CERRADO',
+    );
+    if (filas.length === 0) return out;
+    const { data, error } = await sb
+      .from('cierre_mes_avion')
+      .select('aeronave_id, socios_snapshot, cerrado_at')
+      .eq('periodo', `${mes}-01`)
+      .eq('estado', 'CERRADO');
+    if (error) throw new Error(`Cierre por avión de ${mes}: ${error.message}`);
+    for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+      const id = String(r.aeronave_id);
+      const snap = r.socios_snapshot;
+      const ok =
+        snap &&
+        typeof snap === 'object' &&
+        'aeronave' in snap &&
+        Array.isArray((snap as { socios?: unknown }).socios);
+      if (!ok) {
+        this.logger.warn(
+          `Cierre de ${mes} (${id}): socios_snapshot sin la forma esperada; ese avión se calcula en vivo`,
+        );
+        continue;
+      }
+      out.set(id, {
+        ...(snap as UtilidadMesSocios['aviones'][number]),
+        origen: 'SNAPSHOT_CIERRE',
+        cerrado_at: typeof r.cerrado_at === 'string' ? r.cerrado_at : null,
+      });
+    }
+    return out;
   }
 
   /**
@@ -1782,7 +1890,10 @@ export class ProfitSharingService {
       aeronave: { id: string; matricula: string };
       saldo_disponible_usd: number;
       detalle: { vuelos: Array<{ id: string }> };
+      cierre_avion?: CierreAvionBloque;
     }>;
+    /** Participación por vuelo (CIERRE POR AVIÓN, invariante 105). */
+    participacionPorVuelo?: Map<string, ParticipacionAeronave>;
   }): Promise<CierreRepartoBloque> {
     const sb = this.supabase.service;
     const { q } = ctx;
@@ -1790,7 +1901,18 @@ export class ProfitSharingService {
     const cierreFila: CierreMesLeido | null = mes
       ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
       : null;
-    const estado = cierreFila?.estado ?? 'ABIERTO';
+    // CIERRE POR AVIÓN (23-oct-2026, invariante 105): estado de la FLOTA
+    // (puede ser PARCIAL), `cierre_avion` en cada avión y, con
+    // `q.aeronave_id`, solo los pendientes en que participa ese avión. Sin
+    // la migración por avión ⇒ null y todo como el 0.0.103.
+    const flota = mes ? await resumenCierreFlota(sb, mes, cierreFila) : null;
+    const estado: EstadoMesFlota = flota
+      ? flota.estado
+      : (cierreFila?.estado ?? 'ABIERTO');
+    const participa = (vueloId: string, aeronaveId: string): boolean => {
+      const p = ctx.participacionPorVuelo?.get(vueloId);
+      return p ? (p.factores.get(aeronaveId) ?? 0) > 0 : true;
+    };
     const venidos = ctx.vuelos.filter(
       (v) => papelContableEnPeriodo(v, q.desde, q.hasta) === 'viene',
     );
@@ -1914,11 +2036,61 @@ export class ProfitSharingService {
     }
 
     const pasarian: CierreRepartoVuelo[] = [];
+    const decididosSeQuedan: CierreRepartoVuelo[] = [];
     if (mes != null && estado !== 'CERRADO') {
       const ultimo = rangoDelMes(mes).hasta;
       const destino = mesSiguienteDe(mes);
+      const cerradosMes = new Set(
+        (flota?.filasAvion ?? [])
+          .filter((f) => f.estado === 'CERRADO')
+          .map((f) => f.aeronave_id),
+      );
       for (const v of ctx.vuelos) {
         if (v.estado !== 'COMPLETADO') continue;
+        if (flota) {
+          // Un avión cerrado ya DECIDIÓ que se queda (regla 2) ⇒ no pasará:
+          // va en `decididos_se_quedan` (la previa de los demás lo lista en
+          // `vuelos_incluidos` con `decidido_por`) y la línea lo dice.
+          const quien = flota.decididos.get(v.id);
+          if (quien) {
+            const d = decidir(v, ultimo);
+            if (d) {
+              const leyenda = leyendaSeQuedaDecidido(
+                mes,
+                destino,
+                d,
+                quien.matricula,
+              );
+              decididosSeQuedan.push({
+                ...item(v, d),
+                leyenda,
+                decidido_por: quien,
+              });
+              if (!marcas.has(v.id)) {
+                marcas.set(v.id, {
+                  cierre_marca: leyenda,
+                  diferido_de: null,
+                  diferido_a: null,
+                });
+              }
+            }
+            continue;
+          }
+          // Todos sus aviones cerrados ⇒ ya no es un pendiente de este mes.
+          const p = ctx.participacionPorVuelo?.get(v.id);
+          const ids = p
+            ? [...p.factores.entries()]
+                .filter(([, f]) => f > 0)
+                .map(([id]) => id)
+            : v.aeronave_id
+              ? [v.aeronave_id]
+              : [];
+          if (ids.length > 0 && ids.every((id) => cerradosMes.has(id))) {
+            continue;
+          }
+          // `q.aeronave_id`: solo los vuelos en que participa ese avión.
+          if (q.aeronave_id && !participa(v.id, q.aeronave_id)) continue;
+        }
         const d = decidir(v, ultimo);
         if (!d) continue;
         const leyenda = leyendaPasara(destino, d);
@@ -1946,7 +2118,10 @@ export class ProfitSharingService {
     }
 
     let coincide: boolean | null = null;
-    if (estado === 'CERRADO') {
+    const hayFilasAvion = (flota?.filasAvion ?? []).some(
+      (f) => f.estado === 'CERRADO',
+    );
+    if (estado === 'CERRADO' && !hayFilasAvion) {
       const porAvion = Array.isArray(cierreFila?.totales?.por_avion)
         ? (cierreFila?.totales?.por_avion as Array<Record<string, unknown>>)
         : null;
@@ -1962,6 +2137,29 @@ export class ProfitSharingService {
             Math.abs(round2(a.saldo_disponible_usd) - round2(g)) <= 0.01
           );
         });
+      }
+    }
+    if (flota) {
+      // `cierre_avion` en CADA avión (siempre; 'ABIERTO' por defecto) y el
+      // global `coincide_con_snapshot` = AND de los cerrados (null sin
+      // ninguno). Un cierre global legado (sin filas por avión) conserva la
+      // comparación de siempre contra `totales.por_avion`.
+      const coincidencias: boolean[] = [];
+      for (const a of ctx.aviones) {
+        const fa =
+          flota.filasAvion.find((f) => f.aeronave_id === a.aeronave.id) ?? null;
+        const c =
+          fa?.estado === 'CERRADO'
+            ? coincideSaldoAvion(fa, a.saldo_disponible_usd)
+            : !fa && estado === 'CERRADO'
+              ? coincide
+              : null;
+        if (fa?.estado === 'CERRADO' && c != null) coincidencias.push(c);
+        a.cierre_avion = bloqueCierreAvion(fa, cierreFila, c);
+      }
+      if (hayFilasAvion) {
+        coincide =
+          coincidencias.length > 0 ? coincidencias.every(Boolean) : null;
       }
     }
 
@@ -1980,6 +2178,13 @@ export class ProfitSharingService {
       diferidos_salen: salen.sort(porFolio),
       diferidos_entran: entran.sort(porFolio),
       pendientes_que_pasarian: pasarian.sort(porFolio),
+      ...(flota
+        ? {
+            aviones_activos: flota.aviones_activos,
+            aviones_cerrados: flota.aviones_cerrados,
+            decididos_se_quedan: decididosSeQuedan.sort(porFolio),
+          }
+        : {}),
     };
   }
 
@@ -5345,15 +5550,38 @@ export class ProfitSharingService {
           listo,
         })
       : null;
+    // CIERRE POR AVIÓN (invariante 105): estado de la flota (puede ser
+    // PARCIAL) + «N de M». Sin la migración por avión, como el 0.0.103. En
+    // un mes PARCIAL «se puede cerrar» mientras no esté toda la flota
+    // cerrada (el mes anterior se exige por avión en `POST /v1/cierres`).
+    const flota = mes
+      ? await resumenCierreFlota(this.supabase.service, mes, fila)
+      : null;
+    const estado: EstadoMesFlota = flota
+      ? flota.estado
+      : (fila?.estado ?? 'ABIERTO');
+    let motivoFlota = motivo;
+    if (flota && mes) {
+      if (estado === 'CERRADO') motivoFlota = 'YA_CERRADO';
+      else if (motivo === 'YA_CERRADO' || motivo === 'MES_ANTERIOR_ABIERTO') {
+        motivoFlota = listo ? null : 'PRECIERRE_NO_LISTO';
+      }
+    }
     return {
       disponible: true as const,
       periodo: mes,
-      estado: fila?.estado ?? ('ABIERTO' as const),
+      estado,
       cerrado_at: fila?.cerrado_at ?? null,
       cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
-      puede_cerrar: mes != null && motivo == null,
-      motivo_no_cerrable: motivo,
+      puede_cerrar: mes != null && motivoFlota == null,
+      motivo_no_cerrable: motivoFlota,
       roles_cierran: ['ADMIN', 'FACTURACION'],
+      ...(flota
+        ? {
+            aviones_activos: flota.aviones_activos,
+            aviones_cerrados: flota.aviones_cerrados,
+          }
+        : {}),
     };
   }
 
@@ -5948,6 +6176,8 @@ export class ProfitSharingService {
           b.created_at.localeCompare(a.created_at),
       ),
       ...('cierre' in r && r.cierre ? { cierre: r.cierre } : {}),
+      // CIERRE POR AVIÓN (invariante 105): el bloque de ESTE avión.
+      ...(avion.cierre_avion ? { cierre_avion: avion.cierre_avion } : {}),
       tc_oficial: r.tc_oficial,
       gastos_sin_tc: r.gastos_sin_tc,
     };
@@ -6091,8 +6321,12 @@ export class ProfitSharingService {
         en_curso: mes === mesActual,
         ...numeros,
         reparto,
+        // CIERRE POR AVIÓN (invariante 105): el estado del AVIÓN en el mes
+        // (sin la migración por avión, el de la flota como antes).
         ...('cierre' in r && r.cierre
-          ? { cierre_estado: r.cierre.estado ?? null }
+          ? {
+              cierre_estado: a.cierre_avion?.estado ?? r.cierre.estado ?? null,
+            }
           : {}),
       });
     }

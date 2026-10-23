@@ -2868,10 +2868,12 @@ export class InventoryService {
       dto.tipo === TipoMovimientoInventario.SALIDA ||
       (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id)
     ) {
+      // Por avión (invariante 105): el avión de la salida / devolución.
       await assertMesAbierto(
         this.supabase.service,
         String(dto.fecha_movimiento ?? hoyCancun()).slice(0, 7),
         'gasto',
+        [dto.aeronave_id ?? null],
       );
     }
 

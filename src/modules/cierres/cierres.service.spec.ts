@@ -592,7 +592,7 @@ describe('pre-cierre con un bloqueante SIN VERIFICAR (P3)', () => {
 describe('INCLUIR EN EL MES (21-oct-2026): los cobrados después del corte se quedan', () => {
   it('previa ?incluir=#2: #2 sale de «pasan» y entra en vuelos_incluidos con «Se queda en…»; totales y reparto después lo cuentan', async () => {
     const { svc } = armar();
-    const p = await svc.previa('2026-09', [ids.v2]);
+    const p = await svc.previa('2026-09', { incluir: [ids.v2] });
     expect(p.vuelos_que_pasan.map((v) => v.id)).toEqual([ids.v3, ids.v5]);
     expect(p.vuelos_incluidos.map((v) => v.id)).toEqual([ids.v2]);
     expect(p.vuelos_incluidos[0]).toMatchObject({
@@ -619,14 +619,14 @@ describe('INCLUIR EN EL MES (21-oct-2026): los cobrados después del corte se qu
     expect(sin.vuelos_incluidos).toEqual([]);
     expect(sin.totales.incluidos).toBe(0);
     // Un id desconocido en la previa se ignora.
-    const raro = await svc.previa('2026-09', [ids.v1]);
+    const raro = await svc.previa('2026-09', { incluir: [ids.v1] });
     expect(raro.vuelos_que_pasan).toHaveLength(3);
   });
 
   it('solo COBRO_POSTERIOR: incluir #3 (parcial) o #5 (sin cobro) ⇒ 400 INCLUIR_VUELO_NO_COBRADO', async () => {
     const { svc } = armar();
     for (const id of [ids.v3, ids.v5]) {
-      const e = await atrapa(svc.previa('2026-09', [id]));
+      const e = await atrapa(svc.previa('2026-09', { incluir: [id] }));
       expect(e.status).toBe(400);
       expect(e.body.error).toBe('INCLUIR_VUELO_NO_COBRADO');
       expect(String(e.body.message)).toContain(

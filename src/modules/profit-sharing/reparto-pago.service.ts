@@ -413,8 +413,11 @@ export class RepartoPagoService {
     const fecha = validarFechaPago(dto.fecha_pago, this.cuentas.hoy());
     if (!fecha.ok) throw bad(fecha.codigo, fecha.mensaje);
     // CIERRE DE MES (16-oct-2026, invariante 89): una entrega con fecha en
-    // un mes cerrado ⇒ 409 MES_CERRADO (después del replay).
-    await assertMesAbierto(this.sb, fecha.fecha.slice(0, 7), 'entrega_socio');
+    // un mes cerrado ⇒ 409 MES_CERRADO (después del replay). Por avión
+    // (invariante 105): el avión del reparto (sin él, solo la fila global).
+    await assertMesAbierto(this.sb, fecha.fecha.slice(0, 7), 'entrega_socio', [
+      dto.aeronave_id ?? null,
+    ]);
     const mes = dto.mes ?? null;
     if (mes != null) this.assertMes(mes);
     const entregadoPor = dto.entregado_por_id ?? actor.userId;
@@ -685,6 +688,7 @@ export class RepartoPagoService {
       dto.tc_usd_mxn !== undefined ||
       dto.fecha_pago !== undefined
     ) {
+      // Por avión (invariante 105): el avión de antes y el de después.
       await assertMesAbierto(
         this.sb,
         [
@@ -692,6 +696,10 @@ export class RepartoPagoService {
           dto.fecha_pago ? String(dto.fecha_pago).slice(0, 7) : null,
         ],
         'entrega_socio',
+        [
+          actual.aeronave_id ?? null,
+          dto.aeronave_id === undefined ? null : (dto.aeronave_id ?? null),
+        ],
       );
     }
 
@@ -818,6 +826,8 @@ export class RepartoPagoService {
       this.sb,
       String(actual.fecha_pago ?? '').slice(0, 7) || null,
       'entrega_socio',
+      // Por avión (invariante 105): el avión del reparto.
+      [actual.aeronave_id ?? null],
     );
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)

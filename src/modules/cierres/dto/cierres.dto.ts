@@ -1,5 +1,7 @@
 /**
- * DTOs del CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89).
+ * DTOs del CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; POR AVIÓN
+ * desde el 23-oct-2026, API 0.0.104, invariante 105: `aeronave_id` opcional
+ * en los tres — sin él, toda la flota).
  * `confirmar` es booleano ESTRICTO sobre el valor CRUDO del body (con
  * `enableImplicitConversion` el texto 'false' llegaría como true): patrón de
  * `CambioFechaGastoDto`.
@@ -46,7 +48,16 @@ export class CerrarMesDto {
 
   @ApiPropertyOptional({
     description:
-      'Ids de los vuelos que el diálogo mostró como «pasan al mes siguiente». Si el conjunto real difiere ⇒ 409 PREVIA_CAMBIO con la previa nueva.',
+      'CIERRE POR AVIÓN (23-oct-2026, invariante 105): el avión que se cierra. Sin él se cierran, en orden de matrícula, TODOS los aviones activos abiertos del mes.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID('all', { message: 'aeronave_id debe ser un UUID.' })
+  aeronave_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Ids de los vuelos que el diálogo mostró como «pasan al mes siguiente» (y los que se quedan). Si el conjunto real difiere ⇒ 409 PREVIA_CAMBIO con la previa nueva.',
     type: [String],
   })
   @IsOptional()
@@ -67,8 +78,17 @@ export class CerrarMesDto {
   incluir_vuelos?: string[];
 }
 
-/** `GET /v1/cierres/:periodo/previa?incluir=id,id` (21-oct-2026). */
+/** `GET /v1/cierres/:periodo/previa?aeronave_id=<uuid>&incluir=id,id` (21/23-oct-2026). */
 export class PreviaCierreQuery {
+  @ApiPropertyOptional({
+    description:
+      'CIERRE POR AVIÓN (invariante 105): la previa de ESE avión (sus bloqueantes, sus vuelos, su reparto). Sin él, la de toda la flota abierta. Inválido ⇒ 400; inexistente ⇒ 404 AERONAVE_NO_EXISTE.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID('all', { message: 'aeronave_id debe ser un UUID.' })
+  aeronave_id?: string;
+
   @ApiPropertyOptional({
     description:
       'Ids (separados por coma) de vuelos «que pasan» ya cobrados después del corte que se quedarían en este mes: la previa (lista, totales y reparto después) se recalcula con ellos adentro. Un id desconocido se ignora.',
@@ -112,4 +132,13 @@ export class ReabrirMesDto {
     message: 'Confirma la reapertura del mes (confirmar: true).',
   })
   confirmar!: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'CIERRE POR AVIÓN (invariante 105): el avión que se reabre. Sin él se reabren TODOS los aviones cerrados del mes.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID('all', { message: 'aeronave_id debe ser un UUID.' })
+  aeronave_id?: string;
 }

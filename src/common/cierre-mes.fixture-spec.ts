@@ -80,7 +80,24 @@ export interface FakeOpts {
   fallarEscritura?: (e: Escritura) => { code?: string; message: string } | null;
 }
 
-const TABLAS_CIERRE = new Set(['cierre_mes', 'cierre_mes_vuelo']);
+const TABLAS_CIERRE = new Set([
+  'cierre_mes',
+  'cierre_mes_vuelo',
+  'cierre_mes_avion',
+  'cierre_mes_avion_vuelo',
+]);
+
+/**
+ * CIERRE POR AVIÓN (23-oct-2026, invariante 105): las tablas de la migración
+ * `20261023000001` solo «existen» si el mundo del spec las DECLARA
+ * (`cierre_mes_avion: []`). Sin declararlas responden 42P01 (la sonda
+ * `cierrePorAvionDisponible` ⇒ false) y todo se comporta como el 0.0.103:
+ * así los specs anteriores siguen probando la conducta sin la migración.
+ */
+const TABLAS_CIERRE_AVION = new Set([
+  'cierre_mes_avion',
+  'cierre_mes_avion_vuelo',
+]);
 
 let secuencia = 0;
 
@@ -101,6 +118,11 @@ export function fakeCierre(
   const from = (tabla: string) => {
     let filas = [...(tablas[tabla] ?? [])];
     let error: { code: string; message: string } | null = null;
+    const tablaAusente =
+      TABLAS_CIERRE_AVION.has(tabla) && tablas[tabla] === undefined;
+    if (tablaAusente) {
+      error = { code: '42P01', message: `relation ${tabla} does not exist` };
+    }
     let modo: 'select' | 'insert' | 'update' = 'select';
     let patch: Fila | null = null;
     const insertadas: Fila[] = [];
@@ -173,6 +195,7 @@ export function fakeCierre(
       insert: (v: Fila | Fila[]) => {
         modo = 'insert';
         const lista = Array.isArray(v) ? v : [v];
+        if (tablaAusente) return q;
         if (opts.sinMigracion && TABLAS_CIERRE.has(tabla)) {
           error = {
             code: '42P01',
@@ -218,6 +241,42 @@ export function fakeCierre(
               return q;
             }
             fila.revertido_at = fila.revertido_at ?? null;
+          }
+          // CIERRE POR AVIÓN (invariante 105): PK (periodo, aeronave_id) y
+          // UNIQUE (periodo, aeronave_id, cierre_version, vuelo_id).
+          if (tabla === 'cierre_mes_avion') {
+            const dup = (tablas.cierre_mes_avion ?? []).some(
+              (x) =>
+                x.periodo === fila.periodo &&
+                x.aeronave_id === fila.aeronave_id,
+            );
+            if (dup) {
+              error = {
+                code: '23505',
+                message: 'duplicate key cierre_mes_avion_pkey',
+              };
+              return q;
+            }
+            fila.created_at = fila.created_at ?? new Date().toISOString();
+            fila.updated_at = fila.updated_at ?? fila.created_at;
+          }
+          if (tabla === 'cierre_mes_avion_vuelo') {
+            const dup = (tablas.cierre_mes_avion_vuelo ?? []).some(
+              (x) =>
+                x.periodo === fila.periodo &&
+                x.aeronave_id === fila.aeronave_id &&
+                x.cierre_version === fila.cierre_version &&
+                x.vuelo_id === fila.vuelo_id,
+            );
+            if (dup) {
+              error = {
+                code: '23505',
+                message: 'duplicate key cierre_mes_avion_vuelo_unico',
+              };
+              return q;
+            }
+            fila.revertido_at = fila.revertido_at ?? null;
+            fila.created_at = fila.created_at ?? new Date().toISOString();
           }
           escrituras.push(e);
           (tablas[tabla] ??= []).push(fila);

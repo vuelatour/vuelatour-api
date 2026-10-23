@@ -12,6 +12,8 @@ jest.mock('../../common/cierre-mes-disponible.util', () => ({
 }));
 jest.mock('../../common/cierre-mes.lector', () => ({
   assertMesAbierto: jest.fn(() => Promise.resolve()),
+  // CIERRE POR AVIÓN (invariante 105): sin la migración por avión, ninguno.
+  avionesDelVueloCandado: jest.fn(() => Promise.resolve([])),
 }));
 
 import { ConflictException } from '@nestjs/common';
@@ -189,6 +191,8 @@ describe('AfacRealService (invariante 90)', () => {
       expect.anything(),
       '2026-09',
       'afac_real',
+      // CIERRE POR AVIÓN (invariante 105): sin la migración por avión, [].
+      [],
     );
     expect(f.escrituras).toEqual([]);
   });
@@ -207,6 +211,7 @@ describe('AfacRealService (invariante 90)', () => {
       expect.anything(),
       '2026-10',
       'afac_real',
+      [],
     );
     expect(r.mes_contable).toBe('2026-10');
   });

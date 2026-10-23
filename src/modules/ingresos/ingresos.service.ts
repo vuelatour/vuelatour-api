@@ -2327,10 +2327,13 @@ export class IngresosService {
     }
     // CIERRE DE MES (16-oct-2026, invariante 89): un ingreso cuenta por su
     // `fecha` ⇒ 409 MES_CERRADO si ese mes está cerrado (después del replay).
+    // Por avión (invariante 105): el avión asignado (sin avión ⇒ solo la
+    // fila global).
     await assertMesAbierto(
       this.supabase.service,
       mesDeFechaIngreso(dto.fecha),
       'ingreso',
+      [dto.aeronave_id ?? null],
     );
     // 2) ROL: conciliar con el banco = ADMIN y FACTURACION.
     const movId = dto.movimiento_bancario_id ?? null;
@@ -2653,10 +2656,12 @@ export class IngresosService {
             (actual as unknown as Record<string, unknown>)[k],
       )
     ) {
+      // Por avión (invariante 105): el avión de antes y el de después.
       await assertMesAbierto(
         this.supabase.service,
         [mesDeFechaIngreso(actual.fecha), mesDeFechaIngreso(fusion.fecha)],
         'ingreso',
+        [actual.aeronave_id, fusion.aeronave_id],
       );
     }
     // ¿Qué cambió DE VERDAD? (valor nuevo vs VIGENTE, patrón
@@ -2860,6 +2865,8 @@ export class IngresosService {
       this.supabase.service,
       mesDeFechaIngreso(vigente.fecha as string | null),
       'ingreso',
+      // Por avión (invariante 105): el avión asignado.
+      [(vigente.aeronave_id as string | null) ?? null],
     );
     const mov = (await this.movimientosDeIngresos([id])).get(id);
     if (mov) {

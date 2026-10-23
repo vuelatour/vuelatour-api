@@ -29,6 +29,7 @@ import {
   marcaPasaraAlCerrar,
   statusCobroSombra,
   type DecisionDiferir,
+  type EstadoMesFlota,
   type MotivoDiferir,
 } from '../../common/mes-contable.util';
 
@@ -65,12 +66,17 @@ export interface BalanceCierreVueloPayload {
   fecha_cobro_despues?: string | null;
 }
 
-/** Bloque raíz `cierre` de los balances (avión y general). */
+/** Bloque raíz `cierre` de los balances (avión y general) y del Libro Dinero. */
 export interface BalanceCierrePayload {
   disponible: true;
   /** 'YYYY-MM' solo si el periodo es un mes calendario completo. */
   periodo: string | null;
-  estado: 'ABIERTO' | 'CERRADO' | 'REABIERTO';
+  /**
+   * Balance por avión: el estado del AVIÓN (CIERRE POR AVIÓN, 23-oct-2026,
+   * invariante 105). Balance general y Libro Dinero: el de la FLOTA (puede
+   * ser `PARCIAL`). Sin la migración por avión, el de la fila global.
+   */
+  estado: EstadoMesFlota;
   cerrado_at: string | null;
   cerrado_por_nombre: string | null;
   reabierto_at: string | null;
@@ -78,6 +84,10 @@ export interface BalanceCierrePayload {
   pasan: BalanceCierreVueloPayload[];
   vienen: BalanceCierreVueloPayload[];
   pasarian: BalanceCierreVueloPayload[];
+  /** ADITIVOS (invariante 105; solo con la migración por avión). */
+  estado_flota?: EstadoMesFlota;
+  aviones_activos?: number;
+  aviones_cerrados?: string[];
 }
 
 /** Renglón por avión de `resumen_cierre` (general). */
@@ -372,7 +382,15 @@ export function cierreDelGeneral(
   const vienen = conCierre.flatMap((c) => c.vienen).sort(porFolio);
   const pasarian = conCierre.flatMap((c) => c.pasarian).sort(porFolio);
   return {
-    cierre: { ...base, pasan, vienen, pasarian },
+    cierre: {
+      ...base,
+      // CIERRE POR AVIÓN (invariante 105): el general dice el estado de la
+      // FLOTA (el `estado` de cada libro es el de su avión).
+      ...(base.estado_flota ? { estado: base.estado_flota } : {}),
+      pasan,
+      vienen,
+      pasarian,
+    },
     resumen_cierre: {
       pasan: resumenCierrePorAvion(pasan),
       vienen: resumenCierrePorAvion(vienen),

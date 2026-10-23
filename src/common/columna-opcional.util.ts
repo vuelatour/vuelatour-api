@@ -95,6 +95,14 @@ export interface ColumnaOpcionalOpciones {
   ahora?: () => number;
   /** Texto del `warn` (una sola vez) cuando la columna no existe. */
   mensajeAusente?: string;
+  /**
+   * La migración crea la TABLA entera (23-oct-2026, cierre por avión): un
+   * «la tabla no existe» (`42P01` / `PGRST205`, que NO dice «column») también
+   * cuenta como «todavía no está» (memorizado ≤ 10 min). Sin esta opción ese
+   * error se trata como «otro error» (true sin memorizar) y el API leería
+   * una tabla ausente.
+   */
+  tambienTabla?: boolean;
 }
 
 export class ColumnaOpcional {
@@ -102,6 +110,7 @@ export class ColumnaOpcional {
   private readonly reintentoMs: number;
   private readonly ahora: () => number;
   private readonly mensajeAusente: string;
+  private readonly tambienTabla: boolean;
   /** null = sin sondear; true = existe (definitivo); false = no existe. */
   private estado: boolean | null = null;
   private ultimoSondeoMs = 0;
@@ -119,6 +128,7 @@ export class ColumnaOpcional {
     this.mensajeAusente =
       opts.mensajeAusente ??
       `Columna ${tabla}.${columna} no existe todavía: se omite hasta aplicar la migración pendiente`;
+    this.tambienTabla = opts.tambienTabla === true;
   }
 
   /** `true` si la columna existe (o no se pudo saber); `false` si NO existe. */
@@ -174,7 +184,10 @@ export class ColumnaOpcional {
       this.estado = true;
       return true;
     }
-    if (esColumnaInexistente(error)) {
+    if (
+      esColumnaInexistente(error) ||
+      (this.tambienTabla && esTablaInexistente(error))
+    ) {
       this.estado = false;
       if (!this.avisado) {
         this.avisado = true;

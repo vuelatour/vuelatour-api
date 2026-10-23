@@ -18,6 +18,8 @@ import { CierresService } from './cierres.service';
 
 const USER = 'cccccccc-0000-4000-8000-0000000000a1';
 const V = 'aaaaaaaa-0000-4000-8000-000000000337';
+const V2 = 'aaaaaaaa-0000-4000-8000-000000000338';
+const AV = 'bbbbbbbb-0000-4000-8000-000000000621';
 type Servidor = Parameters<typeof request>[0];
 
 describe('CierresController — @Roles en CADA ruta', () => {
@@ -108,11 +110,34 @@ describe('CierresController por HTTP', () => {
     expect(
       (await request(http()).get('/v1/cierres/2026-09/previa')).status,
     ).toBe(200);
-    expect(previa).toHaveBeenCalledWith('2026-09', undefined);
+    expect(previa).toHaveBeenCalledWith('2026-09', {
+      incluir: undefined,
+      aeronaveId: undefined,
+    });
     rol = Rol.SOCIO;
     expect(
       (await request(http()).get('/v1/cierres/2026-09/previa')).status,
     ).toBe(403);
+  });
+
+  it('GET previa ?aeronave_id (invariante 105): uuid ⇒ llega al servicio; inválido ⇒ 400 sin llamarlo; ?incluir se parte por comas', async () => {
+    const r = await request(http()).get(
+      `/v1/cierres/2026-09/previa?aeronave_id=${AV}&incluir=${V},${V2}`,
+    );
+    expect(r.status).toBe(200);
+    expect(previa).toHaveBeenCalledWith('2026-09', {
+      incluir: [V, V2],
+      aeronaveId: AV,
+    });
+    previa.mockClear();
+    expect(
+      (
+        await request(http()).get(
+          '/v1/cierres/2026-09/previa?aeronave_id=no-uuid',
+        )
+      ).status,
+    ).toBe(400);
+    expect(previa).not.toHaveBeenCalled();
   });
 
   it('POST cerrar: ADMIN y FACTURACION (201); COORDINADOR ⇒ 403; `confirmar` ESTRICTO; llaves de más ⇒ 400', async () => {
@@ -127,6 +152,19 @@ describe('CierresController por HTTP', () => {
       '2026-09',
       { confirmar: true, vuelos_esperados: [V] },
       expect.objectContaining({ userId: USER, rol: Rol.FACTURACION }),
+    );
+    // CIERRE POR AVIÓN (invariante 105): `aeronave_id` uuid opcional.
+    expect(
+      (
+        await request(http())
+          .post('/v1/cierres/2026-09')
+          .send({ confirmar: true, aeronave_id: AV })
+      ).status,
+    ).toBe(201);
+    expect(cerrar).toHaveBeenLastCalledWith(
+      '2026-09',
+      { confirmar: true, aeronave_id: AV },
+      expect.anything(),
     );
     rol = Rol.COORDINADOR;
     expect(
@@ -143,6 +181,7 @@ describe('CierresController por HTTP', () => {
       { confirmar: false },
       { confirmar: true, otra: 1 },
       { confirmar: true, vuelos_esperados: ['no-uuid'] },
+      { confirmar: true, aeronave_id: 'no-uuid' },
     ]) {
       expect(
         (await request(http()).post('/v1/cierres/2026-09').send(body)).status,
@@ -160,6 +199,26 @@ describe('CierresController por HTTP', () => {
       { motivo: 'Faltó un gasto', confirmar: true },
       expect.objectContaining({ userId: USER }),
     );
+    // CIERRE POR AVIÓN (invariante 105): `aeronave_id` uuid opcional.
+    expect(
+      (
+        await request(http())
+          .post('/v1/cierres/2026-09/reabrir')
+          .send({ motivo: 'Faltó un gasto', confirmar: true, aeronave_id: AV })
+      ).status,
+    ).toBe(200);
+    expect(reabrir).toHaveBeenLastCalledWith(
+      '2026-09',
+      { motivo: 'Faltó un gasto', confirmar: true, aeronave_id: AV },
+      expect.anything(),
+    );
+    expect(
+      (
+        await request(http())
+          .post('/v1/cierres/2026-09/reabrir')
+          .send({ motivo: 'Faltó un gasto', confirmar: true, aeronave_id: 'x' })
+      ).status,
+    ).toBe(400);
     expect(
       (
         await request(http())

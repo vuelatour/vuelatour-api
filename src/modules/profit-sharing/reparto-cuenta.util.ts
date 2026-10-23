@@ -472,6 +472,14 @@ export interface UtilidadMesSocios {
      */
     reparto_porcentaje_total: number | null;
     socios: Array<{ socio_id: string; porcentaje: number; monto_mxn: number }>;
+    /**
+     * CIERRE POR AVIÓN (23-oct-2026, invariante 105; ADITIVO): en un mes
+     * PARCIAL cada avión dice su origen — `SNAPSHOT_CIERRE` (congelado al
+     * cerrar ESE avión, con su `cerrado_at`) o `EN_VIVO`. Ausente = el del
+     * mes (`UtilidadMesSocios.origen`).
+     */
+    origen?: 'SNAPSHOT_CIERRE' | 'EN_VIVO';
+    cerrado_at?: string | null;
   }>;
 }
 
@@ -513,6 +521,9 @@ export interface UtilidadAvionSocio {
   aeronave: AeronaveCorta;
   porcentaje: number;
   monto_mxn: number;
+  /** CIERRE POR AVIÓN (invariante 105; ADITIVO): origen de ESE avión en un mes PARCIAL. */
+  origen?: 'SNAPSHOT_CIERRE' | 'EN_VIVO';
+  cerrado_at?: string | null;
 }
 
 /** Lo que el socio generó en un mes, por avión (orden por matrícula). */
@@ -528,6 +539,9 @@ export function utilidadDeSocioEnMes(
         aeronave: a.aeronave,
         porcentaje: s.porcentaje,
         monto_mxn: s.monto_mxn,
+        ...(a.origen
+          ? { origen: a.origen, cerrado_at: a.cerrado_at ?? null }
+          : {}),
       });
     }
   }
@@ -801,12 +815,23 @@ export function avisosDeCuenta(e: {
     );
     // CIERRE DE MES (invariante 89): los meses CONGELADOS al cerrar.
     for (const u of e.utilidades) {
-      if (u.origen !== 'SNAPSHOT_CIERRE' || u.mes < e.cuenta.cuenta_desde) {
+      if (u.mes < e.cuenta.cuenta_desde) continue;
+      if (u.origen === 'SNAPSHOT_CIERRE') {
+        avisos.push(
+          `La utilidad de ${etiquetaMes(u.mes)} se congeló al cerrar el mes; si cambian porcentajes o cobros, reabre el mes y ciérralo de nuevo.`,
+        );
         continue;
       }
-      avisos.push(
-        `La utilidad de ${etiquetaMes(u.mes)} se congeló al cerrar el mes; si cambian porcentajes o cobros, reabre el mes y ciérralo de nuevo.`,
-      );
+      // CIERRE POR AVIÓN (invariante 105): mes PARCIAL — solo los aviones
+      // cerrados están congelados.
+      const congelados = u.aviones
+        .filter((a) => a.origen === 'SNAPSHOT_CIERRE')
+        .map((a) => a.aeronave.matricula || '(sin matrícula)');
+      if (congelados.length > 0) {
+        avisos.push(
+          `La utilidad de ${etiquetaMes(u.mes)} de ${congelados.join(', ')} se congeló al cerrar ${congelados.length > 1 ? 'esos aviones' : 'ese avión'}; si cambian porcentajes o cobros, reábrelo y ciérralo de nuevo.`,
+        );
+      }
     }
   }
   return avisos;
@@ -977,7 +1002,9 @@ export function movimientosDeCuenta(e: EntradaCuenta): MovimientoCuenta[] {
           tipo: 'UTILIDAD',
           concepto:
             conceptoUtilidad(u.mes, a.aeronave.matricula, a.porcentaje) +
-            sufijoCierre(u),
+            // CIERRE POR AVIÓN (invariante 105): en un mes PARCIAL manda el
+            // origen del AVIÓN; si no lo trae, el del mes.
+            sufijoCierre(a.origen ? a : u),
           mes: u.mes,
           aeronave: a.aeronave,
           porcentaje: a.porcentaje,

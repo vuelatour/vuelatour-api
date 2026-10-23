@@ -72,11 +72,13 @@ import {
   papelContableEnPeriodo,
   rangoDelMes,
   salidaDeVuelo,
+  type EstadoMesFlota,
   type MotivoDiferir,
 } from '../../common/mes-contable.util';
 import {
   leerCierresMes,
   leerDiferimientos,
+  resumenCierreFlota,
 } from '../../common/cierre-mes.lector';
 import type {
   BalanceCierrePayload,
@@ -1743,7 +1745,12 @@ export class DineroReportService {
     const fila = mes
       ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
       : null;
-    const estado = fila?.estado ?? 'ABIERTO';
+    // CIERRE POR AVIÓN (23-oct-2026, invariante 105): el Libro Dinero es de
+    // toda la caja ⇒ estado de la FLOTA (puede ser PARCIAL) + «N de M».
+    const flota = mes ? await resumenCierreFlota(sb, mes, fila) : null;
+    const estado: EstadoMesFlota = flota
+      ? flota.estado
+      : (fila?.estado ?? 'ABIERTO');
     type V = {
       id: string;
       fecha_vuelo?: string | null;
@@ -1920,6 +1927,8 @@ export class DineroReportService {
         for (const c of data ?? []) internos.add(c.id as string);
       }
       for (const v of completados) {
+        // Un avión cerrado ya decidió que se queda (regla 2, inv. 105).
+        if (flota?.decididos.has(v.id as string)) continue;
         const d = decisionDiferir(
           {
             estado: 'COMPLETADO',
@@ -1966,6 +1975,13 @@ export class DineroReportService {
         pasan: pasan.sort(porFolio),
         vienen: vienen.sort(porFolio),
         pasarian: pasarian.sort(porFolio),
+        ...(flota
+          ? {
+              estado_flota: flota.estado,
+              aviones_activos: flota.aviones_activos,
+              aviones_cerrados: flota.aviones_cerrados,
+            }
+          : {}),
       },
     };
   }

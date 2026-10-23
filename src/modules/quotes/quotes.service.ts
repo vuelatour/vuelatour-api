@@ -1,5 +1,6 @@
 import {
   assertMesAbierto,
+  avionesDelVueloCandado,
   leerVueloMesContable,
 } from '../../common/cierre-mes.lector';
 import {
@@ -2996,10 +2997,12 @@ export class QuotesService implements ConfirmadorCotizacion {
         realNuevo && realNuevo !== mesRealDeVuelo(vueloContable)
           ? [mesRealDeVuelo(vueloContable), realNuevo]
           : [];
+      // CIERRE POR AVIÓN (invariante 105): los aviones participantes.
       await assertMesAbierto(
         this.supabase.service,
         [mesContableDeVuelo(vueloContable), fechaNueva, ...reales],
         'cotizacion',
+        await avionesDelVueloCandado(this.supabase.service, vueloContable),
       );
     }
     const fechaVentana =
@@ -4176,10 +4179,12 @@ export class QuotesService implements ConfirmadorCotizacion {
       vueloId,
     );
     if (vueloContable) {
+      // CIERRE POR AVIÓN (invariante 105): los aviones participantes.
       await assertMesAbierto(
         this.supabase.service,
         mesContableDeVuelo(vueloContable),
         'vuelo',
+        await avionesDelVueloCandado(this.supabase.service, vueloContable),
       );
     }
     const { data, error } = await this.supabase.service

@@ -217,11 +217,14 @@ import {
   salidaDeVuelo,
   vueloDiferido,
   type DecisionDiferir,
+  type EstadoMesFlota,
 } from '../../common/mes-contable.util';
 import {
+  bloqueCierreAvion,
   cierresCerrados,
   leerCierresMes,
   leerDiferimientos,
+  resumenCierreFlota,
 } from '../../common/cierre-mes.lector';
 
 import { InventoryService } from '../inventory/inventory.service';
@@ -2138,13 +2141,29 @@ export class AircraftBalanceService {
     tcOficialPorVuelo: Map<string, TipoCambioDetalle>;
     clientesInternos: ReadonlySet<string>;
     matriculaLibro: string | null;
+    /** El avión del libro (null = EXTERNOS). */
+    aeronaveId: string | null;
   }): Promise<BalanceCierrePayload> {
     const sb = this.supabase.service;
     const mes = mesCalendarioDeRango(ctx.desde, ctx.hasta);
     const fila = mes
       ? ((await leerCierresMes(sb)).find((f) => f.periodo === mes) ?? null)
       : null;
-    const estado = fila?.estado ?? 'ABIERTO';
+    // CIERRE POR AVIÓN (23-oct-2026, invariante 105): el libro de un avión
+    // dice el estado de ESE avión (+ `estado_flota`); EXTERNOS, el de la
+    // flota. Sin la migración por avión, el de la fila global (0.0.103).
+    const flota = mes ? await resumenCierreFlota(sb, mes, fila) : null;
+    const filaAvion =
+      flota && ctx.aeronaveId
+        ? (flota.filasAvion.find((f) => f.aeronave_id === ctx.aeronaveId) ??
+          null)
+        : null;
+    const estado: EstadoMesFlota = flota
+      ? ctx.aeronaveId
+        ? bloqueCierreAvion(filaAvion, fila).estado
+        : flota.estado
+      : (fila?.estado ?? 'ABIERTO');
+    const sellos = filaAvion ?? fila;
     const porId = new Map(ctx.vuelos.map((v) => [v.id, v]));
     const papeles = new Map(
       ctx.vuelos.map((v) => [
@@ -2185,7 +2204,9 @@ export class AircraftBalanceService {
         !ultimo ||
         v.estado !== 'COMPLETADO' ||
         f.cancelado === true ||
-        (f.participacion ?? 1) <= 0
+        (f.participacion ?? 1) <= 0 ||
+        // Un avión cerrado ya decidió que se queda (regla 2, inv. 105).
+        flota?.decididos.has(v.id) === true
       )
         return false;
       const d = decisionDiferir(
@@ -2292,13 +2313,20 @@ export class AircraftBalanceService {
       disponible: true,
       periodo: mes,
       estado,
-      cerrado_at: fila?.cerrado_at ?? null,
-      cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
-      reabierto_at: fila?.reabierto_at ?? null,
-      reabierto_por_nombre: fila?.reabierto_por?.nombre ?? null,
+      cerrado_at: sellos?.cerrado_at ?? null,
+      cerrado_por_nombre: sellos?.cerrado_por?.nombre ?? null,
+      reabierto_at: sellos?.reabierto_at ?? null,
+      reabierto_por_nombre: sellos?.reabierto_por?.nombre ?? null,
       pasan,
       vienen,
       pasarian,
+      ...(flota
+        ? {
+            estado_flota: flota.estado,
+            aviones_activos: flota.aviones_activos,
+            aviones_cerrados: flota.aviones_cerrados,
+          }
+        : {}),
     };
   }
 
@@ -4990,6 +5018,7 @@ export class AircraftBalanceService {
           tcOficialPorVuelo,
           clientesInternos,
           matriculaLibro: modoExternos ? null : matricula,
+          aeronaveId: modoExternos ? null : aircraftId,
         })
       : null;
     if (cierreLibro) {

@@ -36,7 +36,10 @@ import {
 } from '../../common/afac-real.util';
 import { AFAC_VUELO_COLS } from '../../common/afac-real.lector';
 import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
-import { assertMesAbierto } from '../../common/cierre-mes.lector';
+import {
+  assertMesAbierto,
+  avionesDelVueloCandado,
+} from '../../common/cierre-mes.lector';
 import { colsVueloContable } from '../../common/filtro-periodo-contable.util';
 import {
   diaContableDeVuelo,
@@ -240,7 +243,14 @@ export class AfacRealService {
         details: { inicio },
       });
     }
-    await assertMesAbierto(sb, mesContableDeVuelo(vuelo), 'afac_real');
+    // CIERRE POR AVIÓN (invariante 105): el avión del vuelo (y los demás
+    // participantes de un multi-avión).
+    await assertMesAbierto(
+      sb,
+      mesContableDeVuelo(vuelo),
+      'afac_real',
+      await avionesDelVueloCandado(sb, vuelo),
+    );
     return vuelo;
   }
 

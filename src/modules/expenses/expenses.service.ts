@@ -1,6 +1,7 @@
 import {
   assertGastoEnMesAbierto,
   assertMesAbierto,
+  avionesDeGastoCandado,
   type GastoParaCandado,
 } from '../../common/cierre-mes.lector';
 import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
@@ -5753,13 +5754,19 @@ export class ExpensesService {
       );
     }
     // CIERRE DE MES (invariante 89): el reparto manual cuenta por la
-    // `fecha_gasto` del padre (R4): un mes cerrado no se re-reparte.
+    // `fecha_gasto` del padre (R4): un mes cerrado no se re-reparte. Por
+    // avión (invariante 105): el avión sellado, los de sus partes de HOY y
+    // los de las partes NUEVAS (un avión cerrado no recibe ni suelta parte).
     await assertMesAbierto(
       this.supabase.service,
       typeof gasto.fecha_gasto === 'string'
         ? gasto.fecha_gasto.slice(0, 7)
         : null,
       'gasto',
+      [
+        ...(await avionesDeGastoCandado(this.supabase.service, gasto, null)),
+        ...items.map((i) => i.aeronave_id),
+      ],
     );
     const ids = items.map((i) => i.aeronave_id);
     if (new Set(ids).size !== ids.length) {
@@ -6082,10 +6089,16 @@ export class ExpensesService {
         continue;
       }
       try {
+        // Por avión (invariante 105): el sellado, sus partes de hoy y los
+        // aviones que reciben la parte nueva.
         await assertMesAbierto(
           sb,
           typeof g.fecha_gasto === 'string' ? g.fecha_gasto.slice(0, 7) : null,
           'gasto',
+          [
+            ...(await avionesDeGastoCandado(sb, g, null)),
+            ...aeronaves.map((a) => a.id),
+          ],
         );
       } catch (err) {
         const e = errorRepartoDeExcepcion(err);

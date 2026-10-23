@@ -10105,7 +10105,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
 
 89. **CIERRE DE MES FORMAL + VUELOS PENDIENTES DE COBRO PASAN AL MES
     SIGUIENTE (16-oct-2026, API 0.0.88, migración `20261016000004`
-    APLICADA el 16-oct-2026 ~17:38 Cancún por MCP).** Pedido del cliente: «una opción para cerrar el mes que no
+    APLICADA el 16-oct-2026 ~17:38 Cancún por MCP). NOTA: desde el
+    23-oct-2026 el cierre es POR AVIÓN (invariante 105): la fila global
+    `cierre_mes` es DERIVADA (la escribe el API cuando el último avión activo
+    del mes queda cerrado) y la bitácora viva es `cierre_mes_avion_vuelo`; lo
+    de abajo sigue valiendo para «toda la flota».** Pedido del cliente: «una opción para cerrar el mes que no
     es el corriente (el anterior) y que los vuelos que aún no se cobren se
     marquen en el balance y se muevan al siguiente mes hasta que se cobren y
     completen». Decisiones del 16-oct-2026: el vuelo pasa COMPLETO (venta,
@@ -11449,7 +11453,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
      `compras.service.candidatos.spec`, `compras.calculo.spec`.
 
 102. **INCLUIR EN EL MES AL CERRAR: los vuelos cobrados DESPUÉS del corte se
-    pueden quedar (21-oct-2026, API 0.0.102, sin migración).** Pedido del
+    pueden quedar (21-oct-2026, API 0.0.102, sin migración). NOTA: desde el
+    23-oct-2026 el cierre es por avión (inv. 105): `incluir` / `incluir_vuelos`
+    se evalúan POR AVIÓN y, en un vuelo multi-avión, el primer avión que
+    cierra decide (`decidido_por` en la previa de los demás).** Pedido del
     cliente: «ya se cobraron varios de los vuelos que no se habían cobrado
     pero se cobraron en octubre pero aún no se cierra, que dé la opción de
     poder incluirlos en septiembre». Hasta el 0.0.101 el cierre pasaba al mes
@@ -11540,6 +11547,211 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     la identidad byte a byte (combustible devuelto a directos = la respuesta
     de antes). Specs: `grupos-reparto.util.spec` (membresía congelada),
     `…combustible.spec`, `…avion.spec`, `…reparto-pesos.spec`.
+
+105. **CIERRE DE MES POR AVIÓN (23-oct-2026, API 0.0.104, migración
+    `20261023000001_cierre_mes_avion.sql` — dry-run en
+    `supabase/migrations/_dryrun/20261023000001_cierre_mes_avion.dryrun.sql`).**
+    Pedido del cliente (con capturas de /admin/reportes): «eliminar la burbuja
+    independiente de cierre de mes, y poner un botón de cierre de mes
+    individual en cada avión». Hechos verificados por SQL ese día:
+    `cierre_mes` y `cierre_mes_vuelo` VACÍAS, 0 vuelos con `periodo_contable`,
+    7 aviones activos de 8, 0 vuelos multi-avión desde el 1-sep ⇒ nada que
+    migrar. Contrato completo: §1–§3 del contrato del 23-oct-2026 (este
+    bullet es su resumen vinculante).
+    - **Modelo**: el cierre es POR AVIÓN y por mes: fila en `cierre_mes_avion
+      (periodo, aeronave_id)` (estado CERRADO | REABIERTO, sellos, `version`
+      con CAS, `precierre_snapshot` = bloqueantes evaluados globales + del
+      avión, `reparto_snapshot` = EL avión de `despues.aviones[]`,
+      `socios_snapshot` = utilidad por socio de ESE avión, `totales {vuelos,
+      vuelos_diferidos, diferidos_*_usd, saldo_usd, saldo_mxn,
+      vuelos_incluidos, incluidos[]}`). Bitácora REVERSIBLE
+      `cierre_mes_avion_vuelo` (`aeronave_id` = el avión que CERRÓ —en un
+      multi-avión puede ser el secundario—, `vuelo_aeronave_id` = el
+      principal del vuelo; UNIQUE periodo+avión+versión+vuelo). Cerrar un
+      avión = congelar SU reparto, diferir SUS vuelos no cobrados al corte
+      (`decisionDiferir` sigue siendo por VUELO entero: el vuelo se mueve
+      completo, con la parte de los demás aviones) y activar el candado para
+      las capturas que lo tocan. **La fila global `cierre_mes` es DERIVADA**:
+      el API la escribe CERRADO (insert o REABIERTO⇒CERRADO con `version +
+      1`, snapshots = agregado de las filas por avión, `totales.por_avion`
+      como siempre) cuando el ÚLTIMO avión ACTIVO del mes queda cerrado, y
+      la pasa a REABIERTO cuando cualquier avión se reabre con la flota
+      cerrada; NUNCA en un cierre parcial. Así `cierresCerrados`,
+      `cierreDeMes`, `motivoNoCerrable`, AFAC editable,
+      `mesesPermitidosDelVuelo`, grupos, Dinero y el general conservan «mes
+      cerrado = toda la flota activa cerrada» sin tocarlos. `cierre_mes_vuelo`
+      queda como LEGADO (el lector la sigue uniendo con la viva por
+      compatibilidad). `vuelo.periodo_contable` / `fecha_contable` SIGUEN
+      siendo por vuelo (un solo eje contable).
+    - **Estado de un mes hacia afuera** (`EstadoMesFlota`, FUENTE ÚNICA PURA
+      `estadoMesDerivado` en `mes-contable.util`): fila global CERRADO ⇒
+      `CERRADO`; si no, algún avión CERRADO ⇒ `PARCIAL` (también con la
+      flota reabierta a medias); si no, fila global REABIERTO ⇒ `REABIERTO`;
+      si no ⇒ `ABIERTO`. Los aviones INACTIVOS no cuentan para la flota
+      (`aviones_activos`) pero se listan y se pueden cerrar si tienen fila.
+      Un avión sin fila en un mes con la fila global CERRADO se reporta
+      CERRADO (lo cierra el candado global).
+    - **Sondas**: `cierreMesDisponible` (de siempre) + `cierrePorAvionDisponible`
+      (`cierre_mes_avion.periodo` vía `columnaOpcional` con `tambienTabla`:
+      un 42P01/PGRST205 también cuenta como «todavía no»). REGLA DURA: todo
+      lo que nombre `cierre_mes_avion` o `cierre_mes_avion_vuelo` va detrás.
+      **Sin la migración por avión el API responde byte a byte como el
+      0.0.103** (cierre global de toda la flota, `GET /v1/cierres` ⇒
+      `por_avion: false` sin `aviones`, candado solo por la fila global,
+      libros sin `cierre_avion` ni `aviones_cerrados`); pedir `aeronave_id`
+      en ese estado ⇒ 503 `CIERRE_POR_AVION_NO_DISPONIBLE` (jamás se cierra
+      la flota por un clic que pidió UN avión). Los caminos del 0.0.103 viven
+      intactos en `cerrarFlotaLegado` / `reabrirLegado`; el fixture
+      `cierre-mes.fixture-spec` solo «crea» las tablas nuevas si el mundo las
+      declara (`cierre_mes_avion: []`).
+    - **Reglas**: (1) el cierre del avión A en M toca los vuelos del mes
+      contable M en los que A PARTICIPA (`participacionPorAeronave`, factor >
+      0, también sus tramos en vuelos de otro principal). (2) MULTI-AVIÓN: el
+      PRIMER avión que cierra DECIDE por el vuelo: si lo difiere, el vuelo
+      entero pasa a M+1 y B lo ve como sombra / «viene de»; si la oficina lo
+      marca «Se queda» (solo COBRO_POSTERIOR, inv. 102) queda en
+      `totales.incluidos[]` de A y, cuando B cierre, aparece en su previa en
+      `vuelos_incluidos` con `decidido_por {aeronave_id, matricula}` y leyenda
+      «Se queda en septiembre 2026 (decidido al cerrar N621TX) · …»
+      (`leyendaSeQuedaDecidido`); no se puede diferir ni des-incluir desde B
+      (el reparto lo trae en `cierre.decididos_se_quedan`, fuera de
+      `pendientes_que_pasarian`). Cada vuelo de la previa lleva
+      `multi_avion` y `otros_aviones [{aeronave_id, matricula, estado}]`.
+      Reabrir A rebota 409 `OTRO_AVION_CERRADO` (`details {matriculas[],
+      aviones[{aeronave_id, matricula}], aeronave}`) si un vuelo que A difirió
+      lo comparte con otro avión CERRADO en M (reabrir todos a la vez no
+      rebota). (3) BLOQUEANTES: los «sin avión» (`combustible_sin_avion`,
+      `permisos_sin_avion`, `nomina_sin_repartir`, `gastos_por_pagar`;
+      `CLAVES_BLOQUEANTES_SIN_AVION`) bloquean a TODOS; los atribuibles
+      (`vuelos_sin_completar`, `tacos_en_revision`, `cobros_sin_tc`,
+      `gastos_sin_tc`) solo al avión al que pertenecen (vuelos ⇒
+      participantes; tramos ⇒ su vuelo; gastos ⇒ `avionDelGasto` + partes de
+      `gasto_reparto`); `lectura_fallida`, `ids_truncado` o un elemento sin
+      avión ⇒ a todos. La previa devuelve `bloqueantes` (los del alcance, con
+      `count`/`ids` filtrados) y `bloqueantes_otros_aviones` (informativo);
+      `listo` es del alcance aunque el pre-cierre GLOBAL diga `listo:false`.
+      (4) ORDEN por avión: `MES_ANTERIOR_ABIERTO` (A no cierra octubre si A
+      tiene septiembre abierto; `details.aeronave`, mensaje «N621TX: Para
+      cerrar…»), `YA_CERRADO` (ese avión), `MES_SIGUIENTE_CERRADO` (A no
+      reabre septiembre si A tiene octubre cerrado); `MES_EN_CURSO`,
+      `PERIODO_ANTES_DEL_INICIO`, `PRECIERRE_NO_LISTO`, `PREVIA_CAMBIO`
+      (`vuelos_esperados` = pasan + incluidos + decididos DEL alcance),
+      `CIERRE_REPARTO_FALLIDO`, `CIERRE_INCOMPLETO` (compensación + fila del
+      avión REABIERTO «cierre incompleto: …») con los mismos códigos de hoy.
+      (5) CANDADO 409 `MES_CERRADO` = `assertMesAbierto(sb, meses, registro,
+      aviones?)`: rebota si el mes está CERRADO en la fila GLOBAL o si alguno
+      de `aviones` tiene fila CERRADO; con la migración por avión `details`
+      gana `aeronave: {id, matricula} | null` (null = fila global) y el texto
+      dice «N621TX · Septiembre 2026 ya está cerrado (Ale, 16-oct)…»
+      (`textoMesCerrado` con `matricula`); sin ella, el cuerpo de siempre.
+      Quién pasa aviones: gasto ⇒ `avionesDeGastoCandado` (`avionDelGasto` +
+      partes de `gasto_reparto`; dentro de `assertGastoEnMesAbierto` y en el
+      reparto manual / en partes iguales, que suman los aviones que RECIBEN
+      parte); cobro y vuelo ⇒ participantes (`participantesDeVuelos`, dentro
+      de `assertCobroEnMesAbierto`; `assertVueloEnMesAbierto`, `quotes.revise`
+      / `cancel`, AFAC real con `avionesDelVueloCandado`); ingreso ⇒
+      `aeronave_id` (antes y después); entrega a socio ⇒ el avión del
+      reparto; inventario ⇒ el avión de la salida. Sin avión (caja chica,
+      ingreso sin avión, gasto de empresa sin reparto) ⇒ solo la fila global.
+      Caché por avión (`cierresAvionDeMes`) con los mismos 60 s / relectura
+      a 10 s y `olvidarCierres` la limpia. (6) SNAPSHOTS: la cuenta corriente
+      de socios MEZCLA en un mes PARCIAL — aviones cerrados ⇒ su
+      `socios_snapshot` (`aviones[].origen 'SNAPSHOT_CIERRE'` + `cerrado_at`,
+      sufijo «· cierre del 16-oct» por avión), abiertos ⇒ en vivo; el origen
+      del MES queda `EN_VIVO` hasta que la fila global esté CERRADO (entonces
+      `SNAPSHOT_CIERRE` como hoy). `coincide_con_snapshot` es por avión
+      (`aviones[].cierre_avion.coincide_con_snapshot`, saldo de hoy vs
+      `totales.saldo_usd`); el global = AND de los cerrados (null sin
+      ninguno; un cierre global legado sin filas por avión compara
+      `totales.por_avion` como siempre). (7) CIERRE DE TODA LA FLOTA: `POST
+      /v1/cierres/:periodo` SIN `aeronave_id` cierra en orden de matrícula
+      todos los activos abiertos con UNA previa (`vuelos_esperados` = la
+      unión); la bitácora de un compartido la lleva el primero; si uno falla,
+      los ya cerrados se QUEDAN cerrados y el error trae `details.cerrados`
+      (matrículas que sí quedaron), `details.aeronave` (el que falló) y un
+      `message` «MATRÍCULA: …»; un fallo no HTTP sale 500 `CIERRE_FALLIDO`.
+      (8) REABRIR (solo ADMIN) con `aeronave_id` reabre ese avión (fila
+      REABIERTO, revierte SU bitácora con CAS, `no_revertidos`); sin él
+      reabre todos los cerrados del mes; un cierre global anterior a la
+      migración (sin filas por avión) se reabre por el camino legado. (9) Las
+      descargas no se bloquean (como hoy). (10) NOTIFICACIÓN `alerta_sistema`
+      a ADMIN por avión («N621TX · Septiembre 2026 cerrado» / «… REABIERTO»);
+      la de toda la flota, UNA sola («Septiembre 2026 cerrado (7 avión(es))»).
+    - **Contratos HTTP**: `GET /v1/cierres` ⇒ `{disponible, por_avion,
+      inicio_oficial, mes_en_curso, meses[], siguiente_a_cerrar}`; cada mes
+      trae lo de hoy (fila global, `estado` puede ser `PARCIAL`) +
+      `aviones_activos`, `aviones_cerrados` (número) y `aviones[]
+      {aeronave_id, matricula, modelo, activa, estado ABIERTO|CERRADO|
+      REABIERTO, cerrado_at, cerrado_por, reabierto_at, reabierto_por,
+      reabierto_motivo, version, puede_cerrar, motivo_no_cerrable (mismos
+      códigos que el mes), totales}` (activos + inactivos con fila); el
+      `puede_cerrar` del mes = algún avión activo puede. `GET
+      …/previa?aeronave_id&incluir` ⇒ la `PreviaCierre` de hoy +
+      `aeronave {id, matricula, modelo} | null` (null = toda la flota
+      abierta), `aviones_alcance[]`, `estado` del avión (o de la flota),
+      listas limitadas al alcance, `bloqueantes_otros_aviones`,
+      `reparto.antes/despues` solo del alcance y `totales` del alcance;
+      `aeronave_id` inválido ⇒ 400, inexistente ⇒ 404 `AERONAVE_NO_EXISTE`.
+      `POST /v1/cierres/:periodo` body `{confirmar, aeronave_id?,
+      vuelos_esperados?, incluir_vuelos?}` ⇒ 201 `{aeronave, cierres[]
+      (filas de avión: aeronave_id, matricula, estado, version, cerrado_at,
+      cerrado_por, totales…), mes (la flota, después), diferidos, incluidos,
+      totales, reparto, notificados, cierre (compat: el mes)}`. `POST
+      …/reabrir` body `{confirmar, motivo, aeronave_id?}` ⇒ `{aeronave,
+      cierres[], mes, revertidos, no_revertidos, cierre (compat)}`.
+    - **Bloques `cierre` de los libros (ADITIVO, solo con la migración por
+      avión)**: reparto y pre-cierre `cierre.estado` puede ser `PARCIAL` +
+      `aviones_activos` («M») + `aviones_cerrados: string[]` (matrículas) +
+      `decididos_se_quedan[]`; por avión `aviones[].cierre_avion {estado,
+      cerrado_at, cerrado_por_nombre, reabierto_at, reabierto_por_nombre,
+      version, coincide_con_snapshot}` SIEMPRE ('ABIERTO' por defecto;
+      fuente única `bloqueCierreAvion`); `pendientes_que_pasarian` con
+      `q.aeronave_id` ⇒ solo los vuelos en que participa ese avión y nunca
+      los decididos ni los de aviones todos cerrados. `GET
+      /v1/profit-sharing/aviones/:id` ⇒ `cierre` + `cierre_avion`;
+      `…/historico` ⇒ `meses[].cierre_estado` del AVIÓN. Balance por avión
+      (`cierreDelLibro`): `estado` del AVIÓN (sus sellos) + `estado_flota`,
+      `aviones_activos`, `aviones_cerrados`; balance general y Libro Dinero:
+      estado de la flota (`cierreDelGeneral` toma `estado_flota`) +
+      `aviones_activos` + `aviones_cerrados`. Payload del PDF/XLSX del
+      reparto: `aviones[].cierre_avion` (mismo shape, `RepartoCierreAvion`
+      de pyservices) y `cierre.estado` 'PARCIAL' + `aviones_activos` +
+      `aviones_cerrados` (`RepartoCierrePayload`). Las marcas «pasaría al
+      cerrar» de los balances y del Dinero no se ponen a un vuelo ya decidido
+      por un avión cerrado.
+    - **Decisiones tomadas sin el cliente (§5 del contrato; reversibles,
+      decírselas)**: multi-avión decide el primer avión que cierra
+      (alternativa: exigir cerrar juntos); los bloqueantes sin avión bloquean
+      a todos; los registros sin avión solo rebotan con la flota cerrada; los
+      inactivos no cuentan para la flota. Además, del implementador: un
+      bloqueante atribuible cuyo elemento no se pudo atribuir (o con `ids`
+      truncados) bloquea a todos; `aviones_cerrados` (número) de `GET
+      /v1/cierres` cuenta solo activos; `totales.vuelos` de la fila global
+      derivada = vuelos del mes al cerrar (los que siguen + los diferidos); el
+      `motivo_no_cerrable` del MES en el pre-cierre no es `MES_ANTERIOR_
+      ABIERTO` ni `YA_CERRADO` en un mes PARCIAL (esos se exigen POR AVIÓN al
+      cerrar); el reabrir «por avión» de un cierre GLOBAL legado (sin filas
+      por avión) ⇒ 409 `NO_ESTA_CERRADO` para ese avión (se reabre el mes
+      completo); un avión inactivo que se cierra solo no tiene `aviones[]`
+      en compute ⇒ `reparto_snapshot: {}` y saldo 0.
+    - Specs: `cierres.service.por-avion.spec` (cerrar un avión: snapshot,
+      bitácora propia, candado solo de ese avión, el otro sigue abierto y
+      captura; el último activo crea la fila global CERRADO; reabrir uno con
+      la flota cerrada ⇒ OTRO_AVION_CERRADO / global REABIERTO / mes PARCIAL
+      ⇒ REABIERTO; `MES_ANTERIOR_ABIERTO` y `MES_SIGUIENTE_CERRADO` por avión;
+      bloqueante atribuible vs sin avión vs lectura fallida; multi-avión «se
+      queda» con `decidido_por` y `PREVIA_CAMBIO`; flota secuencial con fallo
+      a la mitad ⇒ `details.cerrados` + `aeronave`; sin la migración por
+      avión ⇒ la respuesta de hoy y 503), `cierre-mes.lector.por-avion.spec`
+      (sonda con tabla ausente, resumen de flota, `estadoMesDerivado`,
+      `bloqueCierreAvion`, participantes, aviones del gasto, candado con
+      aviones y con la flota cerrada, details de siempre sin la migración,
+      caché, bitácora unida), `cierres.controller.spec` (`aeronave_id` en
+      query y body), `afac-real.service.spec` (cuarto argumento del candado).
+      Los specs anteriores del cierre (`cierres.service.spec`,
+      `cierre-mes.lector.spec`, `libros.cierre-mes.spec`, los
+      `*.cierre-mes.spec` de gastos, vuelos y servicios) siguen SIN declarar
+      `cierre_mes_avion`: congelan la conducta sin la migración por avión.
 
 ## Convenciones NestJS
 
@@ -12279,6 +12491,25 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **ORDEN DE DESPLIEGUE DEL 0.0.104 (23-oct-2026; invariante 105, cierre de
+  mes POR AVIÓN).** (1) Migración `20261023000001_cierre_mes_avion` por MCP
+  en `bjesduasnzbzywofukbf`: primero el dry-run
+  `supabase/migrations/_dryrun/20261023000001_cierre_mes_avion.dryrun.sql`
+  con `execute_sql` (debe terminar en «DRYRUN_OK 20261023000001 …»; esa
+  carpeta `_dryrun/` NO es una migración), luego `apply_migration` SOLO con
+  el cuerpo entre «>>> CUERPO» y «<<< CUERPO» (sin drop/delete/revoke),
+  postchecks (tablas, PK, UNIQUE, trigger, RLS, `count(*) = 0`) y
+  `get_advisors`. Inocua para el 0.0.103 (tablas vacías que nadie lee).
+  (2) pyservices (acepta `aviones[].cierre_avion`, `cierre.estado
+  'PARCIAL'`, `aviones_activos`, `aviones_cerrados`; sin ellas pinta como
+  hoy). (3) API 0.0.104 (`GET /v1/version` = 0.0.104). (4) Panel (tiles por
+  avión, chip de la flota, sin la burbuja «Cierre formal del mes»). **Sin la
+  migración el API 0.0.104 responde como el 0.0.103** (sonda
+  `cierrePorAvionDisponible`): cualquier orden entre (1) y (3) es seguro; el
+  panel nuevo con el API viejo recibiría 404 en `aeronave_id`, así que (4) va
+  al final. Rollback de la migración solo desde el SQL Editor y con ningún
+  avión cerrado (reabrir primero); reiniciar el API después.
 
 - **ORDEN DE DESPLIEGUE DEL LOTE 0.0.101 (20-oct-2026; invariante 99).**
   El 21-oct-2026 se le sumó el lote 0.0.102 (invariantes 100–103: entregas
