@@ -12274,7 +12274,12 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
      QH8L8B3E, builds pausados) y prod se quedó en 0.0.99 con la 000006
      puesta ⇒ se aplicó el PUENTE `20261021000001_reparto_pago_monto_mxn_
      puente` (trigger que completa `monto_mxn` con la regla del API cuando
-     la escritura no lo manda; inocuo con el 0.0.102; se queda).
+     la escritura no lo manda; inocuo con el 0.0.102). **El 22-oct-2026 a las
+     21:19 UTC Railway construyó el 0.0.102** (`/v1/version` lo confirmó;
+     pyservices y panel también arriba) y el puente se DESACTIVÓ con
+     `20261021000002_reparto_pago_monto_mxn_puente_fuera` (`disable
+     trigger`; postcheck: un alta sin `monto_mxn` vuelve a rebotar 23502).
+     Borrar trigger + función es opcional y solo desde el SQL Editor.
   2. **pyservices** (push `main`, Railway; confirmar el deployment ACTIVO):
      aditivo; sin `reparto_como_balance` el PDF y el Excel salen byte a
      byte, así que es seguro con el API viejo.
