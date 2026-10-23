@@ -200,9 +200,12 @@ describe('ProfitSharingService.avionDetalle — la pantalla por avión', () => {
           .reduce((acc, f) => acc + (f[k] ?? 0), 0),
       );
     expect(suma('DIRECTO', 'mxn')).toBe(a.gastos.directos_mxn);
+    // COMBUSTIBLE aparte (23-oct-2026, invariante 104).
+    expect(suma('COMBUSTIBLE', 'mxn')).toBe(a.gastos.combustible_mxn);
     expect(suma('INDIRECTO', 'mxn')).toBe(a.gastos.indirectos_mxn);
     expect(suma('PERMISO', 'mxn')).toBe(a.gastos.permisos_mxn);
     expect(suma('DIRECTO', 'usd')).toBe(a.gastos.directos_usd);
+    expect(suma('COMBUSTIBLE', 'usd')).toBe(a.gastos.combustible_usd);
     expect(suma('INDIRECTO', 'usd')).toBe(a.gastos.indirectos_usd);
     expect(suma('PERMISO', 'usd')).toBe(a.gastos.permisos_usd);
     // Cada fila lleva lo que la pantalla pinta: etiqueta, clave, vuelo.
@@ -290,6 +293,7 @@ describe('ProfitSharingService.avionHistorico — mes a mes, en pesos', () => {
     expect(sep).toMatchObject({
       cobrado_mxn: a.ingresos.cobrado_mxn,
       directos_mxn: a.gastos.directos_mxn,
+      combustible_mxn: a.gastos.combustible_mxn,
       indirectos_mxn: a.gastos.indirectos_mxn,
       permisos_mxn: a.gastos.permisos_mxn,
       otros_mxn: a.gastos.otros_prorrateados_mxn,

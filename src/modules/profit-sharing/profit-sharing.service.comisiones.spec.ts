@@ -585,6 +585,10 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         'aviones.0.reparto.0.utilidad_mxn',
         'aviones.0.reparto.1.utilidad_usd',
         'aviones.0.reparto.1.utilidad_mxn',
+        // Invariante 104: la «utilidad antes de gastos» también lleva las
+        // comisiones restadas (cobrado − comisiones − directos − AFAC).
+        'aviones.0.utilidad_antes_gastos_usd',
+        'aviones.0.utilidad_antes_gastos_mxn',
       ].sort(),
     );
     // Antes de la vigencia una «(VuelaTour)» tampoco resta: la paga VuelaTour.

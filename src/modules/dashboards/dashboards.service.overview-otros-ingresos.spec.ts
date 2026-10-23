@@ -35,6 +35,7 @@ function avion(otros?: number) {
     },
     gastos: {
       directos_usd: 100,
+      combustible_usd: 0,
       indirectos_usd: 50,
       permisos_usd: 0,
       otros_prorrateados_usd: 25,

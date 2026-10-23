@@ -90,6 +90,15 @@ export interface RepartoAvionPayload {
    */
   pendiente_bruto_usd?: number;
   gastos_directos_usd: number;
+  /**
+   * ADITIVOS (23-oct-2026, API 0.0.103, invariante 104): el COMBUSTIBLE (GAS)
+   * ya NO está dentro de `gastos_directos_*`: viaja aparte, su propia línea
+   * de la cascada (como «COMBUSTIBLE DEL MES» en el Excel del cliente), y la
+   * «utilidad antes de gastos» (cobrado − comisiones − directos − AFAC) es
+   * la línea del Excel. Un pyservices anterior los ignora.
+   */
+  combustible_usd?: number;
+  utilidad_antes_gastos_usd?: number;
   gastos_indirectos_usd: number;
   permisos_usd: number;
   otros_usd: number;
@@ -146,6 +155,8 @@ export interface RepartoAvionPayload {
   comisiones_venta_mxn?: number;
   pendiente_cobro_mxn?: number;
   gastos_directos_mxn?: number;
+  combustible_mxn?: number;
+  utilidad_antes_gastos_mxn?: number;
   gastos_indirectos_mxn?: number;
   permisos_mxn?: number;
   otros_mxn?: number;

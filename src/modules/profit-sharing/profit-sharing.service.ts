@@ -32,6 +32,7 @@ import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 // invariante 74) para que la confirmación de «Corregir la fecha del gasto»
 // lea la MISMA fuente. El ternario de `computeAvion` no cambia.
 import {
+  COMBUSTIBLE,
   DIRECTO,
   FIJO,
   INDIRECTO,
@@ -515,8 +516,18 @@ interface VueloRow {
   costo_externo_usd: string | null;
 }
 
-/** Grupo del reparto al que aporta una categoría de gasto (doc 4.8). */
-type GrupoGasto = 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'FIJO' | 'EXCLUIDO';
+/**
+ * Grupo del reparto al que aporta una categoría de gasto (doc 4.8).
+ * COMBUSTIBLE (23-oct-2026, invariante 104): el GAS, línea propia de la
+ * cascada (antes iba dentro de DIRECTO).
+ */
+type GrupoGasto =
+  | 'COMBUSTIBLE'
+  | 'DIRECTO'
+  | 'INDIRECTO'
+  | 'PERMISO'
+  | 'FIJO'
+  | 'EXCLUIDO';
 
 interface GastoCategoriaAcc {
   grupo: GrupoGasto;
@@ -639,7 +650,14 @@ export interface FilaGastoDetalle {
   categoria: string;
   etiqueta: string;
   clave: string;
-  grupo: 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'FIJO' | 'EXCLUIDO';
+  /** COMBUSTIBLE desde el 23-oct-2026 (invariante 104): el GAS, aparte. */
+  grupo:
+    | 'COMBUSTIBLE'
+    | 'DIRECTO'
+    | 'INDIRECTO'
+    | 'PERMISO'
+    | 'FIJO'
+    | 'EXCLUIDO';
   concepto: string | null;
   vuelo: { id: string; folio: number | null } | null;
   monto: number;
@@ -816,6 +834,12 @@ export class ProfitSharingService {
         pendiente_bruto_usd: a.ingresos.pendiente_bruto_usd,
         horas_voladas_hr: a.horas_voladas_hr,
         gastos_directos_usd: a.gastos.directos_usd,
+        // ADITIVOS (23-oct-2026, API 0.0.103, invariante 104): el combustible
+        // ya NO está en `gastos_directos_*`; viaja aparte, y la «utilidad
+        // antes de gastos» (cobrado − comisiones − directos − AFAC) es la
+        // línea del Excel. Un pyservices anterior los ignora (pydantic).
+        combustible_usd: a.gastos.combustible_usd,
+        utilidad_antes_gastos_usd: a.utilidad_antes_gastos_usd,
         gastos_indirectos_usd: a.gastos.indirectos_usd,
         permisos_usd: a.gastos.permisos_usd,
         otros_usd: a.gastos.otros_prorrateados_usd,
@@ -887,6 +911,8 @@ export class ProfitSharingService {
         comisiones_venta_mxn: a.ingresos.comisiones_venta_mxn,
         pendiente_cobro_mxn: a.ingresos.pendiente_cobro_mxn,
         gastos_directos_mxn: a.gastos.directos_mxn,
+        combustible_mxn: a.gastos.combustible_mxn,
+        utilidad_antes_gastos_mxn: a.utilidad_antes_gastos_mxn,
         gastos_indirectos_mxn: a.gastos.indirectos_mxn,
         permisos_mxn: a.gastos.permisos_mxn,
         otros_mxn: a.gastos.otros_prorrateados_mxn,
@@ -2701,6 +2727,10 @@ export class ProfitSharingService {
       // en su hoja «permisos» del balance (fuente única `esPagoAfac`) — el
       // delta balance↔reparto no cambia. Clave propia en el detalle.
       const pagoAfac = esPagoAfac(g);
+      // COMBUSTIBLE (23-oct-2026, invariante 104): el GAS es su propia línea
+      // de la cascada (como «COMBUSTIBLE DEL MES» en el Excel del cliente);
+      // antes caía en DIRECTO. Las partes de un GAS repartido a mano también
+      // van a COMBUSTIBLE (no es categoría de empresa).
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
         esTuas || esPagoVendedor || pagoAfac
@@ -2716,16 +2746,18 @@ export class ProfitSharingService {
               ? 'INDIRECTO'
               : g.es_reparto_parcial && g.categoria === FIJO
                 ? 'FIJO'
-                : DIRECTO.has(g.categoria)
-                  ? 'DIRECTO'
-                  : INDIRECTO.has(g.categoria)
-                    ? 'INDIRECTO'
-                    : PERMISO.has(g.categoria)
-                      ? 'PERMISO'
-                      : // FIJO se prorratea aparte; otras categorias no
-                        // avion-especificas SIN reparto (p. ej. la categoría
-                        // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
-                        'EXCLUIDO';
+                : COMBUSTIBLE.has(g.categoria)
+                  ? 'COMBUSTIBLE'
+                  : DIRECTO.has(g.categoria)
+                    ? 'DIRECTO'
+                    : INDIRECTO.has(g.categoria)
+                      ? 'INDIRECTO'
+                      : PERMISO.has(g.categoria)
+                        ? 'PERMISO'
+                        : // FIJO se prorratea aparte; otras categorias no
+                          // avion-especificas SIN reparto (p. ej. la categoría
+                          // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
+                          'EXCLUIDO';
       // Clave separada para parciales: el detalle muestra "OTRO (repartido)"
       // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
       const clave = esTuas
@@ -2897,6 +2929,9 @@ export class ProfitSharingService {
         sin_pesos_usd: 0,
       });
     }
+    // COMBUSTIBLE (23-oct-2026, invariante 104): línea propia, FUERA de
+    // `directos` (como «COMBUSTIBLE DEL MES» en el Excel del cliente).
+    let combustible = 0;
     let directos = 0;
     let indirectos = 0;
     let permisos = 0;
@@ -2906,17 +2941,20 @@ export class ProfitSharingService {
     let tcOficialCount = 0;
     let tcOficialMxn = 0;
     // EN PESOS (0.0.94, invariante 92): los MISMOS grupos.
+    let combustibleMxn = 0;
     let directosMxn = 0;
     let indirectosMxn = 0;
     let permisosMxn = 0;
     let fijoManualMxn = 0;
     for (const acc of porCategoria.values()) {
-      if (acc.grupo === 'DIRECTO') directos += acc.usd;
+      if (acc.grupo === 'COMBUSTIBLE') combustible += acc.usd;
+      else if (acc.grupo === 'DIRECTO') directos += acc.usd;
       else if (acc.grupo === 'INDIRECTO') indirectos += acc.usd;
       else if (acc.grupo === 'PERMISO') permisos += acc.usd;
       else if (acc.grupo === 'FIJO') fijoManual += acc.usd;
       // EXCLUIDO no suma al balance (comportamiento original del else).
-      if (acc.grupo === 'DIRECTO') directosMxn += acc.mxn;
+      if (acc.grupo === 'COMBUSTIBLE') combustibleMxn += acc.mxn;
+      else if (acc.grupo === 'DIRECTO') directosMxn += acc.mxn;
       else if (acc.grupo === 'INDIRECTO') indirectosMxn += acc.mxn;
       else if (acc.grupo === 'PERMISO') permisosMxn += acc.mxn;
       else if (acc.grupo === 'FIJO') fijoManualMxn += acc.mxn;
@@ -3083,6 +3121,9 @@ export class ProfitSharingService {
     const cobradoR = round2(cobrado);
     const comisionesR = round2(comisionesVenta);
     const directosR = round2(directos);
+    // COMBUSTIBLE (23-oct-2026, invariante 104): su propia línea, redondeada
+    // aparte (disciplina v1.3: la cascada publicada cuadra al centavo).
+    const combustibleR = round2(combustible);
     const indirectosR = round2(indirectos);
     const permisosR = round2(permisos);
     // Pool automático + FIJO repartido a mano hacia ESTE avión: mismo campo
@@ -3095,14 +3136,23 @@ export class ProfitSharingService {
     const otrosIngresosAvionR = round2(otrosIngresosAvion);
     // LA CASCADA DEL BALANCE (20-oct-2026, invariante 99; decisión del
     // cliente: «que cuadren»): saldo = venta cobrada − comisiones − directos
-    // − indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
+    // (SIN combustible desde el 23-oct-2026, invariante 104) − combustible −
+    // indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
     // ingresos. La RESERVA DE OVERHAUL YA NO RESTA AQUÍ (como en el balance
     // desde el 0.0.98): se informa, y solo al socio que lo pidió se le
     // descuenta SU parte (`descontar_reserva_overhaul`, abajo).
+    // «UTILIDAD ANTES DE GASTOS» (invariante 104): la línea del Excel del
+    // cliente = venta cobrada − comisiones − directos − PROVISIÓN AFAC; de
+    // ahí, − combustible − indirectos − permisos − fijos + otros ingresos =
+    // saldo. Componentes ya redondeados: cuadra al centavo con lo publicado.
+    const utilidadAntesGastosR = round2(
+      cobradoR - comisionesR - directosR - afacR,
+    );
     const saldo = round2(
       cobradoR -
         comisionesR -
         directosR -
+        combustibleR -
         indirectosR -
         permisosR -
         otrosR -
@@ -3117,6 +3167,7 @@ export class ProfitSharingService {
     const cobradoMxnR = round2(cobradoMxn);
     const comisionesMxnR = round2(comisionesMxn);
     const directosMxnR = round2(directosMxn);
+    const combustibleMxnR = round2(combustibleMxn);
     const indirectosMxnR = round2(indirectosMxn);
     const permisosMxnR = round2(permisosMxn);
     const otrosMxnR = round2((ctx.otrosPorAvionMxn ?? 0) + fijoManualMxn);
@@ -3127,10 +3178,14 @@ export class ProfitSharingService {
     const afacMxnR = round2(afacReservadoMxn);
     const otrosIngresosAvionMxnR = round2(otrosIngresosMxn);
     pesosSinTcUsd += ctx.otrosPorAvionSinPesosUsd ?? 0;
+    const utilidadAntesGastosMxnR = round2(
+      cobradoMxnR - comisionesMxnR - directosMxnR - afacMxnR,
+    );
     const saldoMxn = round2(
       cobradoMxnR -
         comisionesMxnR -
         directosMxnR -
+        combustibleMxnR -
         indirectosMxnR -
         permisosMxnR -
         otrosMxnR -
@@ -3255,7 +3310,11 @@ export class ProfitSharingService {
       },
       horas_voladas_hr: horasPeriodo,
       gastos: {
+        // SIN combustible desde el 23-oct-2026 (invariante 104): el GAS va
+        // en `combustible_*`, su propia línea de la cascada (como en el
+        // Excel del cliente). directos + combustible = los directos de antes.
         directos_usd: directosR,
+        combustible_usd: combustibleR,
         indirectos_usd: indirectosR,
         permisos_usd: permisosR,
         otros_prorrateados_usd: otrosR,
@@ -3270,6 +3329,7 @@ export class ProfitSharingService {
         },
         // ADITIVOS (0.0.94, invariante 92): los mismos grupos EN PESOS.
         directos_mxn: directosMxnR,
+        combustible_mxn: combustibleMxnR,
         indirectos_mxn: indirectosMxnR,
         permisos_mxn: permisosMxnR,
         otros_prorrateados_mxn: otrosMxnR,
@@ -3279,6 +3339,11 @@ export class ProfitSharingService {
       // socio en `reparto[].reserva_*` y solo se descuenta a quien lo pidió.
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
+      // «UTILIDAD ANTES DE GASTOS» (23-oct-2026, invariante 104): la línea
+      // del Excel = cobrado − comisiones − directos − AFAC; de ahí, −
+      // combustible − indirectos − permisos − fijos + otros ingresos = saldo.
+      utilidad_antes_gastos_usd: utilidadAntesGastosR,
+      utilidad_antes_gastos_mxn: utilidadAntesGastosMxnR,
       saldo_disponible_usd: saldo,
       // ADITIVOS (0.0.94, invariante 92): reserva y saldo EN PESOS, y los
       // dólares que SÍ entraron al saldo USD pero no llegaron a pesos (> 0 ⇒
@@ -5944,6 +6009,8 @@ export class ProfitSharingService {
       pendiente_cobro_mxn: 0,
       comisiones_mxn: 0,
       directos_mxn: 0,
+      // COMBUSTIBLE (23-oct-2026, invariante 104): columna propia.
+      combustible_mxn: 0,
       indirectos_mxn: 0,
       permisos_mxn: 0,
       otros_mxn: 0,
@@ -5973,6 +6040,7 @@ export class ProfitSharingService {
         pendiente_cobro_mxn: a.ingresos.pendiente_cobro_mxn,
         comisiones_mxn: a.ingresos.comisiones_venta_mxn,
         directos_mxn: a.gastos.directos_mxn,
+        combustible_mxn: a.gastos.combustible_mxn,
         indirectos_mxn: a.gastos.indirectos_mxn,
         permisos_mxn: a.gastos.permisos_mxn,
         otros_mxn: a.gastos.otros_prorrateados_mxn,

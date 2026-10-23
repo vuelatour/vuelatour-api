@@ -194,6 +194,8 @@ export class DashboardsService {
       const comisionesAvion = a.ingresos.comisiones_venta_usd ?? 0;
       const gastosAvion =
         a.gastos.directos_usd +
+        // COMBUSTIBLE (23-oct-2026, invariante 104): ya no está en directos.
+        a.gastos.combustible_usd +
         a.gastos.indirectos_usd +
         a.gastos.permisos_usd +
         a.gastos.otros_prorrateados_usd +

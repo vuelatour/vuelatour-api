@@ -482,6 +482,8 @@ export class CierresService {
     });
     const pasan = diferidos.map(salida);
     const seQueda = (d: CierreRepartoVuelo): VueloDiferidoSalida => {
+      // `destino` se descarta a propósito (la leyenda «se queda» no lo lleva).
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { destino: _destino, ...sin } = salida(d);
       return { ...sin, leyenda: leyendaSeQueda(periodo, destinoMes, d) };
     };
@@ -509,6 +511,8 @@ export class CierresService {
         cobrado_usd: r2(a.ingresos.cobrado_usd),
         gastos_usd: r2(
           a.gastos.directos_usd +
+            // COMBUSTIBLE (23-oct-2026, invariante 104): línea propia.
+            a.gastos.combustible_usd +
             a.gastos.indirectos_usd +
             a.gastos.permisos_usd +
             a.gastos.otros_prorrateados_usd,

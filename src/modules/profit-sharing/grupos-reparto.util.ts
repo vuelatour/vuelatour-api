@@ -1,7 +1,8 @@
 /**
  * GRUPOS DEL CLASIFICADOR DEL REPARTO A SOCIOS (doc 4.8): los conjuntos de
  * categorías con que `computeAvion` de `profit-sharing.service.ts` decide
- * el grupo de cada gasto (DIRECTO / INDIRECTO / PERMISO / EXCLUIDO) y el
+ * el grupo de cada gasto (COMBUSTIBLE / DIRECTO / INDIRECTO / PERMISO /
+ * EXCLUIDO) y el
  * pool de FIJO. Se MUDARON TAL CUAL del servicio el 14-oct-2026 (invariante
  * 74, SIN cambio de conducta: el ternario de `computeAvion` y el pool de
  * FIJO siguen en el servicio, byte a byte) para que la confirmación de
@@ -10,9 +11,21 @@
  * fuente. PURO (sin BD ni Nest); el spec congela la membresía.
  */
 
-/** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
+/**
+ * COMBUSTIBLE (23-oct-2026, API 0.0.103, invariante 104): el GAS (Gasavión /
+ * Turbosina) es su PROPIA línea de la cascada, como «COMBUSTIBLE DEL MES» en
+ * el Excel del cliente — ya NO va dentro de «Gastos directos». Pedido del
+ * cliente: «debemos separar gastos directos del combustible, porque los está
+ * uniendo, porque no nos está coincidiendo con el excel».
+ */
+export const COMBUSTIBLE: ReadonlySet<string> = new Set(['GAS']);
+/**
+ * Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8):
+ * los costos directos del vuelo SIN combustible (la hoja de horas del Excel:
+ * OPERACIONES, piloto, OTROS). 'GAS' salió de aquí el 23-oct-2026 (ver
+ * COMBUSTIBLE).
+ */
 export const DIRECTO: ReadonlySet<string> = new Set([
-  'GAS',
   // OPERACIONES es la categoría operativa REAL de pistas/aeródromos (la app
   // y el módulo de pistas la usan; ATERRIZAJE/FBO son legacy). Sin ella, las
   // cuotas de VIP SAESA no restaban en el reparto e inflaban la utilidad.

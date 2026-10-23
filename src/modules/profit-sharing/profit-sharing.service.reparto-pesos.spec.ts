@@ -62,12 +62,17 @@ import {
  * —la reserva de overhaul ya no resta del saldo, la provisión AFAC sí, la
  * categoría INDIRECTO cuenta— y el golden se volvió a capturar con ese
  * código: `libros-pesos.golden-0101.json` (4,488.80 de saldo en XB-TST =
- * 4,348.80 + 140 de reserva que ya no resta).
+ * 4,348.80 + 140 de reserva que ya no resta). El 23-oct-2026 (invariante
+ * 104, COMBUSTIBLE APARTE) el GAS salió de «directos» a su propia línea
+ * (`combustible_*`, grupo COMBUSTIBLE) y nació `utilidad_antes_gastos_*`;
+ * el golden se volvió a capturar: `libros-pesos.golden-0103.json` (mismo
+ * saldo; directos 367.60 ⇒ 200 + combustible 167.60; el spec
+ * `…combustible.spec` prueba esa identidad contra el 0101).
  */
 
 const GOLDEN = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, 'libros-pesos.golden-0101.json'),
+    path.join(__dirname, 'libros-pesos.golden-0103.json'),
     'utf8',
   ),
 ) as Record<string, unknown>;
@@ -133,7 +138,7 @@ const avion = (r: Resultado, id: string) => {
 };
 
 describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: sin las llaves en pesos, la respuesta es BYTE A BYTE la del golden 0.0.101 (con oficial, sin oficial y vacía)', async () => {
+  it('GOLDEN: sin las llaves en pesos, la respuesta es BYTE A BYTE la del golden 0.0.103 (con oficial, sin oficial y vacía)', async () => {
     expect(JSON.stringify(sinLlavesPesos(await compute()))).toBe(
       JSON.stringify(GOLDEN.reparto_oficial),
     );
@@ -147,7 +152,7 @@ describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre'
     ).toBe(JSON.stringify(GOLDEN.reparto_vacio));
   });
 
-  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.101', async () => {
+  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.103', async () => {
     expect(JSON.stringify(sinLlavesPesosPayload(await payload()))).toBe(
       JSON.stringify(GOLDEN.payload_oficial),
     );
@@ -171,9 +176,11 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
     // Comisiones: #501 350 MXN × 2000/2230 = 313.90 (la de siempre); #502 la
     // comisión bancaria de 30 USD con el K del balance (18.25) = 547.50.
     expect(a.ingresos.comisiones_venta_mxn).toBe(861.4);
-    // Gastos: OPERACIONES 200 USD × 19.5 + GAS 3,000 MXN; REFACCION 100 USD
-    // × 18.4 (oficial de SU día); PERMISO 500 MXN tal cual.
-    expect(a.gastos.directos_mxn).toBe(6900);
+    // Gastos: OPERACIONES 200 USD × 19.5; el GAS 3,000 MXN va APARTE
+    // (combustible, 23-oct-2026, invariante 104); REFACCION 100 USD × 18.4
+    // (oficial de SU día); PERMISO 500 MXN tal cual.
+    expect(a.gastos.directos_mxn).toBe(3900);
+    expect(a.gastos.combustible_mxn).toBe(3000);
     expect(a.gastos.indirectos_mxn).toBe(1840);
     expect(a.gastos.permisos_mxn).toBe(500);
     // Pool de FIJOS: (7,000 MXN + 300 USD × 17.9) ÷ 2 aviones activos.
@@ -196,6 +203,7 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
       a.ingresos.cobrado_mxn -
         a.ingresos.comisiones_venta_mxn -
         a.gastos.directos_mxn -
+        a.gastos.combustible_mxn -
         a.gastos.indirectos_mxn -
         a.gastos.permisos_mxn -
         a.gastos.otros_prorrateados_mxn -
@@ -351,9 +359,10 @@ describe('Reparto a socios EN PESOS — sin T.C.: lo que no llega a pesos se avi
     expect(a.ingresos.cobrado_mxn).toBe(35874.4);
     expect(a.ingresos.comisiones_venta_mxn).toBe(313.9);
     // El GAS 3,000 MXN sin T.C. no llega a dólares, pero sus pesos son
-    // reales: SÍ resta en pesos.
+    // reales: SÍ resta en pesos (como combustible, aparte de los directos).
     expect(a.gastos.gastos_sin_tc_mxn).toBe(4500);
-    expect(a.gastos.directos_mxn).toBe(6900);
+    expect(a.gastos.directos_mxn).toBe(3900);
+    expect(a.gastos.combustible_mxn).toBe(3000);
     // REFACCION 100 USD sin T.C. ni oficial: no llega a pesos.
     expect(a.gastos.indirectos_mxn).toBe(0);
     // Pool: 7,000 MXN ÷ 2 (el FIJO de 300 USD no llega a pesos).
@@ -441,6 +450,9 @@ describe('Reparto a socios EN PESOS — payload del PDF/XLSX (§2b, pyservices 1
     'saldo_mxn',
     'pesos_sin_tc_usd',
     'reserva_tc',
+    // Combustible aparte (23-oct-2026, invariante 104).
+    'combustible_mxn',
+    'utilidad_antes_gastos_mxn',
   ];
 
   it('bandera raíz y, por avión, las llaves de pyservices con los MISMOS números de la pantalla (el saldo viaja como `saldo_mxn`)', async () => {
@@ -455,6 +467,8 @@ describe('Reparto a socios EN PESOS — payload del PDF/XLSX (§2b, pyservices 1
         comisiones_venta_mxn: a.ingresos.comisiones_venta_mxn,
         pendiente_cobro_mxn: a.ingresos.pendiente_cobro_mxn,
         gastos_directos_mxn: a.gastos.directos_mxn,
+        combustible_mxn: a.gastos.combustible_mxn,
+        utilidad_antes_gastos_mxn: a.utilidad_antes_gastos_mxn,
         gastos_indirectos_mxn: a.gastos.indirectos_mxn,
         permisos_mxn: a.gastos.permisos_mxn,
         otros_mxn: a.gastos.otros_prorrateados_mxn,

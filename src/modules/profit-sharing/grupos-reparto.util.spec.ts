@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { CategoriaGasto } from '../expenses/dto/expenses.dto';
 import {
+  COMBUSTIBLE,
   DIRECTO,
   FIJO,
   INDIRECTO,
@@ -17,10 +18,14 @@ import {
  * siguen verdes SIN tocarse (la mudanza no cambia ninguna conducta).
  */
 describe('grupos-reparto.util — membresía congelada', () => {
-  it('DIRECTO: las 10 categorías directas del vuelo (sin TUAS ni OTRO; «Otros gastos directos del vuelo» desde el 20-oct-2026)', () => {
+  it('COMBUSTIBLE = {GAS} (23-oct-2026, invariante 104): el combustible es su propia línea, FUERA de DIRECTO', () => {
+    expect([...COMBUSTIBLE]).toEqual(['GAS']);
+    expect(DIRECTO.has('GAS')).toBe(false);
+  });
+
+  it('DIRECTO: las 9 categorías directas del vuelo SIN combustible (sin TUAS ni OTRO; «Otros gastos directos del vuelo» desde el 20-oct-2026)', () => {
     expect([...DIRECTO].sort()).toEqual(
       [
-        'GAS',
         'OPERACIONES',
         'ATERRIZAJE',
         'FBO',
@@ -38,14 +43,25 @@ describe('grupos-reparto.util — membresía congelada', () => {
     // La CATEGORÍA INDIRECTO sellada a un avión cuenta como gasto indirecto
     // del avión, igual que en la hoja «Gastos Indirectos» del balance
     // (decisión del cliente del 20-oct-2026: «que cuadren»).
-    expect([...INDIRECTO].sort()).toEqual(['INDIRECTO', 'REFACCION', 'SERVICIOS']);
+    expect([...INDIRECTO].sort()).toEqual([
+      'INDIRECTO',
+      'REFACCION',
+      'SERVICIOS',
+    ]);
     expect([...PERMISO]).toEqual(['PERMISO']);
     expect(FIJO).toBe('FIJO');
     expect(TUAS_CAT).toBe('TUAS');
   });
 
   it('ninguna categoría está en dos grupos y todas existen en el enum', () => {
-    const todas = [...DIRECTO, ...INDIRECTO, ...PERMISO, FIJO, TUAS_CAT];
+    const todas = [
+      ...COMBUSTIBLE,
+      ...DIRECTO,
+      ...INDIRECTO,
+      ...PERMISO,
+      FIJO,
+      TUAS_CAT,
+    ];
     expect(new Set(todas).size).toBe(todas.length);
     const enumValores = Object.values(CategoriaGasto) as string[];
     for (const c of todas) expect(enumValores).toContain(c);
@@ -61,7 +77,12 @@ describe('grupos-reparto.util — membresía congelada', () => {
       'COMISION_VENDEDOR',
       'COMISION_VENDEDOR_AVION',
     ]) {
-      expect(DIRECTO.has(c) || INDIRECTO.has(c) || PERMISO.has(c)).toBe(false);
+      expect(
+        COMBUSTIBLE.has(c) ||
+          DIRECTO.has(c) ||
+          INDIRECTO.has(c) ||
+          PERMISO.has(c),
+      ).toBe(false);
     }
   });
 });
@@ -85,6 +106,7 @@ describe('profit-sharing.service.ts los IMPORTA (sin copias locales)', () => {
     const sinEspacios = fuente.replace(/\s+/g, '');
     for (const patron of [
       'const esTuas = g.categoria === TUAS_CAT;',
+      ': COMBUSTIBLE.has(g.categoria)',
       ': DIRECTO.has(g.categoria)',
       ': INDIRECTO.has(g.categoria)',
       ': PERMISO.has(g.categoria)',

@@ -298,6 +298,8 @@ export function sinLlavesPesos(r: unknown): unknown {
     const gas = a.gastos as Record<string, unknown>;
     for (const k of [
       'directos_mxn',
+      // COMBUSTIBLE (23-oct-2026, invariante 104): también en pesos.
+      'combustible_mxn',
       'indirectos_mxn',
       'permisos_mxn',
       'otros_prorrateados_mxn',
@@ -305,6 +307,7 @@ export function sinLlavesPesos(r: unknown): unknown {
       delete gas[k];
     delete a.reserva_overhaul_mxn;
     delete a.saldo_disponible_mxn;
+    delete a.utilidad_antes_gastos_mxn;
     delete a.pesos_sin_tc_usd;
     // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
     delete a.afac_reservado_mxn;
@@ -356,6 +359,9 @@ export function sinLlavesPesosPayload(p: unknown): unknown {
       // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
       'afac_reservado_mxn',
       'reserva_retenida_mxn',
+      // Combustible aparte (23-oct-2026, invariante 104): sus pesos también.
+      'combustible_mxn',
+      'utilidad_antes_gastos_mxn',
     ])
       delete a[k];
     for (const s of a.reparto as Array<Record<string, unknown>>) {

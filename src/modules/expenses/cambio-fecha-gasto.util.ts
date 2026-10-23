@@ -67,6 +67,7 @@ import {
   etiquetaMesCorta,
 } from '../profit-sharing/reparto-pago.util';
 import {
+  COMBUSTIBLE,
   DIRECTO,
   FIJO,
   INDIRECTO,
@@ -342,7 +343,8 @@ export function errorMedioNoBancario(
  *  - con partes de reparto manual y categoría repartible ⇒ sus aviones;
  *  - FIJO sin reparto ⇒ toda la flota (pool prorrateado);
  *  - otra categoría de EMPRESA sin reparto ⇒ null (EXCLUIDA);
- *  - DIRECTO, INDIRECTO (REFACCION, SERVICIOS y, desde el 20-oct-2026
+ *  - COMBUSTIBLE (GAS: su propia línea desde el 23-oct-2026, invariante
+ *    104), DIRECTO, INDIRECTO (REFACCION, SERVICIOS y, desde el 20-oct-2026
  *    —invariante 99—, la categoría INDIRECTO) y PERMISO ⇒ su avión
  *    (`avionDeGastoEmbebido`, la regla de `avionDelGasto`) o null sin avión;
  *  - el resto (NOMINA sin reparto, PERSONAL_DUENO, categorías futuras) ⇒
@@ -366,7 +368,12 @@ export function alcanceRepartoPorFecha(
   }
   if (cat === FIJO) return { tipo: 'FLOTA' };
   if (CATEGORIAS_GASTO_EMPRESA.has(cat)) return null;
-  if (DIRECTO.has(cat) || INDIRECTO.has(cat) || PERMISO.has(cat)) {
+  if (
+    COMBUSTIBLE.has(cat) ||
+    DIRECTO.has(cat) ||
+    INDIRECTO.has(cat) ||
+    PERMISO.has(cat)
+  ) {
     const avion = avionDeGastoEmbebido(g as unknown as Record<string, unknown>);
     return avion ? { tipo: 'AVION', avion } : null;
   }

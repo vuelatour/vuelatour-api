@@ -11509,6 +11509,38 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     0.0.101) ninguna alerta «Refacciones sin registrar en el avión» en API
     ni panel: el cliente preguntó por ella el 21-oct-2026.
 
+104. **COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS EN EL REPARTO (23-oct-2026,
+    API 0.0.103, sin migración).** Pedido del cliente con las capturas de la
+    card, de la pantalla por avión y de su Excel «Balance»: «debemos separar
+    gastos directos del combustible, porque los está uniendo, porque no nos
+    está coincidiendo con el excel» (N621TX sep-2026: la card decía «Gastos
+    directos 187,865.72» = combustible 147,277.58 + otros directos
+    40,588.14; el Excel los lleva en dos líneas). Grupo NUEVO `COMBUSTIBLE`
+    = {GAS} en `grupos-reparto.util.ts` (`DIRECTO` se queda con las 9
+    categorías sin combustible); el ternario de `computeAvion` lo clasifica
+    antes que DIRECTO (también las partes de un GAS repartido a mano) y
+    `alcanceRepartoPorFecha` lo trata como gasto del avión. Respuesta del
+    reparto (ADITIVO): `gastos.directos_usd/_mxn` quedan SIN combustible,
+    nacen `gastos.combustible_usd/_mxn` y, al nivel del avión,
+    `utilidad_antes_gastos_usd/_mxn` = cobrado − comisiones − directos −
+    provisión AFAC (la línea «UTILIDAD ANTES DE GASTOS» del Excel; de ahí
+    − combustible − indirectos − permisos − fijos prorrateados + otros
+    ingresos = saldo). Cada componente se redondea aparte (disciplina v1.3):
+    el saldo NO se mueve salvo el centavo de redondeo cuando el GAS y los
+    demás directos redondeaban juntos (en el golden, ninguno). El histórico
+    por avión trae `combustible_mxn` por mes y en totales; la previa del
+    cierre (`gastos_usd`) y el dashboard suman el combustible. Payload del
+    PDF/XLSX: `gastos_directos_*` SIN combustible + `combustible_*` y
+    `utilidad_antes_gastos_*` (opcionales en pydantic: un pyservices
+    anterior los ignora, por eso pyservices se sube ANTES que el API; el
+    panel pinta la cascada en el orden del Excel cuando las llaves vienen y
+    como antes si no). Golden `libros-pesos.golden-0103.json` (recapturado:
+    directos 367.60 ⇒ 200 + combustible 167.60, saldo 4,488.80 intacto); el
+    0101 se queda para que `profit-sharing.service.combustible.spec` pruebe
+    la identidad byte a byte (combustible devuelto a directos = la respuesta
+    de antes). Specs: `grupos-reparto.util.spec` (membresía congelada),
+    `…combustible.spec`, `…avion.spec`, `…reparto-pesos.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12252,7 +12284,10 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   El 21-oct-2026 se le sumó el lote 0.0.102 (invariantes 100–103: entregas
   a socios en los balances, Compras/refacción, «se queda en el mes» al
   cerrar, alerta de transporte sin TAXI): UN solo push con el MISMO orden
-  de abajo; la versión que debe responder `/v1/version` es 0.0.102.
+  de abajo; la versión que debe responder `/v1/version` es 0.0.102. **El
+  23-oct-2026 se sumó el 0.0.103 (invariante 104, combustible aparte; SIN
+  migración): pyservices primero (acepta las llaves nuevas), luego el API y
+  enseguida el panel; `/v1/version` debe responder 0.0.103.**
   Nada tiene push: el 0.0.100 TAMPOCO está en prod (Railway nunca tomó
   `9189e0a3`; prod sigue en 0.0.99: confirmar con `GET /v1/version` antes
   de empezar), pyservices y el panel (rama `lote-b2`, commit `3cb74af` sin
