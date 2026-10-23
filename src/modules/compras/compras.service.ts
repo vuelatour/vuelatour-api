@@ -98,6 +98,9 @@ const CATEGORIAS_NO_LIGABLES = [
   // 20-oct-2026 (invariante 97): tampoco los otros gastos directos del vuelo.
   // (PAQUETERIA sí se liga: el envío de una pieza es costo de la compra.)
   'OTROS_DIRECTOS_VUELO',
+  // 23-oct-2026 (invariante 107): un egreso de VuelaTour de la hoja «otros
+  // movimientos» del Balance general no es costo de ninguna refacción.
+  'OTROS_MOVIMIENTOS',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 

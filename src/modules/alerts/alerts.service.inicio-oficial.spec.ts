@@ -78,6 +78,18 @@ describe('AlertsService — inicio oficial', () => {
     expect(lleva(de('gasto')[0], 'gte', 'fecha_gasto', INICIO)).toBe(true);
   });
 
+  it('gastos_sin_avion: «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107) queda FUERA del universo (el not.in de la fuente única)', async () => {
+    const { priv, de } = armar(INICIO);
+    await priv.checkGastosSinAvion(config);
+    const notIn = de('gasto')
+      .flatMap((c) => c.ops)
+      .find((o) => o.m === 'not' && o.args[0] === 'categoria')?.args[2];
+    expect(typeof notIn).toBe('string');
+    expect(notIn).toContain('OTROS_MOVIMIENTOS');
+    expect(notIn).toContain('COMISION_VENDEDOR');
+    expect(notIn).not.toContain('COMISION_VENDEDOR_AVION');
+  });
+
   it('inicio null ⇒ sin piso (como 0.0.83)', async () => {
     const { priv, consultas } = armar(null);
     await priv.checkVuelosEstancados(config);

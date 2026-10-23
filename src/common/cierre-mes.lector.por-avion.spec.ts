@@ -309,6 +309,33 @@ describe('participantesDeVuelos / avionesDeGastoCandado', () => {
     // Sin nada ⇒ [] (solo la fila global).
     expect(await avionesDeGastoCandado(sb, { id: 'g-x' }, null)).toEqual([]);
   });
+
+  it('«Otros movimientos (VuelaTour)» (invariante 107): sin vuelo ⇒ [] aunque traiga avión sellado (solo la fila global); con vuelo ⇒ el avión del vuelo', async () => {
+    const f = fakeCierre(mundo());
+    const sb = sbDe(f);
+    expect(
+      await avionesDeGastoCandado(
+        sb,
+        { id: 'g-om', categoria: 'OTROS_MOVIMIENTOS', aeronave_id: AV621 },
+        null,
+      ),
+    ).toEqual([]);
+    expect(
+      await avionesDeGastoCandado(
+        sb,
+        { categoria: 'OTROS_MOVIMIENTOS', vuelo_id: V2, aeronave_id: AV990 },
+        { fecha_vuelo: null, aeronave_id: AV990, es_externo: false },
+      ),
+    ).toEqual([AV990]);
+    // Control: la TUA sin vuelo con avión sellado sigue yendo a su avión.
+    expect(
+      await avionesDeGastoCandado(
+        sb,
+        { id: 'g-tua', categoria: 'TUAS', aeronave_id: AV621 },
+        null,
+      ),
+    ).toEqual([AV621]);
+  });
 });
 
 describe('CANDADO 409 MES_CERRADO por avión', () => {

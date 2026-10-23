@@ -10,6 +10,7 @@ jest.mock('../conciliacion/conciliacion.service', () => ({
 }));
 
 import {
+  OTROS_MOVIMIENTOS_CLAVE_DETALLE,
   PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
   PAGO_VENDEDOR_AVION_OTRO_PERIODO_CLAVE_DETALLE,
   PAGO_VENDEDOR_AVION_VUELATOUR_CLAVE_DETALLE,
@@ -621,5 +622,86 @@ describe('Reparto a socios — Comisariato es gasto DIRECTO del avión (13-oct-2
     expect(fila(otro, 'OTRO')).toMatchObject({ grupo: 'EXCLUIDO', usd: 250 });
     expect(otro.gastos.directos_usd).toBe(0);
     expect(otro.saldo_disponible_usd).toBe(sin.saldo_disponible_usd);
+  });
+});
+
+/**
+ * «OTROS MOVIMIENTOS (VUELATOUR)» (23-oct-2026, API 0.0.106, invariante 107):
+ * egreso de VuelaTour que vive en la hoja «otros movimientos» del Balance
+ * general. NUNCA es costo del avión: grupo EXCLUIDO con y sin vuelo (como la
+ * TUA pagada), con clave propia solo por transparencia; el saldo del avión
+ * no se mueve.
+ */
+describe('Reparto a socios — «Otros movimientos (VuelaTour)» NO es costo del avión (23-oct-2026, invariante 107)', () => {
+  const control: Fila = {
+    ...gastoBase,
+    id: 'g-op',
+    categoria: 'OPERACIONES',
+    monto: 300,
+    vuelo_id: VUELO,
+  };
+  const otroMovimiento = (extra: Fila = {}): Fila => ({
+    ...gastoBase,
+    id: 'g-om',
+    categoria: 'OTROS_MOVIMIENTOS',
+    monto: 450,
+    ...extra,
+  });
+
+  it('con vuelo del avión ⇒ EXCLUIDO con su clave propia; directos y saldo IDÉNTICOS a sin él', () => {
+    const sin = computar([control]);
+    const con = computar([control, otroMovimiento({ vuelo_id: VUELO })]);
+    expect(fila(con, OTROS_MOVIMIENTOS_CLAVE_DETALLE)).toMatchObject({
+      grupo: 'EXCLUIDO',
+      usd: 450,
+    });
+    expect(con.gastos.directos_usd).toBe(300);
+    expect(con.gastos.indirectos_usd).toBe(sin.gastos.indirectos_usd);
+    expect(con.saldo_disponible_usd).toBe(sin.saldo_disponible_usd);
+    // Nunca en la clave cruda ni como «(repartido)».
+    expect(fila(con, 'OTROS_MOVIMIENTOS')).toBeUndefined();
+  });
+
+  it('sin vuelo con avión sellado ⇒ EXCLUIDO igual (el avión solo informa); saldo intacto', () => {
+    const sin = computar([control]);
+    const con = computar([control, otroMovimiento()]);
+    expect(fila(con, OTROS_MOVIMIENTOS_CLAVE_DETALLE)).toMatchObject({
+      grupo: 'EXCLUIDO',
+      usd: 450,
+    });
+    expect(con.saldo_disponible_usd).toBe(sin.saldo_disponible_usd);
+  });
+
+  it('la clave empieza con el código EXACTO y la etiqueta derivada conserva el sufijo', () => {
+    expect(OTROS_MOVIMIENTOS_CLAVE_DETALLE).toBe(
+      'OTROS_MOVIMIENTOS (egreso VuelaTour · Otros movimientos)',
+    );
+    const r = computar([otroMovimiento({ vuelo_id: VUELO })]);
+    const f = r.detalle.gastos_por_categoria.find(
+      (x) => x.categoria === OTROS_MOVIMIENTOS_CLAVE_DETALLE,
+    ) as unknown as { etiqueta: string } | undefined;
+    expect(f?.etiqueta).toBe(
+      'Otros movimientos (VuelaTour) (egreso VuelaTour · Otros movimientos)',
+    );
+  });
+
+  it('sin TUA embebido: aunque la IA traiga renglones de aeródromo no hay fila «TUA embebido» ni descuento fantasma', () => {
+    const r = computar([
+      otroMovimiento({
+        vuelo_id: VUELO,
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Tarifa TUA', monto: 300 },
+            { concepto: 'Operaciones', monto: 150 },
+          ],
+        },
+      }),
+    ]);
+    expect(fila(r, 'TUA embebido (excluido)')).toBeUndefined();
+    expect(fila(r, OTROS_MOVIMIENTOS_CLAVE_DETALLE)).toMatchObject({
+      grupo: 'EXCLUIDO',
+      usd: 450,
+    });
+    expect(r.gastos.directos_usd).toBe(0);
   });
 });

@@ -612,6 +612,69 @@ describe('R2b — PERMISO marcado «Pago de AFAC» (invariante 90)', () => {
   });
 });
 
+describe('R2c — «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107)', () => {
+  const om = (extra: Partial<GastoParaUbicacion> = {}) =>
+    gasto({ categoria: 'OTROS_MOVIMIENTOS', ...extra });
+
+  it('con vuelo: Balance general, hoja «otros movimientos», NINGÚN avión (el sellado solo informa); eje y mes contable del VUELO', () => {
+    expect(ubicacionBalanceDeGasto(om())).toEqual({
+      periodo: OCT,
+      eje: 'vuelo',
+      aviones: [],
+      general: true,
+      hoja_avion: null,
+      hoja_general: 'otros_movimientos',
+    });
+    // Sellado a OTRO avión sin tramo: no es el hueco #255 — el egreso vive
+    // en el bloque del vuelo del general, no en ningún libro de avión.
+    expect(
+      ubicacionBalanceDeGasto(
+        om({ aeronave_id: VGV, aviones_con_tramo_vivo: [N41] }),
+      ),
+    ).toMatchObject({ aviones: [], hoja_general: 'otros_movimientos' });
+    expect(necesitaTramosVivos(om({ aeronave_id: VGV }))).toBe(false);
+    // Sin embed del vuelo ⇒ null (jamás se inventa el mes).
+    expect(ubicacionBalanceDeGasto(om({ vuelo: null }))).toBeNull();
+  });
+
+  it('EXTERNO sin avión: también «otros movimientos» del general (el externo es un vuelo más de la pestaña)', () => {
+    expect(
+      ubicacionBalanceDeGasto(
+        om({
+          aeronave_id: null,
+          vuelo: {
+            fecha_vuelo: '2026-10-10T21:30:00+00:00',
+            aeronave_id: null,
+            es_externo: true,
+          },
+        }),
+      ),
+    ).toMatchObject({ eje: 'vuelo', hoja_general: 'otros_movimientos' });
+  });
+
+  it('sin vuelo (con o sin avión): fila suelta por la fecha del gasto; sin fecha ⇒ null', () => {
+    for (const aeronave_id of [VGV, null]) {
+      expect(
+        ubicacionBalanceDeGasto(
+          sinVuelo({ categoria: 'OTROS_MOVIMIENTOS', aeronave_id }),
+        ),
+      ).toEqual({
+        periodo: SEP,
+        eje: 'gasto',
+        aviones: [],
+        general: true,
+        hoja_avion: null,
+        hoja_general: 'otros_movimientos',
+      });
+    }
+    expect(
+      ubicacionBalanceDeGasto(
+        sinVuelo({ categoria: 'OTROS_MOVIMIENTOS', fecha_gasto: null }),
+      ),
+    ).toBeNull();
+  });
+});
+
 describe('ALARMA DE PARIDAD con aircraft-balance.service.ts', () => {
   // El espejo imita consultas y reglas del libro: si alguien las cambia,
   // este spec obliga a revisar `ubicacion-balance-gasto.util.ts`. Se compara

@@ -28,7 +28,7 @@ import {
  * EJECUTA la fuente única del panel (`src/lib/admin/gasto-avion.ts#
  * estadoAvionGasto`, con sus `categorias-gasto.ts` y `format.ts`): la
  * transpila con el `typescript` de este repo y la corre sobre la MISMA
- * matriz que `gasto-avion.util.spec` (3,600 filas) y sobre las filas reales.
+ * matriz que `gasto-avion.util.spec` (3,720 filas) y sobre las filas reales.
  * Además lee `expenses-table.tsx` como texto: cómo la tabla PINTA cada
  * estado es lo que aquí se aplana a una celda (`celdaDeLaTabla`).
  *
@@ -318,9 +318,9 @@ function celdaDeLaTabla(e: EstadoPanel, p: HelperAvionPanel): string {
       }
     });
 
-    it('la MISMA celda y la MISMA rama en las 3,600 filas de la matriz', () => {
+    it('la MISMA celda y la MISMA rama en las 3,720 filas de la matriz', () => {
       const filas = matrizAvionGasto();
-      expect(filas).toHaveLength(3600);
+      expect(filas).toHaveLength(3720);
       const distintas: string[] = [];
       for (const f of filas) {
         const e = panel.estadoAvionGasto(f);

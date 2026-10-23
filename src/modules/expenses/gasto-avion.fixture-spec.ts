@@ -188,7 +188,7 @@ export const FILAS_REALES: readonly CasoReal[] = [
 
 // ------------------------- matriz de combinaciones -------------------------
 
-/** Las 22 categorías del enum + códigos raros (legado, prefijos, vacíos). */
+/** Las 25 categorías del enum + códigos raros (legado, prefijos, vacíos). */
 export const CATEGORIAS_MATRIZ: ReadonlyArray<string | null | undefined> = [
   ...Object.keys(CATEGORIA_GASTO_LABEL),
   'otro',
@@ -261,8 +261,9 @@ const REPARTOS_MATRIZ: readonly FilaGasto[] = [
 ];
 
 /**
- * Producto cartesiano categoría × avión × vuelo × reparto (30 × 6 × 2 × 10
- * = 3,600 filas desde el 20-oct-2026; antes 28 categorías y 3,360). Incluye combinaciones que la BD no permite (reparto en una
+ * Producto cartesiano categoría × avión × vuelo × reparto (31 × 6 × 2 × 10
+ * = 3,720 filas desde el 23-oct-2026 —OTROS_MOVIMIENTOS—; 3,600 desde el
+ * 20-oct-2026; antes 28 categorías y 3,360). Incluye combinaciones que la BD no permite (reparto en una
  * categoría que no se reparte): la columna debe decir lo mismo que la tabla
  * con CUALQUIER fila que le llegue.
  */

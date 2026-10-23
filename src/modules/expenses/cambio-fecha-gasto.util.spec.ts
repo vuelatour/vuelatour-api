@@ -597,6 +597,14 @@ describe('confirmación — los textos son espejo de los libros', () => {
     );
   });
 
+  it('«Otros movimientos (VuelaTour)» sin vuelo con avión (23-oct-2026, invariante 107): la MISMA confirmación que la TUA suelta (general + Dinero + T.C. del bloque VUELATOUR; sin reparto)', () => {
+    const g = sinVuelo({ categoria: 'OTROS_MOVIMIENTOS' });
+    expect(alcanceRepartoPorFecha(g, [])).toBeNull();
+    expect(confirmacion(decidir(g, '2026-10-01')).message).toBe(
+      `Pasa de septiembre 2026 a octubre 2026. En el balance general pasa a octubre 2026. En el Libro Dinero pasa a octubre 2026. ${LINEA_TC_GENERAL} ${SEP_TERMINO}`,
+    );
+  });
+
   it('mes en curso: OPERACIONES en pesos sin T.C. dentro de octubre ⇒ APLICAR sin confirmación', () => {
     const g = winjet({ categoria: 'OPERACIONES', fecha_gasto: '2026-10-03' });
     expect(decidir(g, '2026-10-12')).toEqual({
@@ -732,11 +740,25 @@ describe('sueltas de «otros movimientos»: el bloque VUELATOUR del Balance gene
     expect(conAvion).not.toContain(LINEA_TC_GENERAL);
   });
 
-  it('esSueltaOtrosMovimientos: espejo de las tres lecturas de buildOtrosMovimientos', () => {
+  it('esSueltaOtrosMovimientos: espejo de las lecturas de buildOtrosMovimientos', () => {
     expect(esSueltaOtrosMovimientos(tuas())).toBe(true);
     expect(esSueltaOtrosMovimientos(tuas({ aeronave_id: N41 }))).toBe(true);
     // TUAS CON vuelo: nota de la fila del vuelo, no suelta.
     expect(esSueltaOtrosMovimientos(winjet({ categoria: 'TUAS' }))).toBe(false);
+    // «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107): sin
+    // vuelo es suelta (con o sin avión sellado); con vuelo vive en el bloque
+    // de su vuelo.
+    expect(
+      esSueltaOtrosMovimientos(tuas({ categoria: 'OTROS_MOVIMIENTOS' })),
+    ).toBe(true);
+    expect(
+      esSueltaOtrosMovimientos(
+        tuas({ categoria: 'OTROS_MOVIMIENTOS', aeronave_id: N41 }),
+      ),
+    ).toBe(true);
+    expect(
+      esSueltaOtrosMovimientos(winjet({ categoria: 'OTROS_MOVIMIENTOS' })),
+    ).toBe(false);
     // GAS sin avión: suelta solo si ningún tramo ni vuelo lo resuelve…
     expect(
       esSueltaOtrosMovimientos(
@@ -976,11 +998,13 @@ describe('alcanceRepartoPorFecha — espejo del ternario de computeAvion', () =>
     'PERSONAL_DUENO',
     // 20-oct-2026 (invariante 97): de EMPRESA ⇒ EXCLUIDO del reparto.
     'PAQUETERIA',
+    // 23-oct-2026 (invariante 107): egreso de VuelaTour ⇒ EXCLUIDO como TUAS.
+    'OTROS_MOVIMIENTOS',
   ];
 
-  it('tabla CONGELADA de las 24 categorías sin reparto (con y sin avión)', () => {
+  it('tabla CONGELADA de las 25 categorías sin reparto (con y sin avión)', () => {
     const todas = Object.values(CategoriaGasto) as string[];
-    expect(todas).toHaveLength(24);
+    expect(todas).toHaveLength(25);
     expect([...AVION, 'FIJO', ...NULO].sort()).toEqual([...todas].sort());
     for (const categoria of todas) {
       const conAvion = alcanceRepartoPorFecha(sinVuelo({ categoria }), []);

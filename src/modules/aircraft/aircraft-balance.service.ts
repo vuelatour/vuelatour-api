@@ -34,12 +34,22 @@ import {
 import {
   CATEGORIA_COMISARIATO,
   CATEGORIA_OTROS_DIRECTOS_VUELO,
+  CATEGORIA_OTROS_MOVIMIENTOS,
   CATEGORIA_NOMINA,
   CATEGORIAS_GASTO_EMPRESA,
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
   categoriaEsPagoVendedor,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
+// «OTROS MOVIMIENTOS (VUELATOUR)» como gasto (23-oct-2026, invariante 107):
+// gramática única del concepto, clave de la suelta y orden (compartida con
+// el Libro Dinero).
+import {
+  CLAVE_SUELTA_OTROS_MOVIMIENTOS,
+  conceptoOtroMovimiento,
+  esOtroMovimiento,
+  ordenarOtrosMovimientos,
+} from '../../common/otros-movimientos.util';
 // NÓMINA SIN REPARTIR (16-oct-2026, invariante 91): sumas y texto del aviso.
 import {
   pendienteBalanceNominaSinRepartir,
@@ -6408,6 +6418,11 @@ export class AircraftBalanceService {
    *  - `tuasSueltos`: TUAS sin vuelo sin avión sin reparto — regla 7
    *    (28-ago): no restan en ninguna hoja; su único lugar sigue siendo la
    *    fila suelta "tuas sin vuelo" de "Otros movimientos".
+   *  - `otrosMovimientosSueltos` (23-oct-2026, invariante 107): «Otros
+   *    movimientos (VuelaTour)» sin vuelo ni avión — NO van a «otros gastos»
+   *    (no son de EMPRESA): su lugar es la fila suelta «otros movimientos sin
+   *    vuelo» de «Otros movimientos» (los que traen avión sellado los lee
+   *    aparte `buildOtrosMovimientos`, como los TUAS).
    *  - `nominaSinRepartir` (16-oct-2026, API 0.0.90, invariante 91): NÓMINA
    *    SIN ninguna parte de reparto ⇒ NO va a `empresa` (no entra a ningún
    *    balance hasta repartirla en el módulo Nómina); solo alimenta el aviso
@@ -6422,6 +6437,7 @@ export class AircraftBalanceService {
     tuasSueltos: GastoRow[];
     pagosAfac: GastoRow[];
     nominaSinRepartir: GastoRow[];
+    otrosMovimientosSueltos: GastoRow[];
   }> {
     const sb = this.supabase.service;
     // `vuelo:vuelo_id(folio)` = solo traza para el detalle; `medio_pago` +
@@ -6507,8 +6523,19 @@ export class AircraftBalanceService {
     // ninguna parte NO va a «otros gastos» ni a ningún libro — se junta
     // aparte para el aviso del consolidado del general.
     const nominaSinRepartir: GastoRow[] = [];
+    // «OTROS MOVIMIENTOS (VUELATOUR)» sin vuelo ni avión (23-oct-2026,
+    // invariante 107): egreso de VuelaTour de la hoja «otros movimientos»;
+    // NO es de EMPRESA, así que no va a «otros gastos» (se egresaría en dos
+    // hojas del mismo libro): fila suelta de la pestaña.
+    const otrosMovimientosSueltos: GastoRow[] = [];
     if (sueltos.length === 0)
-      return { empresa, tuasSueltos, pagosAfac, nominaSinRepartir };
+      return {
+        empresa,
+        tuasSueltos,
+        pagosAfac,
+        nominaSinRepartir,
+        otrosMovimientosSueltos,
+      };
     // El reparto manual GANA: un gasto repartido ya vive en los libros de
     // sus aviones — aquí solo entra lo que nadie reclama.
     const repartos = await fetchRepartos(
@@ -6543,6 +6570,10 @@ export class AircraftBalanceService {
         else if (esPagoAfac(fila)) pagosAfac.push(fila);
         else if (fila.categoria === CATEGORIA_NOMINA)
           nominaSinRepartir.push(fila);
+        // «Otros movimientos (VuelaTour)» (invariante 107): fila suelta de
+        // «Otros movimientos», jamás «otros gastos».
+        else if (fila.categoria === CATEGORIA_OTROS_MOVIMIENTOS)
+          otrosMovimientosSueltos.push(fila);
         else empresa.push(fila);
         continue;
       }
@@ -6567,7 +6598,13 @@ export class AircraftBalanceService {
         });
       }
     }
-    return { empresa, tuasSueltos, pagosAfac, nominaSinRepartir };
+    return {
+      empresa,
+      tuasSueltos,
+      pagosAfac,
+      nominaSinRepartir,
+      otrosMovimientosSueltos,
+    };
   }
 
   /**
@@ -6743,6 +6780,16 @@ export class AircraftBalanceService {
    * libro EXTERNOS del general); aquí solo sus TUAs/extras/pernocta, el
    * sobrecobro y la comisión bancaria, como en cualquier vuelo.
    *
+   * «OTROS MOVIMIENTOS (VUELATOUR)» como gasto (23-oct-2026, API 0.0.106,
+   * invariante 107; pedido del cliente: «Falta la opción de agregar un gasto
+   * a la hoja de "otros movimientos" en el balance general»): cada gasto
+   * `OTROS_MOVIMIENTOS` ligado a un vuelo es una línea de SOLO-egreso del
+   * bloque de su vuelo (concepto de la oficina, fecha del gasto, pesos como
+   * las «tuas pagadas»); sin vuelo, fila suelta «otros movimientos sin vuelo»
+   * (con la matrícula delante si trae avión sellado). Entra al bloque
+   * VUELATOUR como la TUA; ningún libro por avión lo cuenta (fuente única de
+   * la gramática: `common/otros-movimientos.util.ts`).
+   *
    * Las filas «AFAC · matrícula» (13-oct-2026, invariante 62) NO se arman
    * aquí: las anexa `payloadGeneral` desde los libros (esta función no los
    * conoce y su retorno es byte a byte el de siempre).
@@ -6757,11 +6804,14 @@ export class AircraftBalanceService {
     hasta: string,
     memoTc: Map<string, Promise<TipoCambioDetalle | null>>,
     // Subconjuntos de gastosEmpresaYSueltos (lectura compartida con la hoja
-    // "otros gastos" del general): aquí solo se pintan los TUAS sueltos.
+    // "otros gastos" del general): aquí solo se pintan los TUAS sueltos y,
+    // desde el 23-oct-2026 (invariante 107), los «Otros movimientos
+    // (VuelaTour)» sueltos (opcional: los specs de 4 argumentos no lo traen).
     empresaYSueltos: {
       empresa: GastoRow[];
       tuasSueltos: GastoRow[];
       pagosAfac?: GastoRow[];
+      otrosMovimientosSueltos?: GastoRow[];
     },
     // Memo de etiquetas de factura que ya llenaron los libros del general
     // (30-sep-2026): aquí solo se consultan los vuelos que ningún libro
@@ -6823,6 +6873,7 @@ export class AircraftBalanceService {
       facturasRes,
       gasRes,
       tuasSinVueloRes,
+      otrosMovSinVueloRes,
       consecutivosCliente,
       escalasOmRes,
     ] = await Promise.all([
@@ -6830,8 +6881,11 @@ export class AircraftBalanceService {
       vueloIds.length
         ? sb
             .from('gasto')
+            // `id`, `medio_pago` y el proveedor (23-oct-2026, invariante
+            // 107): concepto y orden de las líneas «Otros movimientos
+            // (VuelaTour)» del vuelo.
             .select(
-              `vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, valor_ia_extraido${colTua}`,
+              `id, vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, medio_pago, valor_ia_extraido, proveedor:proveedor_id(nombre)${colTua}`,
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve(vacio),
@@ -6880,6 +6934,21 @@ export class AircraftBalanceService {
         .gte('fecha_gasto', desde)
         .lte('fecha_gasto', hasta)
         .order('fecha_gasto', { ascending: true }),
+      // «Otros movimientos (VuelaTour)» sin vuelo CON avión sellado
+      // (23-oct-2026, invariante 107): el avión solo informa (ningún libro
+      // por avión lo cuenta) — aquí es su único lugar, como los TUAS. Los
+      // sin avión ya vienen en `empresaYSueltos.otrosMovimientosSueltos`.
+      sb
+        .from('gasto')
+        .select(
+          'id, aeronave_id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, notas, medio_pago, proveedor:proveedor_id(nombre)',
+        )
+        .eq('categoria', CATEGORIA_OTROS_MOVIMIENTOS)
+        .is('vuelo_id', null)
+        .not('aeronave_id', 'is', null)
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
       // CONSECUTIVO del vuelo por cliente (23-oct-2026, invariante 106):
       // columna propia de la pestaña; best-effort, todo o nada (nunca lanza).
       consecutivosClienteDeVuelos(sb, vueloIds),
@@ -6900,6 +6969,7 @@ export class AircraftBalanceService {
       cobrosRes,
       gasRes,
       tuasSinVueloRes,
+      otrosMovSinVueloRes,
       escalasOmRes,
     ]) {
       if (r.error) throw new Error(r.error.message);
@@ -7689,6 +7759,32 @@ export class AircraftBalanceService {
         }
       }
 
+      // «OTROS MOVIMIENTOS (VUELATOUR)» DEL VUELO (23-oct-2026, API 0.0.106,
+      // invariante 107; pedido del cliente: «Falta la opción de agregar un
+      // gasto a la hoja de "otros movimientos" en el balance general»): cada
+      // gasto de la categoría ligado a este vuelo es UNA línea de SOLO-egreso
+      // del bloque del vuelo — concepto = lo que escribió la oficina (o la
+      // etiqueta), fecha = la del gasto, pesos con la MISMA regla que las
+      // «tuas pagadas» (`gastoMxn`: MXN directo; USD × tc_gasto o el T.C.
+      // promedio de la pestaña; sin ninguno, visible con «(USD sin TC)» y
+      // sin sumar). Suma al EGRESO del vuelo (remanente = ingreso − egreso) y
+      // entra al bloque VUELATOUR como la TUA; nada por avión (la fila del
+      // vuelo lo salta por `CAT_FUERA_DEL_AVION`). Orden determinista (fecha,
+      // id); un CANCELADO también lo lista (es un egreso real).
+      for (const g of ordenarOtrosMovimientos(
+        gastosV.filter((x) => esOtroMovimiento(x)),
+      )) {
+        const mxnOM = gastoMxn(g, num(g.monto) ?? 0);
+        const egresoOM = r2(mxnOM);
+        filas.push({
+          ...filaVacia,
+          concepto_egreso: conceptoOtroMovimiento(g, { sinTc: mxnOM == null }),
+          egreso_mxn: egresoOM,
+          fecha_egreso: (g.fecha_gasto as string | null) ?? null,
+          remanente_mxn: egresoOM != null ? r2(-egresoOM) : null,
+        });
+      }
+
       // (La línea de INGRESO «comisión del vendedor a cargo del avión …» del
       // 0.0.65 ya NO existe — 7-oct-2026, API 0.0.66: con el ingreso
       // cobrado se leía la comisión DOS veces. Desde el 0.0.74 el pago REAL
@@ -7877,6 +7973,42 @@ export class AircraftBalanceService {
         concepto_egreso: `${av?.matricula ?? 'avión ¿?'} · ${
           base.concepto_egreso ?? 'tuas'
         }`,
+      });
+      tcSueltas.push(tcDeGastoSuelto(g));
+    }
+    // «OTROS MOVIMIENTOS (VUELATOUR)» SIN VUELO (23-oct-2026, invariante
+    // 107): una fila suelta por gasto, con la gramática única del concepto
+    // (lo que escribió la oficina) y la MISMA regla de pesos y de T.C. de las
+    // sueltas (`sueltaDe` / `tcDeGastoSuelto`). Primero los sin avión (de la
+    // lectura compartida con «otros gastos»: `otrosMovimientosSueltos`),
+    // después los que traen avión sellado (lectura propia, como los TUAS: el
+    // avión solo informa y va delante en el concepto). Orden (fecha, id).
+    const sueltaOtroMovimiento = (
+      g: Record<string, unknown>,
+      matricula: string | null,
+    ): BalanceOtroMovimientoFilaPayload => {
+      const mxn = gastoMxn(g, num(g.monto) ?? 0);
+      const concepto = conceptoOtroMovimiento(g, { sinTc: mxn == null });
+      return {
+        ...sueltaDe(g, CLAVE_SUELTA_OTROS_MOVIMIENTOS),
+        concepto_egreso: matricula ? `${matricula} · ${concepto}` : concepto,
+      };
+    };
+    for (const g of ordenarOtrosMovimientos(
+      (empresaYSueltos.otrosMovimientosSueltos ?? []) as unknown as Array<
+        Record<string, unknown>
+      >,
+    )) {
+      sueltas.push(sueltaOtroMovimiento(g, null));
+      tcSueltas.push(tcDeGastoSuelto(g));
+    }
+    for (const g of ordenarOtrosMovimientos(
+      (otrosMovSinVueloRes.data ?? []) as Array<Record<string, unknown>>,
+    )) {
+      const av = aviones.get(g.aeronave_id as string);
+      sueltas.push({
+        ...sueltaOtroMovimiento(g, av?.matricula ?? 'avión ¿?'),
+        avion_color: av?.color ?? null,
       });
       tcSueltas.push(tcDeGastoSuelto(g));
     }

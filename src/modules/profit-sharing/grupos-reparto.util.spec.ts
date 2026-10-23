@@ -6,6 +6,7 @@ import {
   DIRECTO,
   FIJO,
   INDIRECTO,
+  OTROS_MOVIMIENTOS_CAT,
   PERMISO,
   TUAS_CAT,
 } from './grupos-reparto.util';
@@ -51,6 +52,8 @@ describe('grupos-reparto.util — membresía congelada', () => {
     expect([...PERMISO]).toEqual(['PERMISO']);
     expect(FIJO).toBe('FIJO');
     expect(TUAS_CAT).toBe('TUAS');
+    // 23-oct-2026 (invariante 107): EXCLUIDO como la TUA, con clave propia.
+    expect(OTROS_MOVIMIENTOS_CAT).toBe('OTROS_MOVIMIENTOS');
   });
 
   it('ninguna categoría está en dos grupos y todas existen en el enum', () => {
@@ -61,13 +64,14 @@ describe('grupos-reparto.util — membresía congelada', () => {
       ...PERMISO,
       FIJO,
       TUAS_CAT,
+      OTROS_MOVIMIENTOS_CAT,
     ];
     expect(new Set(todas).size).toBe(todas.length);
     const enumValores = Object.values(CategoriaGasto) as string[];
     for (const c of todas) expect(enumValores).toContain(c);
   });
 
-  it('NOMINA, OTRO y el pago al vendedor NO están en ningún grupo (caen a EXCLUIDO)', () => {
+  it('NOMINA, OTRO, el pago al vendedor y «Otros movimientos (VuelaTour)» NO están en ningún grupo (caen a EXCLUIDO)', () => {
     for (const c of [
       'NOMINA',
       'OTRO',
@@ -76,6 +80,9 @@ describe('grupos-reparto.util — membresía congelada', () => {
       'PERSONAL_DUENO',
       'COMISION_VENDEDOR',
       'COMISION_VENDEDOR_AVION',
+      // 23-oct-2026 (invariante 107): egreso de VuelaTour, EXCLUIDO como TUAS.
+      'OTROS_MOVIMIENTOS',
+      'PAQUETERIA',
     ]) {
       expect(
         COMBUSTIBLE.has(c) ||
@@ -106,6 +113,8 @@ describe('profit-sharing.service.ts los IMPORTA (sin copias locales)', () => {
     const sinEspacios = fuente.replace(/\s+/g, '');
     for (const patron of [
       'const esTuas = g.categoria === TUAS_CAT;',
+      'const esOtrosMovimientos = g.categoria === OTROS_MOVIMIENTOS_CAT;',
+      'esTuas || esPagoVendedor || pagoAfac || esOtrosMovimientos',
       ': COMBUSTIBLE.has(g.categoria)',
       ': DIRECTO.has(g.categoria)',
       ': INDIRECTO.has(g.categoria)',

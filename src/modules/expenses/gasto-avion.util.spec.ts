@@ -66,6 +66,10 @@ const EMPRESA_Y_COMISION = [
   // «Paquetería» (20-oct-2026, invariante 97): de EMPRESA.
   'PAQUETERIA',
   'COMISION_VENDEDOR',
+  // «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107): egreso de
+  // VuelaTour en «otros movimientos» del Balance general; el avión sellado
+  // solo informa ⇒ «VuelaTour» siempre (misma regla en el panel, df09970).
+  'OTROS_MOVIMIENTOS',
 ];
 /**
  * Las que dicen «VuelaTour» SIEMPRE sin reparto: la NÓMINA salió el
@@ -113,9 +117,9 @@ describe('columna «Avión» — gastos REALES de prod (15-oct-2026)', () => {
   });
 });
 
-describe('sin avión ni reparto: las 24 categorías', () => {
-  it('empresa, comisión (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; NÓMINA ⇒ «Sin repartir»; PERSONAL_DUENO ⇒ «Personal»; las 15 restantes ⇒ «Falta avión»', () => {
-    expect(CATEGORIAS).toHaveLength(24);
+describe('sin avión ni reparto: las 25 categorías', () => {
+  it('empresa, comisión (VuelaTour), otros movimientos (VuelaTour) e INDIRECTO ⇒ «VuelaTour»; NÓMINA ⇒ «Sin repartir»; PERSONAL_DUENO ⇒ «Personal»; las 15 restantes ⇒ «Falta avión»', () => {
+    expect(CATEGORIAS).toHaveLength(25);
     const falta: string[] = [];
     for (const categoria of CATEGORIAS) {
       const celda = celdaAvionGasto(gasto({ categoria }));
@@ -315,7 +319,8 @@ describe('reparto: gana a todo', () => {
         empresa.length > 0,
       );
     }
-    expect(conReparto).toBe(30 * 6 * 2 * 7);
+    // 31 categorías de la matriz desde el 23-oct-2026 (OTROS_MOVIMIENTOS).
+    expect(conReparto).toBe(31 * 6 * 2 * 7);
   });
 });
 
@@ -342,7 +347,7 @@ describe('«Falta avión» = la bandeja de pendientes del API', () => {
       }
       revisadas += 1;
     }
-    expect(revisadas).toBe(24 * 5 * 2 * 10);
+    expect(revisadas).toBe(25 * 5 * 2 * 10);
   });
 });
 

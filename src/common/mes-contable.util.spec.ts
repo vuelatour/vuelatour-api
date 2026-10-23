@@ -298,6 +298,14 @@ describe('mes contable del vuelo y del gasto', () => {
     );
   });
 
+  it('«Otros movimientos (VuelaTour)» (invariante 107): con vuelo cuenta en el mes contable del VUELO (su línea vive en el bloque del vuelo); sin vuelo, su fecha_gasto', () => {
+    expect(ejeContableDeGasto(gasto('OTROS_MOVIMIENTOS'))).toBe('vuelo');
+    expect(mesContableDeGasto(gasto('OTROS_MOVIMIENTOS'))).toBe('2026-10');
+    const suelto = gasto('OTROS_MOVIMIENTOS', { vuelo_id: null, vuelo: null });
+    expect(ejeContableDeGasto(suelto)).toBe('gasto');
+    expect(mesContableDeGasto(suelto)).toBe('2026-09');
+  });
+
   it('sin vuelo ⇒ fecha_gasto; sin embed del vuelo ⇒ fecha_gasto (jamás se inventa)', () => {
     expect(
       mesContableDeGasto(gasto('INDIRECTO', { vuelo_id: null, vuelo: null })),

@@ -3,6 +3,7 @@ import {
   CATEGORIA_COMISARIATO,
   CATEGORIA_GASTO_DESTINO,
   CATEGORIA_GASTO_LABEL,
+  CATEGORIA_OTROS_MOVIMIENTOS,
   CATEGORIA_PAGO_VENDEDOR,
   CATEGORIA_PAGO_VENDEDOR_AVION,
   CATEGORIAS_GASTO_EMPRESA,
@@ -10,9 +11,14 @@ import {
   CATEGORIAS_GASTO_PAGO_VENDEDOR,
   CATEGORIAS_GASTO_SIN_AVION,
   CATEGORIAS_GASTO_VUELO_OBLIGATORIO,
+  CATEGORIAS_SOLO_OFICINA,
+  DESTINO_OTROS_MOVIMIENTOS,
   MENSAJE_CATEGORIA_SIN_MIGRACION,
   MENSAJE_COMISARIATO_SIN_MIGRACION,
+  MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION,
+  MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA,
   MIGRACION_DE_CATEGORIA,
+  mensajeCategoriaSoloOficina,
   categoriaDeCheckExigeVuelo,
   categoriaEsDeEmpresa,
   categoriaEsPagoVendedor,
@@ -31,11 +37,13 @@ import { CATS_SIN_TUA_EMBEBIDO } from './desglose-gasto.util';
 describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', () => {
   const codigos = Object.values(CategoriaGasto);
 
-  it('el enum tiene las 24 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después y COMISARIATO justo después de COMIDA desde el 13-oct-2026; OTROS_DIRECTOS_VUELO justo después de COMISARIATO y PAQUETERIA al final desde el 20-oct-2026)', () => {
-    expect(codigos).toHaveLength(24);
+  it('el enum tiene las 25 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después y COMISARIATO justo después de COMIDA desde el 13-oct-2026; OTROS_DIRECTOS_VUELO justo después de COMISARIATO y PAQUETERIA desde el 20-oct-2026; OTROS_MOVIMIENTOS al final desde el 23-oct-2026)', () => {
+    expect(codigos).toHaveLength(25);
     const k = codigos.indexOf(CategoriaGasto.COMISARIATO);
     expect(codigos[k + 1]).toBe('OTROS_DIRECTOS_VUELO');
-    expect(codigos[codigos.length - 1]).toBe('PAQUETERIA');
+    // Mismo orden que el enum de la BD (25.º valor, migración 20261023000002).
+    expect(codigos[codigos.length - 2]).toBe('PAQUETERIA');
+    expect(codigos[codigos.length - 1]).toBe('OTROS_MOVIMIENTOS');
     expect(codigos).toContain('COMISION_VENDEDOR');
     const i = codigos.indexOf(CategoriaGasto.COMISION_VENDEDOR);
     expect(codigos[i + 1]).toBe('COMISION_VENDEDOR_AVION');
@@ -227,6 +235,9 @@ describe('categoriaExigeVuelo', () => {
     CategoriaGasto.OTRO,
     // 20-oct-2026 (invariante 97): de EMPRESA.
     CategoriaGasto.PAQUETERIA,
+    // 23-oct-2026 (invariante 107): egreso de VuelaTour con vuelo OPCIONAL
+    // (con vuelo va en el bloque de ese vuelo; sin vuelo, fila suelta).
+    CategoriaGasto.OTROS_MOVIMIENTOS,
   ];
 
   it('las categorías del VUELO lo exigen', () => {
@@ -284,7 +295,7 @@ describe('categoriaEsDeEmpresa (11-sep-2026)', () => {
     ]);
   });
 
-  it('fuera a propósito: PERSONAL_DUENO, GAS y todo lo del avión', () => {
+  it('fuera a propósito: PERSONAL_DUENO, GAS, todo lo del avión y «Otros movimientos (VuelaTour)» (destino propio)', () => {
     for (const c of [
       'PERSONAL_DUENO',
       'GAS',
@@ -295,6 +306,9 @@ describe('categoriaEsDeEmpresa (11-sep-2026)', () => {
       'TUAS',
       'FBO',
       'OPERACIONES',
+      // 23-oct-2026 (invariante 107): va a «otros movimientos», no a «otros
+      // gastos».
+      'OTROS_MOVIMIENTOS',
     ]) {
       expect(categoriaEsDeEmpresa(c)).toBe(false);
     }
@@ -326,7 +340,7 @@ describe('categoriaEsDeEmpresa (11-sep-2026)', () => {
  * ningún avión, así que pedirle aeronave es un pendiente eterno.
  */
 describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
-  it('es exactamente las de EMPRESA + INDIRECTO + PERSONAL_DUENO + COMISION_VENDEDOR', () => {
+  it('es exactamente las de EMPRESA + INDIRECTO + PERSONAL_DUENO + COMISION_VENDEDOR + OTROS_MOVIMIENTOS (23-oct-2026)', () => {
     expect([...CATEGORIAS_GASTO_SIN_AVION].sort()).toEqual([
       'COMISION_VENDEDOR',
       'FIJO',
@@ -334,6 +348,7 @@ describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
       'INDIRECTO',
       'NOMINA',
       'OTRO',
+      'OTROS_MOVIMIENTOS',
       'PAQUETERIA',
       'PERSONAL_DUENO',
       'VISITA',
@@ -390,10 +405,10 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(texto).toContain(
       'COMISION_VENDEDOR_AVION → Comisión del vendedor (avión) → Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
     );
-    // 24 categorías (COMISION_VENDEDOR_AVION y COMISARIATO entraron el
-    // 13-oct-2026; OTROS_DIRECTOS_VUELO y PAQUETERIA el 20-oct-2026) + el
-    // título.
-    expect(texto.split('\n')).toHaveLength(25);
+    // 25 categorías (COMISION_VENDEDOR_AVION y COMISARIATO entraron el
+    // 13-oct-2026; OTROS_DIRECTOS_VUELO y PAQUETERIA el 20-oct-2026;
+    // OTROS_MOVIMIENTOS el 23-oct-2026) + el título.
+    expect(texto.split('\n')).toHaveLength(26);
   });
 
   it('exige vuelo (piloto) Y para TODOS los roles (solo las dos)', () => {
@@ -426,7 +441,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(categoriaEsDeEmpresa('COMISION_VENDEDOR_AVION')).toBe(false);
   });
 
-  it('FUERA DEL AVIÓN (eje genérico) = empresa + las DOS del pago al vendedor', () => {
+  it('FUERA DEL AVIÓN (eje genérico) = empresa + las DOS del pago al vendedor + OTROS_MOVIMIENTOS (23-oct-2026)', () => {
     expect([...CATEGORIAS_GASTO_FUERA_DEL_AVION].sort()).toEqual([
       'COMISION_VENDEDOR',
       'COMISION_VENDEDOR_AVION',
@@ -434,6 +449,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       'GASOLINA',
       'NOMINA',
       'OTRO',
+      'OTROS_MOVIMIENTOS',
       'PAQUETERIA',
       'VISITA',
     ]);
@@ -549,6 +565,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       COMISARIATO: '20261013000001',
       PAQUETERIA: '20261020000001',
       OTROS_DIRECTOS_VUELO: '20261020000002',
+      OTROS_MOVIMIENTOS: '20261023000002',
     });
     const errAvion = {
       code: '22P02',
@@ -711,6 +728,102 @@ describe('COMISARIATO (13-oct-2026)', () => {
     // El texto de la comisión del 28-sep no se movió.
     expect(MENSAJE_CATEGORIA_SIN_MIGRACION).toBe(
       '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
+  });
+});
+
+/**
+ * «OTROS MOVIMIENTOS (VUELATOUR)» (23-oct-2026, API 0.0.106, invariante 107;
+ * pedido del cliente: «Falta la opción de agregar un gasto a la hoja de
+ * "otros movimientos" en el balance general»): EGRESO DE VUELATOUR con vuelo
+ * y avión opcionales. Destino PROPIO (no es de EMPRESA), nunca costo del
+ * avión, nunca pendiente de avión y solo la oficina la captura.
+ */
+describe('OTROS_MOVIMIENTOS (23-oct-2026)', () => {
+  it('código, etiqueta y destino EXACTOS (paridad manual panel/app); el destino NO es el de EMPRESA', () => {
+    expect(CATEGORIA_OTROS_MOVIMIENTOS).toBe('OTROS_MOVIMIENTOS');
+    expect(CATEGORIA_GASTO_LABEL.OTROS_MOVIMIENTOS).toBe(
+      'Otros movimientos (VuelaTour)',
+    );
+    expect(DESTINO_OTROS_MOVIMIENTOS).toBe(
+      'Otros movimientos (Balance general VuelaTour)',
+    );
+    expect(CATEGORIA_GASTO_DESTINO.OTROS_MOVIMIENTOS).toBe(
+      DESTINO_OTROS_MOVIMIENTOS,
+    );
+    expect(CATEGORIA_GASTO_DESTINO.OTROS_MOVIMIENTOS).not.toBe(
+      'Otros gastos (Balance general VuelaTour)',
+    );
+    expect(descripcionCategoriasGasto()).toContain(
+      'OTROS_MOVIMIENTOS → Otros movimientos (VuelaTour) → Otros movimientos (Balance general VuelaTour)',
+    );
+  });
+
+  it('vuelo OPCIONAL: no exige vuelo a nadie (ni al piloto ni a todos los roles)', () => {
+    expect(categoriaExigeVuelo('OTROS_MOVIMIENTOS')).toBe(false);
+    expect(categoriaExigeVueloSiempre('OTROS_MOVIMIENTOS')).toBe(false);
+    expect([...CATEGORIAS_GASTO_VUELO_OBLIGATORIO].sort()).toEqual([
+      'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
+    ]);
+  });
+
+  it('NO es de empresa (no va a «otros gastos»), SÍ es «sin avión» (nunca pendiente) y SÍ queda fuera del avión', () => {
+    expect(categoriaEsDeEmpresa('OTROS_MOVIMIENTOS')).toBe(false);
+    expect([...CATEGORIAS_GASTO_EMPRESA].sort()).toEqual([
+      'FIJO',
+      'GASOLINA',
+      'NOMINA',
+      'OTRO',
+      'PAQUETERIA',
+      'VISITA',
+    ]);
+    expect(CATEGORIAS_GASTO_SIN_AVION).toContain('OTROS_MOVIMIENTOS');
+    expect(categoriaFueraDelAvion('OTROS_MOVIMIENTOS')).toBe(true);
+    expect(categoriaEsPagoVendedor('OTROS_MOVIMIENTOS')).toBe(false);
+    expect(ladoPagoVendedor('OTROS_MOVIMIENTOS')).toBeNull();
+  });
+
+  it('SIN TUA embebido (entra ENTERA a «otros movimientos») y NO repartible', () => {
+    expect(CATS_SIN_TUA_EMBEBIDO.has('OTROS_MOVIMIENTOS')).toBe(true);
+    expect(CATEGORIAS_REPARTIBLES.has('OTROS_MOVIMIENTOS')).toBe(false);
+  });
+
+  it('SOLO la oficina la captura: CATEGORIAS_SOLO_OFICINA = {OTROS_MOVIMIENTOS} y el texto del 400', () => {
+    expect([...CATEGORIAS_SOLO_OFICINA]).toEqual(['OTROS_MOVIMIENTOS']);
+    expect(mensajeCategoriaSoloOficina('OTROS_MOVIMIENTOS')).toBe(
+      MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA,
+    );
+    expect(MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA).toBe(
+      '«Otros movimientos (VuelaTour)» la registra la oficina: es un egreso de VuelaTour para la hoja «otros movimientos» del Balance general. Si es un gasto del vuelo, elige su categoría (Operaciones, Hotel, Comida…).',
+    );
+    // Cualquier otra categoría que entrara al Set tendría un texto genérico.
+    expect(mensajeCategoriaSoloOficina('COMIDA')).toBe(
+      '«Comida» la registra la oficina.',
+    );
+  });
+
+  it('22P02 del enum sin la migración 20261023000002 ⇒ texto 400 con «Otros movimientos (VuelaTour)»; los demás textos no se mueven', () => {
+    const err = {
+      code: '22P02',
+      message:
+        'invalid input value for enum categoria_gasto: "OTROS_MOVIMIENTOS"',
+    };
+    expect(mensajeCategoriaSinMigracion(err, 'OTROS_MOVIMIENTOS')).toBe(
+      MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION,
+    );
+    expect(MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION).toBe(
+      '«Otros movimientos (VuelaTour)» necesita la migración 20261023000002 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
+    expect(mensajeCategoriaSinMigracion(err, 'OTRO')).toBeNull();
+    expect(
+      mensajeCategoriaSinMigracion(
+        { ...err, code: '23514' },
+        'OTROS_MOVIMIENTOS',
+      ),
+    ).toBeNull();
+    expect(MENSAJE_COMISARIATO_SIN_MIGRACION).toBe(
+      '«Comisariato» necesita la migración 20261013000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
     );
   });
 });

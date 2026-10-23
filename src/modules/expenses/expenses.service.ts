@@ -257,6 +257,7 @@ import { Rol } from '../../common/types/auth.types';
 import { normalizarTc } from '../../common/tc.util';
 import {
   CATEGORIAS_GASTO_SIN_AVION,
+  CATEGORIAS_SOLO_OFICINA,
   categoriaEsDeEmpresa,
   categoriaExigeVuelo,
   categoriaDeCheckExigeVuelo,
@@ -264,6 +265,7 @@ import {
   destinoCategoriaGasto,
   etiquetaCategoriaGasto,
   mensajeCategoriaSinMigracion,
+  mensajeCategoriaSoloOficina,
 } from '../../common/categoria-gasto.util';
 import {
   acoplarTarjetaEnUpdate,
@@ -2407,6 +2409,26 @@ export class ExpensesService {
       throw new BadRequestException({
         message: mensajeMedioSoloOficina(dto.medio_pago),
         error: 'MEDIO_SOLO_OFICINA',
+      });
+    }
+    // «OTROS MOVIMIENTOS (VUELATOUR)» SOLO LA REGISTRA LA OFICINA
+    // (23-oct-2026, invariante 107): es un egreso del Balance general que
+    // decide la oficina; el piloto registra el gasto del vuelo con su
+    // categoría. Mismo patrón que el medio: ANTES de tocar la BD y antes de
+    // la regla del visitante (el mismo mensaje en los tres roles); SOLO en el
+    // alta (la app re-manda la categoría vigente al editar).
+    if (
+      (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE) &&
+      CATEGORIAS_SOLO_OFICINA.has(dto.categoria)
+    ) {
+      throw new BadRequestException({
+        message: mensajeCategoriaSoloOficina(dto.categoria),
+        error: 'CATEGORIA_SOLO_OFICINA',
+        details: {
+          categoria: dto.categoria,
+          categoria_label: etiquetaCategoriaGasto(dto.categoria),
+          destino: destinoCategoriaGasto(dto.categoria),
+        },
       });
     }
     // «TUA incluida en este gasto» (13-oct-2026, invariante 66) es de

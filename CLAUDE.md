@@ -11848,6 +11848,122 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       como `CAMBIOS_0105_*`, y `sinLlavesPesosPayload` quita `ruta` y
       `consecutivo_cliente` de las líneas del reparto.
 
+107. **CATEGORÍA «OTROS MOVIMIENTOS (VUELATOUR)»: UN GASTO A LA HOJA «OTROS
+    MOVIMIENTOS» DEL BALANCE GENERAL (23-oct-2026, API 0.0.106, migración
+    `20261023000002_categoria_otros_movimientos` — YA APLICADA en prod por
+    MCP el 23-oct-2026, dry-run DRYRUN_OK 24→25 valores).** Pedido literal
+    del cliente (con la captura del select de categorías del gasto): «Falta
+    la opción de agregar un gasto a la hoja de "otros movimientos" en el
+    balance general.» Hasta hoy a esa hoja solo llegaban el TUA pagado
+    (TUAS), la comisión bancaria y el pago al vendedor; la oficina
+    necesitaba una categoría para cualquier otro egreso de VuelaTour que se
+    aparea ahí (viáticos de pernocta pagados, extras pagados a terceros…).
+    - **Tabla canónica** (IDÉNTICA en API `categoria-gasto.util`, panel
+      `categorias-gasto.ts` —commit df09970— y app): código
+      `OTROS_MOVIMIENTOS`, etiqueta «Otros movimientos (VuelaTour)», destino
+      PROPIO «Otros movimientos (Balance general VuelaTour)»
+      (`DESTINO_OTROS_MOVIMIENTOS`; NO es `DESTINO_EMPRESA`: no cae en
+      «otros gastos»). Va AL FINAL del enum del DTO y del selector; en la BD
+      es el 25.º valor de `categoria_gasto` (`alter type … add value if not
+      exists`, sola en su archivo). `CATEGORIA_OTROS_MOVIMIENTOS` y
+      `OTROS_MOVIMIENTOS_CAT` (`grupos-reparto.util`) exportan el literal;
+      `MIGRACION_DE_CATEGORIA` la nombra (22P02 ⇒ 400 legible
+      `MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION`).
+    - **Semántica: EGRESO DE VUELATOUR.** Vuelo OPCIONAL y avión opcional
+      (si trae vuelo, `create()` sella el avión del vuelo SOLO como
+      referencia). NUNCA es costo del avión: está en
+      `CATEGORIAS_GASTO_FUERA_DEL_AVION` (fuera de la fila del vuelo, de
+      «Gastos Indirectos», de la ficha, del grupo y del reporte por vuelo
+      —que la lista con la nota «egreso de VuelaTour («otros movimientos»
+      del Balance general) — no resta al vuelo»—); grupo EXCLUIDO del
+      reparto con y sin vuelo (ternario de `computeAvion` junto a `esTuas`;
+      clave propia `OTROS_MOVIMIENTOS (egreso VuelaTour · Otros
+      movimientos)`); `alcanceRepartoPorFecha` ⇒ null. NO es de EMPRESA
+      (`CATEGORIAS_GASTO_EMPRESA` sin cambio: ni «otros gastos» del general
+      ni del Dinero). SÍ en `CATEGORIAS_GASTO_SIN_AVION` (bandeja, IA de
+      asignación, alerta `gastos_sin_avion`, pre-cierre: nunca pendiente ni
+      bloqueante; el panel la tiene en `CATEGORIAS_SIN_AVION`). En
+      `CATS_SIN_TUA_EMBEBIDO` y en `CATEGORIAS_NO_LIGABLES` de compras; no
+      repartible (`CATEGORIAS_REPARTIBLES` y el trigger sin cambio); la IA de
+      tickets NO la sugiere ni la pisa (la decide la oficina; pyservices sin
+      cambio).
+    - **Solo la OFICINA la captura** (ADMIN, COORDINADOR, FACTURACION;
+      ANALISTA no da de alta gastos): `CATEGORIAS_SOLO_OFICINA` ⇒ 400
+      `CATEGORIA_SOLO_OFICINA` en el ALTA de PILOTO/MECANICO/VISITANTE
+      (`mensajeCategoriaSoloOficina`, `details` {categoria, categoria_label,
+      destino}; antes de tocar la BD y antes de la regla del visitante; el
+      PATCH no se bloquea, como el medio solo-oficina). No exige vuelo a
+      nadie (`categoriaExigeVuelo` false; la oficina la captura suelta).
+    - **Balance general, hoja «otros movimientos»** (`buildOtrosMovimientos`):
+      CON vuelo ⇒ UNA línea de SOLO-egreso por gasto en el bloque de su
+      vuelo — concepto = primera línea útil de `notas` (se saltan «Desglose:»
+      y «⚠») o «Otros movimientos (VuelaTour)», + « · proveedor|lugar», +
+      « (efectivo)»/« (efectivo de la empresa)», + « (USD sin TC)» si no
+      llegó a pesos; fecha = `fecha_gasto`; pesos con la MISMA regla que las
+      «tuas pagadas» (`gastoMxn`: MXN directo, USD × `tc_gasto` o el T.C.
+      promedio de la pestaña; sin ninguno, visible y sin sumar) — que SUMA al
+      egreso del vuelo (remanente = ingreso − egreso) y se colapsa con las
+      demás en la fila del vuelo (la nota de la celda lista cada concepto);
+      también en un CANCELADO. SIN vuelo ⇒ fila SUELTA al final con clave
+      «otros movimientos sin vuelo»: sin avión, de la lectura compartida
+      `gastosEmpresaYSueltos.otrosMovimientosSueltos` (que la SACA de «otros
+      gastos»); con avión sellado, lectura propia `otrosMovSinVueloRes` con
+      la matrícula delante del concepto y el color del avión (como los TUAS).
+      Entra al resultado de VuelaTour (bloque VUELATOUR, `tcFilasOM`
+      alineado) exactamente como el TUA pagado; nada por avión. Gramática
+      ÚNICA en `common/otros-movimientos.util.ts` (`conceptoOtroMovimiento`,
+      `CLAVE_SUELTA_OTROS_MOVIMIENTOS`, `ordenarOtrosMovimientos`: fecha,
+      id). La hoja «Otros ingresos» del balance POR AVIÓN no cambia (solo
+      lista ingresos asignados). Payload de pyservices: filas con la forma
+      de siempre (sin llaves nuevas).
+    - **Libro Dinero**: espejo del TUA pagado. CON vuelo ⇒ fila de
+      SOLO-egreso por gasto en «Otros ingresos» del vuelo (mismo concepto;
+      pesos con `pagadoAMxn`: MXN directo, USD × tc_gasto o el T.C. de venta;
+      ingreso null ⇒ `utilidades_otros_ingresos_mxn` NO cambia, como el TUA
+      pagado sin línea; el total de egresos de la hoja sí lo recoge). SIN
+      vuelo ⇒ se LISTA en «otros gastos» con el sufijo «(egreso VuelaTour —
+      no resta: Otros movimientos)» sin sumar al acumulado ni acreditarse a
+      ningún avión (como «tuas sin vuelo»). **Asimetría heredada de la
+      TUA**: el Balance general sí lo resta en el bloque VUELATOUR; el Dinero
+      lo anota sin restarlo en utilidades (decisión a confirmar con el
+      cliente si quiere que el Dinero lo descuente).
+    - **Ubicación (invariante 72) y mes contable**: `ubicacionBalanceDeGasto`
+      R2c ⇒ Balance general, hoja `otros_movimientos`, ningún avión; con
+      vuelo eje VUELO (mes contable del vuelo; sin embed ⇒ null), sin vuelo
+      eje GASTO; `necesitaTramosVivos` false. **Candado del cierre por avión
+      (invariante 105)**: con vuelo ⇒ `avionDelGasto` (el avión del
+      tramo/gasto/vuelo, como todo gasto); sin vuelo ⇒
+      `avionesDeGastoCandado` devuelve `[]` aunque traiga avión sellado
+      (solo la fila global). Cambio de fecha: `esSueltaOtrosMovimientos`
+      true sin vuelo (las mismas líneas de confirmación que la TUA suelta);
+      con vuelo no hay 409 «mes del vuelo» (como la comisión).
+    - **Columna «Avión · vuelo» y tablero**: `estadoAvionGasto` ⇒
+      «VuelaTour» siempre (+ « (ref. matrícula)» con avión sellado; regla 3,
+      la misma del panel df09970; `gasto-avion.paridad.spec` con 3,720
+      filas). `dashboards.gastos` la suma en `gastos_empresa_usd` por
+      `categoriaFueraDelAvion` (como la «Comisión del vendedor (VuelaTour)»;
+      A DIFERENCIA del TUA pagado, que en ese tablero cae por `fecha_gasto`
+      al avión sellado —legado—): el texto del panel
+      `textoTableroGastosEmpresa` debe nombrarla.
+    - Specs: `categoria-gasto.util.spec` (25 valores, OTROS_MOVIMIENTOS al
+      final, tabla exacta, listas congeladas, solo oficina, 22P02),
+      `otros-movimientos.util.spec`, `grupos-reparto.util.spec`,
+      `profit-sharing.service.empresa.spec` (EXCLUIDO con y sin vuelo, saldo
+      intacto, clave y etiqueta, sin TUA embebido),
+      `aircraft-balance.service.otros-movimientos.spec` (egreso en el bloque
+      del vuelo, colapsado con la TUA, USD, CANCELADO, sueltas con y sin
+      avión con el T.C. alineado, maestra e indirectos sin cambio,
+      `gastosEmpresaYSueltos`), `dinero-report.service.otros-movimientos.spec`,
+      `expenses.service.sin-vuelo.spec` (piloto/visitante 400, oficina con y
+      sin vuelo, hereda avión, 22P02, update),
+      `expenses.service.otros-movimientos.spec` (bandeja y sugerencias),
+      `profit-sharing.service.pre-cierre-ids.spec` y
+      `alerts.service.inicio-oficial.spec` (no pendiente),
+      `cambio-fecha-gasto.util.spec`, `ubicacion-balance-gasto.util.spec`
+      (R2c), `mes-contable.util.spec`, `cierre-mes.lector.por-avion.spec`,
+      `gasto-avion.util.spec`. Sin goldens tocados: con 0 gastos de la
+      categoría todo payload es byte-idéntico.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12586,6 +12702,22 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.106 (23-oct-2026; invariante 107, categoría «Otros
+  movimientos (VuelaTour)»).** (1) La migración
+  `20261023000002_categoria_otros_movimientos` (25.º valor del enum
+  `categoria_gasto`, al final) YA ESTÁ APLICADA en prod
+  (`bjesduasnzbzywofukbf`) desde el 23-oct-2026 por MCP (dry-run DRYRUN_OK
+  24→25; `select 'OTROS_MOVIMIENTOS'::public.categoria_gasto` responde).
+  Dependencia DURA: el API la manda como literal en el `not.in(…)` de la
+  bandeja/alerta/pre-cierre y en el `.eq('categoria', …)` de «otros
+  movimientos» ⇒ sin ella, 22P02 ⇒ 500. (2) API 0.0.106 (push `main`; `GET
+  /v1/version` = 0.0.106). (3) Panel (df09970: selector, celda «Avión ·
+  vuelo» y `CATEGORIAS_SIN_AVION` ya espejados; falta nombrarla en
+  `textoTableroGastosEmpresa`, porque el API la suma en
+  `gastos_empresa_usd`). La app solo necesita la etiqueta para mostrar un
+  gasto que capturó la oficina; el piloto no la captura (400
+  `CATEGORIA_SOLO_OFICINA`). pyservices sin cambio.
 
 - **DESPLIEGUE DEL 0.0.105 (23-oct-2026; invariante 106, claves sin apodo
   en los documentos; SIN migración).** pyservices y API en CUALQUIER orden:

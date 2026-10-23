@@ -352,6 +352,20 @@ describe('ProfitSharingService.preCierre — `ids` por renglón (PEDIDO 2)', () 
     expect(Object.keys(i).slice(-2)).toEqual(['ids', 'ids_truncado']);
   });
 
+  it('«Otros movimientos (VuelaTour)» sin avión (23-oct-2026, invariante 107) NO es pendiente: fuera de `gastos_sin_avion` (no bloquea el cierre)', async () => {
+    const svc = armar({
+      aeronave: AERONAVES,
+      gasto: [
+        gasto('g-om', { aeronave_id: null, categoria: 'OTROS_MOVIMIENTOS' }),
+        gasto('g-sin-avion', { aeronave_id: null }),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const i = item(r, 'gastos_sin_avion');
+    expect(i.count).toBe(1);
+    expect(i.ids).toEqual(['g-sin-avion']);
+  });
+
   it('los renglones con `vuelos[]`/`cobros[]`/`grupos[]`… y los informativos NO llevan `ids`', async () => {
     const svc = armar({ aeronave: AERONAVES });
     const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;

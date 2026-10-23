@@ -91,3 +91,11 @@ export const FIJO = 'FIJO';
  * operación; el egreso se aparea con el TUA cobrado en Otros movimientos.
  */
 export const TUAS_CAT = 'TUAS';
+/**
+ * «Otros movimientos (VuelaTour)» (23-oct-2026, API 0.0.106, invariante 107):
+ * egreso de VuelaTour que vive en la hoja «otros movimientos» del Balance
+ * general (en el bloque de su vuelo o como fila suelta). NUNCA es costo del
+ * avión: grupo EXCLUIDO del reparto, con o sin vuelo, como TUAS_CAT —
+ * `computeAvion` lo lista con su clave propia solo por transparencia.
+ */
+export const OTROS_MOVIMIENTOS_CAT = 'OTROS_MOVIMIENTOS';

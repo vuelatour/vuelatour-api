@@ -481,6 +481,9 @@ describe('trasladosEmbebidosDeGasto / tuaEmbebidoDeGasto', () => {
       ).toEqual({ tua: 0, extension: 0 });
     }
     expect(CATS_SIN_TUA_EMBEBIDO.has('INDIRECTO')).toBe(true);
+    // 23-oct-2026 (invariante 107): el egreso de «otros movimientos» entra
+    // ENTERO; jamás se le separa una TUA (se egresaría dos veces).
+    expect(CATS_SIN_TUA_EMBEBIDO.has('OTROS_MOVIMIENTOS')).toBe(true);
   });
 
   it('COMISARIATO (13-oct-2026): nada se separa aunque los renglones IA «parezcan» de aeródromo', () => {

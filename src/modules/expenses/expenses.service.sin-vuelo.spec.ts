@@ -15,7 +15,11 @@ import type { CreateGastoDto } from './dto/expenses.dto';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { NotificationsService } from '../realtime/notifications.service';
 import { Rol } from '../../common/types/auth.types';
-import { MENSAJE_COMISARIATO_SIN_MIGRACION } from '../../common/categoria-gasto.util';
+import {
+  MENSAJE_COMISARIATO_SIN_MIGRACION,
+  MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION,
+  MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA,
+} from '../../common/categoria-gasto.util';
 
 /**
  * GASTO DE PILOTO SIN VUELO (11-sep-2026, backend del pedido de la app).
@@ -1009,5 +1013,143 @@ describe('ExpensesService — COMISARIATO (13-oct-2026)', () => {
       Rol.ADMIN,
     );
     expect(actualizado()).toMatchObject({ categoria: 'COMISARIATO' });
+  });
+});
+
+/**
+ * «OTROS MOVIMIENTOS (VUELATOUR)» (23-oct-2026, API 0.0.106, invariante 107):
+ * egreso de VuelaTour para la hoja «otros movimientos» del Balance general.
+ * Vuelo OPCIONAL (la oficina la captura con o sin vuelo); SOLO la oficina:
+ * PILOTO, MECANICO y VISITANTE rebotan 400 ANTES de tocar la BD. Sin la
+ * migración 20261023000002 (aplicada en prod el 23-oct-2026) el alta
+ * responde 400 legible, nunca 500.
+ */
+describe('ExpensesService — OTROS_MOVIMIENTOS (23-oct-2026, invariante 107)', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(HOY));
+  afterEach(() => jest.useRealTimers());
+
+  const otroMovimiento = (extra: Partial<CreateGastoDto> = {}) =>
+    dto({
+      categoria: CategoriaGasto.OTROS_MOVIMIENTOS,
+      monto: 1250,
+      medio_pago: MedioPago.TRANSFERENCIA,
+      ...extra,
+    });
+
+  it('PILOTO ⇒ 400 CATEGORIA_SOLO_OFICINA con el texto exacto y details, SIN tocar la BD (con o sin vuelo)', async () => {
+    for (const extra of [{}, { vuelo_id: VUELO_A }]) {
+      const { service, llamadas } = armarConTablas();
+      const r = await rebote(
+        service.create(otroMovimiento(extra), 'u-piloto', Rol.PILOTO),
+      );
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('CATEGORIA_SOLO_OFICINA');
+      expect(r.body.message).toBe(MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA);
+      expect(r.body.message).toBe(
+        '«Otros movimientos (VuelaTour)» la registra la oficina: es un egreso de VuelaTour para la hoja «otros movimientos» del Balance general. Si es un gasto del vuelo, elige su categoría (Operaciones, Hotel, Comida…).',
+      );
+      expect(r.body.details).toEqual({
+        categoria: 'OTROS_MOVIMIENTOS',
+        categoria_label: 'Otros movimientos (VuelaTour)',
+        destino: 'Otros movimientos (Balance general VuelaTour)',
+      });
+      expect(llamadas).toHaveLength(0);
+    }
+  });
+
+  it('VISITANTE ⇒ el mismo 400 (antes de que su categoría se fije en VISITA); MECÁNICO rebota por su propio candado (solo GAS)', async () => {
+    const visitante = armarConTablas();
+    const rv = await rebote(
+      visitante.service.create(
+        otroMovimiento({ medio_pago: MedioPago.EFECTIVO }),
+        'u-visita',
+        Rol.VISITANTE,
+      ),
+    );
+    expect(rv.status).toBe(400);
+    expect(rv.body.error).toBe('CATEGORIA_SOLO_OFICINA');
+    expect(visitante.llamadas).toHaveLength(0);
+    const mecanico = armarConTablas();
+    const rm = await rebote(
+      mecanico.service.create(otroMovimiento(), 'u-mec', Rol.MECANICO),
+    );
+    expect(rm.status).toBe(400);
+    expect(mecanico.llamadas).toHaveLength(0);
+  });
+
+  it('la OFICINA (ADMIN, COORDINADOR, FACTURACION) la guarda SIN vuelo: vuelo opcional, sin GASTO_REQUIERE_VUELO', async () => {
+    for (const rol of [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION]) {
+      const { service, insertado } = armarConTablas();
+      await service.create(otroMovimiento(), 'u-oficina', rol, {
+        notificar: false,
+      });
+      expect(insertado()).toMatchObject({
+        categoria: 'OTROS_MOVIMIENTOS',
+        monto: 1250,
+      });
+      expect(insertado()?.vuelo_id).toBeUndefined();
+      expect(insertado()?.aeronave_id).toBeUndefined();
+    }
+  });
+
+  it('con vuelo ⇒ se guarda y HEREDA el avión del vuelo (solo referencia: ningún libro por avión lo cuenta)', async () => {
+    const { service, insertado } = armarConTablas();
+    await service.create(
+      otroMovimiento({ vuelo_id: VUELO_A }),
+      'u-admin',
+      Rol.ADMIN,
+      { notificar: false },
+    );
+    expect(insertado()).toMatchObject({
+      categoria: 'OTROS_MOVIMIENTOS',
+      vuelo_id: VUELO_A,
+      aeronave_id: AVION_A,
+    });
+  });
+
+  it('BD sin la migración 20261023000002 (22P02 del enum) ⇒ 400 legible, nunca 500', async () => {
+    const { service } = armarConTablas({
+      errorInsert: {
+        code: '22P02',
+        message:
+          'invalid input value for enum categoria_gasto: "OTROS_MOVIMIENTOS"',
+      },
+    });
+    const r = await rebote(
+      service.create(otroMovimiento(), 'u-admin', Rol.ADMIN, {
+        notificar: false,
+      }),
+    );
+    expect(r.status).toBe(400);
+    expect(r.body.message).toBe(MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION);
+  });
+
+  it('update: la oficina reclasifica un OTRO (con o sin vuelo) a OTROS_MOVIMIENTOS ⇒ OK (camino manual de las capturas viejas)', async () => {
+    for (const vuelo_id of [VUELO_A, null]) {
+      const { service, actualizado } = armarConTablas({
+        gastoActual: {
+          id: 'g-otro',
+          categoria: 'OTRO',
+          vuelo_id,
+          escala_id: null,
+          aeronave_id: vuelo_id ? AVION_A : null,
+          monto: 1250,
+          propina: 0,
+          moneda: 'MXN',
+          medio_pago: 'TRANSFERENCIA',
+          notas: 'Viáticos de pernocta pagados al piloto',
+          tarjeta_terminacion: null,
+          usuario_captura_id: 'u-admin',
+          valor_ia_extraido: null,
+        },
+      });
+      await service.update(
+        'g-otro',
+        { categoria: CategoriaGasto.OTROS_MOVIMIENTOS },
+        'u-admin',
+        Rol.ADMIN,
+      );
+      expect(actualizado()).toMatchObject({ categoria: 'OTROS_MOVIMIENTOS' });
+    }
   });
 });

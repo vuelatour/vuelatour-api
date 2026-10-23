@@ -141,6 +141,22 @@ export enum CategoriaGasto {
    *  a «sin avión»). La migración 20261020000001 va ANTES del API: las
    *  listas de empresa viajan como literales a PostgREST (22P02 sin ella). */
   PAQUETERIA = 'PAQUETERIA',
+  /** «Otros movimientos (VuelaTour)» (23-oct-2026, API 0.0.106, pedido del
+   *  cliente con la captura del select de categorías: «Falta la opción de
+   *  agregar un gasto a la hoja de "otros movimientos" en el balance
+   *  general»). Invariante 107 del CLAUDE.md del API: EGRESO DE VUELATOUR.
+   *  - Vuelo OPCIONAL y avión opcional (el avión del vuelo solo informa).
+   *    Con vuelo: línea de egreso en el bloque del vuelo de la hoja «otros
+   *    movimientos» del Balance general (y de «Otros ingresos» del Libro
+   *    Dinero, como el TUA pagado); sin vuelo: fila suelta al final.
+   *  - NUNCA es costo del avión: EXCLUIDO del reparto, fuera de la hoja
+   *    maestra y de «otros gastos»; nunca «pendiente de avión».
+   *  - Solo la OFICINA la captura (PILOTO/MECANICO/VISITANTE ⇒ 400
+   *    `CATEGORIA_SOLO_OFICINA` en el alta); sin TUA embebido, no repartible,
+   *    no ligable a compras; la IA de tickets no la sugiere.
+   *  - La migración 20261023000002 (25.º valor del enum, AL FINAL) ya está
+   *    aplicada en prod (23-oct-2026), ANTES del API. */
+  OTROS_MOVIMIENTOS = 'OTROS_MOVIMIENTOS',
 }
 
 export enum Moneda {

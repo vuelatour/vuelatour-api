@@ -11,6 +11,7 @@ import {
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
 import {
+  CATEGORIA_OTROS_MOVIMIENTOS,
   categoriaEsDeEmpresa,
   categoriaEsPagoVendedor,
   categoriaFueraDelAvion,
@@ -511,6 +512,13 @@ export class FlightReportService {
             // gasto sería contarlo dos veces.
             categoriaEsPagoVendedor(g.categoria as string | null)
               ? 'pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)'
+              : null,
+            // «OTROS MOVIMIENTOS (VUELATOUR)» (23-oct-2026, invariante 107):
+            // egreso de VuelaTour de la hoja «otros movimientos» del
+            // Balance general — se lista, no resta al vuelo
+            // (`categoriaFueraDelAvion` lo saca del costo, abajo).
+            g.categoria === CATEGORIA_OTROS_MOVIMIENTOS
+              ? 'egreso de VuelaTour («otros movimientos» del Balance general) — no resta al vuelo'
               : null,
             // PAGO DE AFAC (invariante 90): lo paga VuelaTour (comprobante
             // de los costos reales AFAC por vuelo del Balance general).

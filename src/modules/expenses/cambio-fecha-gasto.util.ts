@@ -71,6 +71,7 @@ import {
   DIRECTO,
   FIJO,
   INDIRECTO,
+  OTROS_MOVIMIENTOS_CAT,
   PERMISO,
   TUAS_CAT,
 } from '../profit-sharing/grupos-reparto.util';
@@ -339,7 +340,8 @@ export function errorMedioNoBancario(
  * ¿Qué reparto a socios mueve la fecha? ESPEJO del ternario de
  * `computeAvion` (`profit-sharing.service.ts`) y del pool de FIJO, con los
  * MISMOS conjuntos (`grupos-reparto.util`). SOLO decide TEXTOS:
- *  - TUAS y las DOS del pago al vendedor ⇒ null (EXCLUIDAS por fecha);
+ *  - TUAS, «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107) y
+ *    las DOS del pago al vendedor ⇒ null (EXCLUIDAS por fecha);
  *  - con partes de reparto manual y categoría repartible ⇒ sus aviones;
  *  - FIJO sin reparto ⇒ toda la flota (pool prorrateado);
  *  - otra categoría de EMPRESA sin reparto ⇒ null (EXCLUIDA);
@@ -356,6 +358,8 @@ export function alcanceRepartoPorFecha(
 ): AlcanceRepartoPorFecha | null {
   const cat = g.categoria ?? '';
   if (cat === TUAS_CAT || categoriaEsPagoVendedor(cat)) return null;
+  // «Otros movimientos (VuelaTour)» (invariante 107): EXCLUIDO como TUAS.
+  if (cat === OTROS_MOVIMIENTOS_CAT) return null;
   // Pago de AFAC marcado (invariante 90): grupo EXCLUIDO del reparto.
   if (esPagoAfac(g)) return null;
   if (repartos.length > 0 && CATEGORIAS_REPARTIBLES.has(cat)) {
@@ -508,14 +512,16 @@ export function candadoMesDelVuelo(g: {
 /**
  * ¿El gasto es una fila SUELTA de «otros movimientos» del Balance general?
  * ESPEJO de `buildOtrosMovimientos` (`aircraft-balance.service.ts`): TUAS
- * sin vuelo, con o sin avión (`tuasSueltos` y `tuasSinVueloRes`), y GAS sin
- * avión sellado que ningún tramo ni vuelo resuelve y que no es de un vuelo
- * EXTERNO sin avión (`gasRes`). Se leen por `fecha_gasto` y, en pesos, el
- * bloque VUELATOUR las convierte con el T.C. oficial de SU día.
+ * sin vuelo, con o sin avión (`tuasSueltos` y `tuasSinVueloRes`), «Otros
+ * movimientos (VuelaTour)» sin vuelo, con o sin avión (23-oct-2026,
+ * invariante 107: `otrosMovimientosSueltos` y `otrosMovSinVueloRes`), y GAS
+ * sin avión sellado que ningún tramo ni vuelo resuelve y que no es de un
+ * vuelo EXTERNO sin avión (`gasRes`). Se leen por `fecha_gasto` y, en pesos,
+ * el bloque VUELATOUR las convierte con el T.C. oficial de SU día.
  */
 export function esSueltaOtrosMovimientos(g: GastoCambioFecha): boolean {
   const cat = g.categoria ?? '';
-  if (cat === TUAS_CAT) return !g.vuelo_id;
+  if (cat === TUAS_CAT || cat === OTROS_MOVIMIENTOS_CAT) return !g.vuelo_id;
   if (cat !== 'GAS' || g.aeronave_id) return false;
   const crudo = g as unknown as Record<string, unknown>;
   return (

@@ -66,6 +66,7 @@ import {
   participacionPorAeronave,
   type EscalaParticipacionInput,
 } from './participacion-aeronave.util';
+import { CATEGORIA_OTROS_MOVIMIENTOS } from './categoria-gasto.util';
 import { fetchNombresUsuarios } from './registrado-por.util';
 
 /** Estados persistidos de `cierre_mes` y de `cierre_mes_avion`. */
@@ -681,6 +682,12 @@ export async function avionesDeGastoCandado(
   vuelo: VueloDelCandado | null,
 ): Promise<string[]> {
   if (!(await cierrePorAvionDisponible(sb))) return [];
+  // «Otros movimientos (VuelaTour)» SIN vuelo (23-oct-2026, invariante 107):
+  // su egreso vive solo en la fila suelta del Balance general y el avión
+  // sellado SOLO informa (ningún libro por avión lo cuenta; el reparto lo
+  // excluye) ⇒ solo la fila global. CON vuelo, el avión del vuelo como
+  // cualquier gasto (la línea vive en el bloque de ese vuelo).
+  if (g.categoria === CATEGORIA_OTROS_MOVIMIENTOS && !g.vuelo_id) return [];
   const escalaPorId = new Map<string, { aeronave_id?: string | null }>();
   if (g.escala_id) {
     const { data, error } = await sb

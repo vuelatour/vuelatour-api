@@ -28,8 +28,10 @@
  *     balance hasta repartirla entre aviones en el módulo Nómina. Va ANTES
  *     de la 3 (NÓMINA sigue siendo categoría de empresa) y después de la 1
  *     (repartida dice «Repartido: …» como cualquier otra).
- *  3. Empresa (`categoriaEsDeEmpresa`) o «Comisión del vendedor (VuelaTour)»
- *     (`ladoPagoVendedor` = VUELATOUR) ⇒ «VuelaTour» SIEMPRE, aunque traiga
+ *  3. Empresa (`categoriaEsDeEmpresa`), «Comisión del vendedor (VuelaTour)»
+ *     (`ladoPagoVendedor` = VUELATOUR) u «Otros movimientos (VuelaTour)»
+ *     (23-oct-2026, invariante 107: egreso de VuelaTour de la hoja «otros
+ *     movimientos» del Balance general) ⇒ «VuelaTour» SIEMPRE, aunque traiga
  *     avión sellado (la categoría de empresa manda sobre el vuelo, regla del
  *     11-sep-2026).
  *     En 2, 2b y 3, con avión sellado: « (ref. N4142R)» — solo referencia,
@@ -58,6 +60,7 @@
  */
 import {
   CATEGORIA_NOMINA,
+  CATEGORIA_OTROS_MOVIMIENTOS,
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
   ladoPagoVendedor,
@@ -193,7 +196,10 @@ export function estadoAvionGasto(
   }
   if (
     categoriaEsDeEmpresa(categoria) ||
-    ladoPagoVendedor(categoria) === 'VUELATOUR'
+    ladoPagoVendedor(categoria) === 'VUELATOUR' ||
+    // «Otros movimientos (VuelaTour)» (invariante 107): el avión sellado
+    // solo informa; su egreso vive en el Balance general.
+    categoria === CATEGORIA_OTROS_MOVIMIENTOS
   ) {
     return {
       tipo: 'FUERA_DEL_AVION',

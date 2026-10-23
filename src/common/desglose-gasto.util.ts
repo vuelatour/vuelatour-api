@@ -297,6 +297,11 @@ export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
   // (además las de EMPRESA ya se excluyen por su categoría).
   'OTROS_DIRECTOS_VUELO',
   'PAQUETERIA',
+  // 23-oct-2026 (invariante 107): «Otros movimientos (VuelaTour)» es un
+  // egreso de VuelaTour que entra ENTERO a la hoja «otros movimientos» del
+  // Balance general; jamás se le separa una TUA o extensión embebida (se
+  // egresaría dos veces en la misma hoja).
+  'OTROS_MOVIMIENTOS',
 ]);
 
 export interface GastoParaTuaEmbebido {

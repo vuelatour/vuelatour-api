@@ -40,6 +40,7 @@ import {
 } from './hojas-balance.util';
 import {
   CATEGORIA_NOMINA,
+  CATEGORIA_OTROS_MOVIMIENTOS,
   CATEGORIAS_GASTO_EMPRESA,
   categoriaEsPagoVendedor,
 } from './categoria-gasto.util';
@@ -144,6 +145,7 @@ export function necesitaTramosVivos(g: GastoParaUbicacion): boolean {
   if (
     cat === 'GAS' ||
     cat === 'PERSONAL_DUENO' ||
+    cat === CATEGORIA_OTROS_MOVIMIENTOS ||
     categoriaEsPagoVendedor(cat) ||
     CATEGORIAS_GASTO_EMPRESA.has(cat)
   ) {
@@ -219,6 +221,18 @@ function ubicar(
           return null;
         }
       }
+      return armar('vuelo', diaVuelo, [], null, 'otros_movimientos');
+    }
+    return armar('gasto', diaGasto, [], null, 'otros_movimientos');
+  }
+  // R2c (23-oct-2026, invariante 107): «Otros movimientos (VuelaTour)» ⇒
+  // Balance general, hoja «otros movimientos», NINGÚN avión (el sellado solo
+  // informa). CON vuelo: la línea de egreso del bloque de su vuelo (eje y
+  // mes contable del VUELO, el universo de la pestaña; sin embed del vuelo
+  // ⇒ null, jamás se inventa); SIN vuelo: fila suelta por `fecha_gasto`.
+  if (cat === CATEGORIA_OTROS_MOVIMIENTOS) {
+    if (conVuelo) {
+      if (!vuelo || !diaVuelo) return null;
       return armar('vuelo', diaVuelo, [], null, 'otros_movimientos');
     }
     return armar('gasto', diaGasto, [], null, 'otros_movimientos');

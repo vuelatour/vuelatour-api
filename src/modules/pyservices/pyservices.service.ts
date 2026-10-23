@@ -1894,7 +1894,8 @@ export interface BalanceOtroMovimientoFilaPayload {
    * «#364» en las filas de un vuelo (23-oct-2026, API 0.0.105, invariante
    * 106; fuente única `claveOtrosMovimientos`: ya no «#364 · beh05-011026» ni
    * el legado «vtbeh364»); en las sueltas, «tuas sin vuelo», «gas sin
-   * avión», «ING-n»…
+   * avión», «otros movimientos sin vuelo» (23-oct-2026, invariante 107: un
+   * gasto «Otros movimientos (VuelaTour)» sin vuelo), «ING-n»…
    */
   clave: string;
   /**

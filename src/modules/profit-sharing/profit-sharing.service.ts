@@ -36,6 +36,7 @@ import {
   DIRECTO,
   FIJO,
   INDIRECTO,
+  OTROS_MOVIMIENTOS_CAT,
   PERMISO,
   TUAS_CAT,
 } from './grupos-reparto.util';
@@ -326,6 +327,17 @@ const PAGINA_POSTGREST = 1000;
 const LOTE_PAGINADO_MAX_PAGINAS = 20;
 
 const TUAS_CLAVE_DETALLE = 'TUAS (egreso VuelaTour — Otros movimientos)';
+/**
+ * «Otros movimientos (VuelaTour)» (23-oct-2026, API 0.0.106, invariante
+ * 107): egreso de VuelaTour que vive en la hoja «otros movimientos» del
+ * Balance general — SIEMPRE grupo EXCLUIDO por el eje fecha_gasto (con o
+ * sin vuelo, con o sin avión sellado), SOLO transparencia como la TUA.
+ * Empieza con el código EXACTO de la categoría y « » para que
+ * `detalleGastos` derive la etiqueta («Otros movimientos (VuelaTour) (egreso
+ * VuelaTour · Otros movimientos)»).
+ */
+export const OTROS_MOVIMIENTOS_CLAVE_DETALLE =
+  'OTROS_MOVIMIENTOS (egreso VuelaTour · Otros movimientos)';
 /**
  * PAGO AL VENDEDOR (28-sep-2026, invariante 31; DOS categorías desde el
  * 13-oct-2026, invariante 61): por el eje de `fetchGastos` (fecha_gasto) es
@@ -2954,6 +2966,10 @@ export class ProfitSharingService {
       // idéntico a antes). Un FIJO repartido va al grupo FIJO manual (suma
       // en otros_prorrateados junto al pool — mismo campo de la cascada).
       const esTuas = g.categoria === TUAS_CAT;
+      // «Otros movimientos (VuelaTour)» (23-oct-2026, invariante 107): egreso
+      // de VuelaTour de la hoja «otros movimientos» del Balance general —
+      // jamás costo del avión, con o sin vuelo (como la TUA pagada).
+      const esOtrosMovimientos = g.categoria === OTROS_MOVIMIENTOS_CAT;
       // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026,
       // MISMA regla del Balance por avión y del Libro Dinero — fuente única
       // `categoriaEsDeEmpresa`): OTRO, NOMINA, GASOLINA, FIJO y VISITA son
@@ -2983,7 +2999,8 @@ export class ProfitSharingService {
       // van a COMBUSTIBLE (no es categoría de empresa).
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
-        esTuas || esPagoVendedor || pagoAfac
+        // «Otros movimientos (VuelaTour)» (invariante 107): igual que la TUA.
+        esTuas || esPagoVendedor || pagoAfac || esOtrosMovimientos
           ? 'EXCLUIDO'
           : empresaSinReparto
             ? 'EXCLUIDO'
@@ -3012,13 +3029,15 @@ export class ProfitSharingService {
       // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
       const clave = esTuas
         ? TUAS_CLAVE_DETALLE
-        : esPagoVendedor
-          ? clavePagoVendedor(g)
-          : pagoAfac
-            ? PAGO_AFAC_CLAVE_DETALLE
-            : g.es_reparto_parcial
-              ? `${g.categoria} (repartido)`
-              : g.categoria;
+        : esOtrosMovimientos
+          ? OTROS_MOVIMIENTOS_CLAVE_DETALLE
+          : esPagoVendedor
+            ? clavePagoVendedor(g)
+            : pagoAfac
+              ? PAGO_AFAC_CLAVE_DETALLE
+              : g.es_reparto_parcial
+                ? `${g.categoria} (repartido)`
+                : g.categoria;
       const acc = porCategoria.get(clave) ?? {
         grupo,
         categoria: g.categoria,

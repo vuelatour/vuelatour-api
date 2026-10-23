@@ -11,6 +11,14 @@ import {
   categoriaFueraDelAvion,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
+// «OTROS MOVIMIENTOS (VUELATOUR)» como gasto (23-oct-2026, invariante 107):
+// la MISMA gramática del concepto que «otros movimientos» del Balance general.
+import {
+  SUFIJO_DINERO_OTROS_MOVIMIENTOS,
+  conceptoOtroMovimiento,
+  esOtroMovimiento,
+  ordenarOtrosMovimientos,
+} from '../../common/otros-movimientos.util';
 import {
   NOTA_PAGO_VENDEDOR_REAL,
   NOTA_PAGO_VENDEDOR_SIN_LINEA,
@@ -352,8 +360,11 @@ export class DineroReportService {
       vueloIds.length
         ? sb
             .from('gasto')
+            // `id`, `lugar`, `medio_pago` y el proveedor (23-oct-2026,
+            // invariante 107): concepto y orden de las líneas «Otros
+            // movimientos (VuelaTour)» del vuelo.
             .select(
-              `vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, notas, valor_ia_extraido${colTua}`,
+              `id, vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, medio_pago, valor_ia_extraido, proveedor:proveedor_id(nombre)${colTua}`,
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve({ data: [], error: null } as const),
@@ -1341,6 +1352,35 @@ export class DineroReportService {
         });
         comisionPagadaMxn += egreso ?? 0;
       }
+
+      // «OTROS MOVIMIENTOS (VUELATOUR)» DEL VUELO (23-oct-2026, API 0.0.106,
+      // invariante 107): espejo del TUA pagado — UNA fila de SOLO-egreso por
+      // gasto `OTROS_MOVIMIENTOS` del vuelo (concepto de la oficina, fecha
+      // del gasto, pesos con `pagadoAMxn`: MXN directo; USD × tc_gasto o el
+      // T.C. de venta; sin ninguno, «(USD sin TC)» sin sumar). Ingreso null
+      // ⇒ `utilidades_otros_ingresos_mxn` NO cambia (como el TUA pagado sin
+      // línea); el total de egresos de la hoja sí lo recoge. Orden (fecha,
+      // id); misma gramática que «otros movimientos» del Balance general.
+      for (const g of ordenarOtrosMovimientos(
+        gastosV.filter((x) => esOtroMovimiento(x)),
+      )) {
+        const mxnOM = pagadoAMxn(num(g.monto) ?? 0, g);
+        const egresoOM = r2(mxnOM);
+        otrosIngresos.push({
+          clave: claveDe(v),
+          ...datosClienteDe(v),
+          fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          ruta: rutaBase,
+          concepto_egreso: conceptoOtroMovimiento(g, { sinTc: mxnOM == null }),
+          egreso_mxn: egresoOM,
+          fecha_egreso: (g.fecha_gasto as string | null) ?? null,
+          concepto_ingreso: null,
+          ingreso_mxn: null,
+          fecha_ingreso: null,
+          remanente_mxn: egresoOM != null ? r2(-egresoOM) : null,
+          factura: facturaPorVuelo.get(v.id as string) ?? null,
+        });
+      }
     }
 
     // ===== Hoja «Otros ingresos», AL FINAL: los ingresos sin vuelo de
@@ -1448,6 +1488,12 @@ export class DineroReportService {
       // pero no suma al acumulado ni se acredita a ningún avión en
       // utilidades. Los TUAS con vuelo ya se aparean en "otros ingresos".
       const esTuas = g.categoria === 'TUAS';
+      // «Otros movimientos (VuelaTour)» SIN vuelo (23-oct-2026, invariante
+      // 107): espejo del TUA sin vuelo — su egreso vive en la fila suelta de
+      // «otros movimientos» del Balance general. Se LISTA (el dinero no se
+      // esconde) pero no suma al acumulado ni se acredita a ningún avión (el
+      // sellado solo informa). Los que traen vuelo salen en «otros ingresos».
+      const esOtroMov = esOtroMovimiento(g);
       // Pago de AFAC marcado (invariante 90): se LISTA (caja real del mes)
       // pero no se acredita a ningún avión (lo paga VuelaTour).
       const pagoAfac = esPagoAfac(g);
@@ -1478,11 +1524,12 @@ export class DineroReportService {
           : null,
         mxn == null ? '(USD sin TC — no suma)' : null,
         esTuas ? '(TUA pagado — no resta: Otros movimientos)' : null,
+        esOtroMov ? SUFIJO_DINERO_OTROS_MOVIMIENTOS : null,
         pagoAfac ? SUFIJO_DINERO_PAGO_AFAC : null,
       ]
         .filter(Boolean)
         .join(' · ');
-      if (mxn != null && !esTuas) acumulado += mxn;
+      if (mxn != null && !esTuas && !esOtroMov) acumulado += mxn;
       otrosGastos.push({
         fecha: (g.fecha_gasto as string) ?? null,
         concepto,
@@ -1521,8 +1568,10 @@ export class DineroReportService {
               : indirectosPorAvion;
         destino.set(aid, (destino.get(aid) ?? 0) + monto_);
       };
-      if (esTuas) {
-        // Regla 7: nunca se acredita a un avión (ver arriba).
+      if (esTuas || esOtroMov) {
+        // Regla 7: nunca se acredita a un avión (ver arriba). «Otros
+        // movimientos (VuelaTour)» (invariante 107): tampoco — el avión
+        // sellado solo informa.
       } else if (pagoAfac) {
         // Invariante 90: lo paga VuelaTour — fuera de `permisosPorAvion`
         // (espejo de la hoja «permisos» del balance y del grupo PERMISO del

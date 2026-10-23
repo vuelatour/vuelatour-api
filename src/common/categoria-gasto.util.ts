@@ -50,6 +50,19 @@
  * no es fuera del avión ni exige vuelo a todos los roles. Lo que la hace
  * columna OTROS y DIRECTO vive en sus lectores (`CAT_OTROS` del balance,
  * `DIRECTO` del reparto, `CATS_SIN_TUA_EMBEBIDO`, `CATEGORIAS_NO_LIGABLES`).
+ *
+ * OTROS MOVIMIENTOS (23-oct-2026, API 0.0.106, invariante 107 del CLAUDE.md
+ * del API; pedido del cliente con la captura del select de categorías:
+ * «Falta la opción de agregar un gasto a la hoja de "otros movimientos" en
+ * el balance general»): `OTROS_MOVIMIENTOS` = «Otros movimientos
+ * (VuelaTour)», destino PROPIO `DESTINO_OTROS_MOVIMIENTOS` (NO es el de
+ * EMPRESA: no cae en «otros gastos»). Es un EGRESO DE VUELATOUR con vuelo y
+ * avión opcionales: con vuelo egresa en el bloque de su vuelo de la hoja
+ * «otros movimientos» del Balance general (y en «Otros ingresos» del Libro
+ * Dinero, como el TUA pagado); sin vuelo, fila suelta. Nunca es costo del
+ * avión (`CATEGORIAS_GASTO_FUERA_DEL_AVION`, EXCLUIDO del reparto) ni
+ * «pendiente de avión» (`CATEGORIAS_GASTO_SIN_AVION`). Solo la OFICINA la
+ * captura (`CATEGORIAS_SOLO_OFICINA`).
  */
 import type { CategoriaGasto } from '../modules/expenses/dto/expenses.dto';
 
@@ -92,7 +105,21 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
   OTRO: 'Otros gastos VuelaTour',
   /** Envíos y mensajería de la empresa (20-oct-2026, invariante 97). */
   PAQUETERIA: 'Paquetería',
+  /** Egreso de VuelaTour para la hoja «otros movimientos» del Balance
+   *  general (23-oct-2026, invariante 107): vuelo y avión opcionales, nunca
+   *  costo del avión. */
+  OTROS_MOVIMIENTOS: 'Otros movimientos (VuelaTour)',
 };
+
+/**
+ * Destino PROPIO de «Otros movimientos (VuelaTour)» (23-oct-2026, invariante
+ * 107). A PROPÓSITO distinto de `DESTINO_EMPRESA`: la categoría NO entra a
+ * `CATEGORIAS_GASTO_EMPRESA` (no va a la hoja «otros gastos»; su lugar es
+ * la hoja «otros movimientos», apareada con el ingreso de VuelaTour de su
+ * vuelo o como fila suelta). Texto IDÉNTICO en panel y app.
+ */
+export const DESTINO_OTROS_MOVIMIENTOS =
+  'Otros movimientos (Balance general VuelaTour)';
 
 /** A dónde se va el gasto POR DEFAULT (texto verde del selector de captura). */
 export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
@@ -133,6 +160,10 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   // a CATEGORIAS_GASTO_EMPRESA (y por ella a «sin avión»).
   PAQUETERIA: 'Otros gastos (Balance general VuelaTour)',
   PERSONAL_DUENO: 'Gastos personales de los dueños (fuera de la empresa)',
+  // OTROS_MOVIMIENTOS (23-oct-2026, invariante 107): destino PROPIO — ni
+  // «Gastos directos del vuelo» (no exige vuelo) ni el de EMPRESA (no va a
+  // «otros gastos»).
+  OTROS_MOVIMIENTOS: DESTINO_OTROS_MOVIMIENTOS,
 };
 
 /** Destino por default que marca a una categoría como gasto de la EMPRESA. */
@@ -203,6 +234,12 @@ export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
   // un literal que el enum de la BD no conoce revienta la LECTURA (22P02)
   // ⇒ el API que lo trae exige la migración 20260928000001 ANTES del deploy.
   'COMISION_VENDEDOR',
+  // OTROS_MOVIMIENTOS (23-oct-2026, invariante 107): egreso de VuelaTour
+  // de la hoja «otros movimientos» — con o sin vuelo, con o sin avión
+  // sellado, jamás es «pendiente de avión» (el avión solo informa). Mismo
+  // aviso de PostgREST: la migración 20261023000002 YA está aplicada en prod
+  // (23-oct-2026), antes de este API.
+  'OTROS_MOVIMIENTOS',
 ];
 
 /**
@@ -240,6 +277,41 @@ export const CATEGORIA_COMISARIATO = 'COMISARIATO';
 /** Literal de «Otros gastos directos del vuelo» (20-oct-2026, invariante
  *  97): columna OTROS del balance, como COMISARIATO. */
 export const CATEGORIA_OTROS_DIRECTOS_VUELO = 'OTROS_DIRECTOS_VUELO';
+
+/**
+ * «Otros movimientos (VuelaTour)» (23-oct-2026, API 0.0.106, invariante
+ * 107): EGRESO DE VUELATOUR que vive en la hoja «otros movimientos» del
+ * Balance general — con vuelo, como línea de egreso del bloque de su vuelo
+ * (el avión del vuelo solo informa); sin vuelo, como fila suelta. Jamás es
+ * costo del avión (fila del vuelo, «Gastos Indirectos», reparto: EXCLUIDO)
+ * ni «otros gastos» de la empresa. Para los lectores que necesitan el
+ * literal (balance, Libro Dinero, reparto, compras, candado del cierre).
+ */
+export const CATEGORIA_OTROS_MOVIMIENTOS = 'OTROS_MOVIMIENTOS';
+
+/**
+ * Categorías que SOLO captura la OFICINA (23-oct-2026, invariante 107): un
+ * PILOTO, MECANICO o VISITANTE que las manda en el ALTA de un gasto recibe
+ * 400 `CATEGORIA_SOLO_OFICINA` (`mensajeCategoriaSoloOficina`); la edición
+ * no se bloquea (la app re-manda la categoría vigente). Patrón de
+ * `MEDIOS_SOLO_OFICINA`. Hoy solo «Otros movimientos (VuelaTour)»: un
+ * egreso del Balance general que la oficina decide; el piloto registra el
+ * gasto del vuelo con su categoría (Operaciones, Hotel, Comida…).
+ */
+export const CATEGORIAS_SOLO_OFICINA: ReadonlySet<string> = new Set([
+  CATEGORIA_OTROS_MOVIMIENTOS,
+]);
+
+/** Texto del 400 `CATEGORIA_SOLO_OFICINA` de «Otros movimientos (VuelaTour)». */
+export const MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA =
+  '«Otros movimientos (VuelaTour)» la registra la oficina: es un egreso de VuelaTour para la hoja «otros movimientos» del Balance general. Si es un gasto del vuelo, elige su categoría (Operaciones, Hotel, Comida…).';
+
+/** El texto del 400 `CATEGORIA_SOLO_OFICINA` según la categoría enviada. */
+export function mensajeCategoriaSoloOficina(cat: string): string {
+  if (cat === CATEGORIA_OTROS_MOVIMIENTOS)
+    return MENSAJE_OTROS_MOVIMIENTOS_SOLO_OFICINA;
+  return `«${etiquetaCategoriaGasto(cat)}» la registra la oficina.`;
+}
 
 /**
  * «Nómina» (16-oct-2026, API 0.0.90, invariante 91): vive en su módulo
@@ -324,6 +396,12 @@ export function categoriaExigeVueloSiempre(
 export const CATEGORIAS_GASTO_FUERA_DEL_AVION: ReadonlySet<string> = new Set([
   ...CATEGORIAS_GASTO_EMPRESA,
   ...CATEGORIAS_GASTO_PAGO_VENDEDOR,
+  // OTROS_MOVIMIENTOS (23-oct-2026, invariante 107): egreso de VuelaTour de
+  // la hoja «otros movimientos» del Balance general — fuera de la fila del
+  // vuelo, de «Gastos Indirectos», del tablero por avión, de la ficha, del
+  // reporte por vuelo y del candado «mes del vuelo» de la fecha, aunque
+  // traiga vuelo o avión sellados. NO va a «otros gastos» (no es de EMPRESA).
+  CATEGORIA_OTROS_MOVIMIENTOS,
 ]);
 
 /** ¿El gasto queda fuera del costo del avión/vuelo? (ver arriba). */
@@ -345,6 +423,8 @@ export const MIGRACION_DE_CATEGORIA: Readonly<Record<string, string>> = {
   // 20-oct-2026 (invariante 97): 23.º y 24.º valores, al final.
   PAQUETERIA: '20261020000001',
   OTROS_DIRECTOS_VUELO: '20261020000002',
+  // 23-oct-2026 (invariante 107): 25.º valor, al final (aplicada en prod).
+  OTROS_MOVIMIENTOS: '20261023000002',
 };
 
 /**
@@ -362,6 +442,14 @@ export const MENSAJE_CATEGORIA_SIN_MIGRACION =
  */
 export const MENSAJE_COMISARIATO_SIN_MIGRACION =
   '«Comisariato» necesita la migración 20261013000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
+
+/**
+ * Texto del 400 cuando la BD todavía no tiene el valor `OTROS_MOVIMIENTOS`
+ * (migración 20261023000002, aplicada en prod el 23-oct-2026): misma
+ * plantilla de `mensajeCategoriaSinMigracion`; aquí para los specs.
+ */
+export const MENSAJE_OTROS_MOVIMIENTOS_SIN_MIGRACION =
+  '«Otros movimientos (VuelaTour)» necesita la migración 20261023000002 en la base de datos; avisa a sistemas (el gasto no se guardó).';
 
 /**
  * 22P02 «invalid input value for enum categoria_gasto: "COMISION_VENDEDOR_AVION"»
