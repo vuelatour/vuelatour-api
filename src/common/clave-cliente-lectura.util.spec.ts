@@ -4,6 +4,7 @@ import { resetColumnasOpcionales } from './columna-opcional.util';
 import {
   LOTE_IDS_CLAVE,
   clavesClienteDeVuelos,
+  consecutivosClienteDeVuelos,
   vueloIdsPorClaveCliente,
 } from './clave-cliente-lectura.util';
 
@@ -344,5 +345,155 @@ describe('vueloIdsPorClaveCliente', () => {
     expect(warn).toHaveBeenCalledWith(
       'ID de vuelo por cliente: no se pudo buscar «january2» (timeout); la búsqueda sigue sin él',
     );
+  });
+});
+
+/**
+ * CONSECUTIVO DEL VUELO POR CLIENTE PARA LOS DOCUMENTOS (23-oct-2026, API
+ * 0.0.105, invariante 106): la misma lectura (sonda + lotes de 150, todo o
+ * nada, nunca lanza), pero devuelve el NÚMERO (`vuelo.consecutivo_cliente`)
+ * sin exigir alias: es la columna CONSECUTIVO de balances, Dinero, AFAC,
+ * reparto y listas del cierre, que ya no imprimen el ID.
+ */
+describe('consecutivosClienteDeVuelos (documentos)', () => {
+  let warn: jest.SpyInstance;
+  const usados: SupabaseClient[] = [];
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    for (const sb of usados.splice(0)) resetColumnasOpcionales(sb);
+    jest.restoreAllMocks();
+  });
+  const armar = (responder: (l: Llamada) => Respuesta) => {
+    const f = sbFalso(responder);
+    usados.push(f.sb);
+    return f;
+  };
+  const warnsLectura = () =>
+    (warn.mock.calls as unknown[][]).filter((c) =>
+      String(c[0]).startsWith(
+        'Consecutivo de vuelo por cliente: no se pudo leer',
+      ),
+    );
+
+  it('sin ids ⇒ Map vacío y CERO consultas (ni la sonda)', async () => {
+    const { sb, llamadas } = armar(mundo([]));
+    expect(await consecutivosClienteDeVuelos(sb, [])).toEqual(new Map());
+    expect(await consecutivosClienteDeVuelos(sb, [null, ''])).toEqual(
+      new Map(),
+    );
+    expect(llamadas).toHaveLength(0);
+  });
+
+  it('sin la migración (42703 en la sonda) ⇒ Map vacío sin lectura de lote ni warn', async () => {
+    const { sb, llamadas } = armar((l) =>
+      esSonda(l)
+        ? {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column vuelo.consecutivo_cliente does not exist',
+            },
+          }
+        : { data: [], error: null },
+    );
+    expect((await consecutivosClienteDeVuelos(sb, [vid(1)])).size).toBe(0);
+    expect(lecturasDeLote(llamadas)).toHaveLength(0);
+    expect(warnsLectura()).toHaveLength(0);
+  });
+
+  it('el número por vuelo: number o string de dígitos; SIN exigir alias ni fecha; inválidos fuera', async () => {
+    const { sb, llamadas } = armar(
+      mundo([
+        {
+          id: vid(364),
+          fecha_vuelo: '2026-10-01T15:00:00+00:00',
+          consecutivo_cliente: 5,
+          cliente: { alias: 'beh' },
+        },
+        {
+          id: vid(376),
+          fecha_vuelo: null,
+          consecutivo_cliente: '2',
+          cliente: null,
+        },
+        {
+          id: vid(2),
+          fecha_vuelo: '2026-10-13',
+          consecutivo_cliente: 1,
+          cliente: { alias: 'Diego' },
+        },
+        {
+          id: vid(3),
+          fecha_vuelo: '2026-10-13',
+          consecutivo_cliente: null,
+          cliente: { alias: 'diego' },
+        },
+        {
+          id: vid(4),
+          fecha_vuelo: '2026-10-13',
+          consecutivo_cliente: 0,
+          cliente: { alias: 'diego' },
+        },
+      ]),
+    );
+    const r = await consecutivosClienteDeVuelos(sb, [
+      vid(364),
+      vid(376),
+      vid(2),
+      vid(3),
+      vid(4),
+    ]);
+    expect([...r.entries()]).toEqual([
+      [vid(364), 5],
+      [vid(376), 2],
+      [vid(2), 1],
+    ]);
+    // La MISMA lectura que el ID (una sola consulta por lote).
+    const [lectura] = lecturasDeLote(llamadas);
+    expect(lectura.ops).toContainEqual([
+      'select',
+      'id, fecha_vuelo, consecutivo_cliente, cliente:cliente_id(alias)',
+    ]);
+  });
+
+  it('151 ids ⇒ lotes de 150 y de 1; error en un lote ⇒ Map VACÍO (jamás parcial) y un warn', async () => {
+    const ids = Array.from({ length: 151 }, (_, i) => vid(i + 1));
+    const ok = armar(
+      mundo(ids.map((id, i) => ({ id, consecutivo_cliente: i + 1 }))),
+    );
+    const r = await consecutivosClienteDeVuelos(ok.sb, ids);
+    expect(r.size).toBe(151);
+    expect(r.get(vid(151))).toBe(151);
+    expect(
+      lecturasDeLote(ok.llamadas).map(
+        (l) => (l.ops.find((o) => o[0] === 'in')?.[2] as string[]).length,
+      ),
+    ).toEqual([150, 1]);
+
+    let n = 0;
+    const mal = armar((l) => {
+      if (esSonda(l)) return { data: [], error: null };
+      n += 1;
+      if (n === 2) return { data: null, error: { message: 'boom' } };
+      return {
+        data: ids.map((id) => ({ id, consecutivo_cliente: 1 })),
+        error: null,
+      };
+    });
+    expect((await consecutivosClienteDeVuelos(mal.sb, ids)).size).toBe(0);
+    expect(warnsLectura()).toEqual([
+      ['Consecutivo de vuelo por cliente: no se pudo leer (boom); se omite'],
+    ]);
+  });
+
+  it('un cliente sin `.from` ⇒ Map vacío con warn, sin lanzar', async () => {
+    const sb = {} as unknown as SupabaseClient;
+    usados.push(sb);
+    await expect(consecutivosClienteDeVuelos(sb, [vid(1)])).resolves.toEqual(
+      new Map(),
+    );
+    expect(warnsLectura()).toHaveLength(1);
   });
 });

@@ -190,7 +190,11 @@ describe('Libro Dinero — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep-2026
     );
     const f = filaComision(p)!;
     expect(f).toEqual({
-      clave: 'vtleticia',
+      // CLAVES SIN APODO (invariante 106): «#501» + cliente, consecutivo y ruta.
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
+      ruta: 'cun-mid',
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
       concepto_egreso: 'pago comisión vendedor (Vendedor Uno) · gasto real',
       egreso_mxn: 1600,
@@ -264,7 +268,12 @@ describe('Libro Dinero — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep-2026
       (f.concepto_egreso ?? '').startsWith('pago comisión vendedor ·'),
     );
     expect(solo).toEqual({
-      clave: 'vtleticia',
+      // CLAVES SIN APODO (invariante 106): «#502» + cliente, consecutivo y
+      // ruta (el #502 de este mundo no tiene tramos ⇒ '' como en la hoja 1).
+      clave: '#502',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
+      ruta: '',
       fecha_vuelo: '2026-09-20T15:00:00+00:00',
       concepto_egreso:
         'pago comisión vendedor · sin comisión cobrada en la cotización',

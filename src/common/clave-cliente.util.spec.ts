@@ -1,10 +1,12 @@
 import {
   ALIAS_REGEX,
+  CLIENTE_VUELO_SERVICIO,
   MENSAJE_ALIAS_INVALIDO,
   claveCliente,
   claveDinero,
   claveLibro,
   claveOtrosMovimientos,
+  consecutivoClienteValido,
   ddmmaaCancun,
   normalizarAliasEntrada,
   parseBusquedaClave,
@@ -194,66 +196,105 @@ describe('parseBusquedaClave (búsqueda por ID; la fecha escrita se ignora)', ()
   });
 });
 
-describe('claveLibro (maestra y cobranza)', () => {
-  it('con ID: folio · ID · cliente (sin recortar el nombre)', () => {
+/**
+ * CLAVES SIN APODO EN LOS DOCUMENTOS (23-oct-2026, API 0.0.105, invariante
+ * 106): «siempre debemos ocultar los apodos con la clave del vuelo … mejor
+ * eliminar esos apodos de todos lados». Las tres claves de los documentos
+ * son SOLO el folio; el ID («beh05-011026»), el legado («vtbeh364», «vtbeh»)
+ * y «vtservicio» ya no se imprimen. Los parámetros viejos se aceptan y se
+ * ignoran (ninguna llamada se rompe).
+ */
+const FORMA_ID = /[a-z]+[0-9]{2,}-[0-9]{6}/;
+
+describe('claveLibro (maestra y cobranza): «#folio» y nada más', () => {
+  it('con ID y con cliente sigue siendo SOLO el folio (el cliente viaja en su columna)', () => {
     expect(
       claveLibro({
         folio: 364,
         claveCliente: 'beh05-011026',
         cliente: 'Beh Kay ',
       }),
-    ).toBe('#364 · beh05-011026 · Beh Kay ');
+    ).toBe('#364');
     expect(
       claveLibro({ folio: 364, claveCliente: 'beh05-011026', cliente: null }),
-    ).toBe('#364 · beh05-011026');
+    ).toBe('#364');
   });
 
   it.each(['Beh Kay ', 'Maqar', '', null])(
-    'sin ID es EXACTAMENTE la plantilla de siempre (cliente %p)',
+    'sin ID y con cliente %p: «#364» (ya no «#364 · cliente»)',
     (cliente) => {
-      const folio = '364';
-      expect(claveLibro({ folio, claveCliente: null, cliente })).toBe(
-        `#${folio}${cliente ? ` · ${cliente}` : ''}`,
+      expect(claveLibro({ folio: '364', claveCliente: null, cliente })).toBe(
+        '#364',
       );
     },
   );
+
+  it('solo con el folio (la llamada nueva) y nunca con forma de ID', () => {
+    expect(claveLibro({ folio: 219 })).toBe('#219');
+    expect(
+      FORMA_ID.test(claveLibro({ folio: 219, claveCliente: 'ana02-010926' })),
+    ).toBe(false);
+  });
 });
 
-describe('claveOtrosMovimientos y claveDinero', () => {
-  it('otros movimientos: con ID «#folio · ID»; sin ID el legado', () => {
+describe('claveOtrosMovimientos y claveDinero: «#folio» y nada más', () => {
+  it('otros movimientos: con ID, sin ID y sin legado ⇒ «#364»', () => {
     expect(
       claveOtrosMovimientos({
         folio: 364,
         claveCliente: 'beh05-011026',
         legado: 'vtbeh364',
       }),
-    ).toBe('#364 · beh05-011026');
+    ).toBe('#364');
     expect(
       claveOtrosMovimientos({
         folio: 364,
         claveCliente: null,
         legado: 'vtbeh364',
       }),
-    ).toBe('vtbeh364');
+    ).toBe('#364');
+    expect(claveOtrosMovimientos({ folio: '364' })).toBe('#364');
   });
 
-  it("dinero: 'vtservicio' manda aunque haya ID; con ID el ID; sin ID el legado", () => {
+  it("dinero: también el vuelo de SERVICIO es «#folio» (ya no 'vtservicio'); con ID o legado, igual", () => {
     expect(
       claveDinero({
+        folio: 504,
         servicio: true,
         claveCliente: 'beh05-011026',
         legado: 'vtbeh',
       }),
-    ).toBe('vtservicio');
+    ).toBe('#504');
     expect(
       claveDinero({
+        folio: 364,
         servicio: false,
         claveCliente: 'beh05-011026',
         legado: 'vtbeh',
       }),
-    ).toBe('beh05-011026');
+    ).toBe('#364');
     expect(
-      claveDinero({ servicio: false, claveCliente: null, legado: 'vtbeh' }),
-    ).toBe('vtbeh');
+      claveDinero({
+        folio: 364,
+        servicio: false,
+        claveCliente: null,
+        legado: 'vtbeh',
+      }),
+    ).toBe('#364');
+    expect(claveDinero({ folio: 364 })).toBe('#364');
+  });
+
+  it('la etiqueta del cliente de un vuelo de servicio es «Vuelo de servicio»', () => {
+    expect(CLIENTE_VUELO_SERVICIO).toBe('Vuelo de servicio');
+  });
+});
+
+describe('consecutivoClienteValido (la columna CONSECUTIVO de los documentos)', () => {
+  it('entero ≥ 1 como number o como string de dígitos; otro ⇒ null', () => {
+    expect(consecutivoClienteValido(5)).toBe(5);
+    expect(consecutivoClienteValido('12')).toBe(12);
+    for (const mal of [0, -1, 1.5, '0', '3x', '', null, undefined, true]) {
+      expect(consecutivoClienteValido(mal)).toBeNull();
+    }
   });
 });

@@ -252,6 +252,15 @@ describe('GET /v1/cierres/:periodo/previa', () => {
       leyenda:
         'Pasa a octubre 2026 · pendiente de cobro: cobrado $500.00 USD de $1,000.00 USD',
     });
+    // CLAVES SIN APODO (23-oct-2026, invariante 106): la previa ya no manda
+    // `clave_cliente`; cada vuelo trae `consecutivo_cliente` (null sin la
+    // migración del ID) y `ruta`, además de folio y cliente.
+    for (const v of p.vuelos_que_pasan) {
+      expect(v).not.toHaveProperty('clave_cliente');
+      expect(v).toHaveProperty('consecutivo_cliente');
+      expect(v).toHaveProperty('ruta');
+      expect(v).toHaveProperty('cliente');
+    }
     expect(p.totales).toMatchObject({
       completados: 5,
       cancelados: 1,

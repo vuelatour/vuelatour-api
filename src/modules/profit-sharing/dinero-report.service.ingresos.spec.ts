@@ -425,7 +425,11 @@ const GOLDEN_DINERO = {
   ],
   vuelos: [
     {
-      clave: 'vtleticia',
+      // CLAVES SIN APODO (23-oct-2026, API 0.0.105, invariante 106): la
+      // clave es SOLO el folio (antes «vtleticia») + cliente y consecutivo.
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
       matricula: 'XB-TST',
       color: '#3B82F6',
       fecha: '2026-09-10T15:00:00+00:00',
@@ -464,9 +468,14 @@ const GOLDEN_DINERO = {
     },
   ],
   otros_ingresos: [
+    // CLAVES SIN APODO (invariante 106): «#501» + cliente, consecutivo y la
+    // ruta de la hoja de vuelos en cada fila del vuelo.
     {
-      clave: 'vtleticia',
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
+      ruta: 'cun-mid',
       concepto_egreso: 'tuas pagadas',
       egreso_mxn: 1500,
       fecha_egreso: '2026-09-10',
@@ -478,8 +487,11 @@ const GOLDEN_DINERO = {
       factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
-      clave: 'vtleticia',
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
+      ruta: 'cun-mid',
       concepto_egreso: null,
       egreso_mxn: null,
       fecha_egreso: null,
@@ -491,8 +503,11 @@ const GOLDEN_DINERO = {
       factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
-      clave: 'vtleticia',
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
+      ruta: 'cun-mid',
       concepto_egreso: null,
       egreso_mxn: null,
       fecha_egreso: null,

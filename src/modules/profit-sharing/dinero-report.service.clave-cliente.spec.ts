@@ -2,15 +2,17 @@
 jest.mock('../pyservices/pyservices.service', () => ({
   PyservicesService: class {},
 }));
-// El lector del ID por cliente se reemplaza: aquí se prueba SOLO la
-// etiqueta de la CLAVE del Libro Dinero.
+// El lector del consecutivo por cliente se reemplaza: aquí se prueban SOLO
+// las columnas de identificación de las filas del Libro Dinero.
 jest.mock('../../common/clave-cliente-lectura.util', () => ({
-  clavesClienteDeVuelos: jest.fn(),
+  clavesClienteDeVuelos: jest.fn().mockResolvedValue(new Map()),
+  consecutivosClienteDeVuelos: jest.fn(),
   vueloIdsPorClaveCliente: jest.fn().mockResolvedValue([]),
 }));
 
 import { DineroReportService } from './dinero-report.service';
-import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import { consecutivosClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import { CLIENTE_VUELO_SERVICIO } from '../../common/clave-cliente.util';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { DineroXlsxPayload } from '../pyservices/pyservices.service';
 import {
@@ -37,30 +39,35 @@ jest.mock('../../common/cierre-mes-disponible.util', () => ({
 }));
 
 /**
- * LIBRO DINERO + ID DE VUELO POR CLIENTE (13-oct-2026, API 0.0.75,
- * invariante 68). SOLO ETIQUETAS (fuente única `claveDinero`): la CLAVE de
- * la hoja de vuelos y de las filas «Otros ingresos» del vuelo pasa a ser el
- * ID («beh05-011026», + « (50 % XB-DOS)» en multi-avión); un vuelo de
- * SERVICIO sigue siendo «vtservicio»; `clave_cliente` viaja SOLO con valor.
- * Sin ID, el libro es BYTE a BYTE el de siempre (golden del fixture). Ningún
- * importe ni utilidad cambia.
+ * LIBRO DINERO — CLAVES SIN APODO (23-oct-2026, API 0.0.105, invariante
+ * 106). SOLO ETIQUETAS (fuente única `claveDinero`): la CLAVE de la hoja de
+ * vuelos y de las filas «Otros ingresos» del vuelo es el folio «#501» (+
+ * « (50 % XB-DOS)» en multi-avión); ya no el ID («beh05-011026»), ni el
+ * legado «vtleticia», ni «vtservicio». Cada fila de vuelo lleva `cliente`
+ * (nombre completo; «Vuelo de servicio» con `servicio: true` en un tramo de
+ * taller), `ruta` y `consecutivo_cliente` (null si el lector no lo da).
+ * Ningún importe ni utilidad cambia.
  */
 
-const lector = clavesClienteDeVuelos as jest.MockedFunction<
-  typeof clavesClienteDeVuelos
+const lector = consecutivosClienteDeVuelos as jest.MockedFunction<
+  typeof consecutivosClienteDeVuelos
 >;
 
 const AV2 = 'av-2';
 const V3 = 'v-3';
 const V4 = 'v-4';
 
-function lectorCon(claves: Record<string, string>) {
+/** Forma de un ID por cliente («beh05-011026») y del legado («vtbeh»). */
+const FORMA_ID = /[a-z]+[0-9]{2,}-[0-9]{6}/;
+const FORMA_LEGADO = /^vt[a-záéíóúüñ]/i;
+
+function lectorCon(consecutivos: Record<string, number>) {
   lector.mockImplementation((_sb, ids) =>
     Promise.resolve(
       new Map(
         [...new Set(ids)]
-          .filter((id): id is string => !!id && claves[id] != null)
-          .map((id) => [id, claves[id]] as [string, string]),
+          .filter((id): id is string => !!id && consecutivos[id] != null)
+          .map((id) => [id, consecutivos[id]] as [string, number]),
       ),
     ),
   );
@@ -161,22 +168,44 @@ async function libro(conExtras = true): Promise<DineroXlsxPayload> {
   return { ...p, generado: 'FIJO' };
 }
 
-/** Lo que el ID NO toca: el payload sin CLAVE ni `clave_cliente`. */
-const sinEtiquetas = (p: unknown) =>
+/** Lo que el lector NO toca: el payload sin `consecutivo_cliente`. */
+const sinConsecutivo = (p: unknown) =>
   JSON.stringify(p, (llave: string, valor: unknown) =>
-    llave === 'clave' || llave === 'clave_cliente' ? undefined : valor,
+    llave === 'consecutivo_cliente' ? undefined : valor,
   );
 
-describe('Libro Dinero — CLAVE con el ID de vuelo por cliente (invariante 68)', () => {
+/** Ni `clave_cliente` ni claves con forma de ID o de legado. */
+function esperarSinApodos(p: DineroXlsxPayload): void {
+  expect(JSON.stringify(p)).not.toContain('clave_cliente');
+  const todas = [
+    ...p.vuelos.map((v) => v.clave),
+    ...p.otros_ingresos.map((f) => f.clave),
+  ];
+  expect(todas.length).toBeGreaterThan(0);
+  for (const c of todas) {
+    expect(c).not.toMatch(FORMA_ID);
+    expect(c).not.toMatch(FORMA_LEGADO);
+  }
+}
+
+describe('Libro Dinero — CLAVE sin apodo (invariante 106)', () => {
   beforeEach(() => lector.mockReset());
 
-  it('dinero-vlos: la CLAVE es el ID y la fila lleva clave_cliente AL FINAL', async () => {
-    lectorCon({ [V1]: 'beh05-011026' });
+  it('dinero-vlos: clave «#501», cliente completo y consecutivo JUNTO a la clave; ruta y fecha como siempre', async () => {
+    lectorCon({ [V1]: 5 });
     const p = await libro();
     const fila = p.vuelos.find((v) => v.fecha?.startsWith('2026-09-10'))!;
-    expect(fila.clave).toBe('beh05-011026');
-    expect(fila.clave_cliente).toBe('beh05-011026');
-    expect(Object.keys(fila).at(-1)).toBe('clave_cliente');
+    expect(fila.clave).toBe('#501');
+    expect(fila.cliente).toBe('Leticia León Alvarado');
+    expect(fila.consecutivo_cliente).toBe(5);
+    expect(fila.ruta).toBe('cun-mid');
+    expect(fila).not.toHaveProperty('servicio');
+    expect(Object.keys(fila).slice(0, 3)).toEqual([
+      'clave',
+      'cliente',
+      'consecutivo_cliente',
+    ]);
+    esperarSinApodos(p);
     // UNA lectura con los vuelos del periodo.
     expect(lector).toHaveBeenCalledTimes(1);
     expect([...(lector.mock.calls[0][1] as string[])].sort()).toEqual(
@@ -184,71 +213,84 @@ describe('Libro Dinero — CLAVE con el ID de vuelo por cliente (invariante 68)'
     );
   });
 
-  it('multi-avión: el ID + el sufijo de siempre « (50 % MATRÍCULA)» en cada fila', async () => {
-    lectorCon({ [V3]: 'january02-211026' });
+  it('multi-avión: «#503» + el sufijo de siempre « (50 % MATRÍCULA)» en cada fila, con el mismo cliente y consecutivo', async () => {
+    lectorCon({ [V3]: 2 });
     const p = await libro();
-    const claves = p.vuelos
-      .filter((v) => v.clave_cliente === 'january02-211026')
-      .map((v) => v.clave)
-      .sort();
-    expect(claves).toEqual([
-      'january02-211026 (50 % XB-DOS)',
-      'january02-211026 (50 % XB-TST)',
+    const filas = p.vuelos.filter((v) => v.clave.startsWith('#503'));
+    expect(filas.map((v) => v.clave).sort()).toEqual([
+      '#503 (50 % XB-DOS)',
+      '#503 (50 % XB-TST)',
     ]);
+    for (const f of filas) {
+      expect(f.cliente).toBe('Leticia León Alvarado');
+      expect(f.consecutivo_cliente).toBe(2);
+    }
   });
 
-  it("vuelo de SERVICIO ⇒ 'vtservicio' aunque tenga ID", async () => {
-    lectorCon({ [V4]: 'leticia09-180926' });
+  it("vuelo de SERVICIO ⇒ clave «#504» (ya no 'vtservicio'), cliente «Vuelo de servicio» y la bandera servicio: true", async () => {
+    lectorCon({ [V4]: 9 });
     const p = await libro();
     const servicio = p.vuelos.find((v) => v.fecha?.startsWith('2026-09-18'))!;
-    expect(servicio.clave).toBe('vtservicio');
+    expect(servicio.clave).toBe('#504');
+    expect(servicio.cliente).toBe(CLIENTE_VUELO_SERVICIO);
+    expect(servicio.cliente).toBe('Vuelo de servicio');
+    expect(servicio.servicio).toBe(true);
+    expect(servicio.consecutivo_cliente).toBe(9);
+    // Solo el vuelo de servicio lleva la bandera.
+    expect(p.vuelos.filter((v) => v.servicio === true)).toHaveLength(1);
   });
 
-  it('«Otros ingresos» del vuelo: la MISMA clave en sus filas; ING-n sin cambio', async () => {
-    lectorCon({ [V1]: 'beh05-011026' });
+  it('«Otros ingresos» del vuelo: «#501» + cliente, consecutivo y ruta en sus filas; ING-n sin cambio y sin esas llaves', async () => {
+    lectorCon({ [V1]: 5 });
     const p = await libro();
     const delVuelo = p.otros_ingresos.filter((f) => f.fecha_vuelo != null);
     expect(delVuelo.length).toBe(3);
     for (const f of delVuelo) {
-      expect(f.clave).toBe('beh05-011026');
-      expect(f.clave_cliente).toBe('beh05-011026');
+      expect(f.clave).toBe('#501');
+      expect(f.cliente).toBe('Leticia León Alvarado');
+      expect(f.consecutivo_cliente).toBe(5);
+      expect(f.ruta).toBe('cun-mid');
     }
     const ing = p.otros_ingresos.filter((f) => f.clave.startsWith('ING-'));
     expect(ing.map((f) => f.clave)).toEqual(['ING-12', 'ING-13']);
-    for (const f of ing) expect(f).not.toHaveProperty('clave_cliente');
+    for (const f of ing) {
+      expect(f).not.toHaveProperty('cliente');
+      expect(f).not.toHaveProperty('consecutivo_cliente');
+      expect(f).not.toHaveProperty('ruta');
+    }
+    esperarSinApodos(p);
   });
 
-  it("sin ID ⇒ 'vtleticia' y SIN llave: el libro es BYTE a BYTE el golden", async () => {
+  it('sin lector ⇒ «#501» con consecutivo_cliente: null: el libro es BYTE a BYTE el golden', async () => {
     lectorCon({});
     const p = await libro(false);
     // El golden del fixture es SIN ingresos; aquí los ING-n van al final.
     const n = GOLDEN_DINERO.otros_ingresos.length;
-    expect(p.vuelos.map((v) => v.clave)).toEqual(['vtleticia']);
+    expect(p.vuelos.map((v) => v.clave)).toEqual(['#501']);
+    expect(p.vuelos[0].consecutivo_cliente).toBeNull();
     expect(JSON.stringify(p.vuelos)).toBe(JSON.stringify(GOLDEN_DINERO.vuelos));
     expect(JSON.stringify(p.otros_ingresos.slice(0, n))).toBe(
       JSON.stringify(GOLDEN_DINERO.otros_ingresos),
     );
-    expect(JSON.stringify(p)).not.toContain('clave_cliente');
+    esperarSinApodos(p);
   });
 
-  it('totales y utilidades IDÉNTICOS con y sin ID (solo cambian las etiquetas)', async () => {
-    lectorCon({ [V1]: 'beh05-011026', [V3]: 'january02-211026' });
+  it('totales y utilidades IDÉNTICOS con y sin lector (solo cambia el consecutivo)', async () => {
+    lectorCon({ [V1]: 5, [V3]: 2, [V4]: 9 });
     const con = await libro();
     lectorCon({});
     const sin = await libro();
     expect(con.vuelos.length).toBe(4);
-    expect(sinEtiquetas(con)).toBe(sinEtiquetas(sin));
+    expect(sinConsecutivo(con)).toBe(sinConsecutivo(sin));
     expect(con.utilidades_otros_ingresos_mxn).toBe(
       sin.utilidades_otros_ingresos_mxn,
     );
   });
 
   it('el avión de la fila no cambia (XB-TST en el #501)', async () => {
-    lectorCon({ [V1]: 'beh05-011026' });
+    lectorCon({ [V1]: 5 });
     const p = await libro();
-    expect(p.vuelos.find((v) => v.clave === 'beh05-011026')?.matricula).toBe(
-      'XB-TST',
-    );
+    expect(p.vuelos.find((v) => v.clave === '#501')?.matricula).toBe('XB-TST');
     expect(AV).toBe('av-1');
   });
 });

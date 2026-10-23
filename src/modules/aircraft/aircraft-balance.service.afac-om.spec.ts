@@ -259,9 +259,13 @@ describe('Balance GENERAL — AFAC POR VUELO en «otros movimientos» (invariant
     const fila = filas.at(-1)!;
     expect(fila).toEqual({
       clave: v.clave,
+      // CLAVES SIN APODO (invariante 106): copiados de la fila del libro.
+      cliente: v.cliente,
+      consecutivo_cliente: null,
       avion_color: tst.avion_color,
       estado: v.estado,
       fecha_vuelo: v.fecha,
+      ruta: v.ruta,
       concepto_egreso: 'AFAC costo real · por capturar',
       egreso_mxn: null,
       fecha_egreso: null,

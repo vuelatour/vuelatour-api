@@ -62,7 +62,17 @@ export interface RepartoOtrosIngresosDesglosePayload {
 export interface RepartoVueloLineaPayload {
   folio: number | string | null;
   cliente: string | null;
+  /**
+   * CLAVES SIN APODO EN LOS DOCUMENTOS (23-oct-2026, API 0.0.105, invariante
+   * 106; ADITIVOS): el CONSECUTIVO del vuelo dentro de su cliente
+   * (`vuelo.consecutivo_cliente`; null sin la migración 20261013000006) y la
+   * RUTA del vuelo (la misma del detalle del reparto: «CUN → MID», con la
+   * etiqueta multi-avión si aplica). Viajan SIEMPRE desde el 0.0.105; un
+   * pyservices anterior los ignora.
+   */
+  consecutivo_cliente?: number | null;
   fecha: string | null;
+  ruta?: string | null;
   estado: string | null;
   cobrado_usd: number;
   pendiente_usd: number;
@@ -506,7 +516,24 @@ export interface DineroCobroPagoPayload {
   monto_mxn?: number | null;
 }
 export interface DineroVueloFilaPayload {
+  /**
+   * Columna CLAVE: «#364» (+ « (50 % N4142R)» en multi-avión). Desde el
+   * 23-oct-2026 (API 0.0.105, invariante 106) SOLO el folio: ya no el ID por
+   * cliente («beh05-011026») ni el legado («vtbeh» / «vtservicio»); el
+   * cliente, la ruta y el consecutivo van en sus columnas.
+   */
   clave: string;
+  /**
+   * CLAVES SIN APODO (invariante 106; ADITIVOS, viajan SIEMPRE desde el
+   * 0.0.105): nombre COMPLETO del cliente tal cual (`CLIENTE_VUELO_SERVICIO`
+   * = «Vuelo de servicio» en un tramo de taller sin pasajeros) y el
+   * CONSECUTIVO del vuelo dentro de su cliente (`vuelo.consecutivo_cliente`;
+   * null sin la migración 20261013000006). `servicio: true` SOLO en el
+   * vuelo de servicio (antes su clave era «vtservicio»).
+   */
+  cliente?: string | null;
+  consecutivo_cliente?: number | null;
+  servicio?: true;
   matricula?: string | null;
   color?: string | null;
   fecha?: string | null;
@@ -547,21 +574,24 @@ export interface DineroVueloFilaPayload {
    */
   participacion?: number | null;
   multi_avion?: boolean;
-  /**
-   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
-   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
-   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
-   * llave, el libro sale byte a byte el de antes.
-   */
-  clave_cliente?: string;
   /** CIERRE DE MES (invariante 89; ADITIVOS, solo con la migración). */
   cierre_marca?: string | null;
   diferido_de?: string | null;
   diferido_a?: string | null;
 }
 export interface DineroOtroIngresoFilaPayload {
+  /** «#364» en las filas de un vuelo (invariante 106); «ING-n» en las sueltas. */
   clave: string;
+  /**
+   * CLAVES SIN APODO (23-oct-2026, API 0.0.105, invariante 106; ADITIVOS):
+   * SOLO en las filas de un VUELO: nombre completo del cliente, consecutivo
+   * del vuelo dentro de su cliente (null sin la migración) y la ruta de la
+   * hoja de vuelos («cun-mid»). Las filas ING-n no los llevan.
+   */
+  cliente?: string | null;
+  consecutivo_cliente?: number | null;
   fecha_vuelo?: string | null;
+  ruta?: string | null;
   concepto_egreso?: string | null;
   egreso_mxn?: number | null;
   fecha_egreso?: string | null;
@@ -581,13 +611,6 @@ export interface DineroOtroIngresoFilaPayload {
    */
   matricula?: string | null;
   avion_color?: string | null;
-  /**
-   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
-   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
-   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
-   * llave, el libro sale byte a byte el de antes.
-   */
-  clave_cliente?: string;
 }
 export interface DineroOtroGastoFilaPayload {
   fecha?: string | null;
@@ -904,9 +927,10 @@ export interface BalanceAvionVueloPayload {
    */
   orden_ts?: string | null;
   /**
-   * Columna CLAVE del libro: "#<folio> · <ID del cliente> · <cliente>"
-   * («#364 · beh05-011026 · Beh Kay »); sin ID (13-oct-2026, invariante 68),
-   * "#<folio> · <cliente>" como siempre (fuente única `claveLibro`).
+   * Columna CLAVE del libro: «#364» — SOLO el folio desde el 23-oct-2026
+   * (API 0.0.105, invariante 106; fuente única `claveLibro`). El nombre
+   * completo del cliente, la fecha, la ruta y el consecutivo viajan en sus
+   * propias columnas; el ID por cliente («beh05-011026») ya no se imprime.
    */
   clave: string;
   /**
@@ -917,6 +941,13 @@ export interface BalanceAvionVueloPayload {
   vuelo_id?: string;
   folio: string;
   cliente: string | null;
+  /**
+   * CONSECUTIVO del vuelo dentro de su cliente (`vuelo.consecutivo_cliente`,
+   * el «02» de «ana02»; 23-oct-2026, API 0.0.105, invariante 106; ADITIVO,
+   * viaja SIEMPRE): null sin la migración 20261013000006 o si no se pudo
+   * leer (todo o nada por libro). pyservices lo pinta como columna propia.
+   */
+  consecutivo_cliente?: number | null;
   estado: string;
   /**
    * true en filas CANCELADO (regla 28-ago tarde): la venta es lo REALMENTE
@@ -1162,13 +1193,6 @@ export interface BalanceAvionVueloPayload {
    */
   comision_vendedor_real_mxn?: number;
   comision_vendedor_real_pagos?: number;
-  /**
-   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
-   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
-   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
-   * llave, el libro sale byte a byte el de antes.
-   */
-  clave_cliente?: string;
   /**
    * CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89; ADITIVOS, solo
    * con la migración `20261016000004`): texto YA armado para la columna
@@ -1866,7 +1890,23 @@ export type VarianteBalanceGeneral = 'mensual' | 'general';
  *  cobrado al cliente) y su remanente. Lados opcionales: una fila puede ser
  *  solo-ingreso o solo-egreso. */
 export interface BalanceOtroMovimientoFilaPayload {
+  /**
+   * «#364» en las filas de un vuelo (23-oct-2026, API 0.0.105, invariante
+   * 106; fuente única `claveOtrosMovimientos`: ya no «#364 · beh05-011026» ni
+   * el legado «vtbeh364»); en las sueltas, «tuas sin vuelo», «gas sin
+   * avión», «ING-n»…
+   */
   clave: string;
+  /**
+   * CLAVES SIN APODO (invariante 106; ADITIVOS, viajan SIEMPRE desde el
+   * 0.0.105 en las filas de un VUELO, también en las AFAC_VUELO, que los
+   * COPIAN de la fila del libro): nombre completo del cliente, consecutivo
+   * del vuelo dentro de su cliente (null sin la migración) y la ruta del
+   * vuelo como la arma la hoja maestra («CUN-HOL-CUN»). Las filas sueltas no
+   * los llevan.
+   */
+  cliente?: string | null;
+  consecutivo_cliente?: number | null;
   avion_color: string | null;
   /**
    * Estado del vuelo de la fila (CANCELADO se pinta en rojo). undefined en
@@ -1875,6 +1915,7 @@ export interface BalanceOtroMovimientoFilaPayload {
    */
   estado?: string | null;
   fecha_vuelo: string | null;
+  ruta?: string | null;
   concepto_egreso: string | null;
   egreso_mxn: number | null;
   fecha_egreso: string | null;
@@ -1907,14 +1948,6 @@ export interface BalanceOtroMovimientoFilaPayload {
    * genera (pyservices la conserva por skew con un API 0.0.74–0.0.88).
    */
   seccion?: 'AFAC' | 'AFAC_VUELO';
-  /**
-   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
-   * SOLO en filas de un vuelo con ID (la CLAVE ya dice «#364 ·
-   * beh05-011026»; sin ID, «vtbeh364» como siempre); pyservices no lo pinta,
-   * solo decide el ancho de la columna A. Sueltas y AFAC no lo llevan.
-   * Las filas AFAC_VUELO la COPIAN de la fila del libro.
-   */
-  clave_cliente?: string;
   /**
    * ADITIVA (16-oct-2026, API 0.0.89, invariante 90), ÚLTIMA llave, SOLO en
    * las filas `seccion: 'AFAC_VUELO'`: los datos del vuelo para pintar la

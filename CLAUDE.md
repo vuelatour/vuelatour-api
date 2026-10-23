@@ -7420,7 +7420,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
 68. **ID DE VUELO POR CLIENTE JUNTO AL FOLIO (13-oct-2026, API 0.0.75,
     migración `20261013000006_vuelo_id_cliente`; decisión 6 del lote del
     13-oct-2026).** Cada vuelo muestra, JUNTO a su folio (nunca en su
-    lugar), un ID por cliente «january02-211026».
+    lugar), un ID por cliente «january02-211026». **Desde el 23-oct-2026
+    (API 0.0.105) el ID NO se imprime en ningún documento generado
+    (balances, Libro Dinero, AFAC, reparto, listas del cierre): vive SOLO
+    en el PANEL (listas de vuelos/cotizaciones y su buscador); el párrafo
+    «Libros» de abajo quedó SUPERSEDIDO por la invariante 106.**
     - **Forma**: alias del cliente + número de vuelo de ESE cliente con 2
       dígitos mínimo (100 ⇒ «diego100») + '-' + DDMMAA del DÍA CANCÚN de
       `fecha_vuelo` (03:30Z del 14 ⇒ «…-131026»); sin fecha, sin sufijo.
@@ -7517,7 +7521,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       /v1/clients/alias-en-uso?alias=&excluir=` (ADMIN y COORDINADOR,
       declarada ANTES de `:id`) ⇒ `{alias, clientes: [{id, nombre,
       activo}]}` por nombre, sin el excluido; 400 alias inválido o excluir
-      no-uuid; 503 sin la migración. **Libros** (solo etiquetas; ningún
+      no-uuid; 503 sin la migración. **Libros** (SUPERSEDIDO el
+      23-oct-2026 por la invariante 106: hoy las tres claves son solo
+      «#folio» y ningún documento lleva `clave_cliente`; se conserva como
+      historia del 0.0.75–0.0.104) (solo etiquetas; ningún
       importe, T.C., partición ni total cambia): maestra y cobranza
       `claveLibro` «#364 · beh05-011026 · Beh Kay » (libro individual,
       `aviones[]` del general, EXTERNOS y, por el spread, el consolidado
@@ -11753,6 +11760,94 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `*.cierre-mes.spec` de gastos, vuelos y servicios) siguen SIN declarar
       `cierre_mes_avion`: congelan la conducta sin la migración por avión.
 
+106. **CLAVES SIN APODO EN LOS DOCUMENTOS (23-oct-2026, API 0.0.105, SIN
+    migración).** Pedido literal del cliente (con capturas del Excel
+    «reporte horas FLOTA» y «otros movimientos»): «siempre debemos ocultar
+    los apodos con la clave del vuelo, para dejar solo las columnas de (Num
+    de cotización, nombre completo, fecha, ruta y consecutivo del vuelo)» y
+    después «mejor eliminar esos apodos de todos lados, y de hecho faltan
+    las columnas de nombre, ruta en algunos otros lados».
+    - **Regla**: en TODO documento generado (balance por avión y general con
+      todas sus hojas, Libro Dinero, libro AFAC por vuelo, PDF/XLSX del
+      reparto, listas del cierre y previa del cierre) un vuelo se identifica
+      por su FOLIO «#219» (= número de cotización) y lleva el NOMBRE
+      COMPLETO del cliente, la FECHA, la RUTA y el CONSECUTIVO del vuelo del
+      cliente (`vuelo.consecutivo_cliente`, el «02» de «ana02») en columnas
+      propias. El ID por cliente («ana02-010926») y el legado del libro
+      manual («vtbeh364», «vtbeh», «vtservicio») NO se imprimen; **el ID
+      vive SOLO en el panel** (`clave_cliente` de `/v1/flights`, `/v1/quotes`
+      y su buscador `parseBusquedaClave`: invariante 68, intacta).
+    - **Fuente única** `common/clave-cliente.util.ts`: `claveLibro`,
+      `claveOtrosMovimientos` y `claveDinero` devuelven «#folio» (misma
+      firma; `claveCliente`/`legado`/`servicio`/`cliente` se aceptan y se
+      IGNORAN); `CLIENTE_VUELO_SERVICIO` = «Vuelo de servicio»;
+      `consecutivoClienteValido` (entero ≥ 1, number o string de dígitos).
+      `claveCliente` y `parseBusquedaClave` no cambian. Lector:
+      `consecutivosClienteDeVuelos` en `clave-cliente-lectura.util.ts`
+      (misma lectura que el ID —sonda `idClienteDisponible`, lotes de 150 en
+      paralelo, TODO O NADA, nunca lanza; sin la migración 20261013000006 ⇒
+      Map vacío ⇒ `consecutivo_cliente: null`); no exige alias.
+    - **Contrato de las filas que viajan a pyservices (ADITIVO; nombres
+      exactos)**. Hoja maestra y cobranza (`BalanceAvionVueloPayload`, libro
+      individual, `aviones[]` del general, EXTERNOS y el consolidado FLOTA):
+      `clave: "#364"`, `cliente` (ya existía), `consecutivo_cliente: number
+      | null` JUNTO a `cliente` (viaja SIEMPRE), `fecha` y `ruta` como
+      siempre; ya NO `clave_cliente`. «Otros movimientos» del general
+      (`BalanceOtroMovimientoFilaPayload`, también tras
+      `colapsarFilasDeVuelo`): `clave: "#364"`, `cliente`,
+      `consecutivo_cliente`, `ruta` («CUN-HOL-CUN», la MISMA concatenación de
+      la maestra: tramos activos en orden, con una lectura de `escala` por
+      pestaña; sin tramos, origen-destino del vuelo; null si no hay) en las
+      filas de VUELO; las sueltas («tuas sin vuelo», «gas sin avión», ING-n)
+      no las llevan; las filas `AFAC_VUELO` (`afac-por-vuelo.util`) las
+      COPIAN de la fila de la maestra y `afac` sigue siendo la ÚLTIMA llave.
+      Libro Dinero (`DineroVueloFilaPayload`): `clave: "#364"` (+ « (50 %
+      N4142R)» en multi-avión), `cliente`, `consecutivo_cliente` tras la
+      clave, `servicio: true` SOLO en el vuelo de servicio (con `cliente:
+      "Vuelo de servicio"`), `ruta` como siempre; las CUATRO filas «Otros
+      ingresos» del vuelo (`DineroOtroIngresoFilaPayload`): `clave: "#364"`,
+      `cliente`, `consecutivo_cliente`, `fecha_vuelo`, `ruta` (la de la hoja
+      1, «cun-mid»; '' sin tramos); ING-n sin cambio. Reparto
+      (`RepartoVueloLineaPayload`): `consecutivo_cliente` tras `cliente` y
+      `ruta` (la del detalle del reparto, «CUN → MID» + etiqueta multi-avión)
+      tras `fecha`; una lectura del consecutivo por `buildRepartoPayload`.
+      Listas del cierre del reparto (`CierreRepartoVuelo`, también en
+      `GET /v1/profit-sharing`): `ruta` (tramos activos de `escalasPorVuelo`;
+      sombras/excluidos sin tramos ⇒ origen-destino). Previa del cierre
+      (`VueloDiferidoSalida`): ya NO `clave_cliente`; `consecutivo_cliente`
+      y `ruta` junto a `folio` y `cliente` (el panel pinta folio + cliente).
+      Las listas `cierre.pasan/vienen/pasarian` de los libros
+      (`BalanceCierreVueloPayload`) solo cambian su `clave` a «#folio».
+      **Ningún payload de documento lleva `clave_cliente` ni un texto con
+      forma de ID en `clave`** (`documentos-sin-apodo.spec`).
+    - **Lo que NO cambia**: ningún importe, T.C., partición, orden ni total;
+      `clave_cliente` de `flights`/`quotes` (listas y detalle del panel);
+      `findById`; la migración del ID y sus triggers.
+    - **Deploy**: pyservices y API 0.0.105 en cualquier orden (todo
+      aditivo/liberal: un pyservices anterior ignora las llaves nuevas y
+      pinta «#364» en la columna CLAVE; un API anterior sigue mandando
+      `clave_cliente`, que pyservices nuevo ignora). Sin migración.
+    - Specs: `clave-cliente.util.spec` (las tres claves = «#folio», también
+      en servicio; parámetros viejos ignorados; `consecutivoClienteValido`),
+      `clave-cliente-lectura.util.spec` (`consecutivosClienteDeVuelos`: sin
+      ids 0 consultas, sonda 42703, number/string, sin alias, lotes 150+1,
+      todo o nada, sin `.from`), `aircraft-balance.service.clave-cliente.spec`
+      (maestra, general, FLOTA, multi-avión, otros movimientos colapsada,
+      AFAC_VUELO, sueltas sin llaves, importes idénticos con y sin lector),
+      `dinero-report.service.clave-cliente.spec` (clave, multi-avión,
+      servicio con bandera, otros ingresos, golden sin lector, totales
+      idénticos), `documentos-sin-apodo.spec` (balance individual, general,
+      Dinero y reparto: cero `clave_cliente`, cero claves con forma de ID o
+      legado, columnas en toda fila de vuelo), `cierres.service.spec`
+      (previa sin `clave_cliente`, con `consecutivo_cliente` y `ruta`).
+      Goldens actualizados con la razón documentada: `GOLDEN_OM` y
+      `GOLDEN_DINERO` (fixture y copias en `*.ingresos.spec`), filas exactas
+      de `*.pago-vendedor.spec` y `*.afac-om.spec`; el golden JSON del
+      0.0.93 (`libros-pesos.golden-0101.json`) NO se regeneró: el spec
+      `aircraft-balance.service.pesos.spec` lista las etiquetas que cambian
+      como `CAMBIOS_0105_*`, y `sinLlavesPesosPayload` quita `ruta` y
+      `consecutivo_cliente` de las líneas del reparto.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12491,6 +12586,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.105 (23-oct-2026; invariante 106, claves sin apodo
+  en los documentos; SIN migración).** pyservices y API en CUALQUIER orden:
+  todo es aditivo/liberal (un pyservices anterior ignora `cliente`/`ruta`/
+  `consecutivo_cliente`/`servicio` y pinta la clave «#364»; un API anterior
+  sigue mandando `clave_cliente` y pyservices nuevo lo ignora). `GET
+  /v1/version` debe responder 0.0.105. El panel no cambia (el ID sigue en
+  listas y buscador; la previa del cierre pinta folio + cliente).
 
 - **ORDEN DE DESPLIEGUE DEL 0.0.104 (23-oct-2026; invariante 105, cierre de
   mes POR AVIÓN).** (1) Migración `20261023000001_cierre_mes_avion` por MCP

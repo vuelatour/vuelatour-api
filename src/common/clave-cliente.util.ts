@@ -6,10 +6,20 @@
  * sin sufijo: «francisco10»).
  *
  * Se calcula al LEER y NUNCA se persiste: cambiar el alias del cliente o
- * reprogramar el vuelo re-etiqueta sus vuelos. Panel, pyservices y app lo
- * reciben YA armado (`clave_cliente`) y jamás lo recalculan. El FOLIO sigue
- * siendo la llave del dinero (cobros, gastos, facturas, conciliación y
- * bitácoras); el ID es una etiqueta.
+ * reprogramar el vuelo re-etiqueta sus vuelos. Panel y app lo reciben YA
+ * armado (`clave_cliente`) y jamás lo recalculan. El FOLIO sigue siendo la
+ * llave del dinero (cobros, gastos, facturas, conciliación y bitácoras); el
+ * ID es una etiqueta.
+ *
+ * CLAVES SIN APODO EN LOS DOCUMENTOS (23-oct-2026, API 0.0.105, invariante
+ * 106): el ID vive SOLO en el panel (listas de vuelos/cotizaciones y su
+ * buscador). En los documentos generados (balances, Libro Dinero, libro
+ * AFAC, reparto, listas del cierre) cada vuelo se identifica por su FOLIO
+ * «#219» (= número de cotización) y lleva el nombre COMPLETO del cliente, la
+ * fecha, la ruta y el CONSECUTIVO del vuelo del cliente
+ * (`vuelo.consecutivo_cliente`) en sus propias columnas: `claveLibro`,
+ * `claveOtrosMovimientos` y `claveDinero` devuelven «#folio» y ningún
+ * documento lleva `clave_cliente`.
  *
  * PURO (sin BD, con spec). Los insumos (`cliente.alias` y
  * `vuelo.consecutivo_cliente`, migración 20261013000006) los lee SOLO
@@ -76,10 +86,12 @@ export function ddmmaaCancun(
 }
 
 /**
- * Número de vuelo del cliente: entero ≥ 1, como number o como string de
- * solo dígitos (PostgREST puede mandarlo de las dos formas). Otro ⇒ null.
+ * Número de vuelo del cliente (`vuelo.consecutivo_cliente`): entero ≥ 1, como
+ * number o como string de solo dígitos (PostgREST puede mandarlo de las dos
+ * formas). Otro ⇒ null. Lo usan el ID (`claveCliente`) y la columna
+ * CONSECUTIVO de los documentos (invariante 106).
  */
-function consecutivoValido(v: unknown): number | null {
+export function consecutivoClienteValido(v: unknown): number | null {
   if (typeof v === 'number') {
     return Number.isSafeInteger(v) && v >= 1 ? v : null;
   }
@@ -102,7 +114,7 @@ export function claveCliente(p: {
   fecha_vuelo: unknown;
 }): string | null {
   if (typeof p.alias !== 'string' || !ALIAS_REGEX.test(p.alias)) return null;
-  const n = consecutivoValido(p.consecutivo);
+  const n = consecutivoClienteValido(p.consecutivo);
   if (n == null) return null;
   const base = `${p.alias}${String(n).padStart(2, '0')}`;
   const ddmmaa =
@@ -131,43 +143,56 @@ export function parseBusquedaClave(
 }
 
 /**
- * CLAVE de la hoja maestra y de cobranza del balance por avión:
- * «#364 · beh05-011026 · Beh Kay ». Con `claveCliente` null da EXACTAMENTE
- * la plantilla de siempre (`#${folio}${cliente ? ` · ${cliente}` : ''}`). No
- * recorta: el nombre viaja tal cual lo capturó la oficina.
+ * Texto de la columna CLIENTE de un vuelo de SERVICIO en el Libro Dinero
+ * (invariante 106): antes la CLAVE decía «vtservicio»; hoy la clave es el
+ * folio y la bandera `servicio: true` acompaña a la fila.
+ */
+export const CLIENTE_VUELO_SERVICIO = 'Vuelo de servicio';
+
+/** «#364» (el folio es el número de cotización que la oficina conoce). */
+const claveFolio = (folio: string | number): string => `#${folio}`;
+
+/**
+ * CLAVE de la hoja maestra y de cobranza del balance por avión: «#364».
+ * Desde el 23-oct-2026 (invariante 106) SOLO el folio: el nombre completo
+ * del cliente, la fecha, la ruta y el consecutivo viajan en sus propias
+ * columnas (`cliente`, `fecha`, `ruta`, `consecutivo_cliente`); el ID por
+ * cliente ya no se imprime. `claveCliente` y `cliente` se aceptan y se
+ * IGNORAN (firma conservada para no romper llamadas).
  */
 export function claveLibro(p: {
   folio: string | number;
-  claveCliente: string | null;
-  cliente: string | null;
+  claveCliente?: string | null;
+  cliente?: string | null;
 }): string {
-  return [`#${p.folio}`, p.claveCliente, p.cliente].filter(Boolean).join(' · ');
+  return claveFolio(p.folio);
 }
 
 /**
- * CLAVE de «otros movimientos» del Balance general: «#364 · beh05-011026»
- * con ID; sin él, el `legado` de siempre ('vt' + primera palabra del
- * cliente + folio: «vtbeh364»).
+ * CLAVE de «otros movimientos» del Balance general: «#364». Sin ID ni el
+ * legado «vtbeh364» (invariante 106): el cliente, la ruta y el consecutivo
+ * van en sus columnas. `claveCliente` y `legado` se aceptan y se IGNORAN.
  */
 export function claveOtrosMovimientos(p: {
   folio: string | number;
-  claveCliente: string | null;
-  legado: string;
+  claveCliente?: string | null;
+  legado?: string;
 }): string {
-  return p.claveCliente ? `#${p.folio} · ${p.claveCliente}` : p.legado;
+  return claveFolio(p.folio);
 }
 
 /**
- * CLAVE del Libro Dinero (hoja de vuelos y «Otros ingresos» del vuelo): un
- * vuelo de SERVICIO es SIEMPRE 'vtservicio' (como el libro manual), aunque
- * tenga ID; si no, el ID («beh05-011026») o, sin él, el `legado` de siempre
- * ('vt' + primera palabra del cliente: «vtbeh»).
+ * CLAVE del Libro Dinero (hoja de vuelos y «Otros ingresos» del vuelo):
+ * «#364», también en un vuelo de SERVICIO (ya no «vtservicio»: la fila dice
+ * `cliente: CLIENTE_VUELO_SERVICIO` y lleva `servicio: true`). El sufijo
+ * multi-avión « (50 % N4142R)» lo agrega el libro, como siempre.
+ * `servicio`, `claveCliente` y `legado` se aceptan y se IGNORAN.
  */
 export function claveDinero(p: {
-  servicio: boolean;
-  claveCliente: string | null;
-  legado: string;
+  folio: string | number;
+  servicio?: boolean;
+  claveCliente?: string | null;
+  legado?: string;
 }): string {
-  if (p.servicio) return 'vtservicio';
-  return p.claveCliente ? p.claveCliente : p.legado;
+  return claveFolio(p.folio);
 }

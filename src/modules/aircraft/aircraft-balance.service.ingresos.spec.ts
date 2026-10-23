@@ -429,10 +429,16 @@ const INGRESOS_LIBROS: Fila[] = [
 const GOLDEN_OM = {
   filas: [
     {
-      clave: 'vtleticia501',
+      // CLAVES SIN APODO (23-oct-2026, API 0.0.105, invariante 106): la
+      // clave es SOLO el folio (antes «vtleticia501») y la fila lleva el
+      // cliente, el consecutivo (null sin la migración) y la ruta.
+      clave: '#501',
+      cliente: 'Leticia León Alvarado',
+      consecutivo_cliente: null,
       avion_color: '#3B82F6',
       estado: 'COMPLETADO',
       fecha_vuelo: '2026-09-10',
+      ruta: 'CUN-MID',
       // 13-oct-2026 (invariante 60): dos cobros sin cuenta ni método ⇒
       // ninguno exige factura.
       factura: ETIQUETA_FACTURA_NO_LLEVA,

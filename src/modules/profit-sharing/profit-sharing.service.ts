@@ -184,6 +184,9 @@ import {
 import { UtilidadesMensualesSocios } from './reparto-utilidades.memo';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
+// CONSECUTIVO del vuelo por cliente (23-oct-2026, invariante 106): columna
+// propia de las líneas de vuelos del PDF/XLSX del reparto (lector único).
+import { consecutivosClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
 import {
   colPeriodoContable,
   colsVueloContable,
@@ -417,6 +420,12 @@ export interface CierreRepartoVuelo {
   id: string;
   folio: number | null;
   cliente: string | null;
+  /**
+   * RUTA del vuelo (23-oct-2026, API 0.0.105, invariante 106; ADITIVA):
+   * la misma concatenación de la hoja maestra («CUN-HOL-CUN»: tramos activos
+   * en orden; sin tramos leídos, origen-destino del vuelo); null sin datos.
+   */
+  ruta: string | null;
   matricula: string | null;
   venta_usd: number;
   cobrado_usd: number;
@@ -831,6 +840,13 @@ export class ProfitSharingService {
   /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
   private async buildRepartoPayload(q: ProfitSharingQuery) {
     const result = await this.compute(q);
+    // CONSECUTIVO del vuelo por cliente (23-oct-2026, invariante 106): la
+    // columna propia de las líneas de vuelos del PDF/XLSX. Best-effort y
+    // todo o nada (sin la migración o con un fallo, Map vacío ⇒ null).
+    const consecutivos = await consecutivosClienteDeVuelos(
+      this.supabase.service,
+      result.aviones.flatMap((a) => a.detalle.vuelos.map((v) => v.id)),
+    );
     const payload = {
       periodo_desde: result.periodo.desde,
       periodo_hasta: result.periodo.hasta,
@@ -913,7 +929,12 @@ export class ProfitSharingService {
         vuelos: a.detalle.vuelos.map((v) => ({
           folio: v.folio,
           cliente: v.cliente,
+          // CLAVES SIN APODO (23-oct-2026, invariante 106; ADITIVOS): el
+          // consecutivo del vuelo dentro de su cliente (null sin la
+          // migración) y la ruta del detalle del reparto.
+          consecutivo_cliente: consecutivos.get(v.id) ?? null,
           fecha: v.fecha,
+          ruta: v.ruta ?? null,
           estado: v.estado,
           cobrado_usd: v.cobrado_avion_usd,
           pendiente_usd: v.pendiente_avion_usd,
@@ -1644,6 +1665,7 @@ export class ProfitSharingService {
           matriculas,
           aviones,
           participacionPorVuelo,
+          escalasPorVuelo,
         })
       : null;
 
@@ -1894,6 +1916,12 @@ export class ProfitSharingService {
     }>;
     /** Participación por vuelo (CIERRE POR AVIÓN, invariante 105). */
     participacionPorVuelo?: Map<string, ParticipacionAeronave>;
+    /**
+     * Tramos por vuelo (invariante 106): SOLO para la columna `ruta` de las
+     * listas; las sombras y los excluidos sin tramos leídos caen al
+     * origen-destino del vuelo.
+     */
+    escalasPorVuelo?: Map<string, EscalaHorasRow[]>;
   }): Promise<CierreRepartoBloque> {
     const sb = this.supabase.service;
     const { q } = ctx;
@@ -1924,6 +1952,22 @@ export class ProfitSharingService {
       v.aeronave_id ? (ctx.matriculas.get(v.aeronave_id) ?? null) : null;
     const cliente = (v: VueloRow): string | null =>
       v.cliente_id ? (ctx.clientes.get(v.cliente_id) ?? null) : null;
+    // RUTA (invariante 106): la misma concatenación de la hoja maestra —
+    // tramos ACTIVOS en orden— y, sin tramos leídos, origen-destino.
+    const ruta = (v: VueloRow): string | null => {
+      const legs = (ctx.escalasPorVuelo?.get(v.id) ?? []).filter(
+        (e) => e.cancelada_at == null,
+      );
+      const codigos = legs.length
+        ? [
+            legs[0].origen_iata ?? '?',
+            ...legs.map((e) => e.destino_iata ?? '?'),
+          ]
+        : [v.origen_iata, v.destino_iata].filter(
+            (x): x is string => typeof x === 'string' && x !== '',
+          );
+      return codigos.length ? codigos.join('-') : null;
+    };
     const item = (
       v: VueloRow,
       d: Pick<DecisionDiferir, 'venta_usd' | 'cobrado_usd' | 'por_cobrar_usd'> &
@@ -1937,6 +1981,7 @@ export class ProfitSharingService {
       id: v.id,
       folio: v.folio ?? null,
       cliente: cliente(v),
+      ruta: ruta(v),
       matricula: matricula(v),
       venta_usd: d.venta_usd,
       cobrado_usd: d.cobrado_usd,

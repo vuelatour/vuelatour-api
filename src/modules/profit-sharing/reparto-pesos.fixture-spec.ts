@@ -372,6 +372,10 @@ export function sinLlavesPesosPayload(p: unknown): unknown {
     for (const v of a.vuelos as Array<Record<string, unknown>>) {
       delete v.cobrado_mxn;
       delete v.pendiente_mxn;
+      // CLAVES SIN APODO (23-oct-2026, invariante 106): el consecutivo y la
+      // ruta de cada línea de vuelo son aditivos (el golden es anterior).
+      delete v.consecutivo_cliente;
+      delete v.ruta;
     }
     for (const o of a.otros_ingresos_avion as Array<Record<string, unknown>>)
       delete o.mxn;

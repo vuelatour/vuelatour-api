@@ -49,9 +49,9 @@ import {
   esPagoAfac,
 } from '../../common/afac-real.util';
 import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
-// ID de vuelo por cliente (13-oct-2026, invariante 68): solo la ETIQUETA de
-// la CLAVE (lector único best-effort + fuente pura); ningún importe.
-import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+// CONSECUTIVO del vuelo por cliente (23-oct-2026, invariante 106): columna
+// propia del libro (lector único best-effort); el ID ya no se imprime.
+import { consecutivosClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
 import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
 import {
   colPeriodoContable,
@@ -88,7 +88,10 @@ import type {
 /** Columnas de `vuelo` del Libro Dinero (las de siempre; 0.0.87). */
 const DINERO_VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, estado, es_externo, fecha_vuelo, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, iva_pct, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, calculo_snapshot, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, tuas_usd, extras_total_usd, viaticos_pernocta_usd';
-import { claveDinero } from '../../common/clave-cliente.util';
+import {
+  CLIENTE_VUELO_SERVICIO,
+  claveDinero,
+} from '../../common/clave-cliente.util';
 import {
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
@@ -314,7 +317,7 @@ export class DineroReportService {
       gastosEmpresaYSueltos,
       gastosGasRes,
       ingresosResultado,
-      clavesCliente,
+      consecutivosCliente,
     ] = await Promise.all([
       sb
         .from('aeronave')
@@ -402,9 +405,9 @@ export class DineroReportService {
       // Balance general. Sin la migración 20260924000004 devuelve [] sin
       // consultar nada — el libro sale byte-idéntico al de siempre.
       leerIngresosDeResultado(sb, desde, hasta),
-      // ID de vuelo por cliente (13-oct-2026, invariante 68): SOLO la
-      // etiqueta de la CLAVE; best-effort y todo o nada (nunca lanza).
-      clavesClienteDeVuelos(sb, vueloIds),
+      // CONSECUTIVO del vuelo por cliente (23-oct-2026, invariante 106):
+      // columna propia del libro; best-effort y todo o nada (nunca lanza).
+      consecutivosClienteDeVuelos(sb, vueloIds),
     ]);
     for (const r of [
       aeronavesRes,
@@ -506,34 +509,29 @@ export class DineroReportService {
         gastosPorVuelo.has(v.id as string),
     );
 
-    // CLAVE del libro (fuente única `claveDinero`, 13-oct-2026, invariante
-    // 68): el ID de vuelo por cliente («beh05-011026»); sin ID, el LEGADO
-    // "vt" + primer nombre del cliente en minúsculas (vtchacon, vtmagaña).
-    // Vuelo de SERVICIO (tramo de taller sin pax) → SIEMPRE "vtservicio",
-    // como en el libro manual, aunque tenga ID. La regla de servicio es la
-    // ÚNICA de `common/vuelo-servicio.util` (la misma del candado de
-    // cotización y del CAFÉ del calendario); `escalasPorVuelo` ya trae solo
-    // tramos activos.
-    const claveDe = (v: Record<string, unknown>): string => {
-      const escalas = escalasPorVuelo.get(v.id as string) ?? [];
-      const nombre = clientes.get(v.cliente_id as string) ?? '';
-      const primera = nombre.trim().split(/\s+/)[0] ?? '';
-      const limpia = primera.toLowerCase().replace(/[^a-záéíóúüñ0-9]/gi, '');
-      return claveDinero({
-        servicio: esVueloDeServicio(escalas),
-        claveCliente: clavesCliente.get(v.id as string) ?? null,
-        legado: limpia ? `vt${limpia.toLowerCase()}` : 'vt',
-      });
-    };
-    // La llave ADITIVA `clave_cliente` (SOLO con valor) que acompaña a la
-    // CLAVE en las filas del vuelo: pyservices ensancha la columna A con
-    // ella (no la pinta). Sin ID, las filas son byte a byte las de siempre.
-    const extraClaveCliente = (
+    // CLAVE del libro (fuente única `claveDinero`, 23-oct-2026, invariante
+    // 106): SOLO el folio «#364». Ya no el ID por cliente («beh05-011026»,
+    // invariante 68) ni el legado "vt" + primer nombre (vtchacon) ni
+    // «vtservicio»: el cliente, la ruta y el consecutivo van en sus columnas.
+    const claveDe = (v: Record<string, unknown>): string =>
+      claveDinero({ folio: String((v.folio as number | string | null) ?? '') });
+    // Vuelo de SERVICIO (tramo de taller sin pax): la regla es la ÚNICA de
+    // `common/vuelo-servicio.util` (la misma del candado de cotización y del
+    // CAFÉ del calendario); `escalasPorVuelo` ya trae solo tramos activos.
+    const esServicio = (v: Record<string, unknown>): boolean =>
+      esVueloDeServicio(escalasPorVuelo.get(v.id as string) ?? []);
+    // CLAVES SIN APODO (invariante 106): las columnas CLIENTE (nombre
+    // completo tal cual; «Vuelo de servicio» en un tramo de taller) y
+    // CONSECUTIVO (el número del vuelo dentro de su cliente; null sin la
+    // migración o si el lector no pudo leer) de TODA fila de vuelo del libro.
+    const datosClienteDe = (
       v: Record<string, unknown>,
-    ): { clave_cliente?: string } => {
-      const claveCli = clavesCliente.get(v.id as string);
-      return claveCli ? { clave_cliente: claveCli } : {};
-    };
+    ): { cliente: string | null; consecutivo_cliente: number | null } => ({
+      cliente: esServicio(v)
+        ? CLIENTE_VUELO_SERVICIO
+        : (clientes.get(v.cliente_id as string) ?? null),
+      consecutivo_cliente: consecutivosCliente.get(v.id as string) ?? null,
+    });
 
     const rutaDe = (vueloId: string): string => {
       const legs = escalasPorVuelo.get(vueloId) ?? [];
@@ -798,6 +796,11 @@ export class DineroReportService {
           : '';
         filas.push({
           clave: `${claveDe(v)}${sufijoClave}`,
+          // CLAVES SIN APODO (invariante 106): cliente y consecutivo en sus
+          // columnas; `servicio: true` SOLO en el vuelo de servicio (antes
+          // su clave era «vtservicio»).
+          ...datosClienteDe(v),
+          ...(esServicio(v) ? { servicio: true as const } : {}),
           matricula: avion?.matricula ?? (v.es_externo ? 'EXTERNO' : null),
           color: avion?.color ?? null,
           fecha: (v.fecha_vuelo as string) ?? null,
@@ -838,7 +841,6 @@ export class DineroReportService {
           factura_vuelatour: facturaPorVuelo.get(v.id as string) ?? null,
           participacion: fa.factor,
           multi_avion: part.multi_avion,
-          ...extraClaveCliente(v),
           // CIERRE DE MES (invariante 89, ADITIVOS al final): solo con la
           // migración.
           ...(cierreDinero
@@ -1227,7 +1229,11 @@ export class DineroReportService {
         }
         otrosIngresos.push({
           clave: claveDe(v),
+          // CLAVES SIN APODO (invariante 106): cliente, consecutivo y la
+          // ruta de la hoja de vuelos en las filas del vuelo.
+          ...datosClienteDe(v),
           fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          ruta: rutaBase,
           concepto_egreso: conceptoEgreso,
           egreso_mxn: egresoMxn,
           fecha_egreso: fechaEgreso,
@@ -1240,7 +1246,6 @@ export class DineroReportService {
           remanente_mxn:
             ingresoMxn != null ? r2(ingresoMxn - (egresoMxn ?? 0)) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
-          ...extraClaveCliente(v),
         });
       }
       // (El IVA de TUAS/extras ya viaja PLEGADO en cada línea de arriba,
@@ -1258,7 +1263,9 @@ export class DineroReportService {
         const egreso = tuaPagadoHubo ? r2(tuaPagadoMxn) : null;
         otrosIngresos.push({
           clave: claveDe(v),
+          ...datosClienteDe(v),
           fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          ruta: rutaBase,
           concepto_egreso: conceptoTuasPagadas(
             esCancelado ? 'vuelo cancelado' : 'sin línea TUAS cobrada',
           ),
@@ -1269,7 +1276,6 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
-          ...extraClaveCliente(v),
         });
       }
 
@@ -1280,7 +1286,9 @@ export class DineroReportService {
         const egreso = extensionPagadaHubo ? r2(extensionPagadaMxn) : null;
         otrosIngresos.push({
           clave: claveDe(v),
+          ...datosClienteDe(v),
           fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          ruta: rutaBase,
           concepto_egreso: conceptoExtensionPagada(
             esCancelado ? 'vuelo cancelado' : 'sin línea de extensión cobrada',
           ),
@@ -1291,7 +1299,6 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
-          ...extraClaveCliente(v),
         });
       }
 
@@ -1311,7 +1318,9 @@ export class DineroReportService {
           pagosVend.pagadoMxn != null ? r2(pagosVend.pagadoMxn) : null;
         otrosIngresos.push({
           clave: claveDe(v),
+          ...datosClienteDe(v),
           fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          ruta: rutaBase,
           concepto_egreso:
             conceptoPagoVendedorReal({
               etiquetaComision,
@@ -1329,7 +1338,6 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
-          ...extraClaveCliente(v),
         });
         comisionPagadaMxn += egreso ?? 0;
       }

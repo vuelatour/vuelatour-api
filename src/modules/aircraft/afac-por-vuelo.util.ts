@@ -233,8 +233,13 @@ export function filasAfacPorVuelo(e: EntradaAfacPorVuelo): SalidaAfacPorVuelo {
     filas.push({
       clave: fila.clave,
       avion_color: libro.avion_color ?? null,
+      // CLAVES SIN APODO (23-oct-2026, invariante 106): cliente, consecutivo
+      // y ruta COPIADOS de la fila del libro (su clave ya es solo «#folio»).
+      cliente: fila.cliente,
+      consecutivo_cliente: fila.consecutivo_cliente ?? null,
       estado: fila.estado,
       fecha_vuelo: fila.fecha,
+      ruta: fila.ruta,
       concepto_egreso: conceptoEgreso,
       egreso_mxn: real,
       fecha_egreso: null,
@@ -253,7 +258,6 @@ export function filasAfacPorVuelo(e: EntradaAfacPorVuelo): SalidaAfacPorVuelo {
       factura: null,
       ...(notaIngreso ? { nota_ingreso: notaIngreso } : {}),
       ...(notaEgreso ? { nota_egreso: notaEgreso } : {}),
-      ...(fila.clave_cliente ? { clave_cliente: fila.clave_cliente } : {}),
       seccion: 'AFAC_VUELO',
       afac,
     });

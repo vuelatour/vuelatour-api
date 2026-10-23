@@ -258,6 +258,36 @@ const CAMBIOS_0101_GENERAL = [
   'gen.aviones.0.gastos_indirectos.total_mxn: 1912.5 -> 1840',
 ];
 
+/**
+ * CLAVES SIN APODO EN LOS DOCUMENTOS (23-oct-2026, API 0.0.105, invariante
+ * 106): SOLO ETIQUETAS. La CLAVE de la maestra pasa de «#501 · Leticia León
+ * Alvarado» a «#501» (el cliente ya viaja en su columna), la de «otros
+ * movimientos» de «vtleticia501» a «#501», y cada fila de vuelo gana
+ * `consecutivo_cliente` (null en este mundo: sin la migración del ID) y, en
+ * «otros movimientos», `cliente` y `ruta`. Ningún peso ni dólar se mueve:
+ * estas son EXACTAMENTE las celdas que cambian contra el golden del 0.0.93.
+ */
+const CAMBIOS_0105_INDIVIDUAL = [
+  'ind.vuelos.0.clave: "#501 · Leticia León Alvarado" -> "#501"',
+  'ind.vuelos.0.consecutivo_cliente: undefined -> null',
+  'ind.vuelos.1.clave: "#502 · Leticia León Alvarado" -> "#502"',
+  'ind.vuelos.1.consecutivo_cliente: undefined -> null',
+];
+const CAMBIOS_0105_GENERAL = [
+  'gen.aviones.0.vuelos.0.clave: "#501 · Leticia León Alvarado" -> "#501"',
+  'gen.aviones.0.vuelos.0.consecutivo_cliente: undefined -> null',
+  'gen.aviones.0.vuelos.1.clave: "#502 · Leticia León Alvarado" -> "#502"',
+  'gen.aviones.0.vuelos.1.consecutivo_cliente: undefined -> null',
+  'gen.consolidado.otros_movimientos.filas.0.clave: "vtleticia501" -> "#501"',
+  'gen.consolidado.otros_movimientos.filas.0.cliente: undefined -> "Leticia León Alvarado"',
+  'gen.consolidado.otros_movimientos.filas.0.consecutivo_cliente: undefined -> null',
+  'gen.consolidado.otros_movimientos.filas.0.ruta: undefined -> "CUN-MID"',
+  'gen.consolidado.vuelos.0.clave: "#501 · Leticia León Alvarado" -> "#501"',
+  'gen.consolidado.vuelos.0.consecutivo_cliente: undefined -> null',
+  'gen.consolidado.vuelos.1.clave: "#502 · Leticia León Alvarado" -> "#502"',
+  'gen.consolidado.vuelos.1.consecutivo_cliente: undefined -> null',
+];
+
 /** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
@@ -320,16 +350,20 @@ const LLAVES_PESOS_BLOQUE = [
 ];
 
 describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: el libro individual sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98 y el USD sin T.C. al oficial del día del 0.0.101', async () => {
+  it('GOLDEN: el libro individual sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98, el USD sin T.C. al oficial del día del 0.0.101 y las etiquetas sin apodo del 0.0.105', async () => {
     const hoy = libroSinPesos(await libro());
     quitar0098(hoy);
     quitarEntregasSocios(hoy);
     expect(difs(hoy, GOLDEN.balance_individual, 'ind').sort()).toEqual(
-      [...CAMBIOS_0098_INDIVIDUAL, ...CAMBIOS_0101_INDIVIDUAL].sort(),
+      [
+        ...CAMBIOS_0098_INDIVIDUAL,
+        ...CAMBIOS_0101_INDIVIDUAL,
+        ...CAMBIOS_0105_INDIVIDUAL,
+      ].sort(),
     );
   });
 
-  it('GOLDEN: el general sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98 y el USD sin T.C. al oficial del día del 0.0.101', async () => {
+  it('GOLDEN: el general sin lo del 0.0.94 es el del 0.0.93 salvo los dólares gasto por gasto del 0.0.98, el USD sin T.C. al oficial del día del 0.0.101 y las etiquetas sin apodo del 0.0.105', async () => {
     const hoy = generalSinPesos(await general());
     delete hoy.usd_por_gasto;
     quitar0098(hoy.consolidado as Record<string, unknown>);
@@ -338,7 +372,11 @@ describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
       quitarEntregasSocios(a);
     }
     expect(difs(hoy, GOLDEN.balance_general, 'gen').sort()).toEqual(
-      [...CAMBIOS_0098_GENERAL, ...CAMBIOS_0101_GENERAL].sort(),
+      [
+        ...CAMBIOS_0098_GENERAL,
+        ...CAMBIOS_0101_GENERAL,
+        ...CAMBIOS_0105_GENERAL,
+      ].sort(),
     );
   });
 

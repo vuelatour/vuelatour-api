@@ -111,7 +111,7 @@ import { avionDelGasto } from '../../common/participacion-aeronave.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { inicioOficialDe } from '../../common/inicio-oficial.util';
 import { mensajePeriodoAntesDelInicio } from '../../common/inicio-oficial.util';
-import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import { consecutivosClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
 import { utilidadMesDesdeAviones } from '../profit-sharing/reparto-cuenta.util';
 import type {
   CierreRepartoBloque,
@@ -197,8 +197,15 @@ export interface OtroAvionPrevia {
 export interface VueloDiferidoSalida {
   id: string;
   folio: number | null;
-  clave_cliente: string | null;
+  /**
+   * CLAVES SIN APODO (23-oct-2026, API 0.0.105, invariante 106): ya no viaja
+   * `clave_cliente` (el panel pinta folio + cliente); en su lugar el
+   * CONSECUTIVO del vuelo dentro de su cliente (null sin la migración) y la
+   * RUTA («CUN-HOL-CUN», la de las listas del reparto).
+   */
+  consecutivo_cliente: number | null;
   cliente: string | null;
+  ruta: string | null;
   aeronave: { id: string; matricula: string | null } | null;
   fecha_vuelo: string | null;
   venta_usd: number;
@@ -980,8 +987,10 @@ export class CierresService {
               return null;
             })
         : vivo;
-    const [claves, nativos] = await Promise.all([
-      clavesClienteDeVuelos(this.sb, [
+    // CONSECUTIVO del vuelo por cliente (invariante 106): best-effort, todo
+    // o nada (sin la migración, null en cada vuelo de la previa).
+    const [consecutivos, nativos] = await Promise.all([
+      consecutivosClienteDeVuelos(this.sb, [
         ...diferidos.map((d) => d.id),
         ...vienen.map((d) => d.id),
       ]),
@@ -1006,8 +1015,9 @@ export class CierresService {
     const salida = (d: CierreRepartoVuelo): VueloDiferidoSalida => ({
       id: d.id,
       folio: d.folio,
-      clave_cliente: claves.get(d.id) ?? null,
+      consecutivo_cliente: consecutivos.get(d.id) ?? null,
       cliente: d.cliente,
+      ruta: d.ruta ?? null,
       aeronave: d.aeronave_id
         ? { id: d.aeronave_id, matricula: d.matricula }
         : null,
