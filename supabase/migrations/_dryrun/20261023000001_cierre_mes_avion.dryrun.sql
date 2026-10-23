@@ -228,8 +228,15 @@ begin
   if v_estado <> 'REABIERTO' then
     raise exception 'DRYRUN_FALLA C6b: el estado no quedó REABIERTO';
   end if;
-  if v_updated_2 <= v_updated_1 then
-    raise exception 'DRYRUN_FALLA C6c: el trigger de updated_at no corrió (% → %)', v_updated_1, v_updated_2;
+  -- C6c) El efecto del trigger de updated_at NO es observable dentro de UNA
+  --      transacción: now() es el instante de inicio de la transacción, el
+  --      mismo del INSERT (en prod, 23-oct-2026, v_updated_2 = v_updated_1).
+  --      Se verifica que el trigger esté adjunto y HABILITADO.
+  if not exists (select 1 from pg_trigger
+                  where tgrelid = 'public.cierre_mes_avion'::regclass
+                    and tgname = 'trg_cierre_mes_avion_set_updated_at'
+                    and tgenabled <> 'D') then
+    raise exception 'DRYRUN_FALLA C6c: el trigger de updated_at no está adjunto o está deshabilitado';
   end if;
 
   -- C7) Volver a cerrar: version + 1 (CAS por REABIERTO y version 1).
