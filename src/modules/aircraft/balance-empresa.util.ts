@@ -1,5 +1,7 @@
 import type {
   BalanceEmpresaBloquePayload,
+  BalanceEmpresaExternoVueloPayload,
+  BalanceEmpresaExternosPayload,
   BalanceEmpresaParticipacionPayload,
 } from '../pyservices/pyservices.service';
 
@@ -233,6 +235,207 @@ export const NOTA_PESOS_BALANCE_EMPRESA =
   "otros gastos = TOTAL MXN de 'otros gastos'; tienda = utilidad MXN de 'inventario'. " +
   'Los dólares son informativos.';
 
+/**
+ * VUELOS CON AVIONES EXTERNOS (27-oct-2026, API 0.0.112, invariante 112).
+ * Pedido del cliente (captura del bloque de septiembre): «me falta en el
+ * balance de VuelaTour los vuelos con aviones externos … que sea claro
+ * cuánto dejaron de ingreso, cuánto de gastos y al final la utilidad, y un
+ * resumen a un lado de cuántos fueron». Lo que el bloque necesita del libro
+ * EXTERNOS del general (vuelos de operador ajeno SIN avión de la flota),
+ * YA calculado por ese libro con el MISMO row-loop que un avión: aquí no se
+ * recalcula nada, solo se cita.
+ */
+export interface LibroExternosParaEmpresa {
+  vuelos: ReadonlyArray<{
+    clave: string;
+    folio: string;
+    fecha: string | null;
+    cliente: string | null;
+    operador_externo?: string | null;
+    estado: string;
+    cancelado?: boolean;
+    /** Fila SOMBRA (invariante 89): horas de otro mes, sin dinero. */
+    fila_sombra?: boolean;
+    ruta: string;
+    total_mxn: number | null;
+    total_usd: number | null;
+    ganancia_mxn: number | null;
+    ganancia_usd: number | null;
+    por_cobrar_mxn: number | null;
+    status_cobro: string;
+  }>;
+  totales: {
+    /** VENTA MXN del libro (fila TOTALES). */
+    total_mxn: number;
+    por_cobrar_mxn: number;
+    por_cobrar_usd: number;
+  };
+  balance: {
+    utilidad_antes_usd: number;
+    utilidad_despues_usd: number | null;
+    utilidad_antes_mxn?: number;
+    utilidad_despues_mxn?: number | null;
+  };
+}
+
+/** Operador ajeno legible (texto libre del vuelo); vacío ⇒ null. */
+function textoOperador(v: unknown): string | null {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s.length > 0 ? s : null;
+}
+
+/** round2(a − b); null si falta alguno (jamás una resta a medias). */
+function resta(a: unknown, b: unknown): number | null {
+  const x = num(a);
+  const y = num(b);
+  return x == null || y == null ? null : round2(x - y);
+}
+
+/** Σ de montos, redondeada al final; null si alguno es null. */
+function sumaEstricta(valores: ReadonlyArray<number | null>): number | null {
+  let suma = 0;
+  for (const v of valores) {
+    if (v == null) return null;
+    suma += v;
+  }
+  return round2(suma);
+}
+
+function plural(n: number, uno: string, varios: string): string {
+  return `${n} ${n === 1 ? uno : varios}`;
+}
+
+/**
+ * Lo que dejaron los vuelos con aviones externos, del libro EXTERNOS que el
+ * general YA calculó (`undefined` sin libro: el bloque de siempre, sin la
+ * llave). EN PESOS: ingreso = la VENTA del libro (fila TOTALES), utilidad
+ * = su UTILIDAD DESPUÉS DE GASTOS y gastos = lo que hay entre las dos (todo
+ * lo que su cascada resta: operaciones con el pago al operador —una sola
+ * vez, invariantes 88 y 110—, combustible, comisiones, permisos y otros).
+ * La utilidad entra COMPLETA aunque esté por cobrar (como los ingresos
+ * propios del bloque; lo pendiente se informa). Una fila sin pesos deja
+ * ingreso, gastos y utilidad en `null` (el TOTAL del libro la suma como 0:
+ * sería un ingreso que omite dinero) y la nota la nombra. Los dólares son
+ * informativos: Σ VENTA USD de las filas y la cascada USD del libro.
+ */
+export function externosParaEmpresa(
+  libro: LibroExternosParaEmpresa | null | undefined,
+): BalanceEmpresaExternosPayload | undefined {
+  if (!libro) return undefined;
+  // Filas con dinero: una SOMBRA (invariante 89) es horas de otro mes.
+  const filas = libro.vuelos.filter((v) => v.fila_sombra !== true);
+  const detalle: BalanceEmpresaExternoVueloPayload[] = filas.map((v) => ({
+    clave: v.clave,
+    folio: v.folio,
+    fecha: v.fecha,
+    cliente: v.cliente,
+    operador: textoOperador(v.operador_externo),
+    estado: v.estado,
+    cancelado: v.cancelado === true,
+    ruta: v.ruta,
+    ingreso_mxn: num(v.total_mxn),
+    gastos_mxn: resta(v.total_mxn, v.ganancia_mxn),
+    utilidad_mxn: num(v.ganancia_mxn),
+    por_cobrar_mxn: round2(num(v.por_cobrar_mxn) ?? 0),
+    status_cobro: v.status_cobro,
+    ingreso_usd: num(v.total_usd),
+    gastos_usd: resta(v.total_usd, v.ganancia_usd),
+    utilidad_usd: num(v.ganancia_usd),
+  }));
+  const sinPesos = detalle
+    .filter((d) => d.ingreso_mxn == null || d.utilidad_mxn == null)
+    .map((d) => d.clave);
+  const operadores = [
+    ...new Set(
+      detalle.map((d) => d.operador).filter((o): o is string => o != null),
+    ),
+  ];
+  const antesMxn = num(libro.balance.utilidad_antes_mxn);
+  const despuesMxn = num(libro.balance.utilidad_despues_mxn);
+  const ingresoMxn =
+    sinPesos.length > 0 ? null : round2(libro.totales.total_mxn);
+  const utilidadMxn = sinPesos.length > 0 ? null : despuesMxn;
+  const gastosMxn = resta(ingresoMxn, utilidadMxn);
+  const hojasMxn = sinPesos.length > 0 ? null : resta(antesMxn, despuesMxn);
+  const porCobrarMxn = round2(libro.totales.por_cobrar_mxn);
+  const ingresoUsd = sumaEstricta(detalle.map((d) => d.ingreso_usd));
+  const utilidadUsd = num(libro.balance.utilidad_despues_usd);
+  const gastosUsd = resta(ingresoUsd, utilidadUsd);
+  const hojasUsd = resta(libro.balance.utilidad_antes_usd, utilidadUsd);
+  const porCobrarUsd = round2(libro.totales.por_cobrar_usd);
+  const cancelados = detalle.filter((d) => d.cancelado).length;
+  const vuelosPorCobrar = detalle.filter((d) => d.por_cobrar_mxn > 0).length;
+  return {
+    vuelos: detalle.length,
+    cancelados,
+    operadores,
+    ingreso_mxn: ingresoMxn,
+    gastos_mxn: gastosMxn,
+    utilidad_mxn: utilidadMxn,
+    por_cobrar_mxn: porCobrarMxn,
+    hojas_mxn: hojasMxn,
+    ingreso_usd: ingresoUsd,
+    gastos_usd: gastosUsd,
+    utilidad_usd: utilidadUsd,
+    por_cobrar_usd: porCobrarUsd,
+    hojas_usd: hojasUsd,
+    detalle,
+    sin_pesos: sinPesos,
+    nota: notaExternos({
+      vuelos: detalle.length,
+      cancelados,
+      operadores,
+      porCobrarMxn,
+      vuelosPorCobrar,
+      sinPesos,
+      utilidadMxn,
+    }),
+  };
+}
+
+/** Texto corto con la base de las líneas de vuelos externos (pie del bloque). */
+function notaExternos(n: {
+  vuelos: number;
+  cancelados: number;
+  operadores: string[];
+  porCobrarMxn: number;
+  vuelosPorCobrar: number;
+  sinPesos: string[];
+  utilidadMxn: number | null;
+}): string {
+  const partes: string[] = [];
+  partes.push(
+    `Vuelos con aviones externos (libro EXTERNOS del periodo): ${plural(n.vuelos, 'vuelo', 'vuelos')}${
+      n.cancelados > 0
+        ? ` (${plural(n.cancelados, 'cancelado', 'cancelados')})`
+        : ''
+    }${n.operadores.length > 0 ? ` con ${n.operadores.join(', ')}` : ''}.`,
+  );
+  partes.push(
+    'Ingreso = la VENTA de cada vuelo en ese libro (lo cotizado al T.C. de su vuelo; en un cancelado, lo realmente cobrado); ' +
+      'gastos = todo lo que ese libro resta (operaciones con el pago al operador —una sola vez—, combustible, comisiones, permisos y otros); ' +
+      'utilidad = su UTILIDAD DESPUÉS DE GASTOS, que suma en el RESULTADO completa aunque esté por cobrar.',
+  );
+  if (n.porCobrarMxn > 0) {
+    partes.push(
+      `De esos vuelos, $${fmt(n.porCobrarMxn)} MXN siguen por cobrar (${plural(n.vuelosPorCobrar, 'vuelo', 'vuelos')}).`,
+    );
+  }
+  partes.push(
+    'Sus TUAs, extras, pernocta y comisión del vendedor ya están en los ingresos y egresos propios (no se suman dos veces).',
+  );
+  if (n.sinPesos.length > 0) {
+    partes.push(
+      `${n.sinPesos.join(', ')} sin pesos (sin T.C.): ingreso, gastos, utilidad y RESULTADO quedan vacíos hasta capturarlo.`,
+    );
+  } else if (n.utilidadMxn == null) {
+    partes.push(
+      'Una hoja del libro EXTERNOS no tiene pesos (combustible o permisos en USD sin T.C.): gastos, utilidad y RESULTADO quedan vacíos hasta capturarlo.',
+    );
+  }
+  return partes.join(' ');
+}
+
 /** Insumos del bloque (todo lo calcula el general ANTES). */
 export interface InsumosBalanceEmpresa {
   participaciones: BalanceEmpresaParticipacionPayload[];
@@ -276,6 +479,13 @@ export interface InsumosBalanceEmpresa {
    * AFAC» no están en la pestaña). Ausente o false ⇒ la nota de siempre.
    */
   afacPorVuelo?: boolean;
+  /**
+   * VUELOS CON AVIONES EXTERNOS (27-oct-2026, API 0.0.112, invariante 112):
+   * `externosParaEmpresa(libro EXTERNOS)`; ausente o null = el general no
+   * tuvo libro EXTERNOS (bloque de siempre, sin la llave). Su `utilidad_*`
+   * SUMA en el resultado; su null se propaga como el de cualquier línea.
+   */
+  externos?: BalanceEmpresaExternosPayload | null;
 }
 
 /** Arma el bloque «VUELATOUR (empresa)» — fuente ÚNICA de su aritmética. */
@@ -316,6 +526,12 @@ export function armarBalanceEmpresa(
     else tiendaSinTc = true;
   }
 
+  // (+) VUELOS CON AVIONES EXTERNOS (27-oct-2026, invariante 112): la
+  // utilidad del libro EXTERNOS, tal cual; sin libro, 0 y sin llave.
+  const ext = e.externos ?? null;
+  const externosMxn = ext ? ext.utilidad_mxn : 0;
+  const externosUsd = ext ? ext.utilidad_usd : 0;
+
   // ===== EN PESOS (18-oct-2026, API 0.0.94, invariante 92) =====
   // Mismas fuentes, en su columna MXN: ningún T.C. de por medio.
   const participacionMxn = e.participaciones.some((p) => p.monto_mxn == null)
@@ -330,13 +546,15 @@ export function armarBalanceEmpresa(
     participacionMxn != null &&
     ingresosMxn != null &&
     egresosMxn != null &&
-    otrosMxn != null
+    otrosMxn != null &&
+    externosMxn != null
       ? round2(
           participacionMxn +
             ingresosMxn -
             egresosMxn -
             otrosMxn +
-            (utilidadTiendaMxn ?? 0),
+            (utilidadTiendaMxn ?? 0) +
+            externosMxn,
         )
       : null;
 
@@ -345,13 +563,15 @@ export function armarBalanceEmpresa(
     ingresos.usd != null &&
     egresos.usd != null &&
     otrosUsd != null &&
-    !tiendaSinTc
+    !tiendaSinTc &&
+    externosUsd != null
       ? round2(
           participacionUsd +
             ingresos.usd -
             egresos.usd -
             otrosUsd +
-            (tiendaUsd ?? 0),
+            (tiendaUsd ?? 0) +
+            externosUsd,
         )
       : null;
 
@@ -393,6 +613,10 @@ export function armarBalanceEmpresa(
     tienda_utilidad_mxn: utilidadTiendaMxn,
     resultado_mxn: resultadoMxn,
     nota_pesos: NOTA_PESOS_BALANCE_EMPRESA,
+    // VUELOS CON AVIONES EXTERNOS (27-oct-2026, API 0.0.112, invariante
+    // 112; ADITIVA, ÚLTIMA llave): solo con libro EXTERNOS. Su utilidad ya
+    // sumó arriba en los dos resultados.
+    ...(ext ? { externos: ext } : {}),
   };
 }
 

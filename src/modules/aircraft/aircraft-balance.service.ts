@@ -252,6 +252,7 @@ import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 // aritmética pura, con spec.
 import {
   armarBalanceEmpresa,
+  externosParaEmpresa,
   movimientosConTc,
   participacionesEmpresa,
 } from './balance-empresa.util';
@@ -1273,22 +1274,26 @@ export class AircraftBalanceService {
     // avión de referencia, con el MISMO row-loop. Entra al consolidado
     // (maestra, cobranza, totales) y al RESUMEN como una fila más; no a los
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
-    registrar(
-      juntarPagosAfac(
-        await this.buildPayload(
-          null,
-          d,
-          h,
-          memoTc,
-          memoFactura,
-          vigenciaComisiones,
-          ingresosPartidos,
-          entregasSocios,
-        ),
+    const payloadExternos = juntarPagosAfac(
+      await this.buildPayload(
+        null,
+        d,
+        h,
+        memoTc,
+        memoFactura,
+        vigenciaComisiones,
+        ingresosPartidos,
+        entregasSocios,
       ),
-      null,
-      false,
     );
+    registrar(payloadExternos, null, false);
+    // VUELOS CON AVIONES EXTERNOS en el bloque «VUELATOUR (empresa)»
+    // (27-oct-2026, API 0.0.112, invariante 112): el libro EXTERNOS solo si
+    // tuvo actividad (`registrar` lo dejó en `libros`); sin él, el bloque de
+    // siempre. Sus números ya están calculados: el bloque solo los cita.
+    const libroExternos = libros.includes(payloadExternos)
+      ? payloadExternos
+      : null;
     // Hoja "refacciones" del GENERAL (29-ago): cada fila se completa con el
     // costo de la salida de cardex ligada (el guardado en su fila) y la venta
     // al avión (el libro individual pinta la hoja sin esas columnas).
@@ -1747,6 +1752,10 @@ export class AircraftBalanceService {
       // ingresos propios, costo real ⇒ egresos propios); la señal solo hace
       // que la nota lo diga.
       afacPorVuelo: afac.filas.length > 0,
+      // VUELOS CON AVIONES EXTERNOS (27-oct-2026, API 0.0.112, invariante
+      // 112): ingreso, gastos y utilidad del libro EXTERNOS (su utilidad
+      // suma en el RESULTADO) y el resumen de cuántos fueron.
+      externos: externosParaEmpresa(libroExternos),
     });
 
     const payload: BalanceGeneralPayload = {

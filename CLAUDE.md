@@ -12268,6 +12268,53 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       textos) e `inventory.service.ubicacion-movimiento.spec` (TRASPASO:
       insert, 400/409, SALIDA por bodega, producto sin principal).
 
+112. **VUELOS CON AVIONES EXTERNOS EN EL BLOQUE «VUELATOUR (empresa)» DEL
+    BALANCE GENERAL (27-oct-2026, API 0.0.112).** Pedido del cliente
+    (captura del bloque de septiembre): «me falta en el balance de VuelaTour
+    los vuelos con aviones externos … que sea claro cuánto dejaron de
+    ingreso, cuánto de gastos y al final la utilidad, y un resumen a un lado
+    de cuántos fueron». Hasta el 0.0.111 el libro EXTERNOS (vuelos de
+    operador ajeno SIN avión de la flota) entraba al RESUMEN y a las hojas
+    consolidadas pero NO al bloque de la empresa (sin socios, sin bloque).
+    - **Fuente única PURA** `balance-empresa.util#externosParaEmpresa(libro
+      EXTERNOS)` → `empresa.externos` (ADITIVA, ÚLTIMA llave del bloque,
+      SOLO con libro EXTERNOS con actividad —`registrar` lo dejó en
+      `libros`—; sin él, el bloque de siempre byte a byte). CERO cálculos
+      paralelos: ingreso = la VENTA del libro (`totales.total_mxn`),
+      utilidad = su UTILIDAD DESPUÉS DE GASTOS
+      (`balance.utilidad_despues_mxn`), gastos = round2(ingreso − utilidad)
+      (todo lo que su cascada resta: OPERACIONES con el pago al operador
+      —una vez, invariantes 88 y 110—, combustible, comisiones, permisos y
+      otros), `hojas_mxn` = antes − después (la parte fuera de las filas),
+      `por_cobrar_mxn` informativo. USD informativos: Σ VENTA USD de las
+      filas y la cascada USD del libro (gasto por gasto, invariante 96).
+      `vuelos` = filas con dinero (sin sombras), `cancelados`,
+      `operadores` distintos, `detalle[]` por vuelo (clave, fecha, cliente,
+      operador, estado, ruta, venta, gastos = venta − ganancia de la fila,
+      utilidad, por cobrar, status) y `nota`.
+    - **RESULTADO**: `resultado_mxn` y `resultado_usd` SUMAN
+      `externos.utilidad_*` (la utilidad entra COMPLETA aunque esté por
+      cobrar, como los ingresos propios; lo pendiente se informa). `null`
+      se propaga: una fila sin pesos (sin T.C.) deja ingreso, gastos,
+      utilidad y RESULTADO vacíos y la nota la nombra (`sin_pesos`); una
+      hoja del libro sin pesos deja gastos/utilidad/RESULTADO vacíos. Sus
+      TUAs, extras, pernocta y comisión del vendedor siguen en «otros
+      movimientos» (ingresos/egresos propios): no se suman dos veces. `nota`
+      y `nota_pesos` del bloque NO cambian.
+    - **pyservices** (mismo día): tres filas entre TIENDA y RESULTADO —«(+)
+      UTILIDAD DE VUELOS CON AVIONES EXTERNOS (MXN)» = ROUND(ingreso −
+      gastos, 2), «Ingreso de esos vuelos (venta) · N vuelos», «(−) Gastos
+      de esos vuelos (…)»— y la tabla «Vuelos con aviones externos del
+      periodo: N» a un lado (columnas F..N); RESULTADO = la fórmula de
+      siempre `+ B{externos}`. Sin `externos`, libro byte a byte. Orden de
+      deploy: cualquiera (el API manda la llave; un pyservices previo la
+      ignora y su RESULTADO ya la incluye).
+    - Specs: `balance-empresa.util.externos.spec` (conteo, bases, detalle,
+      nota, sin pesos, hoja sin pesos, RESULTADO con/sin la llave) y
+      `aircraft-balance.service.externos-empresa.spec` (general con un
+      externo sin avión: pago al operador una vez, RESULTADO exacto, llave
+      al final; sin libro, sin la llave).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -13006,6 +13053,16 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.112 (27-oct-2026; invariante 112, vuelos con
+  aviones externos en el bloque «VUELATOUR (empresa)» del Balance
+  general).** Sin migración. Orden: API y pyservices en cualquier orden
+  (llave ADITIVA `empresa.externos`; un pyservices previo la ignora y el
+  RESULTADO del bloque ya la incluye). `GET /v1/version` = 0.0.112. Números
+  que cambian: solo el RESULTADO del bloque en meses con libro EXTERNOS
+  (sep-2026: #224, #308, #290; oct-2026: #413, #453); el RESUMEN y las
+  hojas no se mueven. La app y el panel no cambian (el panel pinta el
+  `libro_json` de pyservices).
 
 - **DESPLIEGUE DEL 0.0.111 (27-oct-2026; invariante 111, stock por
   ubicación y traspasos entre bodegas; migración

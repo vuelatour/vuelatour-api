@@ -458,13 +458,17 @@ const PAGOS_REALES = { 505: 3000, 506: 1500 } as const;
  * #505 que ya no egresa (300 ÷ 18 = 16.67) = 154.18; resultado = 3,111.98 +
  * 1,032.48 − 154.18 − 38.72 = 3,951.56. Desde el 0.0.98 (invariante 96) la
  * parte de XB-DOS es 1,963.34 ⇒ participación 3,111.99 y resultado 3,951.57.
+ * Desde el 0.0.112 (invariante 112) el RESULTADO suma además la utilidad
+ * del libro EXTERNOS de este mundo (fila EXTERNOS del RESUMEN: ganancia
+ * 9,000 MXN ÷ K 18 = 500 USD) ⇒ 4,451.57.
  */
+const EXTERNOS_USD = 500;
 const EMPRESA_0074 = {
   participacion_usd: 3111.99,
   ingresos_propios_usd: 1032.48,
   pagos_vendedor_usd: 154.18,
   otros_gastos_empresa_usd: 38.72,
-  resultado_usd: 3951.57,
+  resultado_usd: 3951.57 + EXTERNOS_USD,
 };
 
 const MATRICULAS = ['XB-TST', 'XB-DOS'] as const;
@@ -1417,12 +1421,17 @@ describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.74)', (
     }).toEqual(EMPRESA_0074);
     expect(con.ingresos_propios_usd).toBe(antes.ingresos_propios_usd);
     expect(con.movimientos_sin_tc).toBe(0);
+    // 0.0.112 (invariante 112): el libro EXTERNOS de este mundo entra al
+    // bloque con su utilidad (500 USD) y el RESULTADO la suma.
+    expect(con.externos?.vuelos).toBe(1);
+    expect(con.externos?.utilidad_usd).toBe(EXTERNOS_USD);
     expect(con.resultado_usd).toBe(
       r2(
         (con.participacion_usd ?? 0) +
           (con.ingresos_propios_usd ?? 0) -
           (con.pagos_vendedor_usd ?? 0) -
-          (con.otros_gastos_empresa_usd ?? 0),
+          (con.otros_gastos_empresa_usd ?? 0) +
+          (con.externos?.utilidad_usd ?? 0),
       ),
     );
   });
@@ -1462,7 +1471,7 @@ describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.74)', (
     // + 1,172.82.
     expect(con.participacion_usd).toBe(3136.16);
     expect(con.pagos_vendedor_usd).toBe(EMPRESA_0074.pagos_vendedor_usd);
-    expect(con.resultado_usd).toBe(3975.74);
+    expect(con.resultado_usd).toBe(3975.74 + EXTERNOS_USD);
   });
 
   it('conservación: Σ ganancia de los libros + Σ remanente de «otros movimientos» == la regla anterior AL CENTAVO — lo que las filas restan en COMISIONES (banco + pagos absorbidos) es exactamente lo que la pestaña deja de egresar', async () => {

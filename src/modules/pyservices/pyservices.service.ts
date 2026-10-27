@@ -1491,6 +1491,73 @@ export interface BalanceEmpresaParticipacionPayload {
 }
 
 /**
+ * Un vuelo del libro EXTERNOS en el resumen «a un lado» del bloque
+ * VUELATOUR (27-oct-2026, API 0.0.112, invariante 112): las celdas de SU
+ * fila del libro, tal cual (clave, operador, estado y su dinero).
+ */
+export interface BalanceEmpresaExternoVueloPayload {
+  clave: string;
+  folio: string;
+  fecha: string | null;
+  cliente: string | null;
+  /** Operador ajeno (texto libre del vuelo); null si no se capturó. */
+  operador: string | null;
+  estado: string;
+  cancelado: boolean;
+  ruta: string;
+  /** VENTA MXN de la fila (lo cotizado al T.C. de su vuelo; cancelado: lo cobrado). */
+  ingreso_mxn: number | null;
+  /** round2(venta − ganancia de la fila): operaciones (pago al operador) y comisiones. */
+  gastos_mxn: number | null;
+  /** GANANCIA MXN de la fila. */
+  utilidad_mxn: number | null;
+  por_cobrar_mxn: number;
+  status_cobro: string;
+  ingreso_usd: number | null;
+  gastos_usd: number | null;
+  utilidad_usd: number | null;
+}
+
+/**
+ * VUELOS CON AVIONES EXTERNOS en el bloque «VUELATOUR (empresa)»
+ * (27-oct-2026, API 0.0.112, invariante 112). Pedido del cliente: «me falta
+ * en el balance de VuelaTour los vuelos con aviones externos … que sea
+ * claro cuánto dejaron de ingreso, cuánto de gastos y al final la utilidad,
+ * y un resumen a un lado de cuántos fueron». Lo arma la fuente única PURA
+ * `aircraft/balance-empresa.util.ts#externosParaEmpresa` con el libro
+ * EXTERNOS que el general YA calculó: ingreso = su VENTA (fila TOTALES),
+ * utilidad = su UTILIDAD DESPUÉS DE GASTOS, gastos = lo que hay entre las
+ * dos. `null` = una fila o una hoja del libro sin pesos (jamás un 0 falso).
+ */
+export interface BalanceEmpresaExternosPayload {
+  /** Vuelos del libro con dinero en el periodo (sin sombras), cancelados incluidos. */
+  vuelos: number;
+  cancelados: number;
+  /** Operadores distintos, en orden de aparición. */
+  operadores: string[];
+  ingreso_mxn: number | null;
+  gastos_mxn: number | null;
+  /** = `balance.utilidad_despues_mxn` del libro EXTERNOS; SUMA en `resultado_mxn`. */
+  utilidad_mxn: number | null;
+  /** Informativo (ya incluido en la utilidad): `totales.por_cobrar_mxn` del libro. */
+  por_cobrar_mxn: number;
+  /** Parte de `gastos_mxn` fuera de las filas (combustible, permisos y otras hojas del libro); 0 sin ellas. */
+  hojas_mxn: number | null;
+  ingreso_usd: number | null;
+  gastos_usd: number | null;
+  /** = `balance.utilidad_despues_usd` del libro; SUMA en `resultado_usd`. */
+  utilidad_usd: number | null;
+  por_cobrar_usd: number;
+  hojas_usd: number | null;
+  /** Una fila por vuelo, en el orden del libro. */
+  detalle: BalanceEmpresaExternoVueloPayload[];
+  /** Claves de los vuelos sin pesos (sin T.C.): dejan ingreso, gastos, utilidad y RESULTADO vacíos. */
+  sin_pesos: string[];
+  /** Base de las tres líneas, lista para la nota del bloque. */
+  nota: string;
+}
+
+/**
  * Bloque «VUELATOUR (empresa)» al final de la hoja «balance» del Balance
  * GENERAL (6-oct-2026, API 0.0.59). Lo arma la fuente única PURA
  * `aircraft/balance-empresa.util.ts#armarBalanceEmpresa`; pyservices solo
@@ -1553,6 +1620,15 @@ export interface BalanceEmpresaBloquePayload {
   tienda_utilidad_mxn?: number | null;
   resultado_mxn?: number | null;
   nota_pesos?: string;
+  /**
+   * VUELOS CON AVIONES EXTERNOS (27-oct-2026, API 0.0.112, invariante 112;
+   * ADITIVA, ÚLTIMA llave): lo que dejaron los vuelos del libro EXTERNOS
+   * del periodo (operador ajeno SIN avión de la flota), ya calculado por ese
+   * libro. Su `utilidad_*` YA SUMA en `resultado_*`. Solo viaja cuando el
+   * general tiene libro EXTERNOS con actividad; sin él, el bloque de
+   * siempre byte a byte. Un pyservices previo la ignora.
+   */
+  externos?: BalanceEmpresaExternosPayload;
 }
 
 export interface BalanceAvionBalancePayload {
