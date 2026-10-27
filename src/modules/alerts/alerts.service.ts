@@ -1151,8 +1151,10 @@ export class AlertsService {
     const stock = new Map<string, number>();
     for (const m of movs ?? []) {
       const cant = Number(m.cantidad);
-      const signo =
-        m.tipo === 'SALIDA' ? -cant : m.tipo === 'AJUSTE' ? cant : cant; // ENTRADA/DEVOLUCION/AJUSTE suman; SALIDA resta
+      // ENTRADA/DEVOLUCION/AJUSTE suman; SALIDA resta; un TRASPASO entre
+      // ubicaciones (invariante 111) no mueve la existencia total.
+      if (m.tipo === 'TRASPASO') continue;
+      const signo = m.tipo === 'SALIDA' ? -cant : cant;
       stock.set(
         m.item_id as string,
         (stock.get(m.item_id as string) ?? 0) + signo,

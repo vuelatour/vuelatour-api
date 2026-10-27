@@ -37,6 +37,13 @@ export enum TipoMovimientoInventario {
   SALIDA = 'SALIDA',
   DEVOLUCION = 'DEVOLUCION',
   AJUSTE = 'AJUSTE',
+  /**
+   * TRASPASO entre ubicaciones (27-oct-2026, invariante 111, migración
+   * 20261027000002): mueve piezas de una bodega (`ubicacion_id`, null = la
+   * principal del producto) a otra (`ubicacion_destino_id`). No cambia la
+   * existencia total, no fija precio, no genera gasto.
+   */
+  TRASPASO = 'TRASPASO',
 }
 
 /**
@@ -644,6 +651,22 @@ export class CreateMovimientoDto {
   @IsOptional()
   @IsBoolean()
   para_flota?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Bodega donde ocurre el movimiento (27-oct-2026, invariante 111; catálogo GET /inventory/ubicaciones; debe existir y estar activa: 404 UBICACION_NO_EXISTE / 400 UBICACION_INACTIVA). Ausente = la ubicación PRINCIPAL del producto. En SALIDA y TRASPASO debe haber existencia en esa bodega: 409 STOCK_UBICACION_INSUFICIENTE con `details.por_ubicacion`. En TRASPASO es el ORIGEN.',
+  })
+  @IsOptional()
+  @IsUUID()
+  ubicacion_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Solo TRASPASO: bodega que RECIBE las piezas (obligatoria: 400 TRASPASO_SIN_DESTINO; distinta del origen efectivo: 400 TRASPASO_MISMO_ORIGEN). En otros tipos ⇒ 400 DESTINO_SOLO_TRASPASO.',
+  })
+  @IsOptional()
+  @IsUUID()
+  ubicacion_destino_id?: string;
 
   @ApiPropertyOptional({ description: 'Proveedor de origen (en ENTRADA)' })
   @IsOptional()

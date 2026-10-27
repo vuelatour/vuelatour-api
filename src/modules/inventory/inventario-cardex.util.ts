@@ -50,6 +50,17 @@ const SALIDA = TipoMovimientoInventario.SALIDA as string;
 const ENTRADA = TipoMovimientoInventario.ENTRADA as string;
 const DEVOLUCION = TipoMovimientoInventario.DEVOLUCION as string;
 const AJUSTE = TipoMovimientoInventario.AJUSTE as string;
+/**
+ * TRASPASO entre ubicaciones (27-oct-2026, invariante 111): reparte el stock
+ * entre bodegas; NO mueve la existencia total, no fija precio, no vende y no
+ * genera gasto. Todo lector de existencia/costo/utilidad lo salta.
+ */
+const TRASPASO = TipoMovimientoInventario.TRASPASO as string;
+
+/** ¿Es un traspaso entre ubicaciones? (no cuenta en existencia ni dinero). */
+export function esTraspaso(m: { tipo: string }): boolean {
+  return m.tipo === TRASPASO;
+}
 
 export const EPS = 1e-9;
 
@@ -83,6 +94,12 @@ export type MovForFifo = {
   tc_usd_mxn?: number | string | null;
   fecha_movimiento: string;
   created_at: string;
+  /**
+   * Bodega del movimiento (invariante 111): null = la PRINCIPAL del producto
+   * al leer. En un TRASPASO es el origen y `ubicacion_destino_id` el destino.
+   */
+  ubicacion_id?: string | null;
+  ubicacion_destino_id?: string | null;
 };
 
 /** Campos de costo de un movimiento (lo mínimo para expresarlo en pesos). */
@@ -114,6 +131,9 @@ export type MovCardex = MovForFifo & {
   referencia?: string | null;
   aeronave?: unknown;
   proveedor?: unknown;
+  /** Joins de las bodegas (`{ nombre }`), solo para los textos del traspaso. */
+  ubicacion?: unknown;
+  ubicacion_destino?: unknown;
 };
 
 /** T.C. positivo o null (un T.C. ausente, 0 o basura NO es un T.C.). */
@@ -532,11 +552,100 @@ export function sortChrono<T extends MovForFifo>(movs: T[]): T[] {
 export function existenciaDe(movs: MovForFifo[]): number {
   let stock = 0;
   for (const m of movs) {
+    if (esTraspaso(m)) continue;
     const cant = Number(m.cantidad);
     stock = round(m.tipo === SALIDA ? stock - cant : stock + cant);
   }
   return stock;
 }
+
+// ===== Existencia por UBICACIÓN (27-oct-2026, invariante 111) =====
+
+export interface StockUbicacion {
+  /** null = «Sin ubicación»: el producto no tiene principal y el movimiento tampoco. */
+  ubicacion_id: string | null;
+  cantidad: number;
+}
+
+/**
+ * Existencia por BODEGA, derivada del cardex con la MISMA aritmética que
+ * `existenciaDe`: un movimiento sin ubicación cuenta en la PRINCIPAL del
+ * producto (`principalId`, la vigente al leer); sin principal, en null. Un
+ * TRASPASO resta en su origen (null = la principal) y suma en su destino.
+ * Σ cantidades == existenciaDe(movs). Solo bodegas con algún movimiento, en
+ * orden de aparición (quien pinta ordena).
+ */
+export function stockPorUbicacion(
+  movs: MovForFifo[],
+  principalId: string | null,
+): StockUbicacion[] {
+  const acc = new Map<string | null, number>();
+  const suma = (id: string | null, delta: number) =>
+    acc.set(id, round((acc.get(id) ?? 0) + delta));
+  for (const m of sortChrono(movs)) {
+    const cant = Number(m.cantidad);
+    const origen = m.ubicacion_id ?? principalId;
+    if (esTraspaso(m)) {
+      suma(origen, -cant);
+      suma(m.ubicacion_destino_id ?? principalId, cant);
+    } else {
+      suma(origen, m.tipo === SALIDA ? -cant : cant);
+    }
+  }
+  return [...acc.entries()].map(([ubicacion_id, cantidad]) => ({
+    ubicacion_id,
+    cantidad,
+  }));
+}
+
+/** Existencia en UNA bodega (null = «Sin ubicación»). */
+export function existenciaEnUbicacion(
+  movs: MovForFifo[],
+  principalId: string | null,
+  ubicacionId: string | null,
+): number {
+  return (
+    stockPorUbicacion(movs, principalId).find(
+      (s) => s.ubicacion_id === ubicacionId,
+    )?.cantidad ?? 0
+  );
+}
+
+/**
+ * 409 STOCK_UBICACION_INSUFICIENTE: «En Locker Toledo hay 5 y la salida pide
+ * 8 · Dónde está: Bodega Corner 95 · Locker Toledo 5 · Sin ubicación 2.
+ * Elige otra bodega o registra un traspaso.»
+ */
+export function textoStockUbicacionInsuficiente(p: {
+  accion: 'salida' | 'traspaso';
+  ubicacion: string | null;
+  disponible: number;
+  solicitado: number;
+  reparto: Array<{ nombre: string | null; cantidad: number }>;
+}): string {
+  const donde = p.reparto
+    .filter((r) => r.cantidad > EPS)
+    .map((r) => `${r.nombre ?? 'Sin ubicación'} ${round(r.cantidad)}`)
+    .join(' · ');
+  return (
+    `En ${p.ubicacion ?? 'la ubicación principal'} hay ${round(p.disponible)} y ` +
+    `${p.accion === 'salida' ? 'la salida' : 'el traspaso'} pide ${round(p.solicitado)}.` +
+    (donde
+      ? ` Dónde está: ${donde}.`
+      : ' Este producto no tiene existencia en ninguna bodega.') +
+    ' Elige otra bodega o registra un traspaso.'
+  );
+}
+
+/** Textos de los 400 del TRASPASO (invariante 111). */
+export const TEXTOS_TRASPASO = {
+  sinDestino:
+    'Un traspaso necesita la bodega que recibe las piezas (ubicacion_destino_id).',
+  mismoOrigen: (nombre: string): string =>
+    `El traspaso saldría y llegaría a la misma bodega (${nombre}): elige otra bodega de destino.`,
+  destinoSoloTraspaso:
+    'La bodega de destino solo aplica a un traspaso entre ubicaciones.',
+} as const;
 
 // ===== Costo vigente: ÚLTIMO PRECIO DE COMPRA =====
 
@@ -808,6 +917,17 @@ export function walkCardex(movs: MovForFifo[]): Map<string, PasoCardex> {
   let stock = 0;
   for (const m of sortChrono(movs)) {
     const cant = Number(m.cantidad);
+    if (esTraspaso(m)) {
+      // Reparte entre bodegas: la existencia TOTAL no cambia (invariante 111).
+      if (m.id)
+        out.set(m.id, {
+          stockDespues: stock,
+          costoMxn: null,
+          costoUsd: null,
+          sinTc: false,
+        });
+      continue;
+    }
     if (m.tipo === SALIDA) {
       stock = round(stock - cant);
       const c = costoDeSalida(m);
@@ -1039,6 +1159,8 @@ export function agregadosDeItem(
   let sinTc = 0;
   const matriculas = new Set<string>();
   for (const m of sortChrono(movs)) {
+    // Un TRASPASO no compra, no vende ni tiene montos (invariante 111).
+    if (esTraspaso(m)) continue;
     if (m.tipo === ENTRADA && !(Number(m.costo_unitario_usd) > 0)) {
       sinCosto = true;
     }
@@ -1153,7 +1275,8 @@ export function resumenDiarioDe(
   // Stock corriente (walkCardex) — se arrastra a la fila del día siguiente.
   let existencia = 0;
   for (const m of sortChrono(movs)) {
-    if (!enPeriodo(m)) continue;
+    // Un TRASPASO no entra ni sale: no abre día (invariante 111).
+    if (esTraspaso(m) || !enPeriodo(m)) continue;
     const fecha = String(m.fecha_movimiento);
     const paso = m.id ? walk.get(m.id) : undefined;
     if (paso) existencia = paso.stockDespues;
@@ -1336,9 +1459,31 @@ export interface TotalesBloques {
   movimientos_sin_tc: number;
 }
 
+/**
+ * TRASPASO entre ubicaciones (27-oct-2026, invariante 111): reparte el
+ * stock entre bodegas; sin montos. `orden` = su posición en el cardex
+ * completo (como compras y ventas) para la lista por fecha.
+ */
+export interface BloqueTraspaso {
+  movimiento_id: string | null;
+  orden: number;
+  fecha: string;
+  cantidad: number;
+  /** null = la ubicación PRINCIPAL del producto. */
+  origen_id: string | null;
+  origen_nombre: string | null;
+  destino_id: string | null;
+  destino_nombre: string | null;
+  referencia: string | null;
+  /** Existencia TOTAL después del movimiento (no cambia con el traspaso). */
+  stock_despues: number;
+}
+
 export interface BloquesCardex {
   compras: BloqueCompra[];
   ventas: BloqueVenta[];
+  /** ADITIVO (invariante 111): los traspasos entre ubicaciones del periodo. */
+  traspasos?: BloqueTraspaso[];
   totales: TotalesBloques;
 }
 
@@ -1362,6 +1507,7 @@ export function bloquesCardexDe(
   const vigente = costoVigenteEn(movs, { fecha: opts.hoy ?? '9999-12-31' });
   const compras: BloqueCompra[] = [];
   const ventas: BloqueVenta[] = [];
+  const traspasos: BloqueTraspaso[] = [];
   for (const [orden, m] of sortChrono(movs).entries()) {
     if (!enPeriodo(m)) continue;
     const paso = m.id ? walk.get(m.id) : undefined;
@@ -1369,6 +1515,22 @@ export function bloquesCardexDe(
     const referencia =
       typeof m.referencia === 'string' && m.referencia ? m.referencia : null;
     const ref = referencia ? ` · ref ${referencia}` : '';
+    if (esTraspaso(m)) {
+      // Reparte entre bodegas (invariante 111): ni compra ni venta.
+      traspasos.push({
+        movimiento_id: m.id ?? null,
+        orden,
+        fecha: String(m.fecha_movimiento ?? ''),
+        cantidad: cant,
+        origen_id: m.ubicacion_id ?? null,
+        origen_nombre: nombreDeJoin(m.ubicacion, 'nombre'),
+        destino_id: m.ubicacion_destino_id ?? null,
+        destino_nombre: nombreDeJoin(m.ubicacion_destino, 'nombre'),
+        referencia,
+        stock_despues: paso?.stockDespues ?? 0,
+      });
+      continue;
+    }
     if (m.tipo === SALIDA) {
       const venta = ventaDeSalida(m);
       const c = venta.costo;
@@ -1470,6 +1632,7 @@ export function bloquesCardexDe(
   return {
     compras,
     ventas,
+    traspasos,
     totales: {
       compras_cant: a.compradas_cant,
       compras_mxn: a.compradas_costo_mxn,
@@ -1505,7 +1668,12 @@ export function bloquesCardexDe(
 // resumen por mes, del MISMO recorrido de stock (`walkCardex` usa la misma
 // aritmética) y de `agregadosDeItem` (vendido y utilidad del mes).
 
-export type TipoFilaCardex = 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE' | 'SALIDA';
+export type TipoFilaCardex =
+  | 'ENTRADA'
+  | 'DEVOLUCION'
+  | 'AJUSTE'
+  | 'SALIDA'
+  | 'TRASPASO';
 
 /** Una fila de la lista por fecha (Excel del cardex). Montos en PESOS. */
 export interface FilaCardex {
@@ -1618,8 +1786,39 @@ export function cardexCronologicoDe(bloques: BloquesCardex): FilaCardex[] {
         sin_tc: v.sin_tc,
       }),
     ),
+    // TRASPASOS (invariante 111): sin entra/sale ni montos; la existencia
+    // total no cambia. El detalle dice cuántas y de dónde a dónde.
+    ...(bloques.traspasos ?? []).map(
+      (t): FilaCardex => ({
+        orden: t.orden,
+        movimiento_id: t.movimiento_id,
+        fecha: t.fecha,
+        mes: t.fecha.slice(0, 7),
+        tipo: 'TRASPASO',
+        entra: null,
+        sale: null,
+        existencia: t.stock_despues,
+        detalle: detalleDeTraspaso(t),
+        precio_unitario_mxn: null,
+        total_mxn: null,
+        ganancia_mxn: null,
+        a_costo: false,
+        sin_costo: false,
+        sin_tc: false,
+      }),
+    ),
   ];
   return filas.sort((a, b) => a.orden - b.orden);
+}
+
+/** «Traspaso de 2 · Bodega Corner → Locker Toledo · ref X». */
+export function detalleDeTraspaso(t: BloqueTraspaso): string {
+  const partes = [
+    `Traspaso de ${round(t.cantidad)} · ${t.origen_nombre ?? 'ubicación principal'} → ${t.destino_nombre ?? '¿?'}`,
+  ];
+  const ref = refUtil(t.referencia);
+  if (ref) partes.push(`ref ${ref}`);
+  return partes.join(' · ');
 }
 
 /** Un mes del cardex: de cuánto partió, qué entró, qué se vendió y en qué quedó. */
@@ -1690,6 +1889,11 @@ export function mesesCardexDe(
     while (i < orden.length && mesDe(orden[i]) === mes) {
       const m = orden[i];
       const cant = Number(m.cantidad);
+      if (esTraspaso(m)) {
+        // Reparte entre bodegas: ni entra ni sale (invariante 111).
+        i += 1;
+        continue;
+      }
       if (m.tipo === SALIDA) {
         stock = round(stock - cant);
         vendidas = round(vendidas + cant);

@@ -3344,7 +3344,9 @@ export interface CardexLibroMovimientoPayload {
   fecha: string;
   /** YYYY-MM (agrupa la lista por mes). */
   mes: string;
-  tipo: 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE' | 'SALIDA';
+  /** TRASPASO (27-oct-2026, invariante 111): fila sin entra/sale ni montos
+   *  (pyservices la rotula «Traspaso» con su detalle «origen → destino»). */
+  tipo: 'ENTRADA' | 'DEVOLUCION' | 'AJUSTE' | 'SALIDA' | 'TRASPASO';
   /** «Aircraft Spruce · ref F-12» / «XA-VGV» / «Toda la flota · a costo». */
   detalle: string;
   entra: number | null;

@@ -98,9 +98,13 @@ import {
   salidasQueDependenDe,
   sortChrono,
   statsDe,
+  stockPorUbicacion,
   TEXTOS_INVENTARIO,
+  TEXTOS_TRASPASO,
   textoEntradaConSalidas,
   textoSalidaAntesDeLaCompra,
+  textoStockUbicacionInsuficiente,
+  type StockUbicacion,
   ventaDeSalida,
   type AgregadosItem,
   type CostoVigente,
@@ -152,13 +156,15 @@ const EMPAQUE_COLS =
 // inventario_movimiento_registrado_por_fkey → usuario.nombre) para el
 // historial del cardex del panel («salió 1 aceite para el N58BT y yo no lo
 // saqué»: era una PRUEBA de otro usuario). Aditivo: el panel lo pinta si viene.
+// `ubicacion` / `ubicacion_destino` (27-oct-2026, invariante 111): nombre de
+// la bodega del movimiento y, en un TRASPASO, de la que recibe.
 const MOV_JOINS =
-  'aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre), empaque:inventario_item_empaque!empaque_id(nombre, factor), registro:usuario!inventario_movimiento_registrado_por_fkey(nombre)';
+  'aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre), empaque:inventario_item_empaque!empaque_id(nombre, factor), registro:usuario!inventario_movimiento_registrado_por_fkey(nombre), ubicacion:inventario_ubicacion!ubicacion_id(nombre), ubicacion_destino:inventario_ubicacion!ubicacion_destino_id(nombre)';
 
 /** Bucket PÚBLICO de fotos de producto (el cliente sube; el API borra). */
 const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
-  'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+  'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at, ubicacion_id, ubicacion_destino_id';
 
 /** Índice único parcial de `inventario_movimiento.client_request_id`. */
 const UQ_INV_MOVIMIENTO_CLIENT_REQUEST = 'uq_inv_movimiento_client_request';
@@ -1517,7 +1523,7 @@ export class InventoryService {
       this.supabase.service
         .from('inventario_movimiento')
         .select(
-          'id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at',
+          'id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at, ubicacion_id, ubicacion_destino_id',
           { count: 'exact' },
         )
         .eq('item_id', itemId)
@@ -1525,6 +1531,101 @@ export class InventoryService {
         .order('created_at', { ascending: true })
         .order('id', { ascending: true })
         .range(desde, hasta),
+    );
+  }
+
+  /**
+   * STOCK POR UBICACIÓN (27-oct-2026, invariante 111): una SALIDA o un
+   * TRASPASO solo sale de una bodega donde haya piezas. 409
+   * STOCK_UBICACION_INSUFICIENTE con el reparto actual
+   * (`details.por_ubicacion`) para que el panel lo diga y ofrezca el
+   * traspaso. Una SALIDA sin bodega efectiva (producto sin principal y
+   * movimiento sin ubicación) no tiene qué comprobar: la existencia total ya
+   * se validó. Un TRASPASO desde «Sin ubicación» sí: solo sale lo que hay ahí.
+   */
+  private async assertStockEnUbicacion(p: {
+    movs: MovForFifo[];
+    principalId: string | null;
+    ubicacionId: string | null;
+    nombre: string | null;
+    cantidad: number;
+    accion: 'salida' | 'traspaso';
+  }): Promise<void> {
+    if (p.ubicacionId == null && p.accion === 'salida') return;
+    const reparto = stockPorUbicacion(p.movs, p.principalId);
+    const disponible =
+      reparto.find((s) => s.ubicacion_id === p.ubicacionId)?.cantidad ?? 0;
+    if (disponible + EPS >= p.cantidad) return;
+    const conNombres = await this.conNombresDeUbicacion(reparto, p.principalId);
+    throw new ConflictException({
+      message: textoStockUbicacionInsuficiente({
+        accion: p.accion,
+        ubicacion: p.nombre,
+        disponible,
+        solicitado: p.cantidad,
+        reparto: conNombres,
+      }),
+      error: 'STOCK_UBICACION_INSUFICIENTE',
+      details: {
+        ubicacion_id: p.ubicacionId,
+        ubicacion: p.nombre,
+        disponible: round(disponible),
+        solicitado: p.cantidad,
+        por_ubicacion: conNombres,
+      },
+    });
+  }
+
+  /**
+   * `stockPorUbicacion` con el nombre de cada bodega (catálogo) y la marca
+   * de la principal: principal primero, luego por cantidad, luego nombre;
+   * «Sin ubicación» (id null) al final.
+   */
+  private async conNombresDeUbicacion(
+    reparto: StockUbicacion[],
+    principalId: string | null,
+  ): Promise<
+    Array<{
+      ubicacion_id: string | null;
+      nombre: string | null;
+      cantidad: number;
+      es_principal: boolean;
+    }>
+  > {
+    if (reparto.length === 0) return [];
+    const nombres = new Map<string, string>();
+    if (
+      reparto.some((s) => s.ubicacion_id != null) &&
+      (await this.ubicacionDisponible())
+    ) {
+      for (const u of (await this.catalogoUbicaciones()) ?? []) {
+        nombres.set(u.id, u.nombre);
+      }
+    }
+    return reparto
+      .map((s) => ({
+        ubicacion_id: s.ubicacion_id,
+        nombre: s.ubicacion_id ? (nombres.get(s.ubicacion_id) ?? null) : null,
+        cantidad: s.cantidad,
+        es_principal: s.ubicacion_id != null && s.ubicacion_id === principalId,
+      }))
+      .sort(
+        (a, b) =>
+          Number(b.es_principal) - Number(a.es_principal) ||
+          Number(a.ubicacion_id == null) - Number(b.ubicacion_id == null) ||
+          b.cantidad - a.cantidad ||
+          (a.nombre ?? '').localeCompare(b.nombre ?? ''),
+      );
+  }
+
+  /** Reparto del stock por bodega, con nombres (detalle del ítem y respuesta del movimiento). */
+  private async stockPorUbicacionConNombres(
+    movs: MovForFifo[],
+    principalId: string | null,
+  ) {
+    return this.conNombresDeUbicacion(
+      stockPorUbicacion(movs, principalId),
+      principalId,
     );
   }
 
@@ -1786,12 +1887,23 @@ export class InventoryService {
         ganancia_usd_original: v.gananciaUsdOriginal,
       };
     });
+    // STOCK POR UBICACIÓN (27-oct-2026, invariante 111): derivado del MISMO
+    // cardex; un movimiento sin bodega cuenta en la principal del producto.
+    const ubicacionItem = (item as { ubicacion_id?: unknown }).ubicacion_id;
+    const principalId =
+      typeof ubicacionItem === 'string' ? ubicacionItem : null;
+    const stock_por_ubicacion = await this.stockPorUbicacionConNombres(
+      movs,
+      principalId,
+    );
     // TODO el cardex (18-oct-2026): el inventario no lleva el piso del
     // inicio oficial; ya no viaja el `saldo_inicial` del 0.0.85.
     return {
       ...item,
       ...stats,
       regla_costo: REGLA_COSTO,
+      ubicacion_principal_id: principalId,
+      stock_por_ubicacion,
       movimientos,
     };
   }
@@ -1838,7 +1950,7 @@ export class InventoryService {
     // TODO el historial (18-oct-2026): sin piso del inicio oficial.
     const desde = q.desde;
     const enPeriodo = filtroPeriodo(desde, q.hasta);
-    const { compras, ventas, totales } = bloquesCardexDe(
+    const { compras, ventas, traspasos, totales } = bloquesCardexDe(
       item.nombre,
       movs,
       enPeriodo,
@@ -1926,6 +2038,9 @@ export class InventoryService {
           ? (gastoPorMov.get(v.movimiento_id) ?? null)
           : null,
       })),
+      // ADITIVO (invariante 111): traspasos entre bodegas del periodo (sin
+      // montos; la lista por fecha los pinta en su lugar).
+      traspasos: traspasos ?? [],
       resumen_diario,
       totales: {
         ...totales,
@@ -2856,7 +2971,48 @@ export class InventoryService {
       nombre: string;
       precio_venta?: number | string | null;
       precio_venta_moneda?: 'MXN' | 'USD' | null;
+      ubicacion_id?: string | null;
+      ubicacion_nombre?: string | null;
     }; // 404 si no existe
+
+    // UBICACIÓN del movimiento (27-oct-2026, invariante 111): la del DTO
+    // (debe existir y estar activa; la principal del producto se acepta
+    // aunque esté inactiva) o null = la PRINCIPAL del producto al leer. En
+    // un TRASPASO el DTO trae además el destino, obligatorio y distinto del
+    // origen efectivo. Sin el catálogo (migración 20260925000001 ausente) una
+    // ubicación en el DTO responde 503, como en el ítem.
+    const principalId =
+      typeof item.ubicacion_id === 'string' ? item.ubicacion_id : null;
+    const esTraspasoDto = dto.tipo === TipoMovimientoInventario.TRASPASO;
+    if (dto.ubicacion_id != null || dto.ubicacion_destino_id != null) {
+      await this.exigirUbicaciones();
+    }
+    const ubicacionMov = dto.ubicacion_id
+      ? await this.ubicacionElegible(dto.ubicacion_id, principalId)
+      : null;
+    const origenEfectivoId = ubicacionMov?.id ?? principalId;
+    const origenNombre = ubicacionMov?.nombre ?? item.ubicacion_nombre ?? null;
+    let ubicacionDestino: { id: string; nombre: string } | null = null;
+    if (esTraspasoDto) {
+      if (!dto.ubicacion_destino_id) {
+        throw new BadRequestException({
+          message: TEXTOS_TRASPASO.sinDestino,
+          error: 'TRASPASO_SIN_DESTINO',
+        });
+      }
+      ubicacionDestino = await this.ubicacionElegible(dto.ubicacion_destino_id);
+      if (ubicacionDestino.id === origenEfectivoId) {
+        throw new BadRequestException({
+          message: TEXTOS_TRASPASO.mismoOrigen(ubicacionDestino.nombre),
+          error: 'TRASPASO_MISMO_ORIGEN',
+        });
+      }
+    } else if (dto.ubicacion_destino_id) {
+      throw new BadRequestException({
+        message: TEXTOS_TRASPASO.destinoSoloTraspaso,
+        error: 'DESTINO_SOLO_TRASPASO',
+      });
+    }
 
     // CIERRE DE MES (revisión 16-oct-2026, invariante 89): la SALIDA genera
     // el gasto REFACCION del avión (y la DEVOLUCION con avión lo ajusta) con
@@ -2977,6 +3133,16 @@ export class InventoryService {
             : `Stock insuficiente: disponible ${round(disponible)}, salida solicitada ${cantidad}.`,
         );
       }
+      // STOCK POR UBICACIÓN (invariante 111): la salida sale de la bodega
+      // efectiva (la del DTO o la principal del producto).
+      await this.assertStockEnUbicacion({
+        movs: movsItem,
+        principalId,
+        ubicacionId: origenEfectivoId,
+        nombre: origenNombre,
+        cantidad,
+        accion: 'salida',
+      });
       // COSTO = ÚLTIMO PRECIO DE COMPRA vigente el día de la salida (25-sep-
       // 2026). Se GUARDA en la fila: nada posterior lo mueve (D1-bis).
       costoVigente = costoVigenteEn(movsItem, { fecha: fechaDia });
@@ -3028,6 +3194,21 @@ export class InventoryService {
       ventaMoneda = precio.ventaMoneda;
       ventaOrigen = precio.origen;
       margenAplicado = precio.origen === 'MARGEN' ? margen : null;
+    } else if (esTraspasoDto) {
+      // TRASPASO (invariante 111): sin costo, sin T.C., sin venta — solo
+      // piezas que de verdad estén en la bodega de origen.
+      await this.assertStockEnUbicacion({
+        movs: await this.movsForItem(itemId),
+        principalId,
+        ubicacionId: origenEfectivoId,
+        nombre: origenNombre,
+        cantidad,
+        accion: 'traspaso',
+      });
+      costoUnitario = 0;
+      moneda = 'USD';
+      costoMxn = null;
+      tc = null;
     } else {
       const costo = await this.resolverCostoEntrada(dto, fechaDia);
       costoUnitario = costo.costoUnitario;
@@ -3061,8 +3242,13 @@ export class InventoryService {
         venta_unitaria: ventaUnitaria,
         venta_moneda: ventaUnitaria != null ? ventaMoneda : null,
         para_flota: salidaDeFlota,
-        aeronave_id: dto.aeronave_id ?? null,
-        proveedor_id: dto.proveedor_id ?? null,
+        // Un TRASPASO no lleva avión ni proveedor (invariante 111).
+        aeronave_id: esTraspasoDto ? null : (dto.aeronave_id ?? null),
+        proveedor_id: esTraspasoDto ? null : (dto.proveedor_id ?? null),
+        // Bodega del movimiento (null = la principal al leer) y, en un
+        // TRASPASO, la que recibe.
+        ubicacion_id: ubicacionMov?.id ?? null,
+        ubicacion_destino_id: ubicacionDestino?.id ?? null,
         // Día Cancún explícito: el default current_date de la BD es UTC y de
         // las 19:00 a las 23:59 de Cancún fechaba la SALIDA "mañana", ANTES
         // de la ENTRADA del mismo día en el orden del cardex.
@@ -3181,7 +3367,8 @@ export class InventoryService {
     }
 
     // Solo existencia y USD interno: no hace falta el T.C. de hoy.
-    const stats = statsDe(await this.movsForItem(itemId), {
+    const movsDespues = await this.movsForItem(itemId);
+    const stats = statsDe(movsDespues, {
       hoy: hoyCancun(),
       tcHoy: null,
     });
@@ -3191,6 +3378,14 @@ export class InventoryService {
         ? { nombre: empaque.nombre, factor: empaque.factor }
         : null,
       stock_resultante: stats.stock,
+      // ADITIVOS (invariante 111): cómo quedó el reparto por bodega y los
+      // nombres de la(s) bodega(s) del movimiento (para el aviso del panel).
+      stock_por_ubicacion: await this.stockPorUbicacionConNombres(
+        movsDespues,
+        principalId,
+      ),
+      ubicacion_nombre: ubicacionMov?.nombre ?? null,
+      ubicacion_destino_nombre: ubicacionDestino?.nombre ?? null,
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
       reversion_pendiente: reversionPendiente,

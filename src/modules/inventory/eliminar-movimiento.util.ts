@@ -33,6 +33,7 @@ import { TipoMovimientoInventario } from './dto/inventory.dto';
 import {
   costoVigenteEn,
   EPS,
+  esTraspaso,
   fechaCardexEsMx,
   montoTxt,
   precioTxt,
@@ -220,6 +221,8 @@ function recorrerStock(movs: MovEliminable[]): Array<{
 }> {
   let stock = 0;
   return movs.map((mov) => {
+    // Un TRASPASO entre ubicaciones (invariante 111) no mueve la existencia.
+    if (esTraspaso(mov)) return { mov, stock };
     const cant = Number(mov.cantidad);
     stock = round(mov.tipo === SALIDA ? stock - cant : stock + cant);
     return { mov, stock };
@@ -286,7 +289,9 @@ export function evaluarEliminacion(
       ...base,
       permitido: false,
       codigo_bloqueo: 'TIPO_NO_SOPORTADO',
-      detalle: `Un movimiento de tipo ${objetivo.tipo} no se elimina: corrige con un movimiento contrario (una ${objetivo.tipo === 'DEVOLUCION' ? 'SALIDA' : 'ENTRADA/SALIDA'} que lo compense), así el cardex conserva el rastro completo.`,
+      detalle: esTraspaso(objetivo)
+        ? 'Un TRASPASO entre ubicaciones no se elimina: registra el traspaso contrario (de la bodega destino a la de origen), así el cardex conserva el rastro completo.'
+        : `Un movimiento de tipo ${objetivo.tipo} no se elimina: corrige con un movimiento contrario (una ${objetivo.tipo === 'DEVOLUCION' ? 'SALIDA' : 'ENTRADA/SALIDA'} que lo compense), así el cardex conserva el rastro completo.`,
     };
   }
 

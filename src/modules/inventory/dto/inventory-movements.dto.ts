@@ -20,6 +20,8 @@ export enum TipoMovimientoInventario {
   SALIDA = 'SALIDA',
   DEVOLUCION = 'DEVOLUCION',
   AJUSTE = 'AJUSTE',
+  /** Traspaso entre ubicaciones (27-oct-2026, invariante 111). */
+  TRASPASO = 'TRASPASO',
 }
 
 export class ListInventoryMovementsQuery {

@@ -12203,6 +12203,71 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `profit-sharing.service.comisiones.spec` (casos #453 con/sin marca,
       sin costo, dos partes, K oficial).
 
+111. **STOCK POR UBICACIÓN Y TRASPASOS ENTRE BODEGAS (27-oct-2026, API
+    0.0.111, migración `20261027000002_inventario_movimiento_ubicacion`).**
+    Pedido de la oficina (captura de la ficha del filtro CH48108): «tenemos
+    filtros en Córner y aparte filtros en Toledo … muchos de los productos
+    se encuentran en diferentes lugares … una tablita … de estos 200
+    aceites que hay, 100 se encuentran en Toledo, cinco en Mérida y 95 en
+    la bodega de Córner. Y entonces así ya sabemos en dónde hay todo».
+    - **Modelo (sin backfill)**: `inventario_movimiento.ubicacion_id`
+      (bodega del movimiento; null = la PRINCIPAL del producto
+      `inventario_item.ubicacion_id` AL LEER; sin principal, «Sin
+      ubicación») y `ubicacion_destino_id` (solo TRASPASO). Tipo nuevo
+      `TRASPASO`: resta en el origen (null = la principal) y suma en el
+      destino; NO mueve la existencia total, no fija precio, no vende, no
+      genera gasto, no lleva avión ni proveedor, costo 0. CHECK
+      `inventario_movimiento_traspaso_chk` (destino solo en TRASPASO y ≠
+      origen; compara `tipo::text`: el valor nuevo no se cita como enum en
+      la transacción que lo crea). Las 96 filas previas quedan sin bodega ⇒
+      cuentan en la principal de su producto (cambiar la principal
+      re-etiqueta todo lo sin bodega: es la verdad para un producto de una
+      sola bodega, que es la mayoría).
+    - **Fuente única** `inventario-cardex.util`: `esTraspaso`,
+      `stockPorUbicacion(movs, principalId)` (misma aritmética que
+      `existenciaDe`; Σ == existencia total; solo bodegas con movimiento, en
+      orden de aparición), `existenciaEnUbicacion`,
+      `textoStockUbicacionInsuficiente`, `TEXTOS_TRASPASO`. TODO lector de
+      existencia/costo/utilidad SALTA los traspasos: `existenciaDe`,
+      `walkCardex` (paso sin cambio de stock), `agregadosDeItem`,
+      `resumenDiarioDe`, `mesesCardexDe`, `bloquesCardexDe` (los lista
+      aparte en `traspasos: BloqueTraspaso[]`, aditivo),
+      `cardexCronologicoDe` (fila `TRASPASO` sin entra/sale ni montos:
+      «Traspaso de 2 · Bodega Corner → Locker Toledo»),
+      `eliminar-movimiento.util` (`recorrerStock`; un TRASPASO no se
+      elimina: «registra el traspaso contrario») y
+      `alerts.service#checkInventarioBajo`. `costoVigenteEn` y
+      `salidasQueDependenDe` ya solo miran ENTRADA/SALIDA.
+    - **Escritura** (`createMovimiento`): `ubicacion_id` del DTO (existe y
+      activa —la principal del producto se acepta inactiva—; sin el
+      catálogo ⇒ 503 `MIGRACION_PENDIENTE`) o null; `ubicacion_destino_id`
+      obligatorio en TRASPASO (400 `TRASPASO_SIN_DESTINO`), ≠ origen
+      efectivo (400 `TRASPASO_MISMO_ORIGEN`), prohibido fuera (400
+      `DESTINO_SOLO_TRASPASO`). SALIDA y TRASPASO exigen existencia en la
+      bodega efectiva: 409 `STOCK_UBICACION_INSUFICIENTE` con
+      `details.por_ubicacion` (una SALIDA sin bodega efectiva —producto sin
+      principal y sin ubicación en el DTO— solo valida el total, como
+      siempre: la app no manda bodega; un TRASPASO desde «Sin ubicación» sí
+      se valida contra ese cajón). El TRASPASO se inserta con costo 0, USD,
+      sin T.C., sin avión/proveedor/venta y no genera gasto ni toca el
+      candado del mes. La respuesta gana `stock_por_ubicacion`,
+      `ubicacion_nombre`, `ubicacion_destino_nombre`. `MOV_COLS` trae las
+      dos columnas y `MOV_JOINS` los nombres (`ubicacion`,
+      `ubicacion_destino`); `movsForItem` también las trae.
+    - **Lectura**: `GET items/:id` gana `ubicacion_principal_id` y
+      `stock_por_ubicacion[] {ubicacion_id, nombre, cantidad, es_principal}`
+      (principal primero, luego por cantidad, «Sin ubicación» al final);
+      `GET items/:id/resumen` gana `traspasos[]`; el cardex Excel lista los
+      traspasos (pyservices los rotula «Traspaso» por su fallback de tipo).
+    - **Panel**: sección «Stock y ubicaciones» en la ficha, selector de
+      bodega en el movimiento (default la principal; cada bodega con su
+      existencia), tipo «Traspaso entre ubicaciones». La app no cambia (sus
+      movimientos van sin bodega ⇒ la principal).
+    - Specs: `inventario-cardex.util.ubicacion.spec` (reparto, traspasos
+      ignorados por todos los lectores, filas del Excel, eliminación,
+      textos) e `inventory.service.ubicacion-movimiento.spec` (TRASPASO:
+      insert, 400/409, SALIDA por bodega, producto sin principal).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12941,6 +13006,18 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.111 (27-oct-2026; invariante 111, stock por
+  ubicación y traspasos entre bodegas; migración
+  `20261027000002_inventario_movimiento_ubicacion`, APLICADA por MCP el
+  27-oct-2026 tras el dry-run con filas reales — DRYRUN_OK — y un POSTCHECK
+  con un TRASPASO real revertido).** Orden: migración (ya aplicada) ⇒ API ⇒
+  panel (el panel manda `ubicacion_id`/`ubicacion_destino_id` y el tipo
+  TRASPASO, que un API previo rechaza con 400). `GET /v1/version` = 0.0.111.
+  Sin cambio de números: los 96 movimientos previos cuentan en la bodega
+  principal de su producto (71 productos con solo texto «(anterior)» caen en
+  «Sin ubicación» hasta que la oficina les asigne bodega con «Mover a…»). La
+  app no cambia.
 
 - **DESPLIEGUE DEL 0.0.110 (27-oct-2026; invariante 110, el pago al
   operador externo se marca en el gasto; migración
