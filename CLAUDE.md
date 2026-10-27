@@ -2215,8 +2215,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     del dueño en la moneda del fondo).
     - **Qué repone una reposición** = `tramoDeReposicion(historial, id)`:
       las entradas del libro entre la reposición ANTERIOR (exclusiva) y
-      ésta, en el orden de `compararEntradasCaja` (un gasto fechado el día
-      de la reposición entra en ella aunque se capture después — la misma
+      ésta, en el orden de `compararEntradasCaja` (fecha asc; el MISMO día,
+      ORDEN DE CAPTURA — ver el bullet del 27-oct-2026 abajo — la misma
       regla del candado `GASTO_EN_REPOSICION`). Saldo/por reponer antes y
       después se LEEN de las filas del historial; `diferencia = repuesto −
       por reponer antes` (> 0 de más, < 0 quedó pendiente). Con `id = null`
@@ -2256,6 +2256,36 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `repuesto_a` en los espejos; la reposición a una hija se registra con
       el POST de movimientos de la HIJA (el espejo sale solo; sin fecha =
       hoy Cancún, nunca el `CURRENT_DATE` UTC de la BD).
+    - **MISMO DÍA = ORDEN DE CAPTURA (27-oct-2026, API 0.0.108, SIN
+      migración).** Pedido de la oficina (Mary Cruz, capturas del libro y del
+      Excel): registró la reposición «del 28-sep al 12-oct» con fecha 13-oct
+      por la mañana y por la tarde capturó dos gastos del 13-oct; el libro
+      los ponía DEBAJO de la reposición («la reposición del día D salda los
+      gastos de D», regla del 24-sep-2026) y el Excel «Por reponer» arrancaba
+      el 14-oct: nadie los reponía. Ahora `compararEntradasCaja` ordena el
+      mismo día por `created_at` (a sello igual, el gasto antes que el
+      movimiento): una reposición cubre lo que YA estaba capturado cuando se
+      registró —el mismo universo del Excel «Por reponer hoy» con el que la
+      oficina fija el monto—; un gasto del día de la reposición capturado
+      DESPUÉS queda en el tramo siguiente y «Periodo pendiente» arranca ese
+      mismo día. El candado `GASTO_EN_REPOSICION` lee la MISMA regla:
+      `saldadoPorReposicion(gasto{fecha, created_at}, ultima{fecha,
+      created_at})` con `CajaChicaService.ultimaReposicionDe` (antes
+      `fechaUltimaReposicionDe`, solo la fecha); sin sello en alguno de los
+      dos (filas legadas) el mismo día cuenta como saldado. En prod cambia la
+      atribución de 4 reposiciones con gastos del mismo día capturados
+      después (Luis 04-ago ×2 y 20-ago, Alexander 14-ago, Mary 13-oct): esos
+      gastos pasan al tramo siguiente; ningún saldo ni «por reponer hoy»
+      cambia (solo qué Excel los lista y las líneas «venía de antes»). Queda
+      IGUAL a propósito: un gasto de fecha ANTERIOR al día de la reposición
+      capturado después de registrarla sigue dentro de ella (naranja
+      «capturado DESPUÉS» en su Excel y en «Por reponer que venía de
+      antes»), nunca en el «Por reponer» siguiente. Specs:
+      `caja-chica-saldo.util.spec` (orden y `saldadoPorReposicion` con las
+      horas reales de Mary), `caja-chica-tramo.util.spec`,
+      `caja-chica.service.spec`, `caja-chica.reposicion-xlsx.spec` y los de
+      `expenses` que simulan la caja (`ultimaReposicionDe` devuelve `{fecha,
+      created_at}`).
 
 27. **FACTURAS EMITIDAS (registro manual), «NECESITO FACTURA» y COMPROBANTE
     DEL COBRO (24-sep-2026, API 0.0.32, migración `20260924000003` APLICADA
@@ -12773,6 +12803,15 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.108 (27-oct-2026; invariante 26, caja chica: el mismo
+  día ordena por captura; SIN migración).** Solo API (panel, app y
+  pyservices sin cambio: el orden y los tramos los decide el API). `GET
+  /v1/version` = 0.0.108. Efecto en prod: el libro de Mary pone los dos
+  gastos del 13-oct DEBAJO de la reposición del 13-oct (en el libro DESC,
+  arriba de ella) y su «Por reponer» los lista con «Periodo pendiente del
+  13/10/2026»; las reposiciones de agosto de Luis y Alexander reatribuyen 1–2
+  gastos al tramo siguiente (ya pagados; solo cambia qué Excel los lista).
 
 - **DESPLIEGUE DEL 0.0.107 (27-oct-2026; invariante 108, próximo servicio
   vencido; SIN migración).** Solo API y panel, en cualquier orden (contrato

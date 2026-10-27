@@ -464,7 +464,7 @@ describe('ExpensesService — candado MES_CERRADO de la marca (invariante 90 + 8
       nada,
       nada,
       { numero: jest.fn().mockResolvedValue(1) } as never,
-      { fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null) } as never,
+      { ultimaReposicionDe: jest.fn().mockResolvedValue(null) } as never,
       nada,
       {
         intentarCruzarGasto: jest.fn().mockResolvedValue({ ligado: false }),

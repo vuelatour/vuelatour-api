@@ -8,6 +8,7 @@ import {
   lecturaFondo,
   porReponerCaja,
   round2,
+  saldadoPorReposicion,
   saldoCaja,
   type EntradaHistorialCaja,
 } from './caja-chica-saldo.util';
@@ -119,7 +120,11 @@ describe('historialConSaldo — caja ACUMULADA (la del piloto)', () => {
     expect(h[1].por_reponer).toBe(0);
   });
 
-  it('mismo día: el gasto va ANTES que la reposición aunque se haya capturado después (la reposición del día D salda los gastos de D)', () => {
+  it('mismo día: ORDEN DE CAPTURA — el gasto capturado DESPUÉS de registrar la reposición queda pendiente (Mary, 13-oct-2026)', () => {
+    // Hasta el 26-oct-2026 el gasto iba antes «porque la reposición del día
+    // salda los gastos del día»; la oficina registró la reposición «del
+    // 28-sep al 12-oct» con fecha 13-oct y DESPUÉS capturó dos gastos del
+    // 13-oct: el libro los daba por repuestos y nadie los reponía.
     const h = historialConSaldo(
       [
         caja('2026-09-05', 300, '2026-09-05T13:00:00+00:00'),
@@ -127,9 +132,31 @@ describe('historialConSaldo — caja ACUMULADA (la del piloto)', () => {
       ],
       ACUMULADA,
     );
-    expect(h.map((e) => e.origen)).toEqual(['gasto', 'caja']);
+    expect(h.map((e) => e.origen)).toEqual(['caja', 'gasto']);
+    expect(h[0].saldo).toBe(300);
+    expect(h[0].por_reponer).toBe(0);
     expect(h[1].saldo).toBe(0);
     expect(h[1].por_reponer).toBe(0);
+  });
+
+  it('mismo día: el gasto capturado ANTES de la reposición sí entra en ella; a sello igual, el gasto primero', () => {
+    const antes = historialConSaldo(
+      [
+        caja('2026-09-05', 300, '2026-09-05T20:00:00+00:00'),
+        gasto('2026-09-05', 300, '2026-09-05T13:00:00+00:00'),
+      ],
+      ACUMULADA,
+    );
+    expect(antes.map((e) => e.origen)).toEqual(['gasto', 'caja']);
+    expect(antes[1].saldo).toBe(0);
+    const empate = historialConSaldo(
+      [
+        caja('2026-09-05', 300, '2026-09-05T13:00:00+00:00'),
+        gasto('2026-09-05', 300, '2026-09-05T13:00:00+00:00'),
+      ],
+      ACUMULADA,
+    );
+    expect(empate.map((e) => e.origen)).toEqual(['gasto', 'caja']);
   });
 
   it('orden: fecha asc y dentro del día created_at asc; no muta el arreglo de entrada', () => {
@@ -149,6 +176,62 @@ describe('historialConSaldo — caja ACUMULADA (la del piloto)', () => {
 
   it('libro vacío → []', () => {
     expect(historialConSaldo([], ACUMULADA)).toEqual([]);
+  });
+});
+
+describe('saldadoPorReposicion — el candado GASTO_EN_REPOSICION lee la MISMA regla del libro', () => {
+  // La reposición de Mary: fecha 13-oct, registrada el 14-oct a las 15:25 UTC.
+  const repo = { fecha: '2026-10-13', created_at: '2026-10-14T15:25:23+00:00' };
+
+  it('fecha anterior ⇒ saldado; posterior ⇒ no (sin mirar el sello)', () => {
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-12', created_at: '2026-10-20T00:00:00+00:00' },
+        repo,
+      ),
+    ).toBe(true);
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-14', created_at: '2026-10-01T00:00:00+00:00' },
+        repo,
+      ),
+    ).toBe(false);
+  });
+
+  it('mismo día: capturado DESPUÉS de registrar la reposición ⇒ pendiente (los dos gastos del 13-oct); antes o al mismo tiempo ⇒ saldado', () => {
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-13', created_at: '2026-10-14T15:38:52+00:00' },
+        repo,
+      ),
+    ).toBe(false);
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-13', created_at: '2026-10-13T20:00:00+00:00' },
+        repo,
+      ),
+    ).toBe(true);
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-13', created_at: repo.created_at },
+        repo,
+      ),
+    ).toBe(true);
+  });
+
+  it('sin sello en alguno de los dos (filas legadas) el mismo día cuenta como saldado — la regla de antes', () => {
+    expect(
+      saldadoPorReposicion({ fecha: '2026-10-13', created_at: null }, repo),
+    ).toBe(true);
+    expect(
+      saldadoPorReposicion({ fecha: '2026-10-13' }, { fecha: '2026-10-13' }),
+    ).toBe(true);
+    expect(
+      saldadoPorReposicion(
+        { fecha: '2026-10-13', created_at: '2026-10-14T16:00:00+00:00' },
+        { fecha: '2026-10-13', created_at: null },
+      ),
+    ).toBe(true);
   });
 });
 

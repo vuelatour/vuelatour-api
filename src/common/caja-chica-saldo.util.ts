@@ -156,22 +156,52 @@ export type EntradaConSaldo<T extends EntradaHistorialCaja> = T & {
 };
 
 /**
- * Orden cronológico del libro: fecha asc; en el MISMO día los gastos van
- * ANTES que los movimientos de caja (una reposición fechada el día D salda
- * los gastos de ese día — es la misma regla del candado
- * `expenses.assertOwnEnVentana`: gasto con fecha ≤ última reposición ya
- * quedó repuesto); al final `created_at` asc.
+ * Orden cronológico del libro: fecha asc; en el MISMO día, ORDEN DE CAPTURA
+ * (`created_at` asc) — y solo a sello igual, el gasto antes que el
+ * movimiento de caja.
+ *
+ * Hasta el 26-oct-2026 los gastos del día D iban SIEMPRE antes que una
+ * reposición fechada D («la reposición del día salda los gastos del día»).
+ * Caso real (Mary Cruz, 13-oct-2026): registró la reposición «del 28-sep al
+ * 12-oct» con fecha 13-oct y DESPUÉS capturó dos gastos del 13-oct; el libro
+ * los metía debajo de la reposición (como si los hubiera cubierto) y el
+ * Excel «Por reponer» arrancaba el 14-oct: nadie los reponía. Lo que una
+ * reposición cubre es lo que YA estaba capturado cuando se registró — el
+ * mismo universo del Excel «Por reponer hoy» con el que la oficina decide
+ * el monto —, así que el mismo día decide la captura. Es la MISMA regla del
+ * candado `GASTO_EN_REPOSICION` (`saldadoPorReposicion`).
  */
 export function compararEntradasCaja(
   a: EntradaHistorialCaja,
   b: EntradaHistorialCaja,
 ): number {
   if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
+  if (a.created_at !== b.created_at) {
+    return a.created_at < b.created_at ? -1 : 1;
+  }
   const ra = a.origen === 'gasto' ? 0 : 1;
   const rb = b.origen === 'gasto' ? 0 : 1;
-  if (ra !== rb) return ra - rb;
-  if (a.created_at === b.created_at) return 0;
-  return a.created_at < b.created_at ? -1 : 1;
+  return ra - rb;
+}
+
+/**
+ * ¿La reposición SALDÓ esta entrada (= la entrada va ANTES de la reposición
+ * en el libro)? La MISMA regla que `compararEntradasCaja`, para el candado
+ * `GASTO_EN_REPOSICION` de `expenses.assertOwnEnVentana`: fecha anterior ⇒
+ * sí; posterior ⇒ no; el MISMO día decide el orden de captura (capturado
+ * antes o al mismo tiempo que se registró la reposición ⇒ sí). Sin sello de
+ * captura en alguno de los dos (filas legadas) el mismo día cuenta como
+ * saldado, que era la regla anterior.
+ */
+export function saldadoPorReposicion(
+  entrada: { fecha: string; created_at?: string | null },
+  reposicion: { fecha: string; created_at?: string | null },
+): boolean {
+  if (entrada.fecha !== reposicion.fecha) {
+    return entrada.fecha < reposicion.fecha;
+  }
+  if (!entrada.created_at || !reposicion.created_at) return true;
+  return entrada.created_at <= reposicion.created_at;
 }
 
 /**
@@ -258,11 +288,13 @@ export function lecturaFondo(p: LecturaFondoInput): {
 //
 // Lo que una reposición REPONE = las entradas del libro entre la reposición
 // ANTERIOR (exclusiva) y ésta (exclusiva), en el MISMO orden del historial
-// (`historialConSaldo` → `compararEntradasCaja`: un gasto fechado el mismo
-// día que la reposición va ANTES y entra en ella — la misma regla del
-// candado `GASTO_EN_REPOSICION`). Los saldos NO se recalculan: se leen de
-// las cifras que el historial ya trae por fila. Aquí solo se RE-SUMAN las
-// filas que se listan (columna del Excel), nunca un saldo paralelo.
+// (`historialConSaldo` → `compararEntradasCaja`: el mismo día decide el
+// ORDEN DE CAPTURA, 27-oct-2026 — un gasto del día D capturado DESPUÉS de
+// registrar la reposición de D queda pendiente; capturado antes, entra en
+// ella — la misma regla del candado `GASTO_EN_REPOSICION`). Los saldos NO
+// se recalculan: se leen de las cifras que el historial ya trae por fila.
+// Aquí solo se RE-SUMAN las filas que se listan (columna del Excel), nunca
+// un saldo paralelo.
 
 export interface EntradaTramoLike extends EntradaHistorialCaja {
   id: string;

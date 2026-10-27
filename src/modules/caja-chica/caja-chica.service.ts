@@ -275,6 +275,13 @@ export class CajaChicaService {
   private ultimaReposicion(
     movs: CajaMov[],
   ): { fecha: string; monto: number } | null {
+    const mejor = this.ultimaReposicionMov(movs);
+    return mejor ? { fecha: mejor.fecha!, monto: Number(mejor.monto) } : null;
+  }
+
+  /** La fila de la última REPOSICIÓN (fecha más reciente; a igual fecha, la
+   *  registrada al último), o null si nunca ha habido. */
+  private ultimaReposicionMov(movs: CajaMov[]): CajaMov | null {
     let mejor: CajaMov | null = null;
     for (const m of movs) {
       if (m.tipo !== TipoMovimientoCaja.REPOSICION || !m.fecha) continue;
@@ -287,20 +294,23 @@ export class CajaChicaService {
         mejor = m;
       }
     }
-    return mejor ? { fecha: mejor.fecha!, monto: Number(mejor.monto) } : null;
+    return mejor;
   }
 
   /**
-   * Fecha (YYYY-MM-DD) de la ÚLTIMA reposición del fondo ACTIVO del usuario —
-   * null si no tiene fondo activo, si el fondo es de OTRA moneda o si nunca se
-   * le ha repuesto. La usa `expenses.assertOwnEnVentana` (candado 1-sep-2026):
-   * un gasto EFECTIVO con fecha ≤ esta ya quedó saldado en una reposición de
-   * caja chica y no se corrige/borra desde la app — solo oficina.
+   * ÚLTIMA reposición del fondo ACTIVO del usuario — fecha (YYYY-MM-DD) y
+   * sello de registro (`created_at`) — o null si no tiene fondo activo, si
+   * el fondo es de OTRA moneda o si nunca se le ha repuesto. La usa
+   * `expenses.assertOwnEnVentana` (candado 1-sep-2026, `GASTO_EN_REPOSICION`)
+   * con `saldadoPorReposicion`: un gasto EFECTIVO que el libro pone ANTES de
+   * esa reposición ya quedó saldado y no se corrige/borra desde la app —
+   * solo oficina. El sello decide el MISMO día (27-oct-2026): un gasto del
+   * día de la reposición capturado DESPUÉS de registrarla sigue pendiente.
    */
-  async fechaUltimaReposicionDe(
+  async ultimaReposicionDe(
     usuarioId: string,
     moneda: string,
-  ): Promise<string | null> {
+  ): Promise<{ fecha: string; created_at: string | null } | null> {
     const { data: fondo, error } = await this.supabase.service
       .from('caja_chica_fondo')
       .select('id, moneda')
@@ -315,7 +325,10 @@ export class CajaChicaService {
       .eq('fondo_id', (fondo as { id: string }).id)
       .eq('tipo', TipoMovimientoCaja.REPOSICION);
     if (movErr) throw new Error(movErr.message);
-    return this.ultimaReposicion(movs ?? [])?.fecha ?? null;
+    const mejor = this.ultimaReposicionMov(movs ?? []);
+    return mejor
+      ? { fecha: mejor.fecha!, created_at: mejor.created_at ?? null }
+      : null;
   }
 
   // ===== Fondos =====

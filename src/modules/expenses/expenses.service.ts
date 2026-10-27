@@ -87,6 +87,7 @@ import {
   porPagarFinal,
   porPagarVigente,
 } from './por-pagar.util';
+import { saldadoPorReposicion } from '../../common/caja-chica-saldo.util';
 import {
   SEGUNDOS_URL_MINIATURA,
   SEGUNDOS_URL_PUNTUAL,
@@ -4268,17 +4269,31 @@ export class ExpensesService {
       gasto.medio_pago === MedioPago.EFECTIVO &&
       (marcaPagado || !porPagarVigente(gasto, hoy))
     ) {
-      const ultima = await this.cajaChica.fechaUltimaReposicionDe(
+      const ultima = await this.cajaChica.ultimaReposicionDe(
         gasto.usuario_captura_id as string,
         gasto.moneda as string,
       );
       const diaGasto = marcaPagado
         ? fechaMarcarPagado(opts.fechaPago, diaVigente, hoy)
         : diaVigente;
-      if (ultima && diaGasto && diaGasto <= ultima) {
+      // La MISMA regla con la que el libro ordena (`saldadoPorReposicion`,
+      // 27-oct-2026): fecha anterior ⇒ ya repuesto; el MISMO día decide el
+      // orden de captura — un gasto del día de la reposición capturado
+      // DESPUÉS de registrarla sigue pendiente y se puede corregir.
+      if (
+        ultima &&
+        diaGasto &&
+        saldadoPorReposicion(
+          {
+            fecha: diaGasto,
+            created_at: (gasto.created_at as string | null) ?? null,
+          },
+          ultima,
+        )
+      ) {
         throw new ConflictException({
           message: marcaPagado
-            ? mensajeFechaPagoYaRepuesta(diaGasto, ultima)
+            ? mensajeFechaPagoYaRepuesta(diaGasto, ultima.fecha)
             : 'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
           error: 'GASTO_EN_REPOSICION',
         });

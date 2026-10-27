@@ -92,9 +92,15 @@ function armar(
     { sinMigracion: true },
   );
   const cajaChica = {
-    fechaUltimaReposicionDe: jest
+    // `{fecha, created_at}` (27-oct-2026): sin sello, el mismo día cuenta
+    // como saldado (la regla de antes).
+    ultimaReposicionDe: jest
       .fn()
-      .mockResolvedValue(opts.ultimaReposicion ?? null),
+      .mockResolvedValue(
+        opts.ultimaReposicion
+          ? { fecha: opts.ultimaReposicion, created_at: null }
+          : null,
+      ),
   };
   const conciliacion = {
     intentarCruzarGasto: jest.fn((id: string) => {

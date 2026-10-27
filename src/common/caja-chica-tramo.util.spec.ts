@@ -12,8 +12,9 @@ import {
  * SINTÉTICO con dos reposiciones, gastos en medio, un AJUSTE y un REINTEGRO:
  *  - qué gastos caen en cada reposición (entre la anterior y ella, en el
  *    orden del historial);
- *  - la regla del MISMO DÍA (un gasto fechado el día de la reposición entra
- *    en ella, aunque se haya capturado después — `compararEntradasCaja`);
+ *  - la regla del MISMO DÍA (27-oct-2026: ORDEN DE CAPTURA — un gasto fechado
+ *    el día de la reposición entra en ella solo si se capturó ANTES de
+ *    registrarla; capturado después queda pendiente — `compararEntradasCaja`);
  *  - que los saldos se LEEN del historial (no hay un cálculo paralelo);
  *  - el modo PENDIENTE (lo que se va a reponer hoy).
  */
@@ -45,9 +46,9 @@ const mov = (
 
 /**
  * Caja ACUMULADA (la del piloto): gasta de su bolsa y la oficina le repone.
- *   01-sep  g1 300          05-sep  R1 +500 (repone g1+g2)
+ *   01-sep  g1 300          05-sep  R1 +500 (repone g1+g2: cuadra)
  *   03-sep  g2 200          06-sep  g3 100
- *   05-sep  g4 50 ← mismo día que R1 pero capturado DESPUÉS: entra en R1
+ *   05-sep  g4 50 ← mismo día que R1 pero capturado DESPUÉS: queda para R2
  *   07-sep  AJUSTE −20      08-sep  g5 400
  *   09-sep  REINTEGRO −30   10-sep  R2 +600
  *   11-sep  g6 70 (pendiente)
@@ -74,48 +75,50 @@ const acumulada = () =>
 const ids = (xs: Array<EntradaConSaldo<E>>) => xs.map((e) => e.id);
 
 describe('tramoDeReposicion — qué gastos repone cada reposición', () => {
-  it('R1 repone g1, g2 y g4 (mismo día, capturado después): la regla del libro', () => {
+  it('R1 repone g1 y g2; g4 (mismo día, capturado DESPUÉS de registrarla) NO entra: queda para la siguiente', () => {
     const t = tramoDeReposicion(acumulada(), 'r1')!;
-    expect(ids(t.entradas)).toEqual(['g1', 'g2', 'g4']);
-    expect(ids(t.gastos)).toEqual(['g1', 'g2', 'g4']);
+    expect(ids(t.entradas)).toEqual(['g1', 'g2']);
+    expect(ids(t.gastos)).toEqual(['g1', 'g2']);
     expect(t.otros).toEqual([]);
     expect(t.anterior).toBeNull();
-    expect(t.total_gastos).toBe(550);
+    expect(t.total_gastos).toBe(500);
     expect(t.periodo_desde).toBe('2026-09-01');
-    expect(t.periodo_hasta).toBe('2026-09-05');
+    expect(t.periodo_hasta).toBe('2026-09-03');
   });
 
-  it('R2 repone g3 y g5, con el AJUSTE y el REINTEGRO del periodo aparte', () => {
+  it('R2 repone g4 (el del día de R1 capturado después), g3 y g5, con el AJUSTE y el REINTEGRO aparte', () => {
     const t = tramoDeReposicion(acumulada(), 'r2')!;
-    expect(ids(t.entradas)).toEqual(['g3', 'aj', 'g5', 'ri']);
-    expect(ids(t.gastos)).toEqual(['g3', 'g5']);
+    expect(ids(t.entradas)).toEqual(['g4', 'g3', 'aj', 'g5', 'ri']);
+    expect(ids(t.gastos)).toEqual(['g4', 'g3', 'g5']);
     expect(ids(t.otros)).toEqual(['aj', 'ri']);
     expect(t.anterior?.id).toBe('r1');
-    expect(t.total_gastos).toBe(500);
+    expect(t.total_gastos).toBe(550);
     expect(t.total_otros).toBe(-50);
-    expect(t.periodo_desde).toBe('2026-09-06');
+    // El periodo pendiente ARRANCA el día de la reposición anterior (no el
+    // siguiente): es justo el hueco que reportó la oficina el 27-oct-2026.
+    expect(t.periodo_desde).toBe('2026-09-05');
     expect(t.periodo_hasta).toBe('2026-09-08');
   });
 
   it('los saldos se LEEN del historial (antes/después) y la diferencia sale de ahí', () => {
     const h = acumulada();
     const t1 = tramoDeReposicion(h, 'r1')!;
-    // Libro: −300 −200 −50 = −550 → +500 = −50 (quedaron 50 por reponer).
-    expect(t1.saldo_antes).toBe(-550);
-    expect(t1.por_reponer_antes).toBe(550);
+    // Libro: −300 −200 = −500 → +500 = 0 (cuadra); g4 viene después.
+    expect(t1.saldo_antes).toBe(-500);
+    expect(t1.por_reponer_antes).toBe(500);
     expect(t1.monto_repuesto).toBe(500);
-    expect(t1.saldo_despues).toBe(-50);
-    expect(t1.por_reponer_despues).toBe(50);
-    expect(t1.diferencia).toBe(-50); // quedó pendiente
+    expect(t1.saldo_despues).toBe(0);
+    expect(t1.por_reponer_despues).toBe(0);
+    expect(t1.diferencia).toBe(0);
 
     const t2 = tramoDeReposicion(h, 'r2')!;
-    // −50 −100 −20 −400 −30 = −600 → +600 = 0.
-    expect(t2.saldo_inicio).toBe(-50);
-    expect(t2.por_reponer_inicio).toBe(50);
+    // 0 −50 −100 −20 −400 −30 = −600 → +600 = 0.
+    expect(t2.saldo_inicio).toBe(0);
+    expect(t2.por_reponer_inicio).toBe(0);
     expect(t2.saldo_antes).toBe(-600);
     expect(t2.por_reponer_antes).toBe(600);
     expect(t2.saldo_despues).toBe(0);
-    expect(t2.diferencia).toBe(0); // cuadra: cubrió lo pendiente de R1
+    expect(t2.diferencia).toBe(0); // cuadra
 
     // Mismas cifras que la fila del historial (nunca un cálculo paralelo).
     const filaR2 = h.find((e) => e.id === 'r2')!;

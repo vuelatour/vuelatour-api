@@ -95,8 +95,9 @@ describe('CajaChicaService — historial con saldo corrido', () => {
       lugar: null,
       notas: 'Comida tripulación',
       vuelo_id: null,
-      // Capturado DESPUÉS de la reposición del mismo día: aun así va antes
-      // en el libro (la reposición del día salda los gastos del día).
+      // Capturado DESPUÉS de registrar la reposición del mismo día: desde el
+      // 27-oct-2026 va DESPUÉS en el libro (orden de captura): la reposición
+      // no lo cubrió, queda pendiente.
       created_at: '2026-09-05T21:00:00+00:00',
       vuelo: null,
     },
@@ -155,20 +156,22 @@ describe('CajaChicaService — historial con saldo corrido', () => {
     });
     expect(r.count).toBe(4);
     expect(r.truncado).toBe(false);
+    // g-2 se capturó DESPUÉS de registrar la reposición del mismo día: va
+    // después (orden de captura, 27-oct-2026).
     expect(r.movimientos.map((m) => m.id)).toEqual([
       'g-3',
-      'm-repo',
       'g-2',
+      'm-repo',
       'g-1',
     ]);
     expect(r.movimientos.map((m) => m.monto)).toEqual([
-      -250, 13341.12, -5341.12, -8000,
+      -250, -5341.12, 13341.12, -8000,
     ]);
     expect(r.movimientos.map((m) => m.saldo_despues)).toEqual([
-      -250, 0, -13341.12, -8000,
+      -250, 0, 5341.12, -8000,
     ]);
     expect(r.movimientos.map((m) => m.por_reponer_despues)).toEqual([
-      250, 0, 13341.12, 8000,
+      250, 0, 0, 8000,
     ]);
   });
 
@@ -178,7 +181,7 @@ describe('CajaChicaService — historial con saldo corrido', () => {
       desde: '2026-08-01',
       limit: 500,
     });
-    const [g3, repo, g2, g1] = r.movimientos;
+    const [g3, g2, repo, g1] = r.movimientos;
 
     expect(repo).toMatchObject({
       origen: 'caja',
@@ -226,9 +229,11 @@ describe('CajaChicaService — historial con saldo corrido', () => {
       limit: 500,
     });
     expect(r.count).toBe(2);
-    expect(r.movimientos.map((m) => m.id)).toEqual(['m-repo', 'g-2']);
-    // g-2 arrastra los $8,000 de agosto aunque agosto no se devuelva.
-    expect(r.movimientos[1].por_reponer_despues).toBe(13341.12);
+    expect(r.movimientos.map((m) => m.id)).toEqual(['g-2', 'm-repo']);
+    // La reposición arrastra los $8,000 de agosto aunque agosto no se
+    // devuelva: 13,341.12 − 8,000 = 5,341.12 de saldo tras ella.
+    expect(r.movimientos[1].saldo_despues).toBe(5341.12);
+    expect(r.movimientos[1].por_reponer_despues).toBe(0);
     // El fondo NO depende de la ventana.
     expect(r.fondo?.por_reponer).toBe(250);
   });
@@ -241,7 +246,7 @@ describe('CajaChicaService — historial con saldo corrido', () => {
     });
     expect(r.count).toBe(4);
     expect(r.truncado).toBe(true);
-    expect(r.movimientos.map((m) => m.id)).toEqual(['g-3', 'm-repo']);
+    expect(r.movimientos.map((m) => m.id)).toEqual(['g-3', 'g-2']);
   });
 
   it('default: últimos 6 meses en día Cancún (a las 00:30 UTC del 6 todavía es 5-sep)', async () => {
@@ -321,17 +326,17 @@ describe('CajaChicaService — historial con saldo corrido', () => {
     expect(detalle.saldo_libro).toBe(mio.fondo?.saldo_libro);
     expect(detalle.historial.map((e) => e.id)).toEqual([
       'g-3',
-      'm-repo',
       'g-2',
+      'm-repo',
       'g-1',
     ]);
     expect(detalle.historial.map((e) => e.saldo)).toEqual([
-      -250, 0, -13341.12, -8000,
+      -250, 0, 5341.12, -8000,
     ]);
     expect(detalle.historial.map((e) => e.por_reponer)).toEqual([
-      250, 0, 13341.12, 8000,
+      250, 0, 0, 8000,
     ]);
-    expect(detalle.historial[1]).toMatchObject({
+    expect(detalle.historial[2]).toMatchObject({
       origen: 'caja',
       tipo: 'REPOSICION',
       monto: 13341.12,

@@ -181,9 +181,15 @@ function armar(
     notifyUser: jest.fn().mockResolvedValue(true),
   };
   const cajaChica = {
-    fechaUltimaReposicionDe: jest
+    // `{fecha, created_at}` (27-oct-2026): sin sello, el mismo día cuenta
+    // como saldado (la regla de antes).
+    ultimaReposicionDe: jest
       .fn()
-      .mockResolvedValue(opts.ultimaReposicion ?? null),
+      .mockResolvedValue(
+        opts.ultimaReposicion
+          ? { fecha: opts.ultimaReposicion, created_at: null }
+          : null,
+      ),
   };
   const conciliacion = {
     intentarCruzarGasto: jest.fn().mockResolvedValue({ ligado: false }),
@@ -632,10 +638,7 @@ describe('ExpensesService.assertOwnEnVentana — excepción del dueño al marcar
       }),
     );
     expect(e).toMatchObject({ status: 409, code: 'GASTO_EN_REPOSICION' });
-    expect(cajaChica.fechaUltimaReposicionDe).toHaveBeenCalledWith(
-      PILOTO,
-      'MXN',
-    );
+    expect(cajaChica.ultimaReposicionDe).toHaveBeenCalledWith(PILOTO, 'MXN');
     ({ service } = armar({ ultimaReposicion: '2026-10-18' }));
     await expect(
       service.assertOwnEnVentana('g-futuro', PILOTO, undefined, {

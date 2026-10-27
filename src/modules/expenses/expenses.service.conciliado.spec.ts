@@ -154,7 +154,7 @@ function armar(db: Tablas, consultas?: ConsultaIn[]) {
       numero: jest.fn().mockResolvedValue(1),
     } as unknown as ConfiguracionService,
     {
-      fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null),
+      ultimaReposicionDe: jest.fn().mockResolvedValue(null),
     } as unknown as CajaChicaService,
     {} as IaUsoService,
   );

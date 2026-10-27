@@ -128,7 +128,7 @@ function armar(tablas: Record<string, Resultado[]>, gracia = 1) {
     numero: jest.fn().mockResolvedValue(gracia),
   } as unknown as ConfiguracionService;
   const cajaChica = {
-    fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null),
+    ultimaReposicionDe: jest.fn().mockResolvedValue(null),
   } as unknown as CajaChicaService;
   const nada = {} as never;
   const service = new ExpensesService(
@@ -350,8 +350,8 @@ describe('ExpensesService — B3 ventana semanal contra capturado_en', () => {
       const { service, cajaChica } = armar({
         gasto: [{ data: gasto, error: null }],
       });
-      (cajaChica.fechaUltimaReposicionDe as jest.Mock).mockResolvedValue(
-        ultima,
+      (cajaChica.ultimaReposicionDe as jest.Mock).mockResolvedValue(
+        ultima ? { fecha: ultima, created_at: null } : null,
       );
       try {
         await service.assertOwnEnVentana('g-1', userId);

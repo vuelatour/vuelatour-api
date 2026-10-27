@@ -121,8 +121,11 @@ const gastos: Fila[] = [
     vuelo: { folio: 297 },
   }),
   gasto('g2', '2026-09-03', 200),
-  // Mismo día que r1 pero capturado DESPUÉS de registrarla: entra en r1.
-  gasto('g4', '2026-09-05', 50, { created_at: '2026-09-05T22:00:00+00:00' }),
+  // Fecha ANTERIOR a r1 pero capturado DESPUÉS de registrarla (06-sep): entra
+  // en r1 por fecha y va en naranja («no estaba en la cuenta cuando se
+  // repuso»). El caso del MISMO día capturado después (27-oct-2026: queda
+  // para la siguiente) se prueba abajo con `gastos` propios.
+  gasto('g4', '2026-09-04', 50, { created_at: '2026-09-06T10:00:00+00:00' }),
   gasto('g3', '2026-09-06', 100),
   gasto('g5', '2026-09-08', 400),
   gasto('g6', '2026-09-11', 70),
@@ -164,6 +167,8 @@ function armar(
     bitacoraFalla?: boolean;
     /** Sin la migración 20261019000001 (42703 al nombrar `por_pagar`). */
     sinPorPagar?: boolean;
+    /** Gastos propios (en vez de la lista base). */
+    gastos?: Fila[];
   } = {},
 ) {
   const dedicados: CajaChicaReposicionPayload[] = [];
@@ -213,7 +218,7 @@ function armar(
       }
       if (tabla === 'gasto') {
         if (inIds) return extras.filter((x) => inIds!.includes(x.id));
-        return gastos;
+        return opts.gastos ?? gastos;
       }
       if (tabla === 'gasto_bitacora') {
         return (opts.bitacora ?? []).filter(
@@ -377,14 +382,14 @@ describe('GET movimientos/:id/reposicion.xlsx — lo que repuso UNA reposición'
     expect(p.filas.some((f) => f.resaltar)).toBe(false);
   });
 
-  it('r1: el gasto del MISMO día capturado DESPUÉS entra, se resalta y se avisa', async () => {
+  it('r1: el gasto de fecha anterior capturado DESPUÉS de registrarla entra, se resalta y se avisa', async () => {
     const { svc, dedicados } = armar();
     await svc.reposicionXlsx('r1');
     const p = dedicados[0];
     expect(p.filas.map((f) => f.fecha)).toEqual([
       '2026-09-01',
       '2026-09-03',
-      '2026-09-05',
+      '2026-09-04',
     ]);
     expect(p.filas.map((f) => f.resaltar)).toEqual([false, false, true]);
     expect(dato(p, 'Diferencia (repuesto − por reponer)')).toBe(-50);
@@ -452,7 +457,7 @@ describe('GET movimientos/:id/reposicion.xlsx — lo que repuso UNA reposición'
     expect(g.filas.map((f) => f[0])).toEqual([
       '01/09/2026',
       '03/09/2026',
-      '05/09/2026',
+      '04/09/2026',
     ]);
     expect(g.filas[0][col('Gasto')]).toBe(300);
     expect(g.totales?.[col('Gasto')]).toBe(d.total_gastos);
@@ -541,6 +546,44 @@ describe('GET fondos/:id/por-reponer.xlsx — lo PENDIENTE hoy', () => {
   it('fondo inexistente ⇒ 404', async () => {
     const { svc } = armar();
     await expect(svc.porReponerXlsx('otro')).rejects.toThrow(NotFoundException);
+  });
+
+  it('el gasto del DÍA de la última reposición capturado DESPUÉS de registrarla es PENDIENTE y el periodo arranca ese día (Mary, 13-oct-2026)', async () => {
+    // r2 (10-sep) se registró a las 15:00 UTC; g7 es del 10-sep y se capturó
+    // a las 18:00: la reposición no lo cubrió. Antes del 27-oct-2026 el libro
+    // lo metía debajo de r2 y «Por reponer» arrancaba el 11-sep: nadie lo
+    // reponía (el hueco que reportó la oficina).
+    const { svc, dedicados } = armar({
+      gastos: [
+        ...gastos,
+        gasto('g7', '2026-09-10', 25, {
+          created_at: '2026-09-10T18:00:00+00:00',
+        }),
+      ],
+    });
+    await svc.porReponerXlsx(FONDO);
+    const p = dedicados[0];
+    expect(p.filas.map((f) => f.fecha)).toEqual(['2026-09-10', '2026-09-11']);
+    expect(dato(p, 'Periodo pendiente')).toBe('del 10/09/2026 al 11/09/2026');
+    expect(p.totales.map((d) => [d.etiqueta, d.valor])).toEqual([
+      ['Gastos pendientes', '2 gastos'],
+      ['Saldo del libro al abrir el periodo', 0],
+      ['Por reponer que venía de antes', 0],
+      ['Σ gastos pendientes', 95],
+      ['Saldo del libro hoy', -95],
+      ['POR REPONER HOY', 95],
+    ]);
+    // Y el Excel de r2 NO lo lista (no estaba cuando se repuso).
+    await svc.reposicionXlsx('r2');
+    const r2 = dedicados[1];
+    expect(r2.filas.map((f) => f.fecha)).toEqual([
+      '2026-09-06',
+      '2026-09-07',
+      '2026-09-08',
+      '2026-09-09',
+    ]);
+    expect(dato(r2, 'Por reponer después')).toBe(0);
+    expect(r2.avisos).toEqual([]);
   });
 });
 

@@ -97,7 +97,7 @@ function armar() {
     nada,
     nada,
     { numero: jest.fn().mockResolvedValue(1) } as never,
-    { fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null) } as never,
+    { ultimaReposicionDe: jest.fn().mockResolvedValue(null) } as never,
     nada,
   );
   return { service, f };

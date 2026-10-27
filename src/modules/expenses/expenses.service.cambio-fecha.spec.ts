@@ -139,7 +139,7 @@ function armar(tablas: Record<string, Resultado[]>) {
     numero: jest.fn().mockResolvedValue(1),
   } as unknown as ConfiguracionService;
   const cajaChica = {
-    fechaUltimaReposicionDe: jest.fn().mockResolvedValue(null),
+    ultimaReposicionDe: jest.fn().mockResolvedValue(null),
   } as unknown as CajaChicaService;
   const intentarCruzarGasto = jest.fn().mockResolvedValue({ ligado: false });
   const conciliacion = {
