@@ -28,6 +28,12 @@ import {
   type TramoReposicion,
 } from '../../common/caja-chica-saldo.util';
 import {
+  gastosPendientesDe,
+  montoFondoDe,
+  resumenCajaMadre,
+  type ConteoMonto,
+} from '../../common/caja-chica-madre.util';
+import {
   armarExcelCaja,
   tablaXlsxDeCaja,
   type ExtraGastoXlsx,
@@ -216,6 +222,15 @@ export type CajaFondeada = {
   activo: boolean;
   por_reponer: number;
   ultima_reposicion: { fecha: string; monto: number } | null;
+  // ADITIVOS (27-oct-2026, fondo consolidado de la caja madre): lo que la
+  // madre necesita ver de cada colaborador, de SU libro.
+  /** Fondo asignado (nominal); null = sin fijar. */
+  monto_fondo: number | null;
+  es_acumulada: boolean;
+  /** Saldo crudo de su libro = efectivo que conserva (última fila; 0 sin libro). */
+  saldo_libro: number;
+  /** Gastos de su tramo pendiente (desde su última reposición). */
+  gastos_pendientes: ConteoMonto;
 };
 
 /** `fn` sobre cada elemento con a lo más `tope` promesas vivas; mismo orden. */
@@ -604,6 +619,10 @@ export class CajaChicaService {
       this.repuestoADeEspejos(movs),
       this.cajasFondeadas(fondo.id),
     ]);
+    // Ids de los ESPEJOS (entregas a las cajas que fondea), para el resumen.
+    const espejos = new Set(
+      movs.filter((m) => m.espejo_de_id != null).map((m) => m.id as string),
+    );
 
     return {
       ...fondo,
@@ -657,6 +676,23 @@ export class CajaChicaService {
       ...(porPagar
         ? { por_pagar: porPagar.lista, por_pagar_total: porPagar.total }
         : {}),
+      // ADITIVO (27-oct-2026, fondo consolidado de la caja MADRE): solo
+      // cuando fondea a alguien. null = la lectura de las hijas cayó (no se
+      // afirma nada); sin hijas, la llave no viaja. Se suma de los libros
+      // que ya están cargados (`resumenCajaMadre`, PURO): cero fórmulas
+      // nuevas de dinero.
+      ...(cajasFondeadas === null
+        ? { resumen_madre: null }
+        : cajasFondeadas.length > 0
+          ? {
+              resumen_madre: resumenCajaMadre({
+                montoFondo: fondo.monto_fondo,
+                historial,
+                esEspejo: (id) => espejos.has(id),
+                hijas: cajasFondeadas,
+              }),
+            }
+          : {}),
       // ADITIVO (15-oct-2026, invariante 83): cajas ACTIVAS que esta caja
       // fondea, con su por reponer. [] = no fondea ninguna; null = la lectura
       // cayó (jamás un [] falso).
@@ -762,6 +798,11 @@ export class CajaChicaService {
             activo: (h as { activo?: unknown }).activo === true,
             por_reponer: ultima ? ultima.por_reponer : 0,
             ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
+            // Fondo consolidado (27-oct-2026): del MISMO libro ya cargado.
+            monto_fondo: montoFondoDe(h.monto_fondo),
+            es_acumulada: h.es_acumulada === true,
+            saldo_libro: ultima ? ultima.saldo : 0,
+            gastos_pendientes: gastosPendientesDe(historial),
           };
         },
       );
@@ -1150,12 +1191,7 @@ export class CajaChicaService {
     const ya = new Set((conEspejo ?? []).map((m) => m.espejo_de_id as string));
     for (const m of repos ?? []) {
       if (ya.has(m.id as string)) continue;
-      await this.insertarEspejo(
-        m as { id: string; monto: number | string; fecha: string | null },
-        fondoId,
-        origenId,
-        userId,
-      );
+      await this.insertarEspejo(m, fondoId, origenId, userId);
     }
   }
 

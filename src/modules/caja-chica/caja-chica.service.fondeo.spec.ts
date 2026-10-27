@@ -399,6 +399,11 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
         // reposición del 5-oct sobró 300 y se arrastra).
         por_reponer: 250,
         ultima_reposicion: { fecha: '2026-10-05', monto: 1500 },
+        // Fondo consolidado (27-oct-2026): de SU libro.
+        monto_fondo: null,
+        es_acumulada: true,
+        saldo_libro: -250,
+        gastos_pendientes: { n: 2, total: 550 },
       },
       {
         fondo_id: JIMMY,
@@ -409,6 +414,10 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
         // Nominal 2000 − saldo 1300 (el gasto en USD no entra).
         por_reponer: 700,
         ultima_reposicion: { fecha: '2026-10-03', monto: 2000 },
+        monto_fondo: 2000,
+        es_acumulada: false,
+        saldo_libro: 1300,
+        gastos_pendientes: { n: 1, total: 700 },
       },
       {
         fondo_id: NELSON,
@@ -418,6 +427,10 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
         activo: true,
         por_reponer: 0,
         ultima_reposicion: null,
+        monto_fondo: null,
+        es_acumulada: false,
+        saldo_libro: 0,
+        gastos_pendientes: { n: 0, total: 0 },
       },
     ]);
     // `cajas_fondeadas` es la ÚLTIMA llave del detalle (aditiva).
@@ -463,6 +476,48 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
   it('una caja que no fondea a nadie ⇒ [] (no null)', async () => {
     const { d } = await detalle(mundo(), GREG);
     expect(d.cajas_fondeadas).toEqual([]);
+    // …y sin `resumen_madre` (la llave no viaja).
+    expect('resumen_madre' in d).toBe(false);
+  });
+
+  // La llave es condicional (no viaja sin hijas): se lee sin el tipo cerrado.
+  const resumenDe = (d: Detalle) =>
+    (d as unknown as { resumen_madre?: unknown }).resumen_madre;
+
+  it('FONDO CONSOLIDADO (27-oct-2026): `resumen_madre` suma los libros ya cargados, antes de `cajas_fondeadas`', async () => {
+    const { d } = await detalle(mundo());
+    expect(resumenDe(d)).toEqual({
+      fondo_total: 50000,
+      cajas: 3,
+      // Solo Jimmy tiene fondo asignado (2,000); Gregorio es acumulada y
+      // Nelson no tiene nominal.
+      asignado_colaboradores: 2000,
+      fondo_propio: 48000,
+      // −250 (Gregorio) + 1,300 (Jimmy) + 0 (Nelson).
+      efectivo_colaboradores: 1050,
+      pendiente_colaboradores: 950,
+      gastos_pendientes_colaboradores: { n: 3, total: 1250 },
+      // Mary no tiene gastos propios; desde su única reposición (01-oct) salieron
+      // el reintegro a mano (−1,000) y tres espejos (2,000 + 300 + 1,500).
+      gastos_pendientes: { n: 0, total: 0 },
+      entregas_pendientes: { n: 3, total: 3800 },
+      otros_pendientes: -1000,
+      por_solicitar: 4800,
+      efectivo_libro: 45200,
+      efectivo_esperado: 43200,
+      // La entrega del fondo de Jimmy sigue en el tramo pendiente: el libro
+      // trae 2,000 más de lo esperado hasta la siguiente reposición.
+      diferencia: 2000,
+    });
+    const llaves = Object.keys(d);
+    expect(llaves.indexOf('resumen_madre')).toBe(llaves.length - 2);
+    expect(llaves[llaves.length - 1]).toBe('cajas_fondeadas');
+  });
+
+  it('si la lectura de las hijas cae, `resumen_madre` es null (no se afirma nada)', async () => {
+    const { d } = await detalle(mundo(), MARY, esLecturaHijas);
+    expect(d.cajas_fondeadas).toBeNull();
+    expect(resumenDe(d)).toBeNull();
   });
 
   it.each([

@@ -12065,6 +12065,53 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de 2,250 siga abierta; aviso VENCIDO; al completar, crea la de 2,300 a
       2,292 h).
 
+109. **CAJA CHICA MADRE: FONDO CONSOLIDADO (27-oct-2026, API 0.0.109, SIN
+    migración ni ruta nueva).** Pedido de Mary Cruz: «tengo un fondo fijo de
+    $40,000 de los cuales $16,500 están distribuidos entre mis compañeros.
+    Necesito que el sistema me muestre el fondo total, los fondos asignados
+    a cada colaborador, el saldo en efectivo que conserva cada persona, los
+    gastos comprobados y pendientes por reponer, y el efectivo real
+    disponible en mi caja, considerando también las entregas de dinero y
+    las reposiciones registradas». Todo ADITIVO en `getFondoDetail`.
+    - **`cajas_fondeadas[]` gana** `monto_fondo` (fondo asignado, null sin
+      nominal), `es_acumulada`, `saldo_libro` (saldo crudo de SU libro =
+      efectivo que conserva; negativo = sobregiro / de su bolsa) y
+      `gastos_pendientes {n, total}` (`gastosPendientesDe`: el tramo
+      pendiente de `tramoDeReposicion`). Salen del MISMO `cargarLibro` que
+      ya se hacía por hija (cero lecturas nuevas).
+    - **`resumen_madre`** (`common/caja-chica-madre.util.ts`, PURO,
+      `resumenCajaMadre`): la penúltima llave, antes de `cajas_fondeadas`;
+      SOLO cuando fondea a alguien; `null` si la lectura de las hijas cayó;
+      sin hijas no viaja. Modelo (el de la oficina): el fondo total INCLUYE
+      lo asignado a las hijas. `fondo_total` (`montoFondoDe`), `cajas`,
+      `asignado_colaboradores` (Σ `monto_fondo`), `fondo_propio` = total −
+      asignado («debe estar en mi caja»), `efectivo_colaboradores` (Σ
+      `saldo_libro`), `pendiente_colaboradores` (Σ `por_reponer`),
+      `gastos_pendientes_colaboradores`, `gastos_pendientes` (propios del
+      tramo pendiente), `entregas_pendientes` (ESPEJOS del tramo, en
+      positivo), `otros_pendientes` (reintegros a mano / ajustes, con
+      signo), `por_solicitar` = gastos + entregas − otros (lo que salió de
+      la caja desde la última reposición = total_gastos − total_otros del
+      tramo), `efectivo_libro` (última fila), `efectivo_esperado` = propio −
+      por solicitar y `diferencia` = libro − esperado (null sin fondo
+      total). NINGUNA fórmula nueva de dinero: solo sumas de filas que ya
+      existen; `saldo`, `por_reponer` y el Excel no cambian.
+    - **Lectura del 27-oct en prod** (Mary, fondo $40,000; seis hijas por
+      $22,500): libro −$128.56, 11 gastos propios $7,127.50 + 2 entregas
+      $6,100 desde la reposición del 13-oct ⇒ por solicitar $13,227.50,
+      esperado $4,272.50, diferencia −$4,401.06. El panel lo DICE («el
+      libro trae menos de lo esperado: puede faltar registrar una
+      reposición o entrega, o un fondo asignado no es el real»); corregir
+      datos es decisión de la oficina. Nota: la entrega INICIAL del fondo
+      de una hija que siga en el tramo pendiente sale como diferencia
+      positiva hasta la siguiente reposición (el sistema no distingue una
+      entrega de fondo de un reembolso: ambas son REPOSICION en la hija).
+    - Specs: `caja-chica-madre.util.spec` (cifras de Mary, otros
+      movimientos, sin fondo, vacío, `gastosPendientesDe`) y
+      `caja-chica.service.fondeo.spec` (campos nuevos por hija, el resumen
+      del mundo sintético, orden de llaves, `null` con la lectura caída, sin
+      llave sin hijas).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12803,6 +12850,12 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.109 (27-oct-2026; invariante 109, fondo consolidado
+  de la caja madre; SIN migración).** API y panel en cualquier orden (todo
+  ADITIVO: el panel viejo ignora `resumen_madre` y los campos nuevos de
+  `cajas_fondeadas`; el panel nuevo sin la llave no monta la card). `GET
+  /v1/version` = 0.0.109. La app no cambia.
 
 - **DESPLIEGUE DEL 0.0.108 (27-oct-2026; invariante 26, caja chica: el mismo
   día ordena por captura; SIN migración).** Solo API (panel, app y
