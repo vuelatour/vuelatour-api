@@ -188,7 +188,7 @@ function armar(
 
 /** Columnas de la lectura POR VUELO del pago al vendedor (invariante 61). */
 const SELECT_VENDEDOR =
-  'vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto';
+  'vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto, es_pago_operador_externo';
 
 /** Las consultas a `gasto` de la lectura POR VUELO (por su select). */
 const consultasVendedor = (c: Array<Array<[string, unknown[]]>>) =>
@@ -1191,5 +1191,39 @@ describe('Reparto — bloque externos: el gasto real cubre el costo del operador
       (await externosDe(externo({ estado: 'CANCELADO' }), [pago(25500)]))
         .costo_usd,
     ).toBe(0);
+  });
+
+  /**
+   * LA MARCA DE LA OFICINA (27-oct-2026, invariante 110). Caso real #453
+   * (Simon Herrera): cotizado $840 USD (T.C. 18.4888) y el gasto de Ale de
+   * $18,182.00 MXN marcado como pago al operador: 18,182 ÷ 18.4888 = 983.41.
+   */
+  it('#453 (invariante 110): un gasto MARCADO es el pago aunque no coincida; sin la marca, el cotizado; dos partes marcadas suman', async () => {
+    const v453 = externo({ costo_externo_usd: '840.00', tc_usd_mxn: 18.4888 });
+    const simon = pago(18182, { es_pago_operador_externo: true });
+    expect((await externosDe(v453, [simon])).costo_usd).toBe(983.41);
+    expect((await externosDe(v453, [pago(18182)])).costo_usd).toBe(840);
+    expect(
+      (
+        await externosDe(v453, [
+          pago(5000, { es_pago_operador_externo: true }),
+          pago(13182, { id: 'g-liq', es_pago_operador_externo: true }),
+        ])
+      ).costo_usd,
+    ).toBe(983.41);
+  });
+
+  it('marcado SIN costo cotizado ⇒ costo_usd = lo pagado y el vuelo NO cuenta como «sin costo»; sin T.C. en la cotización pide el K oficial', async () => {
+    const sinCosto = externo({ costo_externo_usd: null, tc_usd_mxn: 18.4888 });
+    const simon = pago(18182, { es_pago_operador_externo: true });
+    const ext = await externosDe(sinCosto, [simon]);
+    expect(ext.costo_usd).toBe(983.41);
+    expect(ext.sin_costo_count).toBe(0);
+    expect((await externosDe(sinCosto, [pago(18182)])).sin_costo_count).toBe(1);
+    const sinTc = externo({ costo_externo_usd: null, tc_usd_mxn: null });
+    expect((await externosDe(sinTc, [simon], 17)).costo_usd).toBe(
+      Number((18182 / 17).toFixed(2)),
+    );
+    expect((await externosDe(sinTc, [simon], null)).sin_costo_count).toBe(1);
   });
 });

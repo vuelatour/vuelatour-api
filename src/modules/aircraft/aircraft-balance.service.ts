@@ -543,6 +543,12 @@ interface GastoRow {
    * gastos», detrás de la sonda `afacRealDisponible`.
    */
   es_pago_afac?: boolean | null;
+  /**
+   * ES EL PAGO AL OPERADOR EXTERNO (27-oct-2026, invariante 110; solo con
+   * vuelo externo, trigger de la BD): el costo cotizado del operador no se
+   * suma además. Solo lo trae la lectura de gastos de vuelos.
+   */
+  es_pago_operador_externo?: boolean | null;
   /** Clon parcial del reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
   /**
@@ -2662,7 +2668,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}${colAfac}, created_at, proveedor:proveedor_id(nombre)`,
+              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}${colAfac}, es_pago_operador_externo, created_at, proveedor:proveedor_id(nombre)`,
             )
             .in('vuelo_id', vueloIdsDinero)
             .order('fecha_gasto', { ascending: true })
@@ -4057,21 +4063,31 @@ export class AircraftBalanceService {
           (acc, g) => acc + (gastoMxn(g) ?? 0),
           0,
         );
-        // El gasto cubre SOLO si esta fila lo contó (un USD sin ningún T.C.
-        // quedó 'sin_tc', fuera de las columnas: ahí el costo sigue).
-        const cubre =
-          pagoOp.cubre != null && gastoMxn(pagoOp.cubre) != null
-            ? pagoOp.cubre
-            : null;
+        // Los pagos cubren SOLO si esta fila los contó (un USD sin ningún
+        // T.C. quedó 'sin_tc', fuera de las columnas: ahí el costo sigue).
+        // Invariante 110: con la MARCA de la oficina pueden ser varios
+        // (anticipo + liquidación) y cubren aunque no coincidan con el costo
+        // cotizado — y aunque no haya costo cotizado (el gasto ES el costo).
+        const pagos = pagoOp.pagos.filter((g) => gastoMxn(g) != null);
+        const cubre = pagos[0] ?? null;
+        const textoPagos = pagos
+          .map(
+            (g) =>
+              `«${etiquetaGastoPagoOperador(g)}» de $${fmtMonto(gastoMxn(g) ?? 0)}`,
+          )
+          .join(', ');
+        const porQue = pagoOp.marcado
+          ? pagos.length > 1
+            ? `cubierto por ${pagos.length} gastos marcados como pago al operador: ${textoPagos}`
+            : `cubierto por el gasto marcado como pago al operador ${textoPagos}`
+          : `cubierto por el gasto ${textoPagos}`;
         if (costoOperadorUsd != null && cubre != null) {
           const costoTexto =
             pagoOp.costoMxn != null
               ? `$${fmtMonto(pagoOp.costoMxn)}`
               : `$${costoOperadorUsd.toLocaleString('en-US')} USD`;
           opDetalle.push(
-            `Costo operador externo (${operadorTexto}) ${costoTexto} — cubierto por el gasto «${etiquetaGastoPagoOperador(
-              cubre,
-            )}» de $${fmtMonto(gastoMxn(cubre) ?? 0)} (no se suma dos veces)`,
+            `Costo operador externo (${operadorTexto}) ${costoTexto} — ${porQue} (no se suma dos veces)`,
           );
           if (pagoOp.duplicados.length > 0) {
             pendientes.push(
@@ -4079,7 +4095,9 @@ export class AircraftBalanceService {
                 'en-US',
               )} USD) ya lo cubre el gasto «${etiquetaGastoPagoOperador(
                 cubre,
-              )}», pero ${pagoOp.duplicados.length} gasto(s) más también coinciden (${pagoOp.duplicados
+              )}»${
+                pagoOp.marcado ? ' (marcado como pago al operador)' : ''
+              }, pero ${pagoOp.duplicados.length} gasto(s) más también coinciden (${pagoOp.duplicados
                 .map(
                   (g) =>
                     `«${etiquetaGastoPagoOperador(g)}» $${fmtMonto(gastoMxn(g) ?? 0)}`,
@@ -4089,6 +4107,12 @@ export class AircraftBalanceService {
                 )}) — posible pago duplicado: verifica y corrige en Gastos`,
             );
           }
+        } else if (cubre != null) {
+          // Invariante 110: marcado SIN costo cotizado — el gasto ES el costo
+          // del vuelo: ni línea del costo ni aviso de «sin costo».
+          opDetalle.push(
+            `Pago al operador externo (${operadorTexto}): ${textoPagos} — marcado como pago al operador (la cotización no trae costo del operador; el gasto es el costo del vuelo)`,
+          );
         } else if (costoOperadorUsd != null) {
           if (K != null) {
             const costoOperadorMxn = round2(costoOperadorUsd * K);

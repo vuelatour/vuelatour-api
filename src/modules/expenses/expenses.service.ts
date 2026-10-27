@@ -54,6 +54,15 @@ import {
   MENSAJE_PAGO_AFAC_SOLO_PERMISO,
   rolCapturaAfac,
 } from '../../common/afac-real.util';
+import { gastoRestaEnColumnasDelVuelo } from '../../common/costo-externo.util';
+import {
+  CODIGO_PAGO_OPERADOR,
+  MENSAJE_PAGO_OPERADOR_CATEGORIA,
+  MENSAJE_PAGO_OPERADOR_SIN_VUELO,
+  MENSAJE_PAGO_OPERADOR_SOLO_OFICINA,
+  mensajePagoOperadorVueloNoExterno,
+  rolMarcaPagoOperador,
+} from '../../common/pago-operador-externo.util';
 import {
   CODIGO_TUA_INCLUIDA,
   MENSAJE_TUA_INCLUIDA_NO_DISPONIBLE,
@@ -306,7 +315,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, cuenta_bancaria_id, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, capturado_en, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, cuenta_bancaria_id, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, capturado_en, created_at, updated_at, es_pago_operador_externo';
 
 /**
  * Prefijo del aviso ⚠ "avión del gasto ≠ avión del tramo" que se anexa a
@@ -366,7 +375,7 @@ function excepcionCambioFecha(
 // `vuelo.fecha_vuelo` (ADITIVO, 19-oct-2026, API 0.0.96, invariante 94): el
 // panel pinta la fecha del vuelo bajo «Vuelo #375» en la tabla de Gastos.
 const LIST_EMBEDS =
-  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, banco, moneda, tipo), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
+  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio, fecha_vuelo, es_externo, operador_externo), cuenta:cuenta_bancaria!cuenta_bancaria_id(alias, banco, moneda, tipo), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
 const LIST_COLS = `${COLS}${LIST_EMBEDS}`;
 
 /**
@@ -416,6 +425,9 @@ const CAMPOS_GASTO_CANDADO_MES = [
   // Invariante 90: marcar/desmarcar «Pago de AFAC» mueve el dinero de un
   // mes (sale o entra a la hoja «permisos» del avión y al reparto).
   'es_pago_afac',
+  // Invariante 110: marcar/desmarcar «pago al operador externo» cambia el
+  // costo del vuelo en su mes (el cotizado deja de sumar o vuelve a sumar).
+  'es_pago_operador_externo',
   // Invariante 93: RE-PROGRAMAR (`por_pagar` ⇒ true) saca un EFECTIVO del
   // libro de caja chica: un mes cerrado no se toca. «Marcar pagado» SIN
   // cambio de fecha (⇒ false) NO entra (acuerdo del 19-oct-2026: no mueve
@@ -610,6 +622,118 @@ export class ExpensesService {
       throw new BadRequestException({
         message: MENSAJE_PAGO_AFAC_SOLO_PERMISO,
         error: 'PAGO_AFAC_SOLO_PERMISO',
+      });
+    }
+  }
+
+  /**
+   * Marca «es el pago al operador externo» (27-oct-2026, invariante 110) en
+   * el ALTA, ANTES de tocar la BD: `false`/ausente no escribe nada (default
+   * de la columna); `true` exige rol de oficina (403), vuelo ligado (400),
+   * categoría que resta en las columnas del vuelo (400) y vuelo cubierto por
+   * externo (400). Deja la llave en el DTO solo si debe escribirse. El
+   * `vuelo_id` ya viene resuelto desde el tramo (regla B) cuando se llama.
+   */
+  private async validarPagoOperadorAlta(
+    dto: CreateGastoDto,
+    rol: Rol | undefined,
+  ): Promise<void> {
+    if (dto.es_pago_operador_externo === undefined) return;
+    if (dto.es_pago_operador_externo !== true) {
+      delete dto.es_pago_operador_externo;
+      return;
+    }
+    await this.assertPuedeMarcarPagoOperador(
+      rol,
+      dto.vuelo_id ?? null,
+      dto.categoria,
+    );
+  }
+
+  /**
+   * La misma marca en el PATCH, con el gasto VIGENTE: igual al vigente o
+   * `null` ⇒ se quita del DTO (los diálogos reenvían la fila; no escribe ni
+   * dispara el candado); distinta ⇒ rol de oficina (403) y, al MARCAR, las
+   * reglas del alta sobre el estado FUSIONADO (vuelo y categoría del DTO o
+   * los vigentes). Desmarcar solo pide el rol.
+   */
+  private async validarPagoOperadorPatch(
+    dto: UpdateGastoDto,
+    rol: Rol | undefined,
+    actual: {
+      categoria?: string;
+      vuelo_id?: string | null;
+      es_pago_operador_externo?: boolean | null;
+    } | null,
+  ): Promise<void> {
+    if (dto.es_pago_operador_externo === undefined) return;
+    if (dto.es_pago_operador_externo === null) {
+      delete dto.es_pago_operador_externo;
+      return;
+    }
+    const vigente = actual?.es_pago_operador_externo === true;
+    if (dto.es_pago_operador_externo === vigente) {
+      delete dto.es_pago_operador_externo;
+      return;
+    }
+    if (!rolMarcaPagoOperador(rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_PAGO_OPERADOR_SOLO_OFICINA,
+        error: CODIGO_PAGO_OPERADOR.SOLO_OFICINA,
+      });
+    }
+    if (dto.es_pago_operador_externo === true) {
+      // El panel manda null para «quitar el vuelo» (IsOptional lo deja pasar).
+      const vueloDto = (dto as { vuelo_id?: string | null }).vuelo_id;
+      const vueloEf =
+        vueloDto === undefined ? (actual?.vuelo_id ?? null) : vueloDto;
+      await this.assertPuedeMarcarPagoOperador(
+        rol,
+        vueloEf,
+        dto.categoria ?? actual?.categoria,
+      );
+    }
+  }
+
+  /** Las reglas de la marca (invariante 110), compartidas por alta y PATCH. */
+  private async assertPuedeMarcarPagoOperador(
+    rol: Rol | undefined,
+    vueloId: string | null,
+    categoria: string | undefined,
+  ): Promise<void> {
+    if (!rolMarcaPagoOperador(rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_PAGO_OPERADOR_SOLO_OFICINA,
+        error: CODIGO_PAGO_OPERADOR.SOLO_OFICINA,
+      });
+    }
+    if (!vueloId) {
+      throw new BadRequestException({
+        message: MENSAJE_PAGO_OPERADOR_SIN_VUELO,
+        error: CODIGO_PAGO_OPERADOR.SIN_VUELO,
+      });
+    }
+    if (!gastoRestaEnColumnasDelVuelo(categoria)) {
+      throw new BadRequestException({
+        message: MENSAJE_PAGO_OPERADOR_CATEGORIA,
+        error: CODIGO_PAGO_OPERADOR.CATEGORIA,
+      });
+    }
+    const { data: vuelo, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, es_externo')
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!vuelo) {
+      throw new BadRequestException('El vuelo seleccionado no existe.');
+    }
+    if (vuelo.es_externo !== true) {
+      throw new BadRequestException({
+        message: mensajePagoOperadorVueloNoExterno(
+          vuelo.folio as number | null,
+        ),
+        error: CODIGO_PAGO_OPERADOR.VUELO_NO_EXTERNO,
       });
     }
   }
@@ -2863,6 +2987,9 @@ export class ExpensesService {
     // «Pago de AFAC» (16-oct-2026, invariante 90): oficina, solo Permiso,
     // detrás de la sonda; ANTES de tocar la BD.
     await this.validarPagoAfacAlta(dto, rol);
+    // «Es el pago al operador externo» (27-oct-2026, invariante 110):
+    // oficina, vuelo cubierto por externo y categoría de columnas del vuelo.
+    await this.validarPagoOperadorAlta(dto, rol);
     // «TUA incluida en este gasto» (13-oct-2026, invariante 66; solo llega
     // de la oficina): sin la migración un NÚMERO es 409 (jamás un guardado
     // que se pierde) y un null se omite; con ella, solo en facturas de
@@ -2910,6 +3037,11 @@ export class ExpensesService {
       // Pago de AFAC (invariante 90): la llave SOLO viaja si quedó tras la
       // validación (true de oficina en un Permiso, con la migración).
       ...(dto.es_pago_afac === true ? { es_pago_afac: true } : {}),
+      // Pago al operador externo (invariante 110): la llave SOLO viaja si
+      // quedó tras la validación (true de oficina en un vuelo externo).
+      ...(dto.es_pago_operador_externo === true
+        ? { es_pago_operador_externo: true }
+        : {}),
       // Por pagar (invariante 93): la llave SOLO viaja en `true` (con la
       // migración); un gasto pagado deja el default de la columna (false).
       ...(porPagarAlta ? { por_pagar: true } : {}),
@@ -4669,6 +4801,8 @@ export class ExpensesService {
       dto.tua_incluida !== undefined ||
       // Pago de AFAC (invariante 90): se compara contra el VIGENTE.
       dto.es_pago_afac !== undefined ||
+      // Pago al operador externo (invariante 110): contra el VIGENTE.
+      dto.es_pago_operador_externo !== undefined ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
       // el gasto o se sella (voucher IA → tarjeta del capturador).
       (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
@@ -4690,19 +4824,26 @@ export class ExpensesService {
           tipo_combustible?: string | null;
           tua_incluida?: string | number | null;
           es_pago_afac?: boolean | null;
+          es_pago_operador_externo?: boolean | null;
         })
       : null;
     // «Pago de AFAC» (invariante 90): eco igual ⇒ fuera del DTO; cambio ⇒
     // oficina, Permiso y la migración (403 / 400 / 503) ANTES de escribir.
     await this.validarPagoAfacPatch(dto, rol, actual);
-    // Un PATCH que SOLO traía la marca, igual a la vigente: nada que escribir.
-    if (
-      camposNegocio.length === 1 &&
-      camposNegocio[0] === 'es_pago_afac' &&
-      dto.es_pago_afac === undefined &&
-      !lineaSello &&
-      Object.keys(sello).length === 0
-    ) {
+    // «Pago al operador externo» (invariante 110): eco igual ⇒ fuera del
+    // DTO; cambio ⇒ oficina y, al marcar, vuelo externo + categoría (403 /
+    // 400) ANTES de escribir.
+    await this.validarPagoOperadorPatch(dto, rol, actual);
+    // Un PATCH que SOLO traía marcas (AFAC / pago al operador), iguales a
+    // las vigentes: nada que escribir.
+    const soloMarcasIguales =
+      camposNegocio.length > 0 &&
+      camposNegocio.every(
+        (k) =>
+          (k === 'es_pago_afac' || k === 'es_pago_operador_externo') &&
+          (dto as unknown as Record<string, unknown>)[k] === undefined,
+      );
+    if (soloMarcasIguales && !lineaSello && Object.keys(sello).length === 0) {
       return this.findById(id);
     }
     // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.

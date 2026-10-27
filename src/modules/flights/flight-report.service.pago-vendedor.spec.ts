@@ -524,6 +524,84 @@ describe('Reporte por vuelo — el gasto real cubre el costo del operador extern
     expect(lineaCosto(r)).toEqual([]);
   });
 
+  /**
+   * LA MARCA DE LA OFICINA (27-oct-2026, invariante 110). Caso real #453
+   * (Simon Herrera): cotizado $840 USD (T.C. 18.4888) y el gasto de Ale de
+   * $18,182.00 MXN (840 + IVA al T.C. del día): fuera del ±1 %.
+   */
+  const EXT_453 = {
+    es_externo: true,
+    operador_externo: 'Simon Herrera',
+    costo_externo_usd: '840.00',
+    tc_usd_mxn: 18.4888,
+    comision_vendedor_usd: 0,
+  };
+  const SIMON = gasto('OPERACIONES', 18182, {
+    id: 'g-simon',
+    fecha_gasto: '2026-10-27',
+    notas: 'pago a simon del vuelo a holbox del 25 oct',
+    es_pago_operador_externo: true,
+  });
+  // 18,182 ÷ 18.4888 = 983.41.
+  const SIMON_USD = Number((18182 / 18.4888).toFixed(2));
+  const detalleSimon = (r: ReporteVueloPayload) =>
+    (r.gastos ?? []).find((g) => (g.detalle ?? '').includes('simon'))?.detalle;
+
+  it('#453 (invariante 110): el gasto MARCADO cubre aunque no coincida; sin la marca el costo se sumaba además', async () => {
+    const r = await reporte(vuelo(EXT_453), [SIMON]);
+    expect(r.gastos_total_usd).toBe(SIMON_USD);
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(
+      'Costo operador externo (Simon Herrera) $840 USD — cubierto por el gasto marcado como pago al operador «Operaciones · pago a simon del vuelo a holbox del 25 oct» (no se suma dos veces).',
+    );
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(/ADEMÁS del costo/);
+    expect(detalleSimon(r)).toContain(
+      'pago al operador externo — cubre el costo capturado (no se suma dos veces)',
+    );
+    const sin = await reporte(vuelo(EXT_453), [
+      { ...SIMON, es_pago_operador_externo: false },
+    ]);
+    expect(sin.gastos_total_usd).toBe(Number((SIMON_USD + 840).toFixed(2)));
+    expect(lineaCosto(sin)).toHaveLength(1);
+  });
+
+  it('marcado SIN costo cotizado ⇒ el gasto es el costo: la nota lo dice y NO sale «ganancia BRUTA»', async () => {
+    const r = await reporte(vuelo({ ...EXT_453, costo_externo_usd: null }), [
+      SIMON,
+    ]);
+    expect(r.gastos_total_usd).toBe(SIMON_USD);
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(
+      'Pago al operador externo (Simon Herrera): «Operaciones · pago a simon del vuelo a holbox del 25 oct» — marcado como pago al operador (la cotización no trae costo del operador; el gasto es el costo del vuelo).',
+    );
+    expect((r.notas_horas ?? []).join(' | ')).not.toMatch(/BRUTA/);
+    expect(detalleSimon(r)).toContain(
+      'pago al operador externo (marcado) — es el costo del vuelo',
+    );
+  });
+
+  it('dos marcados (anticipo + liquidación) ⇒ la nota los cita a los dos, del más antiguo al más nuevo', async () => {
+    const r = await reporte(vuelo(EXT_453), [
+      gasto('OPERACIONES', 13182, {
+        id: 'g-liq',
+        fecha_gasto: '2026-10-27',
+        notas: 'liquidacion simon',
+        es_pago_operador_externo: true,
+      }),
+      gasto('OPERACIONES', 5000, {
+        id: 'g-ant',
+        fecha_gasto: '2026-10-20',
+        notas: 'anticipo simon',
+        es_pago_operador_externo: true,
+      }),
+    ]);
+    expect(r.gastos_total_usd).toBe(SIMON_USD);
+    expect(lineaCosto(r)).toEqual([]);
+    expect(r.notas_horas).toContain(
+      'Costo operador externo (Simon Herrera) $840 USD — cubierto por 2 gastos marcados como pago al operador: «Operaciones · anticipo simon», «Operaciones · liquidacion simon» (no se suma dos veces).',
+    );
+  });
+
   it('CANCELADO ⇒ igual que hoy (el reporte no cambia)', async () => {
     const r = await reporte(vuelo({ ...EXT, estado: 'CANCELADO' }), [NUCLEUM]);
     expect(lineaCosto(r)).toHaveLength(1);

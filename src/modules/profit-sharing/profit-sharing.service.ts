@@ -58,8 +58,9 @@ import {
 import {
   gastoRestaEnColumnasDelVuelo,
   pagoOperadorExternoEnGastos,
-  usdDelPagoOperador,
+  usdPagadoAlOperador,
 } from '../../common/costo-externo.util';
+import { esPagoOperadorExterno } from '../../common/pago-operador-externo.util';
 import { dineroDevueltoCompleto } from '../../common/cuentas-cobro';
 import {
   expandirConReparto,
@@ -694,6 +695,8 @@ type GastoVendedorVueloRow = {
   moneda: string;
   tc_gasto: string | null;
   fecha_gasto: string | null;
+  /** Marca «es el pago al operador externo» (invariante 110). */
+  es_pago_operador_externo?: boolean | null;
 };
 /**
  * Un gasto del avión en el reparto, tal cual se sumó (pantalla por avión,
@@ -1294,9 +1297,13 @@ export class ProfitSharingService {
             (v.es_externo === true &&
               v.estado !== 'CANCELADO' &&
               pos(v.tc_usd_mxn) == null &&
-              pos(v.costo_externo_usd) != null &&
-              (gastosExternoPorVuelo.get(v.id) ?? []).some((g) =>
-                gastoRestaEnColumnasDelVuelo(g.categoria),
+              (gastosExternoPorVuelo.get(v.id) ?? []).some(
+                (g) =>
+                  gastoRestaEnColumnasDelVuelo(g.categoria) &&
+                  // Invariante 110: un pago MARCADO en pesos pide el K
+                  // aunque la cotización no traiga costo del operador.
+                  (pos(v.costo_externo_usd) != null ||
+                    esPagoOperadorExterno(g)),
               )),
         )
         .map((v) => v.id),
@@ -1553,28 +1560,31 @@ export class ProfitSharingService {
       // si el operador cobró penalización va como gasto del vuelo) ni se
       // reclama como "sin costo". Tampoco se provisiona pago al vendedor.
       if (v.estado === 'CANCELADO') continue;
-      if (v.costo_externo_usd == null) {
+      // EL PAGO AL OPERADOR ES EL GASTO REAL (16-oct-2026, invariante 88;
+      // fuente única `pagoOperadorExternoEnGastos`, la MISMA del balance y
+      // del reporte por vuelo): si un gasto del vuelo coincide con el costo
+      // capturado —o la oficina lo MARCÓ como pago al operador (27-oct-2026,
+      // invariante 110: uno o varios, con o sin costo cotizado)—, el costo
+      // del operador es LO PAGADO (esos gastos en USD: tc_gasto ?? K). Este
+      // bloque no cuenta ningún otro gasto del externo, así que jamás hubo
+      // doble conteo aquí: solo se alinea el monto con los otros dos
+      // lectores. Sin T.C. para pasarlos a USD, sigue el costo cotizado (o
+      // «sin costo» si tampoco lo hay).
+      const kExt = kComisionesDeVuelo(v, tcOficial.vuelo, tcKComisionesVuelo);
+      const pagoOp = pagoOperadorExternoEnGastos({
+        esExterno: true,
+        cancelado: false,
+        costoUsd: v.costo_externo_usd,
+        tcVenta: kExt,
+        gastos: gastosExternoPorVuelo.get(v.id) ?? [],
+      });
+      const pagadoUsd = usdPagadoAlOperador(pagoOp.pagos, kExt);
+      if (pagadoUsd != null) {
+        extCosto += pagadoUsd;
+      } else if (v.costo_externo_usd == null) {
         extSinCosto += 1;
       } else {
-        // EL PAGO AL OPERADOR ES EL GASTO REAL (16-oct-2026, invariante 88;
-        // fuente única `pagoOperadorExternoEnGastos`, la MISMA del balance y
-        // del reporte por vuelo): si un gasto del vuelo coincide con el
-        // costo capturado, el costo del operador es LO PAGADO (ese gasto en
-        // USD: tc_gasto ?? K). Este bloque no cuenta ningún otro gasto del
-        // externo, así que jamás hubo doble conteo aquí: solo se alinea el
-        // monto con los otros dos lectores. Sin T.C. para pasarlo a USD,
-        // sigue el costo capturado.
-        const kExt = kComisionesDeVuelo(v, tcOficial.vuelo, tcKComisionesVuelo);
-        const pagoOp = pagoOperadorExternoEnGastos({
-          esExterno: true,
-          cancelado: false,
-          costoUsd: v.costo_externo_usd,
-          tcVenta: kExt,
-          gastos: gastosExternoPorVuelo.get(v.id) ?? [],
-        });
-        const pagadoUsd =
-          pagoOp.cubre != null ? usdDelPagoOperador(pagoOp.cubre, kExt) : null;
-        extCosto += pagadoUsd ?? Number(v.costo_externo_usd);
+        extCosto += Number(v.costo_externo_usd);
       }
       // COMISIÓN DEL VENDEDOR en externos (verificación 28-ago): el vuelo
       // externo no se parte (no hay avión de flota), así que lo cobrado
@@ -6577,7 +6587,9 @@ export class ProfitSharingService {
       (lote, desde, hasta) =>
         this.supabase.service
           .from('gasto')
-          .select('vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto')
+          .select(
+            'vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto, es_pago_operador_externo',
+          )
           .in('vuelo_id', lote)
           .order('id', { ascending: true })
           .range(desde, hasta),

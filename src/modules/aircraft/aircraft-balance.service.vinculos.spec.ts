@@ -707,6 +707,95 @@ describe('Balance — el gasto real cubre el costo del operador externo (invaria
     ).toBe(false);
   });
 
+  /**
+   * LA MARCA DE LA OFICINA (27-oct-2026, invariante 110). Caso real #453
+   * (Simon Herrera, 25-oct-2026): cotizado $840 USD × 18.4888 = $15,530.59 y
+   * el gasto de Ale de $18,182.00 (840 + IVA al T.C. del día): 17 % arriba,
+   * fuera del ±1 %. Antes OPERACIONES sumaba los dos: $33,712.59.
+   */
+  const EXTERNO_453 = {
+    es_externo: true,
+    operador_externo: 'Simon Herrera',
+    costo_externo_usd: '840.00',
+    tc_usd_mxn: 18.4888,
+  };
+  const SIMON: Fila = {
+    ...gastoBase,
+    ...enVuelo,
+    id: 'g-simon',
+    categoria: 'OPERACIONES',
+    monto: '18182.00',
+    fecha_gasto: '2026-10-27',
+    created_at: '2026-10-27T17:19:53+00:00',
+    notas: 'pago a simon del vuelo a holbox del 25 oct',
+    es_pago_operador_externo: true,
+  };
+  const NOTA_MARCADO =
+    'Costo operador externo (Simon Herrera) $15,530.59 — cubierto por el gasto marcado como pago al operador «Operaciones · pago a simon del vuelo a holbox del 25 oct» de $18,182.00 (no se suma dos veces)';
+
+  it('#453 (invariante 110): el gasto MARCADO cubre aunque no coincida con el costo cotizado; sin la marca se sumaban los dos', async () => {
+    const { payload, fila } = await filaDe([SIMON], { vuelo: EXTERNO_453 });
+    expect(Number(fila.op_mxn)).toBeCloseTo(18182, 2);
+    expect(fila.op_detalle as string[]).toContain(NOTA_MARCADO);
+    expect(fila.op_vinculos).toEqual([
+      { id: 'g-simon', rol: 'suma', monto_mxn: 18182 },
+    ]);
+    expect(sumaDe(fila.op_vinculos as Vinculo[])).toBe(Number(fila.op_mxn));
+    expect(
+      payload.pendientes.some((p) =>
+        p.includes('ADEMÁS del costo del operador'),
+      ),
+    ).toBe(false);
+    // Sin la marca: la conducta de la invariante 88 (doble conteo + aviso).
+    const sin = await filaDe([{ ...SIMON, es_pago_operador_externo: false }], {
+      vuelo: EXTERNO_453,
+    });
+    expect(Number(sin.fila.op_mxn)).toBeCloseTo(33712.59, 2);
+    expect(
+      sin.payload.pendientes.some((p) =>
+        p.includes('externo con 1 gasto(s) capturado(s) por $18,182.00 ADEMÁS'),
+      ),
+    ).toBe(true);
+  });
+
+  it('marcado SIN costo cotizado ⇒ el gasto es el costo: ni línea del costo ni «sin costo del operador»', async () => {
+    const { payload, fila } = await filaDe([SIMON], {
+      vuelo: { ...EXTERNO_453, costo_externo_usd: null },
+    });
+    expect(Number(fila.op_mxn)).toBeCloseTo(18182, 2);
+    expect(fila.op_detalle as string[]).toContain(
+      'Pago al operador externo (Simon Herrera): «Operaciones · pago a simon del vuelo a holbox del 25 oct» de $18,182.00 — marcado como pago al operador (la cotización no trae costo del operador; el gasto es el costo del vuelo)',
+    );
+    expect(
+      payload.pendientes.some((p) =>
+        p.includes('sin costo del operador capturado'),
+      ),
+    ).toBe(false);
+  });
+
+  it('dos gastos marcados (anticipo + liquidación) ⇒ los dos son el pago, en orden, y el costo cotizado no suma', async () => {
+    const anticipo: Fila = {
+      ...SIMON,
+      id: 'g-anticipo',
+      monto: '5000.00',
+      fecha_gasto: '2026-10-20',
+      notas: 'anticipo simon',
+    };
+    const liquidacion: Fila = {
+      ...SIMON,
+      id: 'g-liq',
+      monto: '13182.00',
+      notas: 'liquidacion simon',
+    };
+    const { fila } = await filaDe([liquidacion, anticipo], {
+      vuelo: EXTERNO_453,
+    });
+    expect(Number(fila.op_mxn)).toBeCloseTo(18182, 2);
+    expect(fila.op_detalle as string[]).toContain(
+      'Costo operador externo (Simon Herrera) $15,530.59 — cubierto por 2 gastos marcados como pago al operador: «Operaciones · anticipo simon» de $5,000.00, «Operaciones · liquidacion simon» de $13,182.00 (no se suma dos veces)',
+    );
+  });
+
   it('libro EXTERNOS (sin avión, como #308 en prod): la misma regla', async () => {
     const svc = armar([PISTA, NUCLEUM], {
       vuelo: { ...EXTERNO_308, aeronave_id: null },

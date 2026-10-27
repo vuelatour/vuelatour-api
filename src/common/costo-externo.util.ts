@@ -98,6 +98,18 @@ export function resolverCostoExterno(input: {
  * avisa si hay gastos). NO toca el gasto (sigue en su lista, conciliado y
  * facturado).
  *
+ * MARCA EXPLÍCITA (27-oct-2026, invariante 110, columna
+ * `gasto.es_pago_operador_externo`, migración 20261027000001). Caso #453
+ * (Simon Herrera, 25-oct-2026): cotizó $840 USD y cobró 840 + IVA al T.C.
+ * del día = $18,182.00 MXN contra $15,530.59 cotizados (17 % arriba: fuera
+ * del ±1 %), y el balance sumó los dos. Los gastos que la oficina MARCA son
+ * el pago (uno o varios —anticipo + liquidación—: `pagos`, del más antiguo
+ * al más nuevo; `cubre` = el primero; `marcado` = true) aunque NO coincidan
+ * con el costo y aunque NO haya costo cotizado (entonces el gasto ES el
+ * costo del vuelo). Un gasto que coincide ±1 % pero no está marcado queda
+ * en `duplicados` (posible pago doble). Sin marcas, la coincidencia de
+ * arriba decide igual que siempre. CANCELADO ⇒ nada cubre (como siempre).
+ *
  * PURA y ÚNICA: el balance por avión/general, el reporte por vuelo y el
  * reparto (bloque `externos`) deciden con ella; ningún lector repite la
  * prueba. Cada lector, además, solo deja que el gasto cubra si ÉL lo cuenta
@@ -112,6 +124,8 @@ export interface GastoCandidatoPagoOperador {
   tc_gasto?: number | string | null;
   fecha_gasto?: string | null;
   created_at?: string | null;
+  /** Marca de la oficina (invariante 110): este gasto ES el pago. */
+  es_pago_operador_externo?: boolean | null;
 }
 
 export interface PagoOperadorExternoDecision<G> {
@@ -123,6 +137,13 @@ export interface PagoOperadorExternoDecision<G> {
   cubre: G | null;
   /** Coinciden pero NO cubren: posible duplicado del pago. */
   duplicados: G[];
+  /**
+   * TODOS los gastos que son el pago (invariante 110): los marcados, del más
+   * antiguo al más nuevo; sin marcas, `[cubre]` o vacío.
+   */
+  pagos: G[];
+  /** true = lo decidió la marca de la oficina; false = la coincidencia. */
+  marcado: boolean;
   /** Costo del operador en MXN (costo USD × K, 2 decimales) o null. */
   costoMxn: number | null;
 }
@@ -176,11 +197,15 @@ export function pagoOperadorExternoEnGastos<
     coinciden: [],
     cubre: null,
     duplicados: [],
+    pagos: [],
+    marcado: false,
     costoMxn,
   };
-  if (!input.esExterno || input.cancelado || costoUsd == null) return vacio;
+  if (!input.esExterno || input.cancelado) return vacio;
 
+  // Invariante 88: distancia al costo cotizado (sin costo, nada coincide).
   const distancia = (g: G): number => {
+    if (costoUsd == null) return Infinity;
     const monto = Number(g.monto);
     if (!Number.isFinite(monto) || monto <= 0) return Infinity;
     const esMxn = g.moneda === 'MXN';
@@ -206,12 +231,39 @@ export function pagoOperadorExternoEnGastos<
       a.i - b.i,
   );
   const coinciden = conDistancia.map((x) => x.g);
+  // Invariante 110: los gastos MARCADOS por la oficina son el pago (del más
+  // antiguo al más nuevo: anticipo antes que liquidación), con o sin costo
+  // cotizado y coincidan o no con él.
+  const marcados = candidatos
+    .map((g, i) => ({ g, i }))
+    .filter((x) => x.g.es_pago_operador_externo === true)
+    .sort(
+      (a, b) =>
+        clave(a.g.fecha_gasto).localeCompare(clave(b.g.fecha_gasto)) ||
+        clave(a.g.created_at).localeCompare(clave(b.g.created_at)) ||
+        a.i - b.i,
+    )
+    .map((x) => x.g);
+  if (marcados.length > 0) {
+    return {
+      candidatos,
+      coinciden,
+      cubre: marcados[0],
+      // Coinciden con el costo pero NO están marcados: posible pago doble.
+      duplicados: coinciden.filter((g) => !marcados.includes(g)),
+      pagos: marcados,
+      marcado: true,
+      costoMxn,
+    };
+  }
   if (coinciden.length === 0) return vacio;
   return {
     candidatos,
     coinciden,
     cubre: coinciden[0],
     duplicados: coinciden.slice(1),
+    pagos: [coinciden[0]],
+    marcado: false,
     costoMxn,
   };
 }
@@ -231,6 +283,25 @@ export function usdDelPagoOperador(
   if (g.moneda !== 'MXN') return monto;
   const tc = numPos(g.tc_gasto) ?? numPos(tcVenta);
   return tc != null ? monto / tc : null;
+}
+
+/**
+ * Σ en USD de TODOS los gastos que son el pago al operador (`pagos` de la
+ * decisión, invariante 110): la suma de `usdDelPagoOperador`. Vacío, o
+ * alguno sin T.C. ⇒ null (el lector sigue con el costo cotizado).
+ */
+export function usdPagadoAlOperador(
+  pagos: readonly GastoCandidatoPagoOperador[],
+  tcVenta: number | string | null | undefined,
+): number | null {
+  if (pagos.length === 0) return null;
+  let total = 0;
+  for (const g of pagos) {
+    const usd = usdDelPagoOperador(g, tcVenta);
+    if (usd == null) return null;
+    total += usd;
+  }
+  return total;
 }
 
 /**

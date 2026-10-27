@@ -12112,6 +12112,97 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       del mundo sintético, orden de llaves, `null` con la lectura caída, sin
       llave sin hijas).
 
+110. **EL PAGO AL OPERADOR EXTERNO SE MARCA EN EL GASTO (27-oct-2026, API
+    0.0.110, migración `20261027000001_gasto_pago_operador_externo`).** Caso
+    #453 (oscar02-251026, Simon Herrera, 25-oct-2026): la oficina cotizó «lo
+    que cobra el operador» en $840 USD (T.C. 18.4888 ⇒ $15,530.59) y Ale
+    capturó el pago real como gasto OPERACIONES del vuelo: $18,182.00 MXN
+    (840 + IVA al T.C. del día, 17 % arriba). La coincidencia ±1 % de la
+    invariante 88 no lo reconoció y el Balance general sumó los dos en
+    OPERACIONES ($33,712.59). Pedido de la oficina (transcripción): «que lo
+    que yo ponga en la cotización simplemente sea informativo … o que se
+    llene en automático cuando se haga el pago … y que tomen nada más de
+    referencia el gasto que puso Ale».
+    - **Regla**: `gasto.es_pago_operador_externo` (boolean NOT NULL default
+      false). El gasto que la oficina MARCA ES el pago al operador: los tres
+      lectores lo toman como el costo REAL y el costo cotizado
+      (`vuelo.costo_externo_*`) queda como referencia del margen al cotizar
+      y como NOTA — aunque no coincida con lo cotizado (IVA, otro T.C.) y
+      aunque NO haya costo cotizado (entonces el gasto ES el costo: ni línea
+      del costo ni aviso «sin costo del operador»). Pueden ser VARIOS
+      (anticipo + liquidación: se marca cada parte). Sin marcas, la
+      invariante 88 sigue igual (coincidencia ±1 %). CANCELADO ⇒ como
+      siempre (nada cubre). El costo de la cotización NO desaparece: es el
+      «costo cotizado» (el panel lo nombra así en cotización, ficha del
+      vuelo y «Cubrir con externo»).
+    - **Fuente única** `pagoOperadorExternoEnGastos`
+      (`common/costo-externo.util`): `pagos` (los marcados del más antiguo
+      al más nuevo —`fecha_gasto`, `created_at`, llegada—, o `[cubre]` por
+      coincidencia), `marcado` (true = lo decidió la marca), `cubre` =
+      `pagos[0]`; un gasto que coincide ±1 % pero NO está marcado queda en
+      `duplicados` (posible pago doble, se avisa). `usdPagadoAlOperador(
+      pagos, K)` = Σ en USD (USD tal cual; MXN ÷ `tc_gasto` ?? K; alguno
+      sin T.C. ⇒ null ⇒ el lector sigue con el cotizado).
+      `common/pago-operador-externo.util`: `esPagoOperadorExterno`,
+      `rolMarcaPagoOperador` (= `ROLES_AFAC_REAL`: ADMIN / FACTURACION /
+      COORDINADOR), códigos y mensajes.
+    - **Lectores**: (i) Balance por avión / EXTERNOS / general: cubierto ⇒
+      no suma a `opMxn`; `op_detalle` «Costo operador externo (Simon
+      Herrera) $15,530.59 — cubierto por el gasto marcado como pago al
+      operador «Operaciones · pago a simon del vuelo a holbox del 25 oct» de
+      $18,182.00 (no se suma dos veces)» (varios: «cubierto por 2 gastos
+      marcados como pago al operador: «…» de $…, «…» de $…»); sin costo
+      cotizado: «Pago al operador externo (X): «…» de $… — marcado como pago
+      al operador (la cotización no trae costo del operador; el gasto es el
+      costo del vuelo)» y SIN el pendiente «sin costo del operador
+      capturado». El texto de la coincidencia (invariante 88) NO cambia.
+      (ii) Reporte por vuelo: nota «Costo operador externo (X) $840 USD —
+      cubierto por el gasto marcado como pago al operador «…» (no se suma
+      dos veces).», el gasto lleva «pago al operador externo — cubre el
+      costo capturado (no se suma dos veces)» (sin costo cotizado: «pago al
+      operador externo (marcado) — es el costo del vuelo» y la nota «Pago
+      al operador externo (X): «…» — marcado como pago al operador (…)» en
+      vez de «ganancia BRUTA»). (iii) Reparto, bloque `externos`:
+      `costo_usd` = `usdPagadoAlOperador` de los marcados (con o sin costo
+      cotizado; sin T.C. ⇒ el cotizado o `sin_costo_count`); un externo sin
+      T.C. en la cotización con un pago MARCADO en pesos pide el K oficial
+      del día de la cotización (rama (e) de `resolverTcOficial`). Las tres
+      lecturas de gastos traen la columna SIN sonda: la migración va ANTES
+      del API.
+    - **Escritura** (`expenses.service`): DTO `es_pago_operador_externo`
+      (alta y PATCH). `true` exige rol de oficina (403
+      `PAGO_OPERADOR_SOLO_OFICINA`), vuelo ligado (400
+      `PAGO_OPERADOR_SIN_VUELO`), categoría que resta en las columnas del
+      vuelo (`gastoRestaEnColumnasDelVuelo`; 400 `PAGO_OPERADOR_CATEGORIA`)
+      y vuelo `es_externo` (400 `PAGO_OPERADOR_VUELO_NO_EXTERNO`, cita el
+      folio); en el PATCH sobre el estado FUSIONADO (vuelo/categoría del DTO
+      o vigentes); eco igual al vigente o `null` ⇒ se quita del DTO (solo
+      marcas iguales ⇒ no escribe nada); desmarcar solo pide el rol. Entra
+      al candado MES_CERRADO (`CAMPOS_GASTO_CANDADO_MES`). `COLS` del gasto
+      incluye la columna y el embed `vuelo` trae `es_externo,
+      operador_externo` (para «Verificar / editar» del panel). BD: trigger
+      `trg_gasto_pago_operador_externo_con_vuelo` apaga la marca sin
+      `vuelo_id` o con vuelo propio en la MISMA escritura; `tg_gasto_bitacora`
+      la audita; `revertirExterno` apaga las marcas de los gastos del vuelo
+      (best-effort, log).
+    - **Panel** (`lib/admin/pago-operador-externo.ts`): casilla «Es el pago
+      al operador externo (Simon Herrera)» en el alta (nace MARCADA con vuelo
+      externo + Operaciones) y en «Verificar / editar»; chip «Pago operador»
+      en Gastos; historial «Pago al operador externo: No → Sí»; ficha del
+      vuelo «Pagado al operador (gastos marcados)». La app no manda la llave.
+    - **Prod (27-oct-2026)**: el gasto de Ale (#453, `807fa413…`) se marcó
+      por SQL tras aplicar la migración: OPERACIONES de #453 $33,712.59 →
+      $18,182.00 (Balance general de octubre, libro EXTERNOS); #308 no
+      cambia (coincidencia de la invariante 88).
+    - Specs: `costo-externo.util.marca.spec` (#453, sin costo, varios,
+      duplicado sin marca, categorías, cancelado, `usdPagadoAlOperador`,
+      roles), `expenses.service.pago-operador.spec` (alta/PATCH: 403/400,
+      eco, null, vuelo propio, categoría, sin vuelo),
+      `aircraft-balance.service.vinculos.spec`,
+      `flight-report.service.pago-vendedor.spec` y
+      `profit-sharing.service.comisiones.spec` (casos #453 con/sin marca,
+      sin costo, dos partes, K oficial).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12850,6 +12941,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.110 (27-oct-2026; invariante 110, el pago al
+  operador externo se marca en el gasto; migración
+  `20261027000001_gasto_pago_operador_externo`, APLICADA por MCP el
+  27-oct-2026 tras el dry-run `_dryrun/20261027000001_….dryrun.sql` con
+  UPDATE reales — DRYRUN_OK).** Orden: migración (ya aplicada) ⇒ API ⇒
+  panel (el panel manda `es_pago_operador_externo` y un API previo la
+  rechaza con `forbidNonWhitelisted`; el API lee la columna SIN sonda).
+  `GET /v1/version` = 0.0.110. Tras el deploy, el gasto de Ale del #453 se
+  marcó por SQL (`update public.gasto set es_pago_operador_externo = true
+  where id = '807fa413-2d57-4b29-bc41-8cb73cab0c1f'`): OPERACIONES de #453
+  $33,712.59 → $18,182.00 en el Balance general de octubre. La app no
+  cambia (no manda la llave; ignora la que el API devuelve).
 
 - **DESPLIEGUE DEL 0.0.109 (27-oct-2026; invariante 109, fondo consolidado
   de la caja madre; SIN migración).** API y panel en cualquier orden (todo

@@ -198,7 +198,7 @@ export class FlightReportService {
       sb
         .from('gasto')
         .select(
-          `id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas${colAfac}, proveedor:proveedor_id(nombre)` as 'id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
+          `id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas${colAfac}, es_pago_operador_externo, proveedor:proveedor_id(nombre)` as 'id, fecha_gasto, created_at, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
         )
         .eq('vuelo_id', flightId)
         .order('fecha_gasto', { ascending: true }),
@@ -469,8 +469,13 @@ export class FlightReportService {
       g.moneda === 'USD' ||
       (g.tc_gasto != null && Number(g.tc_gasto) > 0) ||
       tcVuelo != null;
-    const gastoPagoOperador =
-      pagoOp.cubre != null && cuentaEnUsd(pagoOp.cubre) ? pagoOp.cubre : null;
+    // Invariante 110: con la MARCA de la oficina pueden ser varios (anticipo
+    // + liquidación) y son el pago aunque no coincidan con el costo cotizado
+    // o no haya costo. Cubren solo los que este reporte cuenta en USD.
+    const pagosOperador = pagoOp.pagos.filter((g) => cuentaEnUsd(g));
+    const gastoPagoOperador = pagosOperador[0] ?? null;
+    const hayCostoCotizado =
+      v.es_externo === true && n(v.costo_externo_usd) > 0;
     const combustible: ReporteVueloLineaPayload[] = gastosRows
       .filter((g) => g.categoria === 'GAS')
       .map((g) => ({
@@ -527,9 +532,11 @@ export class FlightReportService {
             )
               ? 'pago de AFAC (lo paga VuelaTour) — no resta al vuelo'
               : null,
-            // Invariante 88: este gasto ES el pago al operador externo.
-            g === gastoPagoOperador
-              ? 'pago al operador externo — cubre el costo capturado (no se suma dos veces)'
+            // Invariante 88 / 110: este gasto ES el pago al operador externo.
+            pagosOperador.some((p) => p === g)
+              ? hayCostoCotizado
+                ? 'pago al operador externo — cubre el costo capturado (no se suma dos veces)'
+                : 'pago al operador externo (marcado) — es el costo del vuelo'
               : null,
           ]
             .filter(Boolean)
@@ -649,18 +656,35 @@ export class FlightReportService {
         `Vuelo COMBINADO con #${(otro?.folio as number | undefined) ?? '?'} (estrategia de pernocta): los tramos ferry de ambos se cancelaron a propósito y un solo avión cubrió los dos. Los precios de ambos clientes quedaron intactos.`,
       );
     }
+    const operadorNota = v.operador_externo
+      ? ` (${v.operador_externo as string})`
+      : '';
+    const textoPagosOperador = pagosOperador
+      .map((g) => `«${etiquetaGastoPagoOperador(g)}»`)
+      .join(', ');
     if (v.es_externo === true && v.costo_externo_usd == null) {
-      notasHoras.push(
-        'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
-      );
+      if (pagosOperador.length > 0) {
+        // Invariante 110: marcado SIN costo cotizado — el gasto ES el costo
+        // del vuelo (ya restó arriba); la ganancia no es bruta.
+        notasHoras.push(
+          `Pago al operador externo${operadorNota}: ${textoPagosOperador} — marcado como pago al operador (la cotización no trae costo del operador; el gasto es el costo del vuelo).`,
+        );
+      } else {
+        notasHoras.push(
+          'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
+        );
+      }
     }
     if (costoExternoUsd > 0 && gastoPagoOperador != null) {
-      // Invariante 88: el pago al operador YA está en los gastos (restó
-      // arriba con lo realmente pagado); el costo capturado es solo nota.
+      // Invariante 88 / 110: el pago al operador YA está en los gastos
+      // (restó arriba con lo realmente pagado); el costo cotizado es nota.
+      const porQue = pagoOp.marcado
+        ? pagosOperador.length > 1
+          ? `cubierto por ${pagosOperador.length} gastos marcados como pago al operador: ${textoPagosOperador}`
+          : `cubierto por el gasto marcado como pago al operador ${textoPagosOperador}`
+        : `cubierto por el gasto ${textoPagosOperador}`;
       notasHoras.push(
-        `Costo operador externo${
-          v.operador_externo ? ` (${v.operador_externo as string})` : ''
-        } $${costoExternoUsd.toLocaleString('en-US')} USD — cubierto por el gasto «${etiquetaGastoPagoOperador(gastoPagoOperador)}» (no se suma dos veces).`,
+        `Costo operador externo${operadorNota} $${costoExternoUsd.toLocaleString('en-US')} USD — ${porQue} (no se suma dos veces).`,
       );
       if (pagoOp.duplicados.length > 0) {
         notasHoras.push(

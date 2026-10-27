@@ -373,6 +373,15 @@ export class CreateGastoDto {
 
   @ApiPropertyOptional({
     type: Boolean,
+    description:
+      'Este gasto ES el pago al operador externo que cubrió el vuelo (27-oct-2026, invariante 110; migración 20261027000001). Con la marca, los libros (balance, reporte por vuelo, reparto) toman este gasto como el costo REAL del operador y el costo cotizado de la cotización deja de sumarse (no se cuenta doble aunque difiera: IVA, otro T.C., pago en partes — marca cada parte). Solo OFICINA (ADMIN, FACTURACION, COORDINADOR): otro rol ⇒ 403 PAGO_OPERADOR_SOLO_OFICINA (un eco igual al vigente se ignora). true exige vuelo ligado (400 PAGO_OPERADOR_SIN_VUELO), vuelo cubierto por externo (400 PAGO_OPERADOR_VUELO_NO_EXTERNO) y una categoría que resta en las columnas del vuelo (400 PAGO_OPERADOR_CATEGORIA). Un trigger de la BD la apaga si el gasto pierde el vuelo o pasa a un vuelo propio. En el PATCH: ausente/null = no tocar; marcar/desmarcar en un mes cerrado ⇒ 409 MES_CERRADO.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_pago_operador_externo?: boolean;
+
+  @ApiPropertyOptional({
+    type: Boolean,
     nullable: true,
     description:
       'Gasto «por pagar» (19-oct-2026, invariante 93; migración 20261019000001). El servidor decide: una fecha_gasto después de hoy (Cancún) nace por pagar aunque no se mande. true con fecha ≤ hoy = «lo anoto hoy y lo pago al rato». En el PATCH, false sobre un gasto por pagar = «Marcar pagado» (fecha_gasto = la del pago, ≤ hoy; sin fecha: hoy, o la suya si ya venció). false con una fecha futura ⇒ 400 POR_PAGAR_FECHA_FUTURA. Sin la migración: true ⇒ 503 POR_PAGAR_NO_DISPONIBLE y false se ignora. Booleano ESTRICTO: el texto "false" ⇒ 400; null = ausente.',

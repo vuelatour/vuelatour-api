@@ -21,7 +21,10 @@ import {
   type Responder,
 } from '../../common/inicio-oficial.fixture-spec';
 
-const EMBED_VUELO = 'vuelo:vuelo!vuelo_id(folio, fecha_vuelo)';
+// Desde el 0.0.110 (invariante 110) el embed también trae `es_externo` y
+// `operador_externo` (casilla «pago al operador externo» del panel).
+const EMBED_VUELO =
+  'vuelo:vuelo!vuelo_id(folio, fecha_vuelo, es_externo, operador_externo)';
 
 function armar(responder?: Responder) {
   const g = supabaseGrabador(responder);

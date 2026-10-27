@@ -6524,6 +6524,21 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Invariante 110: un vuelo propio no tiene «pago al operador externo».
+    // Las marcas de sus gastos se apagan aquí (los lectores ya las ignoran
+    // con es_externo = false; esto deja la verdad en la columna y evita que
+    // resuciten si el vuelo se vuelve a cubrir con otro operador).
+    // Best-effort: no tumba la reversión.
+    const { error: marcasErr } = await this.supabase.service
+      .from('gasto')
+      .update({ es_pago_operador_externo: false, updated_by: userId })
+      .eq('vuelo_id', id)
+      .eq('es_pago_operador_externo', true);
+    if (marcasErr) {
+      this.logger.warn(
+        `revertirExterno ${id}: no se pudieron apagar las marcas «pago al operador externo» de sus gastos: ${marcasErr.message}`,
+      );
+    }
     // Espejo vuelo ↔ tramo 1 y permisos de pista por matrícula.
     if (aeronaveId !== current.aeronave_id) {
       await this.mirrorVueloToIdaEscala(id, { aeronave_id: aeronaveId });
