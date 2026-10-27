@@ -11964,6 +11964,77 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `gasto-avion.util.spec`. Sin goldens tocados: con 0 gastos de la
       categoría todo payload es byte-idéntico.
 
+108. **PRÓXIMO SERVICIO VENCIDO: EL PROGRAMA NO BRINCA MIENTRAS LA ORDEN
+    SIGA ABIERTA (27-oct-2026, API 0.0.107, SIN migración).** Pedido
+    literal del cliente (capturas de la fila del XA-VGV y de su orden
+    «Servicio de 500 hrs», horas programadas 2,250): «la app marca cuánto
+    tiempo le falta para el siguiente servicio, pero cuando no se pudo
+    llevar en tiempo y forma se brinca al siguiente servicio; que tenga un
+    contador negativo hasta que se marque de concluido el servicio de
+    mantenimiento». Prod ese día: Hobbs 2,264.2, orden de 2,250 PROGRAMADA
+    (23-oct) sin cerrar, y lista/ficha decían «faltan 35.8 h» al hito de
+    2,300.
+    - **Regla (`hitoPendienteDeOrden`, `src/common/servicio-hito.util.ts`,
+      PURO con specs)**: mientras exista una orden ABIERTA (PROGRAMADO /
+      EN_TALLER) DEL AVIÓN (sin `motor_id`/`helice_id`) cuyo
+      `horas_programadas` ya se alcanzó (`≤ Hobbs + 0.05`), el «próximo
+      servicio» ES ese hito: `faltan`/`faltan_hr` NEGATIVO («vencido por
+      14.2 h»), `orden` = esa orden (`ordenAbiertaDelHito`, regla 1), nombre
+      y checklist de la(s) etapa(s) que caen en el hito
+      (`intervalosEnHito`: `base + k × intervalo`, k ≥ 1; una orden FUERA del
+      programa va por su `etapa_intervalo_hr` si es del programa; sin etapa
+      y fuera del programa —«cambio de llanta a las 2,230»— no sostiene
+      nada). Con varias, la de horas más bajas (a igualdad, `id` menor). Se
+      destraba al marcar la orden COMPLETADO o cuando otro registro HECHO la
+      atiende (`hitoAtendido`: `horas_programadas` ≈ hito, o la MISMA etapa
+      con `horas_aeronave > hito − intervalo` —regla 2 del dedupe SIN tope
+      superior: un servicio tardío también atiende—; NO «una etapa mayor
+      incluye a la menor», porque el dedupe tampoco lo asume y la ficha no
+      puede dar por atendido un hito para el que el programa sí crea orden).
+      **Sin orden abierta alcanzada NO se inventa un vencido**: el programa
+      cíclico sigue igual (XB-ANU con base 1,253.9 y cero mantenimientos
+      sigue en «faltan 22.3 h» al hito de 1,403.9; el historial sin capturar
+      no se castiga).
+    - **Una sola fuente**: `AircraftService.proximoServicioDetallado(…,
+      mantenimientos?)` aplica primero el hito pendiente y, sin él, el
+      programa cíclico de siempre (`proximoServicio` no cambia; `detallarHito`
+      arma nombre/etapas/tareas para los dos caminos). Lo reciben con las
+      órdenes: `aircraftMetrics` (la misma lectura `MANT_HITO_COLS` del
+      semáforo), `tacometroHistorial`, el listado (`armarServicioFila` pasa
+      `mantenimientos` como 5.º argumento de `ProximoServicioFn`) y
+      `AlertsService.revisarProgramaDeServicio`, que ahora LEE las órdenes
+      ANTES de calcular el hito: con una orden alcanzada abierta NO crea la
+      del siguiente hito (es exactamente el «se brinca» del cliente), el
+      dedupe la encuentra (`yaExiste`) y el aviso mensual sale como
+      «Servicio por horas VENCIDO: XA-VGV … vencido por 14.2 hrs … márcala
+      como COMPLETADA» (misma clave `servicio:<avión>:<a_las>:<mes>`). Al
+      completarla, la siguiente captura/cron crea la orden del siguiente
+      hito con normalidad. `MANT_HITO_COLS` trae `motor_id, helice_id`
+      (`MANT_SERVICIO_COLS` ya no los repite). Contrato ADITIVO/semántico:
+      ningún campo nuevo; el panel (`textoHorasRestantes`, commit del
+      27-oct) y la app pintan «vencido por N h» cuando el número es
+      negativo; con el panel viejo la lista ya decía «vencido por 14.2 h» y
+      el KPI «faltan −14.2 h» (feo, no falso).
+    - **Queda FUERA a propósito**: la línea «próximo servicio … faltan N h»
+      de `pendientes` del balance por avión (`aircraft-balance.service`,
+      `proximoServicio` con el taco del PERIODO, sin órdenes) sigue con el
+      programa cíclico — es un texto informativo del XLSX y leer
+      `mantenimiento` ahí tocaría 20+ specs del balance; si el cliente lo
+      pide, pasarle las órdenes por el mismo `proximoServicioDetallado`.
+      Tampoco cambia el ancla del programa (cíclico vs último servicio
+      hecho: sigue pendiente de decisión del cliente, ver
+      `servicio-flota.util.ts`).
+    - Specs: `servicio-hito.util.spec` (intervalosEnHito, hitoPendienteDeOrden
+      con los datos reales del XA-VGV/N58BT/N990GG/XB-ANU, hitoAtendido,
+      columnas), `aircraft.service.proximo-servicio.spec` (KPI y tacómetros a
+      2,264.2 con la orden abierta / cerrada / de componente / sin orden),
+      `servicio-flota.util.spec` (XA-VGV 27-oct y la vuelta a 2,300 al
+      completar; N58BT ahora «vencido por 27.2 h» con su orden EN_TALLER —
+      antes decía «faltan 72.8 h» con el avión parado en el taller) y
+      `alerts.service.servicio-horas.spec` (no crea la de 2,300 mientras la
+      de 2,250 siga abierta; aviso VENCIDO; al completar, crea la de 2,300 a
+      2,292 h).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -12702,6 +12773,17 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.107 (27-oct-2026; invariante 108, próximo servicio
+  vencido; SIN migración).** Solo API y panel, en cualquier orden (contrato
+  sin campos nuevos: el número `faltan`/`faltan_hr` puede llegar negativo).
+  `GET /v1/version` debe responder 0.0.107. Efecto inmediato en prod al
+  desplegar: XA-VGV pasa de «faltan 35.8 h» (2,300) a «vencido por 14.2 h»
+  (2,250, orden PROGRAMADA del 23-oct) y el siguiente barrido manda UNA
+  notificación «Servicio por horas VENCIDO: XA-VGV» (clave mensual); N990GG
+  seguirá en «faltan 3.4 h» a 5,600 hasta cruzarlo. La app solo necesita
+  pintar «vencido por N h» cuando el número sea negativo
+  (`docs/prompt-app-servicio-vencido-27oct2026.md`).
 
 - **DESPLIEGUE DEL 0.0.106 (23-oct-2026; invariante 107, categoría «Otros
   movimientos (VuelaTour)»).** (1) La migración

@@ -42,6 +42,8 @@ type ConfigServicio =
 function armar(
   mantenimientos: Array<Record<string, unknown>>,
   config: ConfigServicio = { activa: true, horas_anticipacion: 10 },
+  /** Último tacómetro del avión (el hito pendiente se prueba con 2,264.2). */
+  hobbs: number = HOBBS,
 ) {
   const handler = (tabla: string, chain: Chain): Res => {
     switch (tabla) {
@@ -80,7 +82,7 @@ function armar(
           data: [
             {
               taco_salida: 2239.5,
-              taco_llegada: HOBBS,
+              taco_llegada: hobbs,
               vuelo: {
                 id: 'v-295',
                 aeronave_id: AVION,
@@ -314,5 +316,89 @@ describe('tacometroHistorial().proximo_servicio.orden', () => {
     jest.spyOn(servicio, 'proximoServicioDetallado').mockReturnValue(null);
     const h = await servicio.tacometroHistorial(AVION);
     expect(h.proximo_servicio).toBeNull();
+  });
+});
+
+/**
+ * HITO PENDIENTE (27-oct-2026, invariante 108). Pedido del cliente: «la app
+ * marca cuánto falta para el siguiente servicio, pero cuando no se pudo
+ * hacer en tiempo y forma se brinca al siguiente; que tenga un contador
+ * negativo hasta que se marque de concluido el servicio». Caso real: XA-VGV
+ * con la orden de 2,250 PROGRAMADA y el tacómetro ya en 2,264.2 — la ficha
+ * decía «faltan 35.8 h» al hito de 2,300 como si nada.
+ */
+describe('proximo_servicio con una orden abierta ya alcanzada (hito pendiente)', () => {
+  const HOBBS_VENCIDO = 2264.2;
+
+  it('el KPI se queda en el hito de la orden con faltan_hr NEGATIVO (no brinca a 2,300)', async () => {
+    const m = await armar(
+      [ORDEN_MANUAL],
+      undefined,
+      HOBBS_VENCIDO,
+    ).aircraftMetrics(AVION);
+    expect(m.horas_actuales).toBe(2264.2);
+    expect(m.proximo_servicio).toMatchObject({
+      titulo: 'Servicio 500 hrs',
+      horas_objetivo: 2250,
+      faltan_hr: -14.2,
+      orden: { id: 'porfirio-0850', estado: 'PROGRAMADO', automatica: false },
+    });
+  });
+
+  it('sin orden abierta el programa sigue como siempre: el siguiente hito arriba del taco', async () => {
+    const m = await armar([], undefined, HOBBS_VENCIDO).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2300,
+      faltan_hr: 35.8,
+      orden: null,
+    });
+  });
+
+  it('al marcar la orden COMPLETADO el programa avanza al siguiente hito', async () => {
+    const m = await armar(
+      [
+        {
+          ...ORDEN_MANUAL,
+          estado: 'COMPLETADO',
+          fecha_realizada: '2026-10-28',
+          horas_aeronave: 2262,
+          etapa_intervalo_hr: 50,
+        },
+      ],
+      undefined,
+      HOBBS_VENCIDO,
+    ).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2300,
+      faltan_hr: 35.8,
+      orden: null,
+    });
+  });
+
+  it('la ficha de tacómetros dice EXACTAMENTE lo mismo que el KPI', async () => {
+    const s = armar([ORDEN_MANUAL], undefined, HOBBS_VENCIDO);
+    const [kpi, hist] = await Promise.all([
+      s.aircraftMetrics(AVION),
+      s.tacometroHistorial(AVION),
+    ]);
+    expect(hist.proximo_servicio).toMatchObject({
+      a_las: 2250,
+      intervalo: 50,
+      faltan: -14.2,
+      nombre: 'Servicio 500 hrs',
+    });
+    expect(hist.proximo_servicio?.orden).toEqual(kpi.proximo_servicio?.orden);
+  });
+
+  it('un overhaul de componente con horas programadas no sostiene el programa del avión', async () => {
+    const m = await armar(
+      [{ ...ORDEN_MANUAL, motor_id: 'motor-1' }],
+      undefined,
+      HOBBS_VENCIDO,
+    ).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2300,
+      orden: null,
+    });
   });
 });

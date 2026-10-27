@@ -50,6 +50,7 @@ import { combustibleAeronaveDisponible } from '../../common/combustible-disponib
 import { COMBUSTIBLE_DEFAULT } from '../../common/combustible.util';
 import {
   MANT_HITO_COLS,
+  hitoPendienteDeOrden,
   ordenAbiertaDelHito,
   type MantenimientoHitoRow,
 } from '../../common/servicio-hito.util';
@@ -93,12 +94,13 @@ const ETAPA_COLS = 'id, intervalo_hr, nombre, tareas';
 
 /**
  * Columnas de `mantenimiento` que necesita el bloque `servicio` del listado:
- * las del dedupe del hito (`MANT_HITO_COLS`, para la orden abierta) más las
- * del ÚLTIMO servicio — `descripcion` cuando la fila no trae etapa, y
- * `motor_id`/`helice_id` para dejar FUERA los overhauls de componente (ese
- * taller es del motor, no de la célula).
+ * las del dedupe del hito (`MANT_HITO_COLS`, para la orden abierta y el hito
+ * pendiente; desde el 27-oct-2026 ya trae `motor_id`/`helice_id`, que dejan
+ * FUERA los overhauls de componente —ese taller es del motor, no de la
+ * célula—) más las del ÚLTIMO servicio: `descripcion` cuando la fila no trae
+ * etapa.
  */
-const MANT_SERVICIO_COLS = `${MANT_HITO_COLS}, aeronave_id, descripcion, motor_id, helice_id`;
+const MANT_SERVICIO_COLS = `${MANT_HITO_COLS}, aeronave_id, descripcion`;
 
 const SEGURO_COLS =
   'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
@@ -436,11 +438,15 @@ export class AircraftService {
       this.etapasDeServicio(id),
       this.avisoAutomaticoServicio(),
     ]);
+    // Con los mantenimientos (invariante 108, 27-oct-2026): una orden ABIERTA
+    // cuyo hito ya se alcanzó SOSTIENE el próximo servicio (`faltan_hr`
+    // negativo) hasta que se marque COMPLETADO — el programa no brinca.
     const prox = this.proximoServicioDetallado(
       intervalos,
       baseServicio,
       maxHobbs ?? 0,
       etapasServicio,
+      mantenimientos,
     );
 
     return {
@@ -690,11 +696,14 @@ export class AircraftService {
       })),
     ];
 
+    // MISMA fuente que el KPI, con las mismas órdenes (invariante 108): el
+    // hito pendiente de una orden abierta se ve igual en las dos vistas.
     const proxHistorial = this.proximoServicioDetallado(
       intervalos,
       base,
       horasActuales,
       etapas,
+      mantsRes.data ?? [],
     );
 
     return {
@@ -838,6 +847,15 @@ export class AircraftService {
    * Próximo servicio ENRIQUECIDO con las tareas de la(s) etapa(s) que caen en
    * ese hito. Regla del mecánico: en hitos coincidentes el servicio mayor
    * incluye a los menores — las tareas se UNEN (menor→mayor, sin duplicados).
+   *
+   * Con `mantenimientos` (invariante 108, 27-oct-2026) manda primero el HITO
+   * PENDIENTE: una orden ABIERTA del avión cuyo hito ya se alcanzó sostiene
+   * el próximo servicio —`faltan` NEGATIVO («vencido por 14.2 h»)— hasta que
+   * se marque COMPLETADO; solo sin orden abierta alcanzada se recorre el
+   * programa cíclico como siempre. La regla es `hitoPendienteDeOrden`
+   * (`servicio-hito.util`, PURO): ficha, listado y programa automático la
+   * leen de ahí. Sin el parámetro (llamadas que no tienen las órdenes a la
+   * mano) el comportamiento es el histórico.
    */
   proximoServicioDetallado(
     intervalos: number[],
@@ -848,10 +866,25 @@ export class AircraftService {
       nombre: string | null;
       tareas: string[];
     }>,
+    mantenimientos?: readonly MantenimientoHitoRow[],
   ) {
+    const r1 = (n: number) => Number(n.toFixed(1));
+    const pendiente = mantenimientos
+      ? hitoPendienteDeOrden({ mantenimientos, intervalos, base, horas })
+      : null;
+    if (pendiente) {
+      return this.detallarHito(
+        {
+          a_las: pendiente.a_las,
+          intervalo: pendiente.intervalo,
+          faltan: r1(pendiente.a_las - horas),
+        },
+        pendiente.etapas_incluidas,
+        etapas,
+      );
+    }
     const prox = this.proximoServicio(intervalos, base, horas);
     if (!prox) return null;
-    const r1 = (n: number) => Number(n.toFixed(1));
     const ints = [
       ...new Set(
         intervalos.map(Number).filter((n) => Number.isFinite(n) && n > 0),
@@ -865,6 +898,20 @@ export class AircraftService {
         return Math.abs(r1(base + int * pasos) - prox.a_las) <= 0.05;
       })
       .sort((a, b) => a - b);
+    return this.detallarHito(prox, incluidos, etapas);
+  }
+
+  /** Nombre y checklist del hito: la etapa del intervalo ganador da el nombre
+   *  y las tareas de TODAS las etapas incluidas se unen (menor→mayor). */
+  private detallarHito(
+    prox: { a_las: number; intervalo: number; faltan: number },
+    incluidos: number[],
+    etapas: Array<{
+      intervalo_hr: number;
+      nombre: string | null;
+      tareas: string[];
+    }>,
+  ) {
     const tareas: string[] = [];
     for (const int of incluidos) {
       const etapa = etapas.find((e) => Math.abs(e.intervalo_hr - int) <= 0.05);
@@ -1294,8 +1341,14 @@ export class AircraftService {
           etapas: etapasPorAvion.get(a.id as string) ?? [],
           mantenimientos: mantPorAvion.get(a.id as string) ?? [],
           avisoAutomatico,
-          proximo: (intervalos, base, horas, etapas) =>
-            this.proximoServicioDetallado(intervalos, base, horas, etapas),
+          proximo: (intervalos, base, horas, etapas, mants) =>
+            this.proximoServicioDetallado(
+              intervalos,
+              base,
+              horas,
+              etapas,
+              mants,
+            ),
         });
         const apt = aptitud.get(a.id as string);
         a.apto = apt?.apto ?? true;

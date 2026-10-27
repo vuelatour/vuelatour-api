@@ -31,6 +31,7 @@
  */
 
 import {
+  esServicioDelAvion,
   ordenAbiertaDelHito,
   type MantenimientoHitoRow,
   type OrdenServicio,
@@ -88,13 +89,16 @@ export interface ServicioFlota {
 
 /**
  * La MISMA firma de `AircraftService.proximoServicioDetallado`. Se inyecta
- * para que el listado no pueda calcular el hito por su cuenta.
+ * para que el listado no pueda calcular el hito por su cuenta. Las órdenes
+ * viajan como 5.º argumento (invariante 108): una orden ABIERTA ya alcanzada
+ * sostiene el hito con `faltan` negativo hasta que se marque COMPLETADO.
  */
 export type ProximoServicioFn = (
   intervalos: number[],
   base: number,
   horas: number,
   etapas: EtapaServicioFila[],
+  mantenimientos: readonly MantenimientoHitoRow[],
 ) => {
   a_las: number;
   intervalo: number;
@@ -143,7 +147,8 @@ function etiquetaDeDescripcion(desc: unknown): string | null {
  * pondría en el pizarrón un «último servicio» que nadie hizo.
  */
 function esDelAvion(m: MantenimientoServicioRow): boolean {
-  return m.motor_id == null && m.helice_id == null;
+  // Misma regla que el hito pendiente (`servicio-hito.util`).
+  return esServicioDelAvion(m);
 }
 
 /** ¿Ya se hizo? (`estado` llegó después que las filas legadas: cuenta
@@ -224,10 +229,11 @@ export function ultimoServicioDe(
  * `maxHobbs ?? 0`), y el panel muestra «Tact. Actual —» al lado, así que no
  * puede leerse como «le faltan N horas» de verdad.
  *
- * `faltan_hr` viaja TAL CUAL sale de la fuente única: si algún día el hito
- * queda por debajo del tacómetro, el número debe salir NEGATIVO (el pizarrón
- * escribe «−30» en rojo). Recortarlo a 0 convertiría un servicio VENCIDO en
- * «justo a tiempo», que es el error más caro posible en esta tabla.
+ * `faltan_hr` viaja TAL CUAL sale de la fuente única: cuando el hito queda
+ * por debajo del tacómetro —una orden ABIERTA ya alcanzada lo sostiene hasta
+ * que se marque COMPLETADO, invariante 108— el número sale NEGATIVO (el
+ * pizarrón escribe «−30» en rojo). Recortarlo a 0 convertiría un servicio
+ * VENCIDO en «justo a tiempo», que es el error más caro posible en esta tabla.
  */
 export function armarServicioFila(args: {
   intervalos: unknown;
@@ -243,7 +249,13 @@ export function armarServicioFila(args: {
 
   const base = num(args.base) ?? 0;
   const etapas = [...args.etapas];
-  const prox = args.proximo(intervalos, base, args.ultimoTaco ?? 0, etapas);
+  const prox = args.proximo(
+    intervalos,
+    base,
+    args.ultimoTaco ?? 0,
+    etapas,
+    args.mantenimientos,
+  );
 
   return {
     ultimo: ultimoServicioDe(args.mantenimientos, base, etapas),

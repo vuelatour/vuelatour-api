@@ -19,6 +19,7 @@ import {
   MANT_HITO_COLS,
   NOTA_SERVICIO_AUTOMATICO,
   hitoYaTieneOrden,
+  type MantenimientoHitoRow,
 } from '../../common/servicio-hito.util';
 import {
   diagnosticoGrupo,
@@ -1334,20 +1335,30 @@ export class AlertsService {
     try {
       const hobbs = await this.hobbsDeAvion(aeronaveId, hobbsCache);
       if (hobbs <= 0) return;
-      const prox = this.aircraft.proximoServicioDetallado(
-        avion.servicio_intervalos ?? [],
-        Number(avion.servicio_horas_base ?? 0),
-        hobbs,
-        etapas,
-      );
-      if (!prox || prox.faltan > umbralHoras) return;
-
+      // Las órdenes se leen ANTES de calcular el hito (invariante 108,
+      // 27-oct-2026): una orden ABIERTA ya alcanzada sostiene el próximo
+      // servicio con `faltan` negativo, y el programa automático NO crea la
+      // del siguiente hito mientras esa siga sin marcarse COMPLETADO. Es la
+      // misma lectura que usa el dedupe de abajo (ficha, listado y programa
+      // deciden con los mismos datos).
       const { data: mantsHito, error: mhErr } = await this.supabase.service
         .from('mantenimiento')
         .select(MANT_HITO_COLS)
         .eq('aeronave_id', aeronaveId);
       if (mhErr) throw new Error(mhErr.message);
-      const yaExiste = hitoYaTieneOrden(mantsHito ?? [], prox);
+      const mants = (mantsHito ?? []) as unknown as MantenimientoHitoRow[];
+      const prox = this.aircraft.proximoServicioDetallado(
+        avion.servicio_intervalos ?? [],
+        Number(avion.servicio_horas_base ?? 0),
+        hobbs,
+        etapas,
+        mants,
+      );
+      if (!prox || prox.faltan > umbralHoras) return;
+      // Vencido = el hito ya quedó atrás y su orden sigue abierta.
+      const vencido = prox.faltan < 0;
+      const vencidoHr = Number(Math.abs(prox.faltan).toFixed(1));
+      const yaExiste = hitoYaTieneOrden(mants, prox);
 
       let mantenimientoId: string | null = null;
       if (!yaExiste) {
@@ -1361,7 +1372,9 @@ export class AlertsService {
             descripcion: nombreServicio,
             horas_programadas: prox.a_las,
             etapa_intervalo_hr: prox.intervalo,
-            notas: `${NOTA_SERVICIO_AUTOMATICO} por el programa de servicio: faltan ${prox.faltan} h para el hito de ${prox.a_las} h (tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`,
+            notas: vencido
+              ? `${NOTA_SERVICIO_AUTOMATICO} por el programa de servicio: el hito de ${prox.a_las} h ya se alcanzó (vencido por ${vencidoHr} h, tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`
+              : `${NOTA_SERVICIO_AUTOMATICO} por el programa de servicio: faltan ${prox.faltan} h para el hito de ${prox.a_las} h (tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`,
           })
           .select('id')
           .single();
@@ -1394,8 +1407,12 @@ export class AlertsService {
         `servicio:${aeronaveId}:${prox.a_las}:${mes}`,
         {
           tipo: 'mantenimiento_programado',
-          titulo: `Servicio por horas cerca: ${avion.matricula}`,
-          cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
+          titulo: vencido
+            ? `Servicio por horas VENCIDO: ${avion.matricula}`
+            : `Servicio por horas cerca: ${avion.matricula}`,
+          cuerpo: vencido
+            ? `El servicio de ${prox.intervalo} hrs (a las ${prox.a_las}) está vencido por ${vencidoHr} hrs. Tacómetro actual: ${hobbs}.${tareasTxt} Su orden sigue abierta: al terminar el servicio márcala como COMPLETADA para que el programa pase al siguiente hito.`
+            : `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
           data: {
             aeronave_id: aeronaveId,
             a_las: prox.a_las,

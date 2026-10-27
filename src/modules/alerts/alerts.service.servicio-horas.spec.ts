@@ -334,6 +334,61 @@ describe('revisarServicioDeAvion — hook inmediato al capturar tacómetro', () 
     expect(mantsCreados(inserts)).toHaveLength(0);
   });
 
+  it('HITO PENDIENTE (inv. 108): con la orden de 2,250 abierta y el taco en 2,264.2 NO se crea la de 2,300 y el aviso dice VENCIDO', async () => {
+    // Pedido del cliente (27-oct-2026): el programa no brinca al siguiente
+    // servicio mientras la orden alcanzada no se marque COMPLETADO.
+    const { alerts, inserts, notifyRole } = armar({
+      tacos: [2264.2],
+      mantenimientos: [
+        {
+          id: 'porfirio-0850',
+          estado: 'PROGRAMADO',
+          horas_programadas: 2250,
+          etapa_intervalo_hr: null,
+          fecha_realizada: null,
+          fecha_programada: '2026-10-23',
+          horas_aeronave: null,
+          notas: null,
+        },
+      ],
+    });
+    await alerts.revisarServicioDeAvion(AVION);
+    expect(mantsCreados(inserts)).toHaveLength(0);
+    expect(notifyRole).toHaveBeenCalled();
+    const notif = notifyRole.mock.calls[0][1] as unknown as {
+      titulo: string;
+      cuerpo: string;
+    };
+    expect(notif.titulo).toBe('Servicio por horas VENCIDO: XA-VGV');
+    expect(notif.cuerpo).toContain('vencido por 14.2 hrs');
+    expect(notif.cuerpo).toContain('a las 2250');
+    expect(notif.cuerpo).toContain('Tacómetro actual: 2264.2');
+    expect(notif.cuerpo).toContain('COMPLETADA');
+  });
+
+  it('al marcar esa orden COMPLETADO el programa avanza: a 2,292 h se crea la orden de 2,300', async () => {
+    const { alerts, inserts } = armar({
+      tacos: [2292],
+      mantenimientos: [
+        {
+          id: 'porfirio-0850',
+          estado: 'COMPLETADO',
+          horas_programadas: 2250,
+          etapa_intervalo_hr: null,
+          fecha_realizada: '2026-10-28',
+          fecha_programada: '2026-10-23',
+          horas_aeronave: 2270,
+          notas: null,
+        },
+      ],
+    });
+    await alerts.revisarServicioDeAvion(AVION);
+    const creados = mantsCreados(inserts);
+    expect(creados).toHaveLength(1);
+    expect(creados[0].valores).toMatchObject({ horas_programadas: 2300 });
+    expect(String(creados[0].valores.notas)).toContain('faltan 8 h');
+  });
+
   it('dos llamadas CONCURRENTES al mismo avión ⇒ UN solo insert', async () => {
     const { alerts, inserts } = armar({ tacos: [2240.2] });
     await Promise.all([

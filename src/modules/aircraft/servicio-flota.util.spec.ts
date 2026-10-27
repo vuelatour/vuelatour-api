@@ -34,8 +34,8 @@ const svc = new AircraftService(
   undefined as never,
   undefined as never,
 );
-const PROXIMO: ProximoServicioFn = (intervalos, base, horas, etapas) =>
-  svc.proximoServicioDetallado(intervalos, base, horas, etapas);
+const PROXIMO: ProximoServicioFn = (intervalos, base, horas, etapas, mants) =>
+  svc.proximoServicioDetallado(intervalos, base, horas, etapas, mants);
 
 const etapa = (
   intervalo_hr: number,
@@ -213,7 +213,96 @@ describe('servicio de la flota — casos REALES (prod, 22-sep-2026)', () => {
     });
   });
 
-  it('N58BT: sin servicios capturados ⇒ último = BASE del programa (y la orden de 1600 NO es la del hito 1700)', () => {
+  it('XA-VGV el 27-oct-2026: taco 2,264.2 con la orden de 2,250 PROGRAMADA ⇒ el hito NO brinca a 2,300 (vencido por 14.2 h)', () => {
+    // Pedido del cliente (invariante 108): «que tenga un contador negativo
+    // hasta que se marque de concluido el servicio». Datos reales de prod.
+    const ordenAbierta = mant({
+      id: 'af81ccf5-65b3-477d-bcbc-9ecc871d35b7',
+      estado: 'PROGRAMADO',
+      horas_programadas: '2250',
+      etapa_intervalo_hr: '500.00',
+      fecha_programada: '2026-10-23',
+      descripcion: 'Servicio de 500 hrs — Servicio 500 hrs',
+    });
+    const hechos = [
+      mant({
+        id: 'm-2162',
+        estado: 'COMPLETADO',
+        horas_aeronave: 2162.7,
+        fecha_realizada: '2026-07-10',
+        descripcion: '200 HRS',
+      }),
+      mant({
+        id: 'm-2216',
+        estado: 'COMPLETADO',
+        horas_aeronave: 2216.9,
+        horas_programadas: 2212,
+        etapa_intervalo_hr: 50,
+        fecha_realizada: '2026-08-28',
+        descripcion: '50 hrs',
+      }),
+    ];
+    const etapas = [
+      etapa(50, 'Servicio 50 hrs'),
+      etapa(100, 'Servicio 100 hrs / Anual'),
+      etapa(200, 'Servicio 200 hrs'),
+      etapa(500, 'Servicio 500 hrs'),
+    ];
+    const s = fila({
+      intervalos: [50, 100, 200, 500],
+      base: 1750,
+      ultimoTaco: 2264.2,
+      etapas,
+      mantenimientos: [...hechos, ordenAbierta],
+    });
+    expect(s?.ultimo).toMatchObject({
+      hobbs_hr: 2216.9,
+      etiqueta: 'Servicio 50 hrs',
+    });
+    expect(s?.siguiente).toEqual({
+      hobbs_hr: 2250,
+      intervalo_hr: 500,
+      etiqueta: 'Servicio 500 hrs',
+      faltan_hr: -14.2,
+      orden: {
+        id: 'af81ccf5-65b3-477d-bcbc-9ecc871d35b7',
+        estado: 'PROGRAMADO',
+        fecha_programada: '2026-10-23',
+        automatica: false,
+      },
+    });
+
+    // Al marcar esa orden COMPLETADO (entró a 2,270 el 28-oct) la lista
+    // avanza al siguiente hito del programa: 2,300 (50 hrs), faltan 35.8.
+    const cerrada = mant({
+      ...ordenAbierta,
+      estado: 'COMPLETADO',
+      horas_aeronave: 2270,
+      fecha_realizada: '2026-10-28',
+    });
+    const despues = fila({
+      intervalos: [50, 100, 200, 500],
+      base: 1750,
+      ultimoTaco: 2264.2,
+      etapas,
+      mantenimientos: [...hechos, cerrada],
+    });
+    expect(despues?.ultimo).toEqual({
+      hobbs_hr: 2270,
+      fecha: '2026-10-28',
+      etiqueta: 'Servicio 500 hrs',
+      origen: 'MANTENIMIENTO',
+    });
+    expect(despues?.siguiente).toEqual({
+      hobbs_hr: 2300,
+      intervalo_hr: 50,
+      etiqueta: 'Servicio 50 hrs',
+      faltan_hr: 35.8,
+      orden: null,
+    });
+  });
+
+  it('N58BT: sin servicios capturados ⇒ último = BASE del programa, y la orden EN_TALLER de 1600 ya alcanzada sostiene el hito (vencido por 27.2 h)', () => {
     const s = fila({
       intervalos: [100],
       base: 1500,
@@ -247,16 +336,23 @@ describe('servicio de la flota — casos REALES (prod, 22-sep-2026)', () => {
       origen: 'BASE',
     });
     // Etapa sin nombre ⇒ etiqueta genérica (igual que la ficha del avión).
+    // Hasta el 26-oct-2026 la fila decía «faltan 72.8 h» al hito de 1700 con
+    // el avión PARADO en el taller por el de 1600 (correcto y tranquilizador
+    // de más). Con el hito pendiente (invariante 108) la orden EN_TALLER ya
+    // alcanzada ES el próximo servicio, en negativo, hasta que se complete.
     expect(s?.siguiente).toEqual({
-      hobbs_hr: 1700,
+      hobbs_hr: 1600,
       intervalo_hr: 100,
       etiqueta: 'Servicio de 100 hr',
-      faltan_hr: 72.8,
-      // La orden EN_TALLER es del hito de 1600, NO del de 1700: mismo
-      // criterio que el dedupe (si la atribuyéramos, la lista diría «ya hay
-      // orden» de un servicio que nadie programó).
-      orden: null,
+      faltan_hr: -27.2,
+      orden: {
+        id: 'm-taller',
+        estado: 'EN_TALLER',
+        fecha_programada: '2026-08-13',
+        automatica: false,
+      },
     });
+    // La orden de 1800 («HSI») sigue adelante: no se alcanza todavía.
   });
 
   it('N990GG: el último servicio real viene SIN fecha_realizada ⇒ fecha null (y no se inventa)', () => {
@@ -552,18 +648,29 @@ describe('armarServicioFila', () => {
     ).toBeNull();
   });
 
-  it('el hito lo decide la FUENTE ÚNICA: el helper solo ensambla', () => {
+  it('el hito lo decide la FUENTE ÚNICA: el helper solo ensambla (y le pasa las órdenes)', () => {
     const espia = jest.fn(PROXIMO);
+    const orden = mant({
+      id: 'o-1',
+      estado: 'PROGRAMADO',
+      horas_programadas: 4500,
+    });
     fila({
       intervalos: [50, 100],
       base: 4200,
       ultimoTaco: 4458,
       etapas: [etapa(100, 'Servicio 100 hrs / Anual')],
+      mantenimientos: [orden],
       proximo: espia,
     });
     expect(espia).toHaveBeenCalledTimes(1);
-    expect(espia).toHaveBeenCalledWith([50, 100], 4200, 4458, [
-      etapa(100, 'Servicio 100 hrs / Anual'),
-    ]);
+    // Las órdenes viajan como 5.º argumento (hito pendiente, invariante 108).
+    expect(espia).toHaveBeenCalledWith(
+      [50, 100],
+      4200,
+      4458,
+      [etapa(100, 'Servicio 100 hrs / Anual')],
+      [orden],
+    );
   });
 });
