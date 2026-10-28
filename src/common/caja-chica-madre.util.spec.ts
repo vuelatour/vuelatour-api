@@ -136,8 +136,13 @@ describe('resumenCajaMadre — la caja de Mary (27-oct-2026)', () => {
     expect(r.gastos_pendientes).toEqual({ n: 11, total: 7127.5 });
     expect(r.entregas_pendientes).toEqual({ n: 2, total: 6100 });
     expect(r.otros_pendientes).toBe(0);
-    // Lo que se le pide a la empresa: gastos + entregas.
-    expect(r.por_solicitar).toBe(13227.5);
+    // Lo que salió de la caja en el tramo: gastos + entregas.
+    expect(r.salidas_pendientes).toBe(13227.5);
+  });
+
+  it('para solicitar a la empresa (regla de Mary, 28-oct-2026) = lo que debe estar en la caja − el saldo del libro', () => {
+    // 17,500 − 15,300.5: lo que falta para volver a lo que debe tener.
+    expect(r.por_solicitar).toBe(2199.5);
   });
 
   it('efectivo esperado vs el libro, y la diferencia', () => {
@@ -149,7 +154,7 @@ describe('resumenCajaMadre — la caja de Mary (27-oct-2026)', () => {
 });
 
 describe('resumenCajaMadre — casos de borde', () => {
-  it('otros movimientos del tramo: un reintegro a mano SUBE lo por solicitar y un ajuste positivo lo BAJA', () => {
+  it('otros movimientos del tramo: un reintegro a mano SUBE lo que salió y un ajuste positivo lo BAJA; por solicitar = propio − libro', () => {
     const r = resumenCajaMadre({
       montoFondo: 10000,
       historial: historial([
@@ -165,14 +170,15 @@ describe('resumenCajaMadre — casos de borde', () => {
     expect(r.gastos_pendientes).toEqual({ n: 1, total: 300 });
     expect(r.entregas_pendientes).toEqual({ n: 1, total: 400 });
     expect(r.otros_pendientes).toBe(-950);
-    expect(r.por_solicitar).toBe(1650); // 300 + 400 + 1,000 − 50
+    expect(r.salidas_pendientes).toBe(1650); // 300 + 400 + 1,000 − 50
     expect(r.efectivo_libro).toBe(8350);
     expect(r.fondo_propio).toBe(10000);
     expect(r.efectivo_esperado).toBe(8350);
     expect(r.diferencia).toBe(0); // cuadra
+    expect(r.por_solicitar).toBe(1650); // 10,000 − 8,350 (cuadra ⇒ coincide con lo que salió)
   });
 
-  it('sin fondo total (acumulada o sin fijar): lo propio, lo esperado y la diferencia van en null; lo demás sí', () => {
+  it('sin fondo total (acumulada o sin fijar): lo propio, lo esperado, lo por solicitar y la diferencia van en null; lo demás sí', () => {
     const r = resumenCajaMadre({
       montoFondo: null,
       historial: historial([
@@ -195,7 +201,8 @@ describe('resumenCajaMadre — casos de borde', () => {
     expect(r.diferencia).toBeNull();
     expect(r.asignado_colaboradores).toBe(0);
     expect(r.efectivo_colaboradores).toBe(-80);
-    expect(r.por_solicitar).toBe(120);
+    expect(r.salidas_pendientes).toBe(120);
+    expect(r.por_solicitar).toBeNull();
     expect(r.efectivo_libro).toBe(380);
     expect(montoFondoDe('0')).toBeNull();
     expect(montoFondoDe('abc')).toBeNull();
@@ -220,7 +227,8 @@ describe('resumenCajaMadre — casos de borde', () => {
       gastos_pendientes: { n: 0, total: 0 },
       entregas_pendientes: { n: 0, total: 0 },
       otros_pendientes: 0,
-      por_solicitar: 0,
+      salidas_pendientes: 0,
+      por_solicitar: 1000, // todo el fondo propio falta en la caja
       efectivo_libro: 0,
       efectivo_esperado: 1000,
       diferencia: -1000, // el fondo nunca se entregó: el libro trae 1,000 menos

@@ -10,11 +10,15 @@
  * Modelo (el de la oficina): el fondo total de la madre INCLUYE lo asignado a
  * las cajas que fondea (`monto_fondo` de cada hija). Entonces:
  *  · «debe estar en mi caja» (`fondo_propio`) = fondo total − Σ asignado;
- *  · «por solicitar a la empresa» = lo que SALIÓ de la caja desde la última
- *    reposición: gastos propios + entregas a colaboradores (espejos) ± otros
- *    movimientos (reintegros a mano, ajustes) — el tramo PENDIENTE de
+ *  · «por solicitar a la empresa» (`por_solicitar`; regla de Mary del
+ *    28-oct-2026, API 0.0.113: «la resta de los 25,500 que tiene de fondo
+ *    Mari menos el saldo actual») = fondo propio − saldo del libro; null sin
+ *    fondo total. Hasta el 0.0.112 era lo que salió del tramo (abajo);
+ *  · «salió de la caja desde la última reposición» (`salidas_pendientes`) =
+ *    gastos propios + entregas a colaboradores (espejos) ± otros movimientos
+ *    (reintegros a mano, ajustes) — el tramo PENDIENTE de
  *    `tramoDeReposicion`, el mismo del Excel «Por reponer»;
- *  · efectivo ESPERADO = fondo propio − por solicitar; efectivo SEGÚN EL LIBRO
+ *  · efectivo ESPERADO = fondo propio − salidas; efectivo SEGÚN EL LIBRO
  *    = el saldo corrido de siempre (`historialConSaldo`). Si difieren, la
  *    diferencia se DICE (faltan entradas por registrar, o un fondo asignado
  *    no es el real; una entrega inicial a un colaborador que siga en el tramo
@@ -71,11 +75,21 @@ export interface ResumenCajaMadre {
   entregas_pendientes: ConteoMonto;
   /** Otros movimientos del tramo pendiente, con signo (reintegro a mano −, ajuste ±). */
   otros_pendientes: number;
-  /** Lo que salió de la caja desde la última reposición = gastos + entregas − otros. */
-  por_solicitar: number;
+  /**
+   * Lo que salió de la caja desde la última reposición = gastos + entregas −
+   * otros (ADITIVA, 28-oct-2026, API 0.0.113: hasta el 0.0.112 viajaba como
+   * `por_solicitar`). Base del efectivo esperado.
+   */
+  salidas_pendientes: number;
+  /**
+   * Para solicitar a la empresa = fondo propio − saldo del libro (regla de
+   * Mary, 28-oct-2026, API 0.0.113); null sin fondo total. Negativo = el
+   * saldo supera lo que debe estar en la caja.
+   */
+  por_solicitar: number | null;
   /** Saldo del libro hoy (última fila; 0 sin libro). */
   efectivo_libro: number;
-  /** fondo propio − por solicitar (null sin fondo total). */
+  /** fondo propio − salidas pendientes (null sin fondo total). */
   efectivo_esperado: number | null;
   /** efectivo según el libro − esperado (null sin fondo total). */
   diferencia: number | null;
@@ -143,11 +157,14 @@ export function resumenCajaMadre<T extends EntradaTramoLike>(args: {
       .filter((e) => !args.esEspejo(e.id))
       .reduce((s, e) => s + e.monto, 0),
   );
-  const porSolicitar = round2(gastos.total + entregas.total - otros);
+  const salidas = round2(gastos.total + entregas.total - otros);
   const ultima = args.historial[args.historial.length - 1];
   const efectivoLibro = ultima ? round2(ultima.saldo) : 0;
-  const esperado =
-    fondoPropio != null ? round2(fondoPropio - porSolicitar) : null;
+  const esperado = fondoPropio != null ? round2(fondoPropio - salidas) : null;
+  // Regla de Mary (28-oct-2026): lo que pide a la empresa es lo que falta en
+  // su caja para volver a lo que debe tener — no lo que salió en el tramo.
+  const porSolicitar =
+    fondoPropio != null ? round2(fondoPropio - efectivoLibro) : null;
   return {
     fondo_total: fondoTotal,
     cajas: args.hijas.length,
@@ -159,6 +176,7 @@ export function resumenCajaMadre<T extends EntradaTramoLike>(args: {
     gastos_pendientes: gastos,
     entregas_pendientes: entregas,
     otros_pendientes: otros,
+    salidas_pendientes: salidas,
     por_solicitar: porSolicitar,
     efectivo_libro: efectivoLibro,
     efectivo_esperado: esperado,

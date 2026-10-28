@@ -12090,12 +12090,24 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `gastos_pendientes_colaboradores`, `gastos_pendientes` (propios del
       tramo pendiente), `entregas_pendientes` (ESPEJOS del tramo, en
       positivo), `otros_pendientes` (reintegros a mano / ajustes, con
-      signo), `por_solicitar` = gastos + entregas − otros (lo que salió de
-      la caja desde la última reposición = total_gastos − total_otros del
-      tramo), `efectivo_libro` (última fila), `efectivo_esperado` = propio −
-      por solicitar y `diferencia` = libro − esperado (null sin fondo
-      total). NINGUNA fórmula nueva de dinero: solo sumas de filas que ya
-      existen; `saldo`, `por_reponer` y el Excel no cambian.
+      signo), `salidas_pendientes` = gastos + entregas − otros (lo que
+      salió de la caja desde la última reposición = total_gastos −
+      total_otros del tramo; hasta el 0.0.112 viajaba como
+      `por_solicitar`), `por_solicitar` = propio − `efectivo_libro`
+      (**regla de Mary del 28-oct-2026, API 0.0.113**: «en el apartado de
+      solicitar a la empresa debe ir $7,220.00, que es la resta de los
+      25,500 que tiene de fondo Mari menos el saldo actual»; null sin fondo
+      total; negativo = el saldo supera lo que debe estar en la caja),
+      `efectivo_libro` (última fila), `efectivo_esperado` = propio −
+      salidas y `diferencia` = libro − esperado (null sin fondo total).
+      NINGUNA fórmula nueva de dinero: solo sumas y restas de cifras que ya
+      existen; `saldo`, `por_reponer` y el Excel no cambian. Panel
+      (28-oct-2026): en la caja MADRE las tarjetas «Fondo total» y «Por
+      reponer» de arriba se quitan (pedido con la captura: «esto lo pueden
+      quitar»; «Editar» del fondo pasa a la cifra «Fondo total» de la card)
+      y la cifra «Para solicitar a la empresa» usa `por_solicitar`; «Mi caja
+      hoy» lista «Salió de la caja desde la última reposición»
+      (`salidas_pendientes`).
     - **Lectura del 27-oct en prod** (Mary, fondo $40,000; seis hijas por
       $22,500): libro −$128.56, 11 gastos propios $7,127.50 + 2 entregas
       $6,100 desde la reposición del 13-oct ⇒ por solicitar $13,227.50,
@@ -13053,6 +13065,13 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **DESPLIEGUE DEL 0.0.113 (28-oct-2026; invariante 109, regla de Mary
+  para «Para solicitar a la empresa» de la caja madre).** Sin migración.
+  Orden: API ⇒ panel (el panel lee `salidas_pendientes` para saber que
+  `por_solicitar` ya es propio − saldo; con un API previo pinta la nota
+  vieja). `GET /v1/version` = 0.0.113. Prod (Mary, 28-oct): propio $25,500
+  − saldo $18,280 = $7,220.00 por solicitar (antes −$5,181.06 del tramo).
 
 - **DESPLIEGUE DEL 0.0.112 (27-oct-2026; invariante 112, vuelos con
   aviones externos en el bloque «VUELATOUR (empresa)» del Balance

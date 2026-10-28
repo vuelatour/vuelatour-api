@@ -502,7 +502,9 @@ describe('CajaChicaService.getFondoDetail — `cajas_fondeadas` (invariante 83)'
       gastos_pendientes: { n: 0, total: 0 },
       entregas_pendientes: { n: 3, total: 3800 },
       otros_pendientes: -1000,
-      por_solicitar: 4800,
+      salidas_pendientes: 4800,
+      // Regla de Mary (28-oct-2026, 0.0.113): propio 48,000 − libro 45,200.
+      por_solicitar: 2800,
       efectivo_libro: 45200,
       efectivo_esperado: 43200,
       // La entrega del fondo de Jimmy sigue en el tramo pendiente: el libro
