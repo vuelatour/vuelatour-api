@@ -251,7 +251,7 @@ export class ExpensesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Crea los gastos de pista confirmados (origen SISTEMA, un gasto por aterrizaje, SIN_COMPROBANTE hasta amarrar la factura).',
+      'Crea los gastos de pista confirmados (origen SISTEMA, un gasto por aterrizaje, SIN_COMPROBANTE hasta amarrar la factura). Opcionales del lote (invariante 114): `factura_folio` ⇒ «Factura NNNN» en la primera línea de las notas de cada gasto (nunca folio_ticket); `fecha_pago` (YYYY-MM-DD) ⇒ fecha_gasto de cada gasto en lugar de la del aterrizaje (futura ⇒ por pagar).',
   })
   generarPistas(
     @Body() dto: GenerarPistasDto,

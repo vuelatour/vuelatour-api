@@ -970,3 +970,88 @@ describe('ExpensesService — SIN la migración 20261019000001 (0.0.94 byte a by
     expect(soloSonda(registro)).toEqual([]);
   });
 });
+
+describe('ExpensesService.generarPistas — número de factura y fecha de pago del lote (2-nov-2026, invariante 114)', () => {
+  const escala = (id: string, fechaSalidaPlan: string): Fila => ({
+    id,
+    vuelo_id: 'v-1',
+    destino_iata: 'MID',
+    hora_llegada: null,
+    fecha_salida_plan: fechaSalidaPlan,
+    aeronave_id: 'av-1',
+    vuelo: { aeronave_id: 'av-1' },
+  });
+  const lote = (extra: Record<string, unknown>, ...ids: string[]) =>
+    ({
+      items: ids.map((escala_id) => ({ escala_id, monto: 1200 })),
+      ...extra,
+    }) as never;
+
+  it('la factura va en la PRIMERA línea de las notas de CADA gasto (nunca en folio_ticket) y la fecha de pago es la fecha_gasto', async () => {
+    const { service, f } = armar();
+    f.tablas.escala = [
+      escala('e-1', '2026-10-10T15:00:00Z'),
+      escala('e-2', '2026-10-25T15:00:00Z'),
+    ];
+    const r = await service.generarPistas(
+      lote({ factura_folio: ' 7360 ', fecha_pago: '2026-10-18' }, 'e-1', 'e-2'),
+      ADMIN,
+    );
+    expect(r.creados).toBe(2);
+    const filas = altas(f);
+    expect(filas).toHaveLength(2);
+    for (const { valores } of filas) {
+      expect(valores.fecha_gasto).toBe('2026-10-18');
+      expect(String(valores.notas)).toBe(
+        'Factura 7360\nCuota de aterrizaje MID',
+      );
+      expect('folio_ticket' in valores).toBe(false);
+      // 18-oct ≤ hoy (19-oct): pagado, aunque el aterrizaje e-2 sea futuro.
+      expect('por_pagar' in valores).toBe(false);
+    }
+  });
+
+  it('fecha de pago FUTURA ⇒ por pagar con esa fecha; sin factura ni fecha ⇒ como siempre', async () => {
+    const { service, f } = armar();
+    f.tablas.escala = [escala('e-1', '2026-10-10T15:00:00Z')];
+    await service.generarPistas(
+      lote({ fecha_pago: '2026-10-25' }, 'e-1'),
+      ADMIN,
+    );
+    expect(altas(f)[0].valores).toMatchObject({
+      fecha_gasto: '2026-10-25',
+      por_pagar: true,
+      notas: 'Cuota de aterrizaje MID',
+    });
+
+    const { service: s2, f: f2 } = armar();
+    f2.tablas.escala = [escala('e-1', '2026-10-10T15:00:00Z')];
+    await s2.generarPistas(lote({}, 'e-1'), ADMIN);
+    expect(altas(f2)[0].valores).toMatchObject({
+      fecha_gasto: '2026-10-10',
+      notas: 'Cuota de aterrizaje MID',
+    });
+    expect('por_pagar' in altas(f2)[0].valores).toBe(false);
+  });
+
+  it('las notas propias del renglón conservan la factura delante', async () => {
+    const { service, f } = armar();
+    f.tablas.escala = [escala('e-1', '2026-10-10T15:00:00Z')];
+    await service.generarPistas(
+      {
+        items: [
+          {
+            escala_id: 'e-1',
+            monto: 1200,
+            notas: 'Cuota MID · vuelo #364 · N4142R',
+          },
+        ],
+        factura_folio: 'fact vip 7360',
+      },
+      ADMIN,
+    );
+    expect(altas(f)[0].valores.notas).toBe(
+      'fact vip 7360\nCuota MID · vuelo #364 · N4142R',
+    );
+  });
+});

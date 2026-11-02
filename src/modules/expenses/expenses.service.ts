@@ -205,6 +205,7 @@ import {
   folioTicketDeLectura,
   normalizarFolio,
 } from './folio-ticket.util';
+import { notasConFactura } from './pistas-generar.util';
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
@@ -1936,6 +1937,10 @@ export class ExpensesService {
     // sonda se consulta solo si algún renglón es futuro (null = sin sondear).
     const hoyPistas = hoyCancun();
     let conPorPagar: boolean | null = null;
+    // Fecha de pago del lote (2-nov-2026, invariante 114): sustituye a la
+    // fecha del aterrizaje como fecha_gasto (la fecha del gasto es la del
+    // pago, invariante 93); futura ⇒ por pagar por la misma regla de abajo.
+    const fechaPago = dto.fecha_pago ?? null;
     for (const item of dto.items) {
       const { data: esc } = await this.supabase.service
         .from('escala')
@@ -1989,9 +1994,11 @@ export class ExpensesService {
       const fechaIso = (esc.hora_llegada ?? esc.fecha_salida_plan) as
         | string
         | null;
-      const fechaGastoPista = fechaIso
-        ? this.cancunDate(fechaIso)
-        : this.cancunDate(new Date().toISOString());
+      const fechaGastoPista =
+        fechaPago ??
+        (fechaIso
+          ? this.cancunDate(fechaIso)
+          : this.cancunDate(new Date().toISOString()));
       let porPagarPista = false;
       if (fechaGastoPista > hoyPistas) {
         conPorPagar ??= await porPagarDisponible(this.supabase.service);
@@ -2050,8 +2057,12 @@ export class ExpensesService {
           // Por pagar (invariante 93): la llave SOLO viaja en `true` (con la
           // migración); una cuota de hoy o de antes deja el default.
           ...(porPagarPista ? { por_pagar: true } : {}),
-          notas:
+          // La factura del lote (si se capturó) va en la PRIMERA línea de
+          // las notas: una factura ↔ varios gastos (invariante 114).
+          notas: notasConFactura(
+            dto.factura_folio,
             item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
+          ),
           // Gasto fabricado por oficina: capturado = ahora (sin DEFAULT en BD).
           capturado_en: capturadoAhora(),
           created_by: userId,

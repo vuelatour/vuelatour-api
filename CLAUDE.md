@@ -12399,6 +12399,32 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de escrituras, ligas, renumeración, notas, estado, rechazos sin
       escrituras, PILOTO).
 
+114. **«PISTAS POR PAGAR»: NÚMERO DE FACTURA Y FECHA DE PAGO DEL LOTE
+    (2-nov-2026, API 0.0.115, SIN migración).** Pedido de la oficina: «una
+    casilla para deseleccionar todas las pistas marcadas y aparte un cuadro
+    donde pueda poner número de factura y fecha de pago». `POST
+    /expenses/pistas/generar` acepta, además de `items[]`, dos opcionales
+    del LOTE:
+    - `factura_folio` (≤ 40): queda como **«Factura NNNN» en la PRIMERA
+      línea de las notas de CADA gasto** (`pistas-generar.util#
+      notasConFactura`; si ya empieza con fact/factura/prefactura se respeta
+      tal cual). NUNCA en `folio_ticket`: una factura de VIP SAESA ampara
+      varios aterrizajes y `uq_gasto_folio_ticket_norm` es único (el 2.º
+      rebotaría con 409). Es la regla de la oficina para «una factura ↔
+      varios gastos» y Conciliación la lee (`numerosDeGasto`: el spec lo
+      comprueba). El CFDI se amarra después en Facturas recibidas; el
+      semáforo de facturación no se toca.
+    - `fecha_pago` (YYYY-MM-DD, Cancún): es la `fecha_gasto` de cada gasto
+      en lugar de la del aterrizaje (la fecha del gasto es la del pago,
+      invariante 93); con fecha futura la cuota nace «por pagar» por la
+      regla P11 de siempre. El candado de mes sigue por el eje VUELO.
+    - Sin ninguno de los dos: byte a byte lo de siempre. Panel: casilla del
+      encabezado «Marcar todas / Desmarcar todas» (con alguna marcada,
+      desmarca) y el cuadro «Factura y pago» del lote.
+    - Specs: `pistas-generar.util.spec` (línea, recorte, lectura por
+      Conciliación) y el bloque «número de factura y fecha de pago del lote»
+      de `expenses.service.por-pagar.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

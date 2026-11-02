@@ -756,6 +756,25 @@ export class GenerarPistasDto {
   @ValidateNested({ each: true })
   @Type(() => GenerarPistaItemDto)
   items!: GenerarPistaItemDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Número de la factura de VIP SAESA que ampara estos aterrizajes (2-nov-2026, invariante 114). Queda como «Factura NNNN» en la PRIMERA línea de las notas de cada gasto (la regla de la oficina para una factura ↔ varios gastos; Conciliación la lee), NUNCA en folio_ticket (único en la BD). El CFDI se amarra después en Facturas recibidas.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  factura_folio?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Fecha en que se pagó la factura (YYYY-MM-DD, día Cancún): queda como fecha_gasto de cada gasto en lugar de la del aterrizaje (la fecha del gasto es la del pago, invariante 93); futura ⇒ por pagar. Vacía = la del aterrizaje, como siempre.',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'fecha_pago debe ser una fecha YYYY-MM-DD',
+  })
+  fecha_pago?: string;
 }
 
 export class CreateTarifaAerodromoDto {
