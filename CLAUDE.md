@@ -12425,6 +12425,47 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Conciliación) y el bloque «número de factura y fecha de pago del lote»
       de `expenses.service.por-pagar.spec`.
 
+115. **FACTURACIÓN DEL GASTO: «NO OBTENIDA / NO EMITIDA» CON MOTIVO
+    (2-nov-2026, API 0.0.116, migración `20261102000001` por SQL Editor).**
+    Pedido de la oficina: «agregar la opción "no obtenida o no emitida" y
+    que se pueda agregar una nota o el motivo por el cual no se pudo obtener
+    esa factura». Quinto valor de `gasto.estatus_facturacion`
+    (`NO_OBTENIDA` 🟣, CHECK re-creado buscándolo por su definición, como en
+    la 20260914000002) + columna `gasto.facturacion_nota` (text 1..500;
+    CHECK: obligatoria con NO_OBTENIDA) + trigger `gasto_sync_facturacion`
+    (el amarre de una factura recibida pasa a FACTURADA también desde
+    NO_OBTENIDA; el desamarre sigue regresando a PENDIENTE solo desde
+    FACTURADA). Sin backfill.
+    - **Semántica** (`common/facturacion-gasto.util`): NO_OBTENIDA no está
+      «por facturar» (`ESTATUS_POR_FACTURAR` sigue = pendiente + solicitada;
+      el filtro `NO_FACTURADA` la deja fuera) y `cuentaComoSinFacturar` la
+      excluye del pre-cierre (no hay nada que perseguir), pero NO es «no
+      requiere»: `cuboFacturacionEfectivo` (fuente única del reporte de
+      EFECTIVOS del Excel) la pone en su propio cubo «no obtenida» (cuatro
+      cubos: facturado / POR FACTURAR / no facturable / no obtenida).
+    - **Motivo** (`prepararNotaFacturacion`, alta y PATCH): obligatorio al
+      marcar NO_OBTENIDA (400 `FACTURACION_NOTA_REQUERIDA`; reafirmar el
+      estatus sin nota conserva la vigente), se recorta a 500, y cambiar a
+      otro estatus desde el API lo pone en null salvo nota explícita; el
+      amarre por trigger lo deja como historial. `facturacion_nota: null`
+      en el DTO = borrar.
+    - **Sonda** `common/facturacion-nota-disponible.util#
+      facturacionNotaDisponible` (columna `facturacion_nota`). REGLA DURA:
+      todo select/insert/update que la nombre va detrás (`colsOpcionales`).
+      Sin la migración: pedir NO_OBTENIDA o mandar una nota ⇒ 400
+      `NO_OBTENIDA_NO_DISPONIBLE` («Esta opción necesita la migración
+      20261102000001; mientras, usa Pendiente.»); otro estatus no nombra la
+      columna. `mensajeEstatusSinMigracion` generaliza el 23514 de
+      NO_FACTURABLE a los dos valores.
+    - **Panel**: en el menú del semáforo, «No obtenida / no emitida» abre un
+      diálogo que pide el motivo; el pill muestra el motivo en el title. Los
+      selectores de alta/verificación NO ofrecen NO_OBTENIDA (sin campo de
+      motivo ahí). App: no pinta este semáforo.
+    - Specs: `facturacion-gasto.util.spec` (etiqueta, cubos, pre-cierre,
+      filtro, mensajes) y el bloque «No obtenida» de
+      `expenses.service.por-pagar.spec` (motivo obligatorio, recorte,
+      limpieza, alta, sin migración).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

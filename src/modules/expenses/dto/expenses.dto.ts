@@ -33,6 +33,7 @@ import {
   MaxLength,
   Min,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 
 export enum CategoriaGasto {
@@ -238,6 +239,8 @@ export enum EstatusFacturacion {
   SOLICITADA = 'SOLICITADA',
   FACTURADA = 'FACTURADA',
   NO_FACTURABLE = 'NO_FACTURABLE',
+  /** 2-nov-2026 (invariante 115): no emitida / no obtenida; motivo obligatorio. */
+  NO_OBTENIDA = 'NO_OBTENIDA',
 }
 
 /**
@@ -491,11 +494,21 @@ export class CreateGastoDto {
   @ApiPropertyOptional({
     enum: EstatusFacturacion,
     description:
-      'Semáforo de facturación de oficina: PENDIENTE · SOLICITADA · FACTURADA · NO_FACTURABLE (no requiere factura; necesita la migración 20260914000002).',
+      'Semáforo de facturación de oficina: PENDIENTE · SOLICITADA · FACTURADA · NO_FACTURABLE (no requiere factura; necesita la migración 20260914000002) · NO_OBTENIDA (2-nov-2026, invariante 115: el proveedor no la emitió; exige facturacion_nota y la migración 20261102000001).',
   })
   @IsOptional()
   @IsEnum(EstatusFacturacion)
   estatus_facturacion?: EstatusFacturacion;
+
+  @ApiPropertyOptional({
+    description:
+      'Motivo por el que la factura NO se obtuvo (2-nov-2026, invariante 115). OBLIGATORIO al marcar NO_OBTENIDA (1..500); en el PATCH, cambiar a otro estatus la limpia salvo que viaje una nota; null = borrar. Necesita la migración 20261102000001 (sin ella, 400 legible).',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(500)
+  facturacion_nota?: string | null;
 
   @ApiPropertyOptional({ description: 'URL/path en Supabase Storage' })
   @IsOptional()
@@ -1121,7 +1134,7 @@ export class ListGastosQuery {
 
   @ApiPropertyOptional({
     description:
-      'PENDIENTE | SOLICITADA | FACTURADA | NO_FACTURABLE (no requiere factura) | NO_FACTURADA (meta-valor = pendiente o solicitada; NO incluye NO_FACTURABLE)',
+      'PENDIENTE | SOLICITADA | FACTURADA | NO_FACTURABLE (no requiere factura) | NO_OBTENIDA (no emitida, con motivo) | NO_FACTURADA (meta-valor = pendiente o solicitada; NO incluye NO_FACTURABLE ni NO_OBTENIDA)',
   })
   @IsOptional()
   @IsIn([...Object.values(EstatusFacturacion), 'NO_FACTURADA'])

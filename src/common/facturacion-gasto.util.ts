@@ -26,6 +26,7 @@ export const ESTATUS_FACTURACION = [
   'SOLICITADA',
   'FACTURADA',
   'NO_FACTURABLE',
+  'NO_OBTENIDA',
 ] as const;
 
 export type EstatusFacturacionValor = (typeof ESTATUS_FACTURACION)[number];
@@ -36,6 +37,7 @@ export const FACTURACION_LABEL: Record<string, string> = {
   SOLICITADA: 'Solicitada',
   FACTURADA: 'Facturada',
   NO_FACTURABLE: 'No requiere factura',
+  NO_OBTENIDA: 'No obtenida',
 };
 
 /**
@@ -65,6 +67,33 @@ export function estaPorFacturar(estatus: string | null | undefined): boolean {
 /** ¿El cliente decidió que este gasto no lleva factura? */
 export function esNoFacturable(estatus: string | null | undefined): boolean {
   return (estatus ?? '').trim() === 'NO_FACTURABLE';
+}
+
+/**
+ * «NO OBTENIDA / no emitida» 🟣 (2-nov-2026, invariante 115, migración
+ * `20261102000001`): se pidió la factura y el proveedor no la emitió (o no
+ * se pudo obtener). Lleva SIEMPRE el motivo (`gasto.facturacion_nota`).
+ * Como NO_FACTURABLE sale de «por facturar» y del pendiente del pre-cierre
+ * (ya no hay nada que perseguir), pero NO es «no requiere»: en el reporte de
+ * efectivos es su propio cubo («no obtenida»).
+ */
+export function esNoObtenida(estatus: string | null | undefined): boolean {
+  return (estatus ?? '').trim() === 'NO_OBTENIDA';
+}
+
+/**
+ * Cubo del reporte de EFECTIVOS del Excel (fuente única): facturado /
+ * POR FACTURAR / no facturable / no obtenida. Meter el ⚪ o el 🟣 en otro
+ * cubo sería una cifra falsa.
+ */
+export function cuboFacturacionEfectivo(
+  estatus: string | null | undefined,
+): 'facturado' | 'POR FACTURAR' | 'no facturable' | 'no obtenida' {
+  const e = (estatus ?? '').trim();
+  if (e === 'FACTURADA') return 'facturado';
+  if (esNoFacturable(e)) return 'no facturable';
+  if (esNoObtenida(e)) return 'no obtenida';
+  return 'POR FACTURAR';
 }
 
 /**
@@ -105,7 +134,15 @@ export function cuentaComoSinFacturar(g: {
 }): boolean {
   const estatus =
     typeof g.estatus_facturacion === 'string' ? g.estatus_facturacion : '';
-  if (estatus === 'FACTURADA' || esNoFacturable(estatus)) return false;
+  if (
+    estatus === 'FACTURADA' ||
+    esNoFacturable(estatus) ||
+    // NO_OBTENIDA (2-nov-2026): la oficina ya dijo que no la emitieron;
+    // seguir contándola sería ruido eterno en el checklist.
+    esNoObtenida(estatus)
+  ) {
+    return false;
+  }
   if (g.medio_pago === 'BODEGA') return false;
   if (g.categoria === 'PERSONAL_DUENO') return false;
   return true;
@@ -137,4 +174,37 @@ export function mensajeNoFacturableSinMigracion(
   if (error.code !== '23514') return null;
   if (!/estatus_facturacion/.test(error.message ?? '')) return null;
   return MENSAJE_NO_FACTURABLE_SIN_MIGRACION;
+}
+
+/** Migración que admite `NO_OBTENIDA` y crea `gasto.facturacion_nota`. */
+export const MIGRACION_NO_OBTENIDA = '20261102000001';
+
+/** 400 cuando se pide `NO_OBTENIDA` (o una nota) sin la migración. */
+export const MENSAJE_NO_OBTENIDA_SIN_MIGRACION =
+  'Esta opción necesita la migración 20261102000001; mientras, usa Pendiente.';
+
+/** 400 al marcar `NO_OBTENIDA` sin el motivo. */
+export const MENSAJE_FACTURACION_NOTA_REQUERIDA =
+  'Escribe el motivo por el que no se obtuvo la factura (de 1 a 500 caracteres).';
+
+/** Largo máximo del motivo (CHECK de la BD). */
+export const FACTURACION_NOTA_MAX = 500;
+
+/**
+ * Generaliza `mensajeNoFacturableSinMigracion` a los dos valores que
+ * dependen de una migración del CHECK (23514 con `estatus_facturacion` en
+ * el mensaje): NO_FACTURABLE ⇒ 20260914000002; NO_OBTENIDA ⇒ 20261102000001.
+ * null = no es ese caso (sigue el camino de siempre).
+ */
+export function mensajeEstatusSinMigracion(
+  error: { code?: string | null; message?: string | null },
+  valorEnviado: string | null | undefined,
+): string | null {
+  const viejo = mensajeNoFacturableSinMigracion(error, valorEnviado);
+  if (viejo) return viejo;
+  if (!esNoObtenida(valorEnviado)) return null;
+  if (error.code !== '23514') return null;
+  if (!/estatus_facturacion|facturacion_nota/.test(error.message ?? ''))
+    return null;
+  return MENSAJE_NO_OBTENIDA_SIN_MIGRACION;
 }

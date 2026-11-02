@@ -87,10 +87,10 @@ type Registro = string[];
 const ALTAS = new WeakMap<object, Fila[]>();
 
 /** Cadena que responde 42703 en cualquier terminal (la columna no existe). */
-function consultaSinColumna(): Record<string, unknown> {
+function consultaSinColumna(col = 'por_pagar'): Record<string, unknown> {
   const r = {
     data: null,
-    error: { code: '42703', message: 'column gasto.por_pagar does not exist' },
+    error: { code: '42703', message: `column gasto.${col} does not exist` },
   };
   const q: Record<string, unknown> = {};
   for (const m of [
@@ -121,6 +121,8 @@ function consultaSinColumna(): Record<string, unknown> {
 function armar(
   opts: {
     sinPorPagar?: boolean;
+    /** Sin la migración 20261102000001 (`gasto.facturacion_nota` no existe). */
+    sinNotaFacturacion?: boolean;
     ultimaReposicion?: string | null;
     /** Con el módulo de conciliación (auto-cruce con el banco). */
     conCruce?: boolean;
@@ -142,6 +144,14 @@ function armar(
     >;
     const sel = q.select;
     q.select = (cols?: unknown, ...resto: unknown[]) => {
+      // Sonda de `facturacion_nota` (invariante 115): sin la migración, 42703.
+      if (
+        opts.sinNotaFacturacion &&
+        typeof cols === 'string' &&
+        cols.trim() === 'facturacion_nota'
+      ) {
+        return consultaSinColumna('facturacion_nota');
+      }
       if (nombra(cols)) {
         registro.push(`${tabla}.select(${String(cols)})`);
         if (opts.sinPorPagar) return consultaSinColumna();
@@ -1053,5 +1063,118 @@ describe('ExpensesService.generarPistas — número de factura y fecha de pago d
     expect(altas(f)[0].valores.notas).toBe(
       'fact vip 7360\nCuota MID · vuelo #364 · N4142R',
     );
+  });
+});
+
+describe('ExpensesService — «No obtenida» con motivo (2-nov-2026, invariante 115)', () => {
+  const nombraNota = (x: unknown) =>
+    typeof x === 'string' && /\bfacturacion_nota\b/.test(x);
+
+  it('PATCH a NO_OBTENIDA sin motivo ⇒ 400 FACTURACION_NOTA_REQUERIDA y nada se escribe', async () => {
+    const { service, f } = armar();
+    const r = await error(
+      service.update(
+        'g-pagado',
+        { estatus_facturacion: 'NO_OBTENIDA' } as never,
+        ADMIN,
+        Rol.ADMIN,
+      ),
+    );
+    expect(r.status).toBe(400);
+    expect(r.code).toBe('FACTURACION_NOTA_REQUERIDA');
+    expect(escrituras(f, 'g-pagado')).toEqual([]);
+    const vacio = await error(
+      service.update(
+        'g-pagado',
+        {
+          estatus_facturacion: 'NO_OBTENIDA',
+          facturacion_nota: '   ',
+        } as never,
+        ADMIN,
+        Rol.ADMIN,
+      ),
+    );
+    expect(vacio.code).toBe('FACTURACION_NOTA_REQUERIDA');
+  });
+
+  it('con motivo: estatus + nota recortada; al cambiar a otro estatus la nota se limpia', async () => {
+    const { service, f } = armar();
+    await service.update(
+      'g-pagado',
+      {
+        estatus_facturacion: 'NO_OBTENIDA',
+        facturacion_nota: '  El proveedor no la emitió  ',
+      } as never,
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(fila(f, 'g-pagado')).toMatchObject({
+      estatus_facturacion: 'NO_OBTENIDA',
+      facturacion_nota: 'El proveedor no la emitió',
+    });
+    // Reafirmar NO_OBTENIDA sin nota conserva el motivo vigente.
+    await service.update(
+      'g-pagado',
+      { estatus_facturacion: 'NO_OBTENIDA' } as never,
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(fila(f, 'g-pagado').facturacion_nota).toBe(
+      'El proveedor no la emitió',
+    );
+    await service.update(
+      'g-pagado',
+      { estatus_facturacion: 'SOLICITADA' } as never,
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(fila(f, 'g-pagado')).toMatchObject({
+      estatus_facturacion: 'SOLICITADA',
+      facturacion_nota: null,
+    });
+  });
+
+  it('alta con NO_OBTENIDA + motivo: el insert lleva los dos; sin NO_OBTENIDA ni nota no nombra la columna', async () => {
+    const { service, f } = armar();
+    await service.create(
+      alta({
+        estatus_facturacion: 'NO_OBTENIDA',
+        facturacion_nota: 'No emiten factura en ese FBO',
+      } as never),
+      ADMIN,
+      Rol.ADMIN,
+    );
+    expect(altas(f).at(-1)?.valores).toMatchObject({
+      estatus_facturacion: 'NO_OBTENIDA',
+      facturacion_nota: 'No emiten factura en ese FBO',
+    });
+    const { service: s2, f: f2 } = armar();
+    await s2.create(alta(), ADMIN, Rol.ADMIN);
+    expect('facturacion_nota' in (altas(f2).at(-1)?.valores ?? {})).toBe(false);
+  });
+
+  it('SIN la migración 20261102000001: NO_OBTENIDA ⇒ 400 NO_OBTENIDA_NO_DISPONIBLE; otro estatus no nombra la columna', async () => {
+    const { service, f } = armar({ sinNotaFacturacion: true });
+    const r = await error(
+      service.update(
+        'g-pagado',
+        { estatus_facturacion: 'NO_OBTENIDA', facturacion_nota: 'x' } as never,
+        ADMIN,
+        Rol.ADMIN,
+      ),
+    );
+    expect(r.status).toBe(400);
+    expect(r.code).toBe('NO_OBTENIDA_NO_DISPONIBLE');
+    expect(r.message).toContain('20261102000001');
+    expect(escrituras(f, 'g-pagado')).toEqual([]);
+    await service.update(
+      'g-pagado',
+      { estatus_facturacion: 'SOLICITADA' } as never,
+      ADMIN,
+      Rol.ADMIN,
+    );
+    const ultima = escrituras(f, 'g-pagado').at(-1);
+    expect(ultima?.valores.estatus_facturacion).toBe('SOLICITADA');
+    expect(Object.keys(ultima?.valores ?? {}).some(nombraNota)).toBe(false);
   });
 });

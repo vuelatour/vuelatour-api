@@ -78,6 +78,10 @@ import {
   porPagarDisponible,
 } from '../../common/por-pagar-disponible.util';
 import {
+  colsFacturacionNota,
+  facturacionNotaDisponible,
+} from '../../common/facturacion-nota-disponible.util';
+import {
   CODIGO_POR_PAGAR_FECHA_FUTURA,
   MENSAJE_FECHA_FUTURA_CONCILIADO,
   MENSAJE_POR_PAGAR_CONCILIADO,
@@ -290,9 +294,12 @@ import { celdaAvionGasto } from './gasto-avion.util';
 import { etiquetaComprobante } from '../../common/comprobante.util';
 import {
   etiquetaFacturacion,
-  esNoFacturable,
+  MENSAJE_FACTURACION_NOTA_REQUERIDA,
+  MENSAJE_NO_OBTENIDA_SIN_MIGRACION,
+  cuboFacturacionEfectivo,
+  esNoObtenida,
+  mensajeEstatusSinMigracion,
   filtroFacturacion,
-  mensajeNoFacturableSinMigracion,
 } from '../../common/facturacion-gasto.util';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
@@ -523,6 +530,66 @@ export class ExpensesService {
     return (extra ? `${COLS}${extra}` : COLS) as typeof COLS;
   }
 
+  /**
+   * «NO OBTENIDA» (2-nov-2026, invariante 115): el motivo
+   * (`facturacion_nota`) es OBLIGATORIO al marcarla y se limpia al cambiar a
+   * otro estatus (salvo nota explícita). La columna SOLO se escribe con la
+   * migración 20261102000001: sin ella, pedir NO_OBTENIDA o mandar una nota
+   * ⇒ 400 legible; una nota ausente ni se nombra. `destino` = lo que va a la
+   * BD (el payload del alta o el DTO del PATCH); `actual` = la fila vigente
+   * si el PATCH ya la leyó (si no, con `gastoId` se lee el motivo vigente
+   * para conservarlo cuando solo se reafirma el estatus).
+   */
+  private async prepararNotaFacturacion(
+    dto: { estatus_facturacion?: string; facturacion_nota?: string | null },
+    destino: Record<string, unknown>,
+    actual: Record<string, unknown> | null,
+    gastoId: string | null,
+  ): Promise<void> {
+    const pideNoObtenida = esNoObtenida(dto.estatus_facturacion);
+    const traeNota = dto.facturacion_nota !== undefined;
+    if (!pideNoObtenida && !traeNota && dto.estatus_facturacion === undefined)
+      return;
+    const notaDto = traeNota ? (dto.facturacion_nota ?? '').trim() : undefined;
+    const notaOk = await facturacionNotaDisponible(this.supabase.service);
+    if (!notaOk) {
+      if (pideNoObtenida || notaDto) {
+        throw new BadRequestException({
+          message: MENSAJE_NO_OBTENIDA_SIN_MIGRACION,
+          error: 'NO_OBTENIDA_NO_DISPONIBLE',
+        });
+      }
+      delete destino.facturacion_nota;
+      return;
+    }
+    if (pideNoObtenida) {
+      let notaVigente = actual?.facturacion_nota as string | null | undefined;
+      if (notaDto === undefined && notaVigente === undefined && gastoId) {
+        const { data } = await this.supabase.service
+          .from('gasto')
+          .select('facturacion_nota')
+          .eq('id', gastoId)
+          .maybeSingle();
+        notaVigente = (data?.facturacion_nota as string | null) ?? null;
+      }
+      const nota = notaDto !== undefined ? notaDto : (notaVigente ?? '').trim();
+      if (!nota) {
+        throw new BadRequestException({
+          message: MENSAJE_FACTURACION_NOTA_REQUERIDA,
+          error: 'FACTURACION_NOTA_REQUERIDA',
+        });
+      }
+      destino.facturacion_nota = nota.slice(0, 500);
+      return;
+    }
+    if (dto.estatus_facturacion !== undefined) {
+      // Otro estatus: el motivo de «no obtenida» deja de aplicar.
+      destino.facturacion_nota = notaDto ? notaDto.slice(0, 500) : null;
+      return;
+    }
+    destino.facturacion_nota = notaDto ? notaDto.slice(0, 500) : null;
+  }
+
   /** `LIST_COLS` con `tua_incluida` detrás de la sonda (ver `cols()`). */
   private async listCols(): Promise<typeof LIST_COLS> {
     const extra = await this.colsOpcionales();
@@ -539,12 +606,13 @@ export class ExpensesService {
    */
   private async colsOpcionales(): Promise<string> {
     const sb = this.supabase.service;
-    const [tua, afac, porPagar] = await Promise.all([
+    const [tua, afac, porPagar, nota] = await Promise.all([
       tuaIncluidaDisponible(sb),
       afacRealDisponible(sb),
       porPagarDisponible(sb),
+      facturacionNotaDisponible(sb),
     ]);
-    return `${tua ? ', tua_incluida' : ''}${afac ? ', es_pago_afac' : ''}${porPagar ? ', por_pagar' : ''}`;
+    return `${tua ? ', tua_incluida' : ''}${afac ? ', es_pago_afac' : ''}${porPagar ? ', por_pagar' : ''}${colsFacturacionNota(nota)}`;
   }
 
   /**
@@ -869,12 +937,8 @@ export class ExpensesService {
       // requiere factura» no es facturado NI está por facturar — meterlo en
       // cualquiera de los otros dos sería una cifra falsa.
       const estatusFact = (x.estatus_facturacion as string) ?? '';
-      const facturado =
-        estatusFact === 'FACTURADA'
-          ? 'facturado'
-          : esNoFacturable(estatusFact)
-            ? 'no facturable'
-            : 'POR FACTURAR';
+      // Cuatro cubos desde el 2-nov-2026 (NO_OBTENIDA aparte; fuente única).
+      const facturado = cuboFacturacionEfectivo(estatusFact);
       const clave = deLaEmpresa
         ? `Efectivo de la empresa ${facturado} (${(x.moneda as string) ?? '?'})`
         : `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
@@ -3139,6 +3203,9 @@ export class ExpensesService {
       );
     }
 
+    // «No obtenida» con motivo (invariante 115): valida y escribe la nota
+    // SOLO con la migración; sin estatus ni nota no toca el payload.
+    await this.prepararNotaFacturacion(dto, payload, null, null);
     const { data, error } = await this.supabase.service
       .from('gasto')
       .insert(payload)
@@ -3149,9 +3216,9 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
-      // NO_FACTURABLE contra una base SIN la migración 20260914000002: el
+      // NO_FACTURABLE / NO_OBTENIDA contra una base SIN su migración: el
       // CHECK viejo lo rechaza. 400 que dice qué hacer, no un 409 genérico.
-      const sinMigracion = mensajeNoFacturableSinMigracion(
+      const sinMigracion = mensajeEstatusSinMigracion(
         error,
         dto.estatus_facturacion,
       );
@@ -5160,6 +5227,14 @@ export class ExpensesService {
       tramoRef,
     );
 
+    // «No obtenida» con motivo (invariante 115): obligatorio al marcarla,
+    // se limpia al salir; sin la migración, 400 (la columna no se nombra).
+    await this.prepararNotaFacturacion(
+      dto,
+      dto as Record<string, unknown>,
+      actual ?? null,
+      id,
+    );
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
     // Por pagar (invariante 93): SOLO si cambia (con la migración).
@@ -5311,8 +5386,8 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
-      // NO_FACTURABLE sin la migración 20260914000002 (ver create): 400.
-      const sinMigracion = mensajeNoFacturableSinMigracion(
+      // NO_FACTURABLE / NO_OBTENIDA sin su migración (ver create): 400.
+      const sinMigracion = mensajeEstatusSinMigracion(
         error,
         dto.estatus_facturacion,
       );

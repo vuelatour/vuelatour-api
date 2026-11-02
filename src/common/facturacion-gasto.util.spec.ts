@@ -128,3 +128,69 @@ describe('facturacion-gasto.util (NO_FACTURABLE, 14-sep-2026)', () => {
     });
   });
 });
+
+import {
+  MENSAJE_NO_OBTENIDA_SIN_MIGRACION,
+  cuboFacturacionEfectivo,
+  esNoObtenida,
+  mensajeEstatusSinMigracion,
+} from './facturacion-gasto.util';
+
+describe('facturacion-gasto.util (NO_OBTENIDA, 2-nov-2026, invariante 115)', () => {
+  it('etiqueta «No obtenida»; no está por facturar; es su propio cubo en efectivos', () => {
+    expect(etiquetaFacturacion('NO_OBTENIDA')).toBe('No obtenida');
+    expect(esNoObtenida('NO_OBTENIDA')).toBe(true);
+    expect(esNoObtenida('NO_FACTURABLE')).toBe(false);
+    expect(estaPorFacturar('NO_OBTENIDA')).toBe(false);
+    expect(cuboFacturacionEfectivo('FACTURADA')).toBe('facturado');
+    expect(cuboFacturacionEfectivo('NO_FACTURABLE')).toBe('no facturable');
+    expect(cuboFacturacionEfectivo('NO_OBTENIDA')).toBe('no obtenida');
+    expect(cuboFacturacionEfectivo('PENDIENTE')).toBe('POR FACTURAR');
+    expect(cuboFacturacionEfectivo('SOLICITADA')).toBe('POR FACTURAR');
+    expect(cuboFacturacionEfectivo(null)).toBe('POR FACTURAR');
+  });
+
+  it('el pre-cierre NO la cuenta como sin facturar; el filtro NO_FACTURADA la deja fuera', () => {
+    expect(cuentaComoSinFacturar({ estatus_facturacion: 'NO_OBTENIDA' })).toBe(
+      false,
+    );
+    expect(cuentaComoSinFacturar({ estatus_facturacion: 'PENDIENTE' })).toBe(
+      true,
+    );
+    const f = filtroFacturacion('NO_FACTURADA');
+    expect(f?.op === 'in' && f.valores.includes('NO_OBTENIDA')).toBe(false);
+    expect(filtroFacturacion('NO_OBTENIDA')).toEqual({
+      op: 'eq',
+      valor: 'NO_OBTENIDA',
+    });
+  });
+
+  it('mensajeEstatusSinMigracion: cada valor con SU migración; otros CHECK siguen su camino', () => {
+    const check = {
+      code: '23514',
+      message: 'violates check constraint "gasto_estatus_facturacion_check"',
+    };
+    expect(mensajeEstatusSinMigracion(check, 'NO_FACTURABLE')).toBe(
+      MENSAJE_NO_FACTURABLE_SIN_MIGRACION,
+    );
+    expect(mensajeEstatusSinMigracion(check, 'NO_OBTENIDA')).toBe(
+      MENSAJE_NO_OBTENIDA_SIN_MIGRACION,
+    );
+    expect(MENSAJE_NO_OBTENIDA_SIN_MIGRACION).toBe(
+      'Esta opción necesita la migración 20261102000001; mientras, usa Pendiente.',
+    );
+    expect(mensajeEstatusSinMigracion(check, 'PENDIENTE')).toBeNull();
+    expect(
+      mensajeEstatusSinMigracion(
+        { code: '23514', message: 'gasto_monto_check' },
+        'NO_OBTENIDA',
+      ),
+    ).toBeNull();
+    expect(
+      mensajeEstatusSinMigracion(
+        { code: '23505', message: 'estatus_facturacion' },
+        'NO_OBTENIDA',
+      ),
+    ).toBeNull();
+  });
+});
