@@ -102,13 +102,18 @@ function armar(
     const op = (m: string) => c.ops.find((o) => o[0] === m);
     const sel = op('select');
     if (c.tabla === 'gasto') {
-      if (sel && sel[1][0] === 'tua_incluida') {
+      // Sondas de `tua_incluida` (invariante 66) y `facturacion_nota`
+      // (invariante 115): con `sinMigracion` las dos columnas faltan.
+      if (
+        sel &&
+        (sel[1][0] === 'tua_incluida' || sel[1][0] === 'facturacion_nota')
+      ) {
         return opts.sinMigracion
           ? {
               data: null,
               error: {
                 code: '42703',
-                message: 'column gasto.tua_incluida does not exist',
+                message: `column gasto.${String(sel[1][0])} does not exist`,
               },
             }
           : { data: [], error: null };
@@ -268,7 +273,9 @@ describe('ExpensesService.create — tua_incluida (13-oct-2026)', () => {
       notificar: false,
     });
     expect(cuerpoDe(consultas, 'insert')).toMatchObject({ tua_incluida: 100 });
-    expect(selectDe(consultas, 'insert')).toMatch(/, tua_incluida$/);
+    expect(selectDe(consultas, 'insert')).toMatch(
+      /, tua_incluida(, facturacion_nota)?$/,
+    );
   });
 
   it('sin el campo ⇒ el payload NO nombra la llave (alta de siempre)', async () => {
@@ -388,7 +395,9 @@ describe('ExpensesService.update — tua_incluida (13-oct-2026)', () => {
     expect(cuerpoDe(a.consultas, 'update')).toMatchObject({
       tua_incluida: null,
     });
-    expect(selectDe(a.consultas, 'update')).toMatch(/, tua_incluida$/);
+    expect(selectDe(a.consultas, 'update')).toMatch(
+      /, tua_incluida(, facturacion_nota)?$/,
+    );
   });
 
   it('solo la TUA: lee el gasto vigente y valida contra SU monto', async () => {

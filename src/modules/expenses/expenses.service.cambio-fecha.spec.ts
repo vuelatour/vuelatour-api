@@ -107,7 +107,9 @@ function armarSupabase(tablas: Record<string, Resultado[]>) {
     let esSonda = false;
     q.select = (...args: unknown[]) => {
       llamadas.push({ tabla, metodo: 'select', args });
-      if (args[0] === 'tua_incluida') esSonda = true;
+      // Igual la sonda de `gasto.facturacion_nota` (invariante 115).
+      if (args[0] === 'tua_incluida' || args[0] === 'facturacion_nota')
+        esSonda = true;
       return q;
     };
     const resolver = (): Promise<{ data: unknown; error: unknown }> => {
@@ -164,7 +166,9 @@ const de = (llamadas: Llamada[], tabla: string, metodo: string) =>
 
 /** Lecturas de negocio de `gasto` (sin la sonda de `tua_incluida`). */
 const lecturasGasto = (llamadas: Llamada[]) =>
-  de(llamadas, 'gasto', 'select').filter((l) => l.args[0] !== 'tua_incluida');
+  de(llamadas, 'gasto', 'select').filter(
+    (l) => l.args[0] !== 'tua_incluida' && l.args[0] !== 'facturacion_nota',
+  );
 
 /** El HttpException con el que rechaza la promesa. */
 async function rechazo(p: Promise<unknown>): Promise<HttpException> {

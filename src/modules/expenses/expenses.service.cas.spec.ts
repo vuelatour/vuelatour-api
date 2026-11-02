@@ -102,7 +102,9 @@ function armarSupabase(tablas: Record<string, Resultado[]>) {
     let esSonda = false;
     q.select = (...args: unknown[]) => {
       llamadas.push({ tabla, metodo: 'select', args });
-      if (args[0] === 'tua_incluida') esSonda = true;
+      // Igual la sonda de `gasto.facturacion_nota` (invariante 115).
+      if (args[0] === 'tua_incluida' || args[0] === 'facturacion_nota')
+        esSonda = true;
       return q;
     };
     const resultado = (): Resultado =>
