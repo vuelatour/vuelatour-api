@@ -417,6 +417,14 @@ const titulos = (w: ReturnType<typeof mundo>) =>
 const AVISO_338 =
   'El vuelo ya voló en N4142R: el cambio de avión solo cambia con qué se cobra (Cessna 206); la operación no se modifica.';
 
+// RELOJ FIJO (2-nov-2026): el candado «la cotización solo se ajusta en el mes
+// corriente o el anterior» (`revise`) mide contra `Date.now()`; con datos
+// REALES del 24-sep-2026 el spec moría solo cada 1-nov. Se fija al
+// 25-sep-2026 12:00 Cancún para que el caso sea reproducible siempre.
+const AHORA_CASO_338 = Date.parse('2026-09-25T17:00:00Z');
+const relojFijo = jest.spyOn(Date, 'now').mockReturnValue(AHORA_CASO_338);
+afterAll(() => relojFijo.mockRestore());
+
 describe('#338 con datos REALES de prod — revise de la v2 sobre el vuelo COMPLETADO', () => {
   it('vuelo.aeronave_id NO cambia (N4142R) y ningún tramo cambia de avión', async () => {
     const w = mundo();
