@@ -341,6 +341,21 @@ export class RestoreEscalaDto {
   motivo!: string;
 }
 
+/**
+ * Quitar una escala intermedia que NO se hizo (2-nov-2026, invariante 113):
+ * el tramo y el siguiente se fusionan en uno. Motivo obligatorio y auditable
+ * (notas internas del vuelo y bitácora del tramo).
+ */
+export class QuitarEscalaDto {
+  @ApiProperty({
+    description:
+      'Por qué no se hizo la escala (p. ej. "No bajamos en Holbox: fuimos directo a Tulum por el clima").',
+  })
+  @IsString()
+  @Length(3, 500)
+  motivo!: string;
+}
+
 export class UpdateEscalaPermisoDto {
   @ApiProperty({
     enum: EstadoPermiso,

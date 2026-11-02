@@ -45,6 +45,7 @@ import {
   CreateEscalaDto,
   OmitirTacoDto,
   OperationalLegDto,
+  QuitarEscalaDto,
   RestoreEscalaDto,
   TacoAiReadDto,
   UpdateEscalaDto,
@@ -916,6 +917,21 @@ export class FlightsController {
   @ApiOperation({ summary: 'Delete leg (only if no tacómetro captured)' })
   deleteLeg(@Param('legId', ParseUUIDPipe) legId: string) {
     return this.flights.deleteEscala(legId);
+  }
+
+  @Post('legs/:legId/quitar-escala')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Quita una escala intermedia que NO se hizo (2-nov-2026, invariante 113): fusiona este tramo con el tramo ACTIVO siguiente (que sale de donde llega este) en UN tramo origen → destino final. Conserva la salida de este tramo y toma la llegada y la parada del siguiente; la llegada a la escala se descarta (queda en la bitácora del tramo y en las notas internas); el tramo fusionado queda en amarillo para que oficina confirme el tacómetro; el siguiente se borra (sus gastos y apoyos pasan al fusionado) y los comerciales posteriores se renumeran. El vuelo NO cambia de estado (solo avanza EN_VUELO → COMPLETADO si ya no falta llegada). Motivo obligatorio. PILOTO: solo tripulación y con el vuelo COMPLETADO (403). 409 ESCALA_CANCELADA / VUELO_CANCELADO / ESCALA_FINAL / ESCALA_NO_ENLAZA / ESCALA_OPERATIVA / ESCALAS_DISTINTO_AVION / ESCALA_FUSION_INCOMPLETA; 404 ESCALA_NO_EXISTE. Respuesta: el tramo fusionado + `fusion` {escala_quitada_id, escala_iata, tramo_a, tramo_b, descartada, salida_retirada, aviso}.',
+  })
+  quitarEscala(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: QuitarEscalaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.quitarEscala(legId, dto.motivo, c.userId, c);
   }
 
   // ============ Factura del SERVICIO (por vuelo) ============

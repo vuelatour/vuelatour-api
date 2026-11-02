@@ -1371,7 +1371,10 @@ saldo_usd, cobrado_usd, monto_usd, monto_total_usd }`. Exentos: vuelos
       (panel) no hay candado: la oficina puede sobrecobrar a propósito.
     - **Codes en bajas/transiciones** (message intacto): `deleteEscala` 409
       `ESCALA_CON_TACO`; `cancelEscala` 409 `ESCALA_YA_CANCELADA`
-      (idempotente) / `ESCALA_CON_TACO` / `ESCALA_UNICA`; `start()` 409
+      (idempotente) / `ESCALA_CON_TACO` / `ESCALA_UNICA`; `quitarEscala`
+      (invariante 113) 409 `ESCALA_CANCELADA` / `VUELO_CANCELADO` /
+      `ESCALA_FINAL` / `ESCALA_NO_ENLAZA` / `ESCALA_OPERATIVA` /
+      `ESCALAS_DISTINTO_AVION` / `ESCALA_FUSION_INCOMPLETA`; `start()` 409
       `VUELO_YA_INICIADO` (idempotente) / `VUELO_NO_INICIABLE`; 404
       `ESCALA_NO_EXISTE` (`escalaNoExiste()`) y `VUELO_NO_EXISTE` también
       en `updatePermiso`.
@@ -12326,6 +12329,75 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `aircraft-balance.service.externos-empresa.spec` (general con un
       externo sin avión: pago al operador una vez, RESULTADO exacto, llave
       al final; sin libro, sin la llave).
+
+113. **QUITAR UNA ESCALA INTERMEDIA QUE NO SE HIZO (2-nov-2026, API
+    0.0.114).** Caso real #496 (Pablo, 29-oct-2026): ruta CUN→HOL→TQO→CUN,
+    el avión fue directo a Tulum sin bajar en Holbox; el piloto capturó
+    llegadas en los dos primeros tramos (misma aguja, 1682.3) y el vuelo
+    quedó COMPLETADO con una escala que nunca ocurrió. «Cancelar tramo»
+    exige que el tramo NO haya volado (409 ESCALA_CON_TACO) y «Eliminar
+    tramo» que no tenga tacómetro: el vuelo SÍ voló, con una parada menos.
+    `POST /v1/flights/legs/:legId/quitar-escala` ({ motivo 3..500 },
+    ADMIN/COORDINADOR; PILOTO solo tripulante y con el vuelo COMPLETADO,
+    como «Agregar tramo») FUSIONA el tramo A (`:legId`) con el tramo
+    ACTIVO siguiente B (que sale de donde llega A) en UN tramo
+    A.origen → B.destino que conserva la fila de A.
+    - **Regla pura** `flights/escala-quitada.util.ts`
+      (`porQueNoSeQuitaEscala`, `fusionarTramos`, textos; spec propia): de
+      A queda lo del ORIGEN (salida: hora, taco y origen, foto,
+      observación; fecha planeada, piloto/copiloto/avión, orden, evento de
+      Google, plan de vuelo); de B viene lo del DESTINO (llegada: hora,
+      taco y origen, foto, observación; permiso de pista, pernocta y costo,
+      tipo de parada, notas de servicio; omisión de tacómetro si B estaba
+      omitido); la llegada de A se DESCARTA y queda en la bitácora del
+      tramo (`Registro: … escala HOL quitada el <fecha> por <quién>:
+      llegada a HOL descartada (taco …) · llegada a TQO tomada del tramo
+      HOL→TQO (taco …)`) y en las notas internas del vuelo (`[Escala HOL
+      quitada <ISO>] motivo — resumen`); pasajeros = el mayor y manifiesto
+      = unión; ferry solo si ambos; notas concatenadas; costo externo
+      sumado. CHECK `taco_llegada > taco_salida`: si la llegada de B no
+      supera la salida de A, la SALIDA se retira (null, en amarillo;
+      `salida_retirada: true` en la respuesta) y la llegada —la
+      evidencia— se queda. El fusionado queda SIEMPRE en amarillo
+      (`revision_requerida`, alerta al frente con `motivoDirecto`: horas
+      sagradas, oficina confirma). Las alertas viejas de A y B («Duración
+      … fuera de rango», «Salida estimada retirada») no se arrastran; las
+      correcciones a la baja pendientes sí.
+    - **NO se fusionan** (409, nada se escribe): tramo cancelado
+      `ESCALA_CANCELADA`; vuelo CANCELADO `VUELO_CANCELADO`; último tramo
+      activo `ESCALA_FINAL` (el destino se corrige con «Editar tramo»); B no
+      sale de donde llega A `ESCALA_NO_ENLAZA`; A o B operativos (ferry /
+      parada técnica, orden ≥ 100) `ESCALA_OPERATIVA`; aviones distintos
+      (con herencia del vuelo) `ESCALAS_DISTINTO_AVION`. 404
+      `ESCALA_NO_EXISTE`. Candado de mes cerrado (invariante 89) antes de
+      escribir.
+    - **Orden de escritura** (sin transacción): evento de Google de B
+      (`removeEscalaEvent`) → PATCH de A (ya con la llegada de B) → gastos y
+      apoyos de B pasan a A (`traspasarLigasDeTramo`, best-effort: el FK de
+      `gasto` haría SET NULL y el de `vuelo_apoyo` CASCADE; un apoyo que A
+      ya tiene cae con el CASCADE) → DELETE de B (si falla: 409
+      `ESCALA_FUSION_INCOMPLETA`; A ya tiene la llegada, nada se pierde) →
+      renumerar comerciales posteriores (`orden − 1`, ascendente, < 100,
+      best-effort) → sello en notas internas → `retraerFechaTrasladoFinal`
+      (helper extraído de cancelEscala, mismo comportamiento) →
+      `refreshPermisosDeVuelo` → `syncFlight` → el vuelo NO cambia de
+      estado (COMPLETADO sigue; solo AVANZA EN_VUELO → COMPLETADO si ya no
+      falta llegada) → `avisarProgramaDeServicio` → aviso a la tripulación
+      («Escala quitada · vuelo #N»). Respuesta: el tramo fusionado +
+      `fusion` {escala_quitada_id, escala_iata, tramo_a, tramo_b,
+      descartada {hora_llegada, taco_llegada, taco_llegada_origen,
+      con_foto}, salida_retirada, aviso}.
+    - **Lo que NO cambia a propósito**: la cotización y su snapshot
+      (`num_aterrizajes`, TUAs de la escala: la pantalla de la cotización
+      señala «la operación difiere» y ofrece adoptarla, como con «Agregar
+      tramo»); `tramo_tiempo_promedio` (las muestras que `complete()` ya
+      registró con la ruta vieja no se retiran). pyservices no cambia (lee
+      los tramos del API).
+    - Specs: `escala-quitada.util.spec` (rechazos, patch, bitácora, salida
+      retirada, pasajeros/ferry, notas/externo/observaciones, omitido,
+      textos) y `flights.service.quitar-escala.spec` (orquestación: orden
+      de escrituras, ligas, renumeración, notas, estado, rechazos sin
+      escrituras, PILOTO).
 
 ## Convenciones NestJS
 

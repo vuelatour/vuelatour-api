@@ -278,6 +278,7 @@ import {
 } from '../../common/grupo-contexto.util';
 import { patchCobrosAlClon, payloadClonVuelo } from './clon-vuelo.util';
 import {
+  OPERATIVA_ORDEN_BASE,
   avisoDeTramoGuardado,
   ESCALAS_PARA_UBICAR_COLS,
   ubicarTramoAgregado,
@@ -293,6 +294,13 @@ import {
   motivoDirecto,
   soloPendientes,
 } from '../../common/taco-motivo.util';
+import {
+  fusionarTramos,
+  porQueNoSeQuitaEscala,
+  selloEscalaQuitada,
+  textoAvisoEscalaQuitada,
+  type TramoFusionable,
+} from './escala-quitada.util';
 import { fechaHoraCancun, hoyCancun } from '../../common/fecha-cancun.util';
 // GASTOS «POR PAGAR» (19-oct-2026, invariante 93): gastos del vuelo.
 import {
@@ -12804,52 +12812,13 @@ export class FlightsService {
       );
     }
     // Multi-día fantasma (28-ago, vuelos combinados): si el tramo cancelado
-    // era el regreso que sostenía fecha_traslado_final, el GREATEST de
-    // fecha_fin la conservaba y el vuelo seguía "activo" un día de más en
-    // taco-live/calendario/crones. Si ya ningún tramo ACTIVO sale en (o
-    // después de) esa fecha, se retrae.
-    try {
-      const { data: v } = await this.supabase.service
-        .from('vuelo')
-        .select('fecha_traslado_final')
-        .eq('id', row.vuelo_id as string)
-        .maybeSingle();
-      const fin = v?.fecha_traslado_final as string | null;
-      if (fin) {
-        const { data: vivos } = await this.supabase.service
-          .from('escala')
-          .select('fecha_salida_plan')
-          .eq('vuelo_id', row.vuelo_id as string)
-          .is('cancelada_at', null);
-        const dia = (iso: string): string =>
-          new Date(iso).toLocaleDateString('en-CA', {
-            timeZone: 'America/Cancun',
-          });
-        const diaFin = dia(fin);
-        // Un tramo vivo SIN fecha propia puede SER el regreso que la
-        // sostiene (patrón de la migración 20260807000002): con cualquiera
-        // así, no se retrae — mejor un multi-día de más que perder la
-        // fecha comercial del regreso (caso real #203).
-        const haySinFecha = (vivos ?? []).some(
-          (e) => e.fecha_salida_plan == null,
-        );
-        const sostienen = (vivos ?? []).some(
-          (e) =>
-            e.fecha_salida_plan != null &&
-            dia(e.fecha_salida_plan as string) >= diaFin,
-        );
-        if (!haySinFecha && !sostienen) {
-          await this.supabase.service
-            .from('vuelo')
-            .update({ fecha_traslado_final: null, updated_by: userId })
-            .eq('id', row.vuelo_id as string);
-        }
-      }
-    } catch (err) {
-      this.logger.warn(
-        `cancelEscala(${escalaId}): retracción de fecha_traslado_final falló: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // era el regreso que sostenía fecha_traslado_final, se retrae. Helper
+    // compartido con quitarEscala (2-nov-2026); best-effort.
+    await this.retraerFechaTrasladoFinal(
+      row.vuelo_id as string,
+      userId,
+      `cancelEscala(${escalaId})`,
+    );
     // El permiso a nivel vuelo pudo depender SOLO del tramo cancelado:
     // re-derivar de inmediato (antes quedaba 'pendiente' hasta el cron).
     void this.airports
@@ -13129,6 +13098,348 @@ export class FlightsService {
       accion: 'se eliminó',
     });
     return { deleted: true, id: escalaId };
+  }
+
+  /**
+   * Multi-día fantasma (28-ago, vuelos combinados): si el tramo que salió de
+   * la ruta activa (cancelado o fusionado) era el regreso que sostenía
+   * fecha_traslado_final, el GREATEST de fecha_fin la conservaba y el vuelo
+   * seguía "activo" un día de más en taco-live/calendario/crones. Si ya
+   * ningún tramo ACTIVO sale en (o después de) esa fecha, se retrae.
+   * Best-effort: jamás bloquea al caller (`quien` = prefijo del warn).
+   */
+  private async retraerFechaTrasladoFinal(
+    vueloId: string,
+    userId: string,
+    quien: string,
+  ): Promise<void> {
+    try {
+      const { data: v } = await this.supabase.service
+        .from('vuelo')
+        .select('fecha_traslado_final')
+        .eq('id', vueloId)
+        .maybeSingle();
+      const fin = v?.fecha_traslado_final as string | null;
+      if (fin) {
+        const { data: vivos } = await this.supabase.service
+          .from('escala')
+          .select('fecha_salida_plan')
+          .eq('vuelo_id', vueloId)
+          .is('cancelada_at', null);
+        const dia = (iso: string): string =>
+          new Date(iso).toLocaleDateString('en-CA', {
+            timeZone: 'America/Cancun',
+          });
+        const diaFin = dia(fin);
+        // Un tramo vivo SIN fecha propia puede SER el regreso que la
+        // sostiene (patrón de la migración 20260807000002): con cualquiera
+        // así, no se retrae — mejor un multi-día de más que perder la
+        // fecha comercial del regreso (caso real #203).
+        const haySinFecha = (vivos ?? []).some(
+          (e) => e.fecha_salida_plan == null,
+        );
+        const sostienen = (vivos ?? []).some(
+          (e) =>
+            e.fecha_salida_plan != null &&
+            dia(e.fecha_salida_plan as string) >= diaFin,
+        );
+        if (!haySinFecha && !sostienen) {
+          await this.supabase.service
+            .from('vuelo')
+            .update({ fecha_traslado_final: null, updated_by: userId })
+            .eq('id', vueloId);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `${quien}: retracción de fecha_traslado_final falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * QUITAR UNA ESCALA INTERMEDIA QUE NO SE HIZO (2-nov-2026, API 0.0.114,
+   * invariante 113). Fusiona el tramo `escalaId` (A) con el tramo ACTIVO
+   * siguiente (B, que sale de donde llega A) en UN tramo A.origen →
+   * B.destino que conserva la fila de A: de A la salida, de B la llegada y
+   * la parada; la llegada de A (a la escala que no se hizo) se descarta y
+   * queda en la bitácora del tramo y en las notas internas. Regla y textos
+   * en `escala-quitada.util` (puro, con spec). B se borra (sus gastos y
+   * apoyos pasan a A) y los comerciales posteriores se renumeran.
+   * El vuelo NO cambia de estado (COMPLETADO sigue completado); solo AVANZA
+   * EN_VUELO → COMPLETADO si ya no falta ninguna llegada. PILOTO: solo
+   * tripulante y con el vuelo COMPLETADO (como «Agregar tramo»).
+   */
+  async quitarEscala(
+    escalaId: string,
+    motivo: string,
+    userId: string,
+    current?: AuthenticatedUser,
+  ) {
+    const omitidoOk = await this.tacoOmitidoOk();
+    const cols =
+      `${ESCALA_COLS}${colsTacoOmitido(omitidoOk)}` as typeof ESCALA_COLS;
+    const { data: a, error: aErr } = await this.supabase.service
+      .from('escala')
+      .select(cols)
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (aErr) throw new Error(aErr.message);
+    if (!a) throw escalaNoExiste(escalaId);
+    const filaA = a as Record<string, unknown>;
+    const vueloId = filaA.vuelo_id as string;
+    const vuelo = await this.findById(vueloId);
+    const { data: siguientes, error: sErr } = await this.supabase.service
+      .from('escala')
+      .select(cols)
+      .eq('vuelo_id', vueloId)
+      .gt('orden', Number(filaA.orden))
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(1);
+    if (sErr) throw new Error(sErr.message);
+    const filaB = ((siguientes ?? [])[0] ?? null) as Record<
+      string,
+      unknown
+    > | null;
+    const rechazo = porQueNoSeQuitaEscala(
+      filaA as unknown as TramoFusionable,
+      filaB as unknown as TramoFusionable | null,
+      {
+        estado: vuelo.estado as string,
+        aeronave_id: (vuelo.aeronave_id as string | null) ?? null,
+      },
+    );
+    if (rechazo) {
+      throw new ConflictException({
+        message: rechazo.message,
+        error: rechazo.code,
+        details: rechazo.details,
+      });
+    }
+    const b = filaB as Record<string, unknown>;
+    const bId = b.id as string;
+    if (current?.rol === Rol.PILOTO) {
+      if ((vuelo.estado as string) !== 'COMPLETADO') {
+        throw new ForbiddenException(
+          'Antes de completar el vuelo la ruta la corrige la oficina; el piloto quita una escala solo cuando el vuelo ya se completó.',
+        );
+      }
+      const rel = await this.relacionConVuelo(vueloId, current.userId);
+      if (!rel.es_tripulante) {
+        throw new ForbiddenException(
+          'Solo la tripulación del vuelo puede quitarle una escala.',
+        );
+      }
+    }
+    // CIERRE DE MES (invariante 89): las horas del vuelo cambian de tramo.
+    await this.assertVueloEnMesAbierto(vueloId);
+
+    const ahora = new Date().toISOString();
+    let quien = 'oficina';
+    try {
+      quien = (await this.usuariosInfo([userId])).get(userId)?.nombre || quien;
+    } catch {
+      /* best-effort */
+    }
+    const fusion = fusionarTramos(
+      filaA as unknown as TramoFusionable,
+      b as unknown as TramoFusionable,
+      { ahora, quien, userId, omitidoOk },
+    );
+    const tramoA = `${filaA.origen_iata as string}→${filaA.destino_iata as string}`;
+    const tramoB = `${b.origen_iata as string}→${b.destino_iata as string}`;
+
+    // El evento de Google del tramo B se borra ANTES de perder su id (mismo
+    // orden que deleteEscala); el del vuelo se re-espeja al final.
+    await this.calendar.removeEscalaEvent(
+      (b.google_calendar_id as string | null) ?? null,
+    );
+    // ORDEN: primero A (ya con la llegada de B); si borrar B fallara, no se
+    // pierde ninguna lectura (B seguiría ahí y se avisa).
+    const { data: fusionado, error: updErr } = await this.supabase.service
+      .from('escala')
+      .update(fusion.patch)
+      .eq('id', escalaId)
+      .select(cols)
+      .maybeSingle();
+    if (updErr) {
+      throw new Error(
+        `No se pudo fusionar el tramo ${tramoA}: ${updErr.message}`,
+      );
+    }
+    await this.traspasarLigasDeTramo(bId, escalaId);
+    const { error: delErr } = await this.supabase.service
+      .from('escala')
+      .delete()
+      .eq('id', bId);
+    if (delErr) {
+      throw new ConflictException({
+        message: `El tramo ya quedó como ${fusion.origen_iata} → ${fusion.destino_iata}, pero el tramo ${tramoB} no se pudo borrar (${delErr.message}): avisa a sistemas antes de volver a intentar.`,
+        error: 'ESCALA_FUSION_INCOMPLETA',
+        details: {
+          escala_id: escalaId,
+          escala_quitada_id: bId,
+          vuelo_id: vueloId,
+        },
+      });
+    }
+    await this.renumerarTramosDesde(vueloId, Number(b.orden), userId);
+    // Rastro auditable en las notas internas (patrón cancelar/restaurar).
+    try {
+      const sello = selloEscalaQuitada(fusion, motivo, ahora);
+      const previas = (vuelo.notas_internas as string | null)?.trim();
+      const { error } = await this.supabase.service
+        .from('vuelo')
+        .update({
+          notas_internas: previas ? `${previas}\n${sello}` : sello,
+          updated_by: userId,
+        })
+        .eq('id', vueloId);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala(${escalaId}): sello en notas falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    await this.retraerFechaTrasladoFinal(
+      vueloId,
+      userId,
+      `quitarEscala(${escalaId})`,
+    );
+    // La escala quitada pudo ser la única pista con permiso: re-derivar y
+    // DESPUÉS espejar (mismo orden que deleteEscala).
+    try {
+      await this.airports.refreshPermisosDeVuelo(vueloId);
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala(${escalaId}): refresh de permisos falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    void this.calendar.syncFlight(vueloId);
+    // Estado derivado: solo AVANZA (EN_VUELO → COMPLETADO), jamás regresa.
+    try {
+      if (
+        !vuelo.es_externo &&
+        (vuelo.estado as string) === 'EN_VUELO' &&
+        !this.faltanLlegadas(await this.escalasTaco(vueloId))
+      ) {
+        await this.complete(vueloId, userId);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala(${escalaId}): autocierre falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Las horas del tramo cambiaron: el programa de servicio se entera.
+    const filaFusionada = fusionado as Record<string, unknown> | null;
+    this.avisarProgramaDeServicio(
+      (filaFusionada?.aeronave_id as string | null) ?? null,
+      vueloId,
+    );
+    try {
+      void this.notificarTripulacion(vuelo, {
+        titulo: `Escala quitada · vuelo #${vuelo.folio as number}`,
+        cuerpo: textoAvisoEscalaQuitada(fusion, motivo),
+        tipo: 'alerta_sistema',
+      });
+    } catch {
+      /* best-effort */
+    }
+    return {
+      ...(filaFusionada ?? { ...filaA, ...fusion.patch }),
+      fusion: {
+        escala_quitada_id: bId,
+        escala_iata: fusion.escala_iata,
+        tramo_a: tramoA,
+        tramo_b: tramoB,
+        descartada: fusion.descartada,
+        salida_retirada: fusion.salida_retirada,
+        aviso: fusion.aviso,
+      },
+    };
+  }
+
+  /**
+   * Gastos y apoyos ligados al tramo que se borra pasan al que sobrevive
+   * (sin esto el FK de `gasto` haría SET NULL y el de `vuelo_apoyo` CASCADE).
+   * Un apoyo que el tramo fusionado ya tiene se queda como está (el CASCADE
+   * se lleva el duplicado). Best-effort: nunca bloquea la fusión.
+   */
+  private async traspasarLigasDeTramo(
+    deId: string,
+    aId: string,
+  ): Promise<void> {
+    try {
+      const { error } = await this.supabase.service
+        .from('gasto')
+        .update({ escala_id: aId })
+        .eq('escala_id', deId);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala: los gastos del tramo ${deId} no se religaron: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      const { data: deB } = await this.supabase.service
+        .from('vuelo_apoyo')
+        .select('id, usuario_id')
+        .eq('escala_id', deId);
+      if (!deB?.length) return;
+      const { data: deA } = await this.supabase.service
+        .from('vuelo_apoyo')
+        .select('id, usuario_id')
+        .eq('escala_id', aId);
+      const ya = new Set((deA ?? []).map((r) => r.usuario_id as string));
+      for (const r of deB) {
+        if (ya.has(r.usuario_id as string)) continue;
+        const { error } = await this.supabase.service
+          .from('vuelo_apoyo')
+          .update({ escala_id: aId })
+          .eq('id', r.id as string);
+        if (error) throw new Error(error.message);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala: los apoyos del tramo ${deId} no se religaron: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Tramos COMERCIALES (orden < 100) posteriores a `desde` bajan un número,
+   * en orden ascendente (el índice único (vuelo_id, orden) lo permite porque
+   * el hueco va delante). Los operativos (≥ 100) no se tocan. Un hueco que
+   * quede por un fallo se tolera (como los que dejan los cancelados).
+   */
+  private async renumerarTramosDesde(
+    vueloId: string,
+    desde: number,
+    userId: string,
+  ): Promise<void> {
+    if (!(desde < OPERATIVA_ORDEN_BASE)) return;
+    try {
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .select('id, orden')
+        .eq('vuelo_id', vueloId)
+        .gt('orden', desde)
+        .lt('orden', OPERATIVA_ORDEN_BASE)
+        .order('orden', { ascending: true });
+      if (error) throw new Error(error.message);
+      for (const e of data ?? []) {
+        const { error: uErr } = await this.supabase.service
+          .from('escala')
+          .update({ orden: Number(e.orden) - 1, updated_by: userId })
+          .eq('id', e.id as string);
+        if (uErr) throw new Error(uErr.message);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `quitarEscala: renumerar tramos del vuelo ${vueloId} falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // ============ Cobros ============
