@@ -9930,9 +9930,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`desde` sube), historial de mantenimiento (COMPLETADOS con
       `fecha_realizada ?? fecha_programada < inicio`; prod 9), bitácora de
       motor/hélice (`componente_evento.fecha ≥ inicio`), bitácora PDF
-      (`desde = pisoDia`, vacío ⇒ el inicio; SEGURO: el tiempo de cada
-      renglón sale de la BASE de la ficha + tacómetro, no del rango; el
-      nombre del archivo lleva el `desde` efectivo); **cuenta de socios**
+      (DEROGADO el 3-nov-2026 —excepción abajo—: era `desde = pisoDia`,
+      vacío ⇒ el inicio; el tiempo de cada renglón sale de la BASE de la
+      ficha + tacómetro, no del rango); **cuenta de socios**
       (`validarCuentaDesde(mes, mesActual, inicio)` ⇒ 400
       `CUENTA_ANTES_DEL_INICIO` «La cuenta no puede arrancar antes de
       septiembre de 2026 (inicio oficial).» `details {inicio}`;
@@ -9971,6 +9971,28 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `inventario-historial-completo.spec.ts` (con la fila encendida, los
       cuatro movimientos de agosto–octubre salen en todas las superficies y
       ninguna consulta lleva `gte` por el inicio).
+    - **EXCEPCIÓN: LA BITÁCORA PDF IMPRIME TODO EL HISTORIAL (3-nov-2026,
+      API 0.0.117, SIN migración).** Pedido de la oficina (bitácoras de
+      XB-PEV): «le pongo en la parte de imprimir bitácoras … desde una fecha
+      pero da otra … no arroja los datos desde agosto sino que inicia el 1
+      de sep». El libro físico de mantenimiento lleva TODOS los vuelos; el
+      inicio oficial es financiero («NO toca inventario ni horas») y los
+      vuelos de agosto SÍ están capturados (XB-PEV: 7–25-ago, tacómetros
+      330.3 → 344.5, continuos con el 1-sep). SUPERSEDE, solo para `GET
+      /aircraft/:id/bitacora.pdf`, lo que la «Auditoría 16-oct-2026» decía
+      de la bitácora PDF: `desde`/`hasta` se usan TAL CUAL (vacíos ⇒ todo el
+      histórico), `bitacoraTacoPdf` NO lee `inicioOficial` y el nombre del
+      archivo lleva el `desde` pedido. Los tiempos nunca dependieron del
+      rango (base de la ficha + tacómetro). El resto de la ficha del avión
+      conserva el piso (`horas_anio`/`anio_desde`, tacómetros con
+      `saldo_inicial`, bitácora de motor/hélice por eventos). Panel: el
+      diálogo «Imprimir bitácoras» ya no lee el inicio, no acota las fechas
+      ni sube el `desde` (solo valida `desde ≤ hasta`). Skew: un panel nuevo
+      contra un API ≤ 0.0.116 sigue recibiendo el PDF desde el inicio
+      (deploy API → panel). Spec: `aircraft.inicio-oficial.spec.ts`
+      («Bitácora PDF — SIN piso»: con la fila encendida y sin `desde` salen
+      agosto y septiembre, `inicioOficial` no se llama; un `desde` de
+      agosto se respeta).
 87. **VARIAS FACTURAS RECIBIDAS POR GASTO (16-oct-2026, API 0.0.87,
     migración `20261016000003` APLICADA el 16-oct-2026 ~12:43 Cancún por MCP).** Pedido del cliente: ASA entrega
     5 CFDI por carga de combustible (producto, almacenamiento, expendio,

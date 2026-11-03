@@ -239,9 +239,12 @@ describe('Tacómetros del avión — saldo inicial (0.0.85)', () => {
   });
 });
 
-describe('Bitácora PDF — desde con piso (0.0.85)', () => {
+describe('Bitácora PDF — SIN piso (excepción de la invariante 86, 0.0.117)', () => {
+  // 3-nov-2026: la oficina imprime el libro físico desde agosto. El rango
+  // pedido se respeta TAL CUAL y el service ni siquiera lee el inicio.
   function bit(inicio: string | null) {
     const g = supabaseGrabador();
+    const cfg = cfgInicio(inicio);
     const generateBitacoraTacoPdf = jest
       .fn()
       .mockResolvedValue(Buffer.from('pdf'));
@@ -249,7 +252,7 @@ describe('Bitácora PDF — desde con piso (0.0.85)', () => {
       g.supabase,
       {} as never,
       { generateBitacoraTacoPdf } as never,
-      cfgInicio(inicio) as unknown as ConfiguracionService,
+      cfg as unknown as ConfiguracionService,
     );
     Object.assign(svc as unknown as Record<string, unknown>, {
       findById: jest.fn().mockResolvedValue({ id: AV, matricula: 'N4142R' }),
@@ -258,34 +261,42 @@ describe('Bitácora PDF — desde con piso (0.0.85)', () => {
         { ...esc('e-sep', '2026-09-10T15:00:00Z', 103, 105), orden: 1 },
       ]),
     });
-    return { svc, generateBitacoraTacoPdf };
+    return { svc, cfg, generateBitacoraTacoPdf };
   }
+  interface Payload {
+    desde: string | null;
+    tiras: Array<{ filas: Array<{ taco_inicial: number }> }>;
+  }
+  const payloadDe = (b: ReturnType<typeof bit>): Payload =>
+    (b.generateBitacoraTacoPdf.mock.calls as unknown[][])[0][0] as Payload;
 
-  it('sin desde ⇒ el inicio; filas solo desde el inicio; devuelve el desde efectivo', async () => {
+  it('fila encendida y sin desde ⇒ todo el histórico (agosto incluido), desde null y NO lee el inicio', async () => {
     const b = bit(INICIO);
     const r = await b.svc.bitacoraTacoPdf(AV);
-    expect(r.desde).toBe(INICIO);
-    const payload = (
-      b.generateBitacoraTacoPdf.mock.calls as unknown[][]
-    )[0][0] as {
-      desde: string;
-      tiras: Array<{ filas: Array<{ taco_inicial: number }> }>;
-    };
-    expect(payload.desde).toBe(INICIO);
-    for (const t of payload.tiras) {
-      expect(t.filas.map((f) => f.taco_inicial)).toEqual([103]);
+    expect(r.desde).toBeNull();
+    const p = payloadDe(b);
+    expect(p.desde).toBeNull();
+    expect(p.tiras.length).toBeGreaterThan(0);
+    for (const t of p.tiras) {
+      expect(t.filas.map((f) => f.taco_inicial)).toEqual([100, 103]);
     }
+    expect(b.cfg.inicioOficial).not.toHaveBeenCalled();
   });
 
-  it('inicio null ⇒ todo el histórico (desde null)', async () => {
+  it('un desde anterior al inicio se respeta tal cual (agosto se imprime) y va al nombre del archivo', async () => {
+    const b = bit(INICIO);
+    const r = await b.svc.bitacoraTacoPdf(AV, '2026-08-01', '2026-08-31');
+    expect(r.desde).toBe('2026-08-01');
+    const p = payloadDe(b);
+    expect(p.desde).toBe('2026-08-01');
+    expect(p.tiras[0].filas.map((f) => f.taco_inicial)).toEqual([100]);
+    expect(b.cfg.inicioOficial).not.toHaveBeenCalled();
+  });
+
+  it('inicio null ⇒ idéntico (todo el histórico, desde null)', async () => {
     const b = bit(null);
     const r = await b.svc.bitacoraTacoPdf(AV);
     expect(r.desde).toBeNull();
-    const payload = (
-      b.generateBitacoraTacoPdf.mock.calls as unknown[][]
-    )[0][0] as {
-      tiras: Array<{ filas: unknown[] }>;
-    };
-    expect(payload.tiras[0].filas).toHaveLength(2);
+    expect(payloadDe(b).tiras[0].filas).toHaveLength(2);
   });
 });

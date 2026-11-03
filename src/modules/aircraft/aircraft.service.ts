@@ -1523,17 +1523,16 @@ export class AircraftService {
     } = {},
   ): Promise<{ buffer: Buffer; matricula: string; desde: string | null }> {
     const aeronave = await this.findById(id);
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): el
-    // periodo arranca en el inicio (`desde` vacío ⇒ el inicio). SEGURO para
-    // los tiempos: el acumulado de cada renglón sale de la BASE de la ficha
-    // (avión/componente) + el tacómetro (`bitacora-tiras.util`), NO de sumar
-    // el rango; la hélice sin ficha usa `helice_base` = el tiempo que la
-    // oficina teclea para el PRIMER renglón impreso. El nombre del archivo
-    // lleva el `desde` efectivo (devuelto aquí).
-    const desde = pisoDia(
-      desdePedido,
-      await inicioOficialDe(this.configuracion),
-    );
+    // SIN INICIO OFICIAL (excepción de la invariante 86, 3-nov-2026,
+    // 0.0.117): la bitácora es el libro físico de mantenimiento y lleva TODOS
+    // los vuelos (la oficina pidió imprimir desde agosto). El rango es el
+    // pedido tal cual (`desde` vacío ⇒ todo el histórico). Los tiempos no
+    // dependen del rango: el acumulado de cada renglón sale de la BASE de la
+    // ficha (avión/componente) + el tacómetro (`bitacora-tiras.util`); la
+    // hélice sin ficha usa `helice_base` = el tiempo que la oficina teclea
+    // para el PRIMER renglón impreso. El nombre del archivo lleva este
+    // `desde` (devuelto aquí).
+    const desde = desdePedido ?? null;
     // Escalas + fichas de motores/hélices (horas ancladas a un tacómetro): de
     // ahí salen los tiempos de cada libro. Solo las columnas de la bitácora.
     const [rows, motoresRes, helicesRes] = await Promise.all([

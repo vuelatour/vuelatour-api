@@ -224,8 +224,9 @@ export class AircraftController {
       q.hasta,
       { tiras: q.tiras, formato: q.formato, heliceBase: q.helice_base },
     );
-    // `desde` EFECTIVO (inicio oficial, invariante 86): el nombre dice el
-    // periodo que de verdad trae el PDF.
+    // El `desde` que devuelve el service es el pedido tal cual: la bitácora
+    // NO lleva inicio oficial (excepción de la invariante 86, 3-nov-2026);
+    // el nombre dice el periodo que de verdad trae el PDF.
     const rango = desde || q.hasta ? `-${desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {
       type: 'application/pdf',
