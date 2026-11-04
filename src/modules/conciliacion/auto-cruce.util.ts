@@ -743,6 +743,48 @@ export function refDedupe(ref: string | null | undefined): string | null {
   return n.length >= 4 ? n : null;
 }
 
+/** Dígitos SIGNIFICATIVOS mínimos de un número de operación del banco. */
+export const OPERACION_DIGITOS_MIN = 9;
+
+/**
+ * Números de OPERACIÓN del banco dentro de la referencia (4-nov-2026): cada
+ * tira de ≥ 9 dígitos, sin sus ceros a la izquierda y con ≥ 9 dígitos
+ * significativos. Reconoce la MISMA línea leída por dos caminos distintos:
+ * la IA del PDF entrega «00000000182524573911 AUT. 470924» (y a veces
+ * «270695199», sin ceros) mientras el XLSX/CSV del portal trae solo
+ * «00000000182524573911» / «00000000000270695199»; `refDedupe` las ve
+ * distintas y, con una leyenda corta («ADO») o reordenada («POR
+ * DOMICILIACION 03 POR COBRANZA…» vs «03 POR COBRANZA…»), el movimiento
+ * entraba dos veces (prod: ADO 12-oct, ES BACALAR 5-oct, domiciliación
+ * 15-oct). Quedan FUERA: el relleno de Scotiabank en los SPEI
+ * («00000000000000000001» ⇒ «1»), las autorizaciones («AUT. 470924», 6
+ * dígitos) y el número de TARJETA que la IA pega como «REF. 9155656256»
+ * (se repite en todos los cargos de esa tarjeta: no identifica la línea).
+ */
+export function operacionesDedupe(ref: string | null | undefined): string[] {
+  if (typeof ref !== 'string') return [];
+  const out: string[] = [];
+  const re = /(REF\.?\s*)?(\d{9,})/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(ref)) !== null) {
+    if (m[1]) continue; // «REF. 9155656256» = tarjeta
+    const n = m[2].replace(/^0+/, '');
+    if (n.length >= OPERACION_DIGITOS_MIN && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/** ¿Las dos referencias comparten un número de operación del banco? */
+export function mismaOperacionDedupe(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const oa = operacionesDedupe(a);
+  if (oa.length === 0) return false;
+  const ob = operacionesDedupe(b);
+  return oa.some((x) => ob.includes(x));
+}
+
 /**
  * Largo mínimo de la leyenda CORTA para que un prefijo cuente como la misma
  * línea truncada («REST HOTEL ZOMAY HOLBO» ⊂ «REST HOTEL ZOMAY HOLBOX»).
@@ -879,7 +921,10 @@ export interface ParejaDedupe {
  *  3. Leyenda con el mismo inicio (12 caracteres).
  *  4. REFERENCIA igual con leyendas que NO se contradicen (la IA redactó
  *     distinto la MISMA línea: «AEROPUERTO DE COZUMEL» / «Aeropuerto
- *     Cozumel (TUA)»).
+ *     Cozumel (TUA)»). «Igual» = `refDedupe` idéntica O el mismo número de
+ *     operación (`mismaOperacionDedupe`, 4-nov-2026): «ADO» con
+ *     «00000000182524573911 AUT. 470924» (PDF) ES «ADO ADO\\AV UXMAL…» con
+ *     «00000000182524573911» (XLSX).
  *
  * Exportada desde el 0.0.75 (concepto del SPEI, 13-oct-2026): la regla
  * ORDEN_ARCHIVO de `planEnriquecimiento` re-empareja gemelos por posición y
@@ -891,7 +936,13 @@ export function nivelEmpateDedupe(
   p: LineaDedupe,
 ): number | null {
   const ref = refDedupe(n.referencia);
-  const mismaRef = ref !== null && ref === refDedupe(p.referencia);
+  // Referencia igual: idéntica normalizada O con el mismo número de
+  // operación del banco (`operacionesDedupe`, 4-nov-2026: PDF por la IA vs
+  // XLSX/CSV del portal). Sigue siendo la señal MÁS débil cuando va sola
+  // (nivel 4) y nunca veta un duplicado.
+  const mismaRef =
+    (ref !== null && ref === refDedupe(p.referencia)) ||
+    mismaOperacionDedupe(n.referencia, p.referencia);
   const desc = nivelDescripcionDedupe(n.descripcion, p.descripcion);
   if (desc !== null) return mismaRef ? 0 : desc + 1;
   if (mismaRef && !descripcionesSeContradicen(n.descripcion, p.descripcion)) {

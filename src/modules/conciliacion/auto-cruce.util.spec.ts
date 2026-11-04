@@ -24,6 +24,8 @@ import {
   descDedupe,
   descripcionesSeContradicen,
   elegirCandidato,
+  mismaOperacionDedupe,
+  operacionesDedupe,
   elegirMovimiento,
   emparejarDuplicados as emparejarDuplicadosReal,
   leyendasNombranDistinto,
@@ -1694,5 +1696,160 @@ describe('la cuenta del gasto manda (20-oct-2026, invariante 98)', () => {
       ],
     );
     expect(ok.movimiento_id).toBe('m2');
+  });
+});
+
+describe('operacionesDedupe / mismaOperacionDedupe (4-nov-2026)', () => {
+  it('saca el número de operación sin ceros y descarta relleno, AUT. y tarjeta', () => {
+    expect(operacionesDedupe('00000000182524573911 AUT. 470924')).toEqual([
+      '182524573911',
+    ]);
+    expect(operacionesDedupe('00000000182524573911')).toEqual(['182524573911']);
+    // La IA del 2-nov soltó los ceros: mismo número.
+    expect(operacionesDedupe('270695199')).toEqual(['270695199']);
+    expect(operacionesDedupe('00000000000270695199')).toEqual(['270695199']);
+    // Relleno de Scotiabank en los SPEI: no identifica nada.
+    expect(operacionesDedupe('00000000000000000001')).toEqual([]);
+    expect(operacionesDedupe('000000000000000000000000')).toEqual([]);
+    // «REF. 9155656256» es la TARJETA (se repite en todos sus cargos).
+    expect(
+      operacionesDedupe('00000000180523011597 REF. 9155656256 AUT. 480427'),
+    ).toEqual(['180523011597']);
+    expect(operacionesDedupe('REF. 9155656256 AUT. 480427')).toEqual([]);
+    // Tarjetas sueltas de las lecturas viejas (8 significativos): fuera.
+    expect(operacionesDedupe('0025830577')).toEqual([]);
+    expect(operacionesDedupe(null)).toEqual([]);
+    expect(operacionesDedupe('1')).toEqual([]);
+  });
+
+  it('mismaOperacionDedupe: comparten un número de operación', () => {
+    expect(
+      mismaOperacionDedupe(
+        '00000000182524573911 AUT. 470924',
+        '00000000182524573911',
+      ),
+    ).toBe(true);
+    expect(mismaOperacionDedupe('270695199', '00000000000270695199')).toBe(
+      true,
+    );
+    expect(
+      mismaOperacionDedupe('00000000279163776614', '00000000279163789015'),
+    ).toBe(false);
+    expect(
+      mismaOperacionDedupe('00000000000000000001', '00000000000000000001'),
+    ).toBe(false);
+    expect(mismaOperacionDedupe(null, '00000000182524573911')).toBe(false);
+  });
+});
+
+describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 4-nov-2026)', () => {
+  type Linea = {
+    fecha: string;
+    tipo: string;
+    monto: number;
+    descripcion: string | null;
+    referencia: string | null;
+  };
+  function importar(base: Linea[], archivo: Linea[]): Linea[] {
+    return [...base, ...emparejarDuplicados(archivo, base).aInsertar];
+  }
+
+  it('ADO $124 del 12-oct: «ADO» (PDF, 3 letras) y «ADO ADO\\AV UXMAL…» (XLSX) son la misma línea', () => {
+    let base = importar(
+      [],
+      [
+        {
+          fecha: '2026-10-12',
+          tipo: 'CARGO',
+          monto: 124,
+          descripcion: 'ADO',
+          referencia: '00000000182524573911 AUT. 470924',
+        },
+      ],
+    );
+    base = importar(base, [
+      {
+        fecha: '2026-10-12',
+        tipo: 'CARGO',
+        monto: 124,
+        descripcion:
+          'ADO ADO\\AV UXMAL LT19 L1 S REF. 0025830585 AUT. 470924 RFC AOR 540203NL7',
+        referencia: '00000000182524573911',
+      },
+    ]);
+    expect(base).toHaveLength(1);
+  });
+
+  it('ES BACALAR $1,000.27 del 5-oct: el PDF pegó « REF. … AUT. …» a la referencia', () => {
+    let base = importar(
+      [],
+      [
+        {
+          fecha: '2026-10-05',
+          tipo: 'CARGO',
+          monto: 1000.27,
+          descripcion: 'ES BACALAR',
+          referencia: '00000000180523011597 REF. 9155656256 AUT. 480427',
+        },
+      ],
+    );
+    base = importar(base, [
+      {
+        fecha: '2026-10-05',
+        tipo: 'CARGO',
+        monto: 1000.27,
+        descripcion:
+          'ES BACALAR ES BACALAR\\AV BENITO J REF. 9155656256 AUT. 480427 RFC ESB 150325KK1',
+        referencia: '00000000180523011597',
+      },
+    ]);
+    expect(base).toHaveLength(1);
+  });
+
+  it('domiciliación $15,682.76 del 15-oct: el PDF reordena la leyenda y suelta los ceros de la referencia', () => {
+    let base = importar(
+      [],
+      [
+        {
+          fecha: '2026-10-15',
+          tipo: 'CARGO',
+          monto: 15682.76,
+          descripcion:
+            'POR DOMICILIACION 03 POR COBRANZA DOMICILIADA RFC/CURP: NFM0',
+          referencia: '00000000000270695199',
+        },
+      ],
+    );
+    base = importar(base, [
+      {
+        fecha: '2026-10-15',
+        tipo: 'CARGO',
+        monto: 15682.76,
+        descripcion: '03 POR COBRANZA DOMICILIADA',
+        referencia: '270695199',
+      },
+    ]);
+    expect(base).toHaveLength(1);
+  });
+
+  it('dos cargos ASUR iguales el mismo día con operaciones DISTINTAS siguen siendo dos', () => {
+    const asur = (referencia: string): Linea => ({
+      fecha: '2026-10-12',
+      tipo: 'CARGO',
+      monto: 332.04,
+      descripcion: 'ASUR CANCUN',
+      referencia,
+    });
+    let base = importar(
+      [],
+      [asur('00000000279163776614'), asur('00000000279163789015')],
+    );
+    expect(base).toHaveLength(2);
+    // Re-subir el mismo archivo no agrega nada (multiconjunto).
+    base = importar(base, [
+      asur('00000000279163776614'),
+      asur('00000000279163789015'),
+    ]);
+    expect(base).toHaveLength(2);
   });
 });

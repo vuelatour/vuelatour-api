@@ -393,6 +393,26 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
        (1)–(3) la referencia no cuenta. Sola es la señal MÁS débil: los 7
        abonos «CARGO INDEBIDO 21 SEP 355xx» del 23-sep traen la MISMA
        referencia.
+     - **Referencia «igual» = `refDedupe` idéntica O el mismo NÚMERO DE
+       OPERACIÓN del banco** (`operacionesDedupe` / `mismaOperacionDedupe`,
+       4-nov-2026, API 0.0.118). Incidente (WhatsApp 4-nov: «se están
+       duplicando movimientos»): la IA del PDF entrega la referencia como
+       «00000000182524573911 AUT. 470924» (o «270695199», sin ceros) y el
+       XLSX/CSV del portal nuevo de Scotiabank trae solo
+       «00000000182524573911» / «00000000000270695199»; con una leyenda
+       corta («ADO», 3 letras: nunca es prefijo) o reordenada («POR
+       DOMICILIACION 03 POR COBRANZA…» vs «03 POR COBRANZA…») ningún nivel
+       empataba y el movimiento entró dos veces (prod: ADO $124 12-oct,
+       ES BACALAR $1,000.27 5-oct, domiciliación $15,682.76 15-oct). Número
+       de operación = cada tira de ≥ 9 dígitos de la referencia sin ceros a
+       la izquierda y con ≥ 9 significativos; NO cuentan el relleno de los
+       SPEI («…0001»), las autorizaciones (6 dígitos) ni la TARJETA que la IA
+       pega como «REF. 9155656256» (se repite en todos los cargos de esa
+       tarjeta). Sigue siendo nivel 4 cuando va sola (exige leyendas que no
+       se contradigan) y nunca veta. Los duplicados que ya estaban se
+       resuelven en el panel con «Omitir → Duplicado en el estado de
+       cuenta» (así lo hizo la oficina con 3 de los 6 pares) o con una
+       limpieza por SQL Editor con respaldo (patrón 20260929000001).
      - **EMPAREJAMIENTO MÁXIMO por niveles** (Kuhn, revisión adversaria
        29-sep): se abre un nivel a la vez y una línea ya emparejada puede
        ceder su fila previa y moverse a otra con la que también empata. Con
