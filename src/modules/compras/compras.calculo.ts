@@ -387,6 +387,52 @@ export function calcularCompra<L extends LineaCalcInput>(
   };
 }
 
+// ===== Categorías que pueden ser PAGO de una compra (PURO, 4-nov-2026) =====
+
+/** Categorías de gasto que pueden ser la factura de MERCANCÍA. */
+export const CATEGORIAS_MERCANCIA: readonly string[] = [
+  'REFACCION',
+  'OTRO',
+  'OPERACIONES',
+];
+
+/**
+ * Categorías que JAMÁS son pago de una compra de refacciones: dinero
+ * personal del dueño, gastos de visita, gasolina de coches, combustible de
+ * aviación, TUAS, permisos de pista y gastos fijos. Ligarlos metería al
+ * costo de bodega dinero que no tiene nada que ver con la refacción.
+ * NOMINA y SERVICIOS (29-ago): sueldos y servicios al avión. COMISION_VENDEDOR
+ * (28-sep-2026) y COMISION_VENDEDOR_AVION (13-oct-2026, invariante 61): el
+ * pago al vendedor no es costo de una refacción. COMISARIATO (invariante 63)
+ * y OTROS_DIRECTOS_VUELO (invariante 97): gastos directos del vuelo.
+ * OTROS_MOVIMIENTOS (invariante 107): egreso de VuelaTour del Balance
+ * general. (PAQUETERIA sí se liga: el envío de una pieza es costo de la
+ * compra.) Se usa con `.includes` en JS, nunca en un query.
+ */
+export const CATEGORIAS_NO_LIGABLES: readonly string[] = [
+  'PERSONAL_DUENO',
+  'VISITA',
+  'GASOLINA',
+  'GAS',
+  'TUAS',
+  'PERMISO',
+  'FIJO',
+  'NOMINA',
+  'SERVICIOS',
+  'COMISION_VENDEDOR',
+  'COMISION_VENDEDOR_AVION',
+  'COMISARIATO',
+  'OTROS_DIRECTOS_VUELO',
+  'OTROS_MOVIMIENTOS',
+];
+
+/** ¿Un gasto de esta categoría puede ser pago (mercancía o cargo) de una compra? */
+export function categoriaLigableACompra(
+  categoria: string | null | undefined,
+): boolean {
+  return !!categoria && !CATEGORIAS_NO_LIGABLES.includes(categoria);
+}
+
 // ===== Heurísticas de texto (compartidas por create/unir) =====
 
 /**

@@ -31,7 +31,7 @@ const cuerpo = (extra: Record<string, unknown> = {}) => ({
 describe('POST /v1/compras/:id/registrar-gasto — cableado HTTP', () => {
   let app: INestApplication;
   let rol: Rol = Rol.ADMIN;
-  const svc = { registrarGasto: jest.fn() };
+  const svc = { registrarGasto: jest.fn(), agregarGasto: jest.fn() };
   const http = (): Servidor => app.getHttpServer() as Servidor;
 
   beforeAll(async () => {
@@ -73,6 +73,11 @@ describe('POST /v1/compras/:id/registrar-gasto — cableado HTTP', () => {
     svc.registrarGasto.mockResolvedValue({
       id: COMPRA,
       gasto_registrado: { id: 'g-1' },
+    });
+    svc.agregarGasto.mockReset();
+    svc.agregarGasto.mockResolvedValue({
+      id: COMPRA,
+      gasto_registrado: { id: 'g-2' },
     });
   });
 
@@ -181,5 +186,119 @@ describe('POST /v1/compras/:id/registrar-gasto — cableado HTTP', () => {
     rol = Rol.FACTURACION;
     expect((await request(http()).post(RUTA).send(cuerpo())).status).toBe(403);
     expect(svc.registrarGasto).toHaveBeenCalledTimes(1);
+  });
+
+  it('acepta foto_url (comprobante ya subido) y lo pasa al servicio; más de 500 caracteres ⇒ 400', async () => {
+    const res = await request(http())
+      .post(RUTA)
+      .send(cuerpo({ foto_url: 'oficina/1762-abc-factura.pdf' }));
+    expect(res.status).toBe(201);
+    expect(llamadas(svc.registrarGasto)[0][1]).toMatchObject({
+      foto_url: 'oficina/1762-abc-factura.pdf',
+    });
+    expect(
+      (
+        await request(http())
+          .post(RUTA)
+          .send(cuerpo({ foto_url: 'x'.repeat(501) }))
+      ).status,
+    ).toBe(400);
+  });
+
+  // ===== «Agregar gasto a la compra» (4-nov-2026, invariante 116) =====
+  const RUTA_OTRO = `/v1/compras/${COMPRA}/gastos`;
+  const otro = (extra: Record<string, unknown> = {}) => ({
+    rol: 'ENVIO',
+    monto: 1850.5,
+    moneda: 'MXN',
+    tc_usd_mxn: 18.8052,
+    fecha_gasto: '2026-11-04',
+    medio_pago: 'TARJETA_CORP',
+    ...extra,
+  });
+
+  it('POST :id/gastos — 201 con el cuerpo mínimo: rol, monto y T.C. llegan numéricos al servicio con usuario y rol', async () => {
+    const res = await request(http()).post(RUTA_OTRO).send(otro());
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      id: COMPRA,
+      gasto_registrado: { id: 'g-2' },
+    });
+    const [id, dto, userId, r] = llamadas(svc.agregarGasto)[0];
+    expect(id).toBe(COMPRA);
+    expect(dto).toEqual({
+      rol: 'ENVIO',
+      monto: 1850.5,
+      moneda: 'MXN',
+      tc_usd_mxn: 18.8052,
+      fecha_gasto: '2026-11-04',
+      medio_pago: 'TARJETA_CORP',
+    });
+    expect(userId).toBe('u-1');
+    expect(r).toBe(Rol.ADMIN);
+    expect(svc.registrarGasto).not.toHaveBeenCalled();
+  });
+
+  it('POST :id/gastos — rol MERCANCIA o fuera de la lista, monto ausente/0/texto/3 decimales, moneda rara, sin T.C., medio BODEGA, fecha mala ⇒ 400 sin llamar al servicio', async () => {
+    for (const malo of [
+      { rol: 'MERCANCIA' },
+      { rol: 'envio' },
+      { rol: undefined },
+      { monto: undefined },
+      { monto: 0 },
+      { monto: 'mil' },
+      { monto: 10.123 },
+      { moneda: 'EUR' },
+      { tc_usd_mxn: undefined },
+      { tc_usd_mxn: 'x' },
+      { medio_pago: 'BODEGA' },
+      { fecha_gasto: '04/11/2026' },
+      { categoria: 'NO_EXISTE' },
+      { foto_url: 'x'.repeat(501) },
+      { aeronave_id: 'a0000000-0000-4000-8000-000000000002' },
+    ]) {
+      const res = await request(http()).post(RUTA_OTRO).send(otro(malo));
+      expect(res.status).toBe(400);
+    }
+    expect(svc.agregarGasto).not.toHaveBeenCalled();
+  });
+
+  it('POST :id/gastos — acepta los opcionales (categoría, cuenta, proveedor, folio, notas, foto, llave); id que no es uuid ⇒ 400; roles ADMIN/COORDINADOR sí, PILOTO/FACTURACION 403', async () => {
+    const res = await request(http())
+      .post(RUTA_OTRO)
+      .send(
+        otro({
+          categoria: 'OTRO',
+          cuenta_bancaria_id: 'c0000000-0000-4000-8000-000000000001',
+          proveedor_id: 'a0000000-0000-4000-8000-000000000002',
+          folio_ticket: '1Z999',
+          notas: 'guía',
+          foto_url: 'oficina/1-a-guia.pdf',
+          client_request_id: '9b2c7a10-1d2e-4f30-8a4b-5c6d7e8f9a0b',
+        }),
+      );
+    expect(res.status).toBe(201);
+    expect(llamadas(svc.agregarGasto)[0][1]).toMatchObject({
+      categoria: 'OTRO',
+      folio_ticket: '1Z999',
+      notas: 'guía',
+      foto_url: 'oficina/1-a-guia.pdf',
+    });
+    expect(
+      (await request(http()).post('/v1/compras/12/gastos').send(otro())).status,
+    ).toBe(400);
+    rol = Rol.COORDINADOR;
+    expect((await request(http()).post(RUTA_OTRO).send(otro())).status).toBe(
+      201,
+    );
+    rol = Rol.PILOTO;
+    expect((await request(http()).post(RUTA_OTRO).send(otro())).status).toBe(
+      403,
+    );
+    rol = Rol.FACTURACION;
+    expect((await request(http()).post(RUTA_OTRO).send(otro())).status).toBe(
+      403,
+    );
+    expect(svc.agregarGasto).toHaveBeenCalledTimes(2);
   });
 });

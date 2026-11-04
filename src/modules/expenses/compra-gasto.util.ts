@@ -12,14 +12,24 @@
  * T.C. de la compra) vive en `CompraGastoService`.
  */
 import { cuentaParaGuardar } from '../../common/medio-pago.util';
-import type { MonedaCompra, ResumenCompra } from '../compras/compras.calculo';
+import {
+  categoriaLigableACompra,
+  type MonedaCompra,
+  type ResumenCompra,
+} from '../compras/compras.calculo';
 import {
   CategoriaGasto,
   type CreateGastoDto,
+  EstatusComprobante,
   MedioPago,
   Moneda,
 } from './dto/expenses.dto';
-import type { RegistrarGastoCompraDto } from './dto/compra-gasto.dto';
+import {
+  ROLES_OTRO_GASTO_COMPRA,
+  type AgregarGastoCompraDto,
+  type RegistrarGastoCompraDto,
+  type RolOtroGastoCompra,
+} from './dto/compra-gasto.dto';
 
 /**
  * Banda razonable del T.C. (MXN por USD), la MISMA que `TC_PAGO_SOCIO_*`
@@ -37,6 +47,10 @@ export const CODIGO_COMPRA_GASTO = {
   TC_REQUERIDO: 'TC_REQUERIDO',
   TC_FUERA_DE_RANGO: 'TC_FUERA_DE_RANGO',
   NO_DISPONIBLE: 'REGISTRAR_GASTO_NO_DISPONIBLE',
+  // «Agregar gasto a la compra» (4-nov-2026).
+  ROL_MERCANCIA: 'COMPRA_GASTO_ROL_MERCANCIA',
+  MONTO_REQUERIDO: 'COMPRA_GASTO_MONTO_REQUERIDO',
+  CATEGORIA_NO_LIGABLE: 'COMPRA_GASTO_CATEGORIA_NO_LIGABLE',
 } as const;
 
 export const MENSAJE_COMPRA_GASTO = {
@@ -50,7 +64,14 @@ export const MENSAJE_COMPRA_GASTO = {
     'Captura el tipo de cambio (pesos por dólar): es obligatorio para registrar el gasto de una compra.',
   NO_DISPONIBLE:
     'Registrar el gasto de una compra no está disponible en este servidor; registra el gasto en Gastos y vincúlalo a la compra.',
+  ROL_MERCANCIA:
+    'La factura de las refacciones se registra con «Registrar gasto»; aquí se agregan los otros pagos de la compra (envío, impuestos o aduana, otro cargo).',
+  MONTO_REQUERIDO: 'Captura el monto que pagaste (mayor a cero).',
 } as const;
+
+export function mensajeCategoriaNoLigable(categoria: string): string {
+  return `Un gasto ${categoria} no puede ser pago de una compra de refacciones: elige otra categoría.`;
+}
 
 export function mensajeTcFueraDeRango(tc: number): string {
   return `El tipo de cambio ${tc} está fuera del rango razonable (${TC_COMPRA_MIN} a ${TC_COMPRA_MAX} pesos por dólar): revisa la captura.`;
@@ -127,6 +148,115 @@ export function validarRegistrarGastoCompra(p: {
   return null;
 }
 
+/**
+ * Qué paga un gasto agregado a la compra (todo menos la mercancía) y la
+ * categoría con la que nace si no se manda otra: el envío de una pieza es
+ * PAQUETERIA (invariante 97: gasto de la empresa, como la refacción sin
+ * avión); impuestos/aduana y otros cargos van a OTRO (así los capturó la
+ * oficina en las compras #3 y #4). Nunca una categoría de vuelo.
+ */
+export const ETIQUETA_ROL_OTRO_GASTO: Readonly<
+  Record<RolOtroGastoCompra, string>
+> = {
+  ENVIO: 'Envío',
+  IMPUESTOS: 'Impuestos / aduana',
+  OTRO: 'Otro cargo',
+};
+
+export const CATEGORIA_POR_ROL_OTRO_GASTO: Readonly<
+  Record<RolOtroGastoCompra, CategoriaGasto>
+> = {
+  ENVIO: CategoriaGasto.PAQUETERIA,
+  IMPUESTOS: CategoriaGasto.OTRO,
+  OTRO: CategoriaGasto.OTRO,
+};
+
+export function esRolOtroGastoCompra(
+  rol: string | null | undefined,
+): rol is RolOtroGastoCompra {
+  return (
+    typeof rol === 'string' &&
+    (ROLES_OTRO_GASTO_COMPRA as readonly string[]).includes(rol)
+  );
+}
+
+/** La categoría con la que nace el gasto agregado: la capturada o la del rol. */
+export function categoriaOtroGastoCompra(
+  rol: RolOtroGastoCompra,
+  categoria: CategoriaGasto | string | null | undefined,
+): string {
+  const c = typeof categoria === 'string' ? categoria.trim() : '';
+  return c || CATEGORIA_POR_ROL_OTRO_GASTO[rol];
+}
+
+/**
+ * Valida «Agregar gasto a la compra» ANTES de tocar la BD, en este orden:
+ * el rol (la mercancía tiene su propio botón), el monto, la categoría (una
+ * que no se liga a compras jamás entra al costo de bodega) y el T.C.
+ * (obligatorio y en banda, como en «Registrar gasto»). `null` = adelante.
+ */
+export function validarAgregarGastoCompra(p: {
+  rol: string | null | undefined;
+  monto: number | string | null | undefined;
+  tc: number | string | null | undefined;
+  categoria?: string | null;
+}): ErrorCompraGasto | null {
+  if (!esRolOtroGastoCompra(p.rol)) {
+    return {
+      status: 400,
+      code: CODIGO_COMPRA_GASTO.ROL_MERCANCIA,
+      message: MENSAJE_COMPRA_GASTO.ROL_MERCANCIA,
+    };
+  }
+  const monto = p.monto == null || p.monto === '' ? NaN : Number(p.monto);
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return {
+      status: 400,
+      code: CODIGO_COMPRA_GASTO.MONTO_REQUERIDO,
+      message: MENSAJE_COMPRA_GASTO.MONTO_REQUERIDO,
+    };
+  }
+  const categoria = categoriaOtroGastoCompra(p.rol, p.categoria);
+  if (!categoriaLigableACompra(categoria)) {
+    return {
+      status: 400,
+      code: CODIGO_COMPRA_GASTO.CATEGORIA_NO_LIGABLE,
+      message: mensajeCategoriaNoLigable(categoria),
+      details: { categoria },
+    };
+  }
+  const tc = p.tc == null || p.tc === '' ? NaN : Number(p.tc);
+  if (!Number.isFinite(tc) || tc <= 0) {
+    return {
+      status: 400,
+      code: CODIGO_COMPRA_GASTO.TC_REQUERIDO,
+      message: MENSAJE_COMPRA_GASTO.TC_REQUERIDO,
+    };
+  }
+  if (tc < TC_COMPRA_MIN || tc > TC_COMPRA_MAX) {
+    return {
+      status: 400,
+      code: CODIGO_COMPRA_GASTO.TC_FUERA_DE_RANGO,
+      message: mensajeTcFueraDeRango(tc),
+    };
+  }
+  return null;
+}
+
+/**
+ * El comprobante que ya subió el panel al bucket (4-nov-2026): con path, el
+ * gasto nace «Con comprobante» (FACTURA, lo mismo que guarda el alta de la
+ * oficina y la app al subir foto); sin path no se nombra ninguna llave.
+ */
+export function comprobanteDeFoto(
+  fotoUrl: string | null | undefined,
+): Pick<CreateGastoDto, 'foto_url' | 'estatus_comprobante'> {
+  const foto = typeof fotoUrl === 'string' ? fotoUrl.trim() : '';
+  return foto
+    ? { foto_url: foto, estatus_comprobante: EstatusComprobante.FACTURA }
+    : {};
+}
+
 /** Lo que el cuerpo del gasto toma de la compra. */
 export interface CompraParaGasto {
   folio: number;
@@ -188,10 +318,68 @@ export function cuerpoGastoDeCompra(p: {
     ...(cuenta ? { cuenta_bancaria_id: cuenta } : {}),
     ...(proveedorId ? { proveedor_id: proveedorId } : {}),
     ...(folio ? { folio_ticket: folio } : {}),
+    ...comprobanteDeFoto(dto.foto_url),
     ...(dto.client_request_id
       ? { client_request_id: dto.client_request_id }
       : {}),
     notas: notasGastoDeCompra(compra, dto.notas),
+  };
+}
+
+/** «Envío de la compra #12 · Ref. AS-1234 · Aircraft Spruce» (+ las notas capturadas). */
+export function notasOtroGastoDeCompra(
+  compra: Pick<CompraParaGasto, 'folio' | 'referencia' | 'proveedor'>,
+  rol: RolOtroGastoCompra,
+  notas: string | null | undefined,
+): string {
+  const cabecera = [
+    `${ETIQUETA_ROL_OTRO_GASTO[rol]} de la compra #${compra.folio}`,
+    compra.referencia ? `Ref. ${compra.referencia}` : null,
+    compra.proveedor?.nombre ?? null,
+  ]
+    .filter((x): x is string => !!x)
+    .join(' · ');
+  const extra = (notas ?? '').trim();
+  return extra ? `${cabecera}\n${extra}` : cabecera;
+}
+
+/**
+ * El `CreateGastoDto` de «Agregar gasto a la compra»: el monto y la moneda
+ * de SU factura (no los de la compra), el T.C. capturado, la fecha y el
+ * medio del pago, la cuenta solo con un medio que la lleva (invariante 98),
+ * el proveedor de ESTE pago (sin default: UPS no es Aircraft Spruce), el
+ * folio, el comprobante y las notas con la compra. SIN avión ni vuelo, como
+ * la mercancía: el avión paga por la SALIDA de bodega.
+ */
+export function cuerpoOtroGastoDeCompra(p: {
+  compra: Pick<CompraParaGasto, 'folio' | 'referencia' | 'proveedor'>;
+  dto: AgregarGastoCompraDto;
+}): CreateGastoDto {
+  const { compra, dto } = p;
+  const cuenta = cuentaParaGuardar(
+    dto.medio_pago,
+    dto.cuenta_bancaria_id,
+    null,
+  );
+  const folio = dto.folio_ticket?.trim();
+  return {
+    categoria: categoriaOtroGastoCompra(dto.rol, dto.categoria),
+    monto: Math.round(Number(dto.monto) * 100) / 100,
+    moneda: dto.moneda === Moneda.MXN ? Moneda.MXN : Moneda.USD,
+    tc_gasto: Number(dto.tc_usd_mxn),
+    fecha_gasto: dto.fecha_gasto,
+    medio_pago: dto.medio_pago,
+    ...(dto.medio_pago === MedioPago.TARJETA_CORP && dto.tarjeta_terminacion
+      ? { tarjeta_terminacion: dto.tarjeta_terminacion }
+      : {}),
+    ...(cuenta ? { cuenta_bancaria_id: cuenta } : {}),
+    ...(dto.proveedor_id ? { proveedor_id: dto.proveedor_id } : {}),
+    ...(folio ? { folio_ticket: folio } : {}),
+    ...comprobanteDeFoto(dto.foto_url),
+    ...(dto.client_request_id
+      ? { client_request_id: dto.client_request_id }
+      : {}),
+    notas: notasOtroGastoDeCompra(compra, dto.rol, dto.notas),
   } as CreateGastoDto;
 }
 

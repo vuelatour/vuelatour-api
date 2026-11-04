@@ -9,13 +9,19 @@ import {
 import type { Rol } from '../../common/types/auth.types';
 import { ComprasService } from '../compras/compras.service';
 import { ExpensesService } from './expenses.service';
-import type { RegistrarGastoCompraDto } from './dto/compra-gasto.dto';
+import type {
+  AgregarGastoCompraDto,
+  RegistrarGastoCompraDto,
+} from './dto/compra-gasto.dto';
 import {
   CODIGO_COMPRA_GASTO,
   MENSAJE_COMPRA_GASTO,
   cuerpoGastoDeCompra,
+  cuerpoOtroGastoDeCompra,
   resumenGastoRegistrado,
+  validarAgregarGastoCompra,
   validarRegistrarGastoCompra,
+  type ErrorCompraGasto,
 } from './compra-gasto.util';
 
 /**
@@ -40,12 +46,7 @@ export class CompraGastoService {
     @Optional() private readonly compras?: ComprasService,
   ) {}
 
-  async registrarGasto(
-    compraId: string,
-    dto: RegistrarGastoCompraDto,
-    userId: string,
-    rol?: Rol,
-  ) {
+  private comprasDisponibles(): ComprasService {
     const compras = this.compras;
     if (!compras) {
       throw new ServiceUnavailableException({
@@ -53,6 +54,27 @@ export class CompraGastoService {
         error: CODIGO_COMPRA_GASTO.NO_DISPONIBLE,
       });
     }
+    return compras;
+  }
+
+  private lanzar(invalido: ErrorCompraGasto): never {
+    const cuerpo = {
+      message: invalido.message,
+      error: invalido.code,
+      ...(invalido.details ? { details: invalido.details } : {}),
+    };
+    throw invalido.status === 409
+      ? new ConflictException(cuerpo)
+      : new BadRequestException(cuerpo);
+  }
+
+  async registrarGasto(
+    compraId: string,
+    dto: RegistrarGastoCompraDto,
+    userId: string,
+    rol?: Rol,
+  ) {
+    const compras = this.comprasDisponibles();
     return compras.bajoCandado(compraId, async () => {
       const { compra, lineas, pagos, resumen } =
         await compras.calcularDe(compraId);
@@ -62,16 +84,7 @@ export class CompraGastoService {
         resumen,
         pagos,
       });
-      if (invalido) {
-        const cuerpo = {
-          message: invalido.message,
-          error: invalido.code,
-          ...(invalido.details ? { details: invalido.details } : {}),
-        };
-        throw invalido.status === 409
-          ? new ConflictException(cuerpo)
-          : new BadRequestException(cuerpo);
-      }
+      if (invalido) this.lanzar(invalido);
       const cuerpo = cuerpoGastoDeCompra({ compra, resumen, dto });
       // El alta de siempre, con la liga a la compra en el mismo INSERT.
       const gasto = (await this.expenses.create(cuerpo, userId, rol, {
@@ -86,6 +99,52 @@ export class CompraGastoService {
       );
       this.logger.log(
         `compra #${compra.folio}: gasto ${String(gasto.id)} registrado por ${resumen.total_factura} ${compra.moneda} (T.C. ${dto.tc_usd_mxn})${tcCompraFijado ? ', T.C. fijado en la compra' : ''}`,
+      );
+      const detalle = await compras.getDetail(compraId);
+      return {
+        ...detalle,
+        gasto_registrado: resumenGastoRegistrado(gasto),
+        tc_compra_fijado: tcCompraFijado,
+      };
+    });
+  }
+
+  /**
+   * «AGREGAR GASTO A LA COMPRA» (4-nov-2026, invariante 116): otro pago de
+   * la compra —el envío de UPS en pesos, la aduana, otro cargo— que nace
+   * como gasto REAL en Gastos por el alta de siempre, con su moneda, su
+   * medio, su comprobante y su cruce bancario, ligado a la compra con su
+   * rol en el MISMO INSERT. El costo de las refacciones lo recoge
+   * `calcularCompra` (prorrateo con el T.C. del gasto). Bajo el candado de
+   * la compra; la mercancía no entra por aquí (400 ROL_MERCANCIA).
+   */
+  async agregarGasto(
+    compraId: string,
+    dto: AgregarGastoCompraDto,
+    userId: string,
+    rol?: Rol,
+  ) {
+    const compras = this.comprasDisponibles();
+    return compras.bajoCandado(compraId, async () => {
+      const { compra } = await compras.calcularDe(compraId);
+      const invalido = validarAgregarGastoCompra({
+        rol: dto.rol,
+        monto: dto.monto,
+        tc: dto.tc_usd_mxn,
+        categoria: dto.categoria,
+      });
+      if (invalido) this.lanzar(invalido);
+      const cuerpo = cuerpoOtroGastoDeCompra({ compra, dto });
+      const gasto = (await this.expenses.create(cuerpo, userId, rol, {
+        compra: { id: compraId, rol: dto.rol },
+      })) as Record<string, unknown>;
+      const tcCompraFijado = await compras.fijarTcSiFalta(
+        compraId,
+        Number(dto.tc_usd_mxn),
+        userId,
+      );
+      this.logger.log(
+        `compra #${compra.folio}: gasto ${String(gasto.id)} agregado como ${dto.rol} por ${cuerpo.monto} ${cuerpo.moneda} (T.C. ${dto.tc_usd_mxn})${tcCompraFijado ? ', T.C. fijado en la compra' : ''}`,
       );
       const detalle = await compras.getDetail(compraId);
       return {

@@ -12522,6 +12522,58 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `expenses.service.por-pagar.spec` (motivo obligatorio, recorte,
       limpieza, alta, sin migración).
 
+116. **«AGREGAR GASTO A LA COMPRA»: CADA PAGO DE UNA COMPRA ES UN GASTO
+    REAL EN GASTOS, EN SU MONEDA Y CON SU COMPROBANTE (4-nov-2026, API
+    0.0.120, sin migración).** Pedido de la oficina (Pablo Canales, video):
+    el envío de UPS de la compra #14 «no me deja cambiarlo a pesos, solo lo
+    puedo registrar en dólares, no me deja subir el comprobante y no aparece
+    en Gastos»: lo capturaron en «Cargos en la factura de mercancía»
+    (renglones de la MISMA factura, en su moneda, que solo suben el monto
+    del gasto de mercancía) y el gasto de mercancía quedó «parcial». Regla:
+    «que la compra se quede y se vayan sumando más gastos y el total, pero
+    que esos gastos se registren uno por uno en Gastos y el total de la
+    compra sea solo informativo».
+    - `POST /v1/compras/:id/gastos` (`CompraGastoController.agregarGasto`,
+      `ExpensesModule`, mismos roles que Compras): `AgregarGastoCompraDto`
+      = `rol` ENVIO|IMPUESTOS|OTRO (MERCANCIA ⇒ 400
+      `COMPRA_GASTO_ROL_MERCANCIA`: esa es `registrar-gasto`), `monto` (> 0,
+      2 decimales; ⇒ 400 `COMPRA_GASTO_MONTO_REQUERIDO`), `moneda` del
+      pago (la de SU factura, no la de la compra), `tc_usd_mxn` OBLIGATORIO
+      en banda 15–25 (mismos códigos `TC_REQUERIDO`/`TC_FUERA_DE_RANGO`: con
+      él `calcularCompra` prorratea el cargo al costo de las refacciones
+      aunque la compra esté en la otra moneda), `fecha_gasto`, `medio_pago`,
+      `tarjeta_terminacion`, `cuenta_bancaria_id` (solo con medio que la
+      lleva, invariante 98), `categoria` opcional (default por rol: ENVIO ⇒
+      PAQUETERIA, IMPUESTOS/OTRO ⇒ OTRO —así capturó la oficina las aduanas
+      de #3 y #4—; una de `CATEGORIAS_NO_LIGABLES` ⇒ 400
+      `COMPRA_GASTO_CATEGORIA_NO_LIGABLE`), `proveedor_id` SIN default (UPS
+      no es Aircraft Spruce), `folio_ticket`, `notas`, `foto_url`,
+      `client_request_id`. Nace por `ExpensesService.create` con
+      `opts.compra = {id, rol}` (liga en el MISMO INSERT), sin avión ni
+      vuelo (el avión paga por la salida de bodega), notas «Envío de la
+      compra #14 · Ref. … · proveedor» + las capturadas; bajo
+      `bajoCandado`; `fijarTcSiFalta` igual que la mercancía; responde el
+      detalle + `gasto_registrado` + `tc_compra_fijado`.
+    - **Comprobante** (`comprobanteDeFoto`): `foto_url` (path ya subido por
+      el panel a `gasto-fotos`, ≤ 500) en `registrar-gasto` Y en `gastos` ⇒
+      `foto_url` + `estatus_comprobante: FACTURA` (lo mismo que el alta de
+      oficina); vacío no nombra la llave.
+    - `CATEGORIAS_MERCANCIA` y `CATEGORIAS_NO_LIGABLES` viven en
+      `compras.calculo.ts` (PURO; `categoriaLigableACompra`) y
+      `compras.service` las importa (re-exporta `CATEGORIAS_MERCANCIA`).
+    - Panel: «Agregar gasto» en el detalle de la compra (rol, monto, moneda,
+      T.C. sugerido, medio, proveedor, comprobante), «Registrar compra» con
+      «Ya la pagué: registrar su gasto ahora» (dos llamadas: `POST /compras`
+      y `registrar-gasto`; si la segunda falla la compra queda sin gasto y el
+      panel lo dice), tarjeta «Gastos de esta compra» con el total
+      informativo, y «Cargos impresos en ESTA factura» con el aviso de que
+      lo pagado aparte va por «Agregar gasto». Ver su AGENTS.md.
+    - Specs: `compra-gasto.util.spec` (validación en orden, cuerpo en MXN
+      con PAQUETERIA y FACTURA, notas, comprobante), `compra-gasto.service.spec`
+      (candado → create con la liga → T.C. → detalle; rechazos sin crear
+      nada; 503), `compra-gasto.controller.spec` (cableado, whitelist, roles,
+      `foto_url`), `compras.calculo.spec` (`categoriaLigableACompra`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

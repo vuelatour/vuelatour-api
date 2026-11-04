@@ -6,17 +6,31 @@ import {
   TC_PAGO_SOCIO_MAX,
   TC_PAGO_SOCIO_MIN,
 } from '../profit-sharing/reparto-pago.util';
-import { CategoriaGasto, MedioPago, Moneda } from './dto/expenses.dto';
-import type { RegistrarGastoCompraDto } from './dto/compra-gasto.dto';
 import {
+  CategoriaGasto,
+  EstatusComprobante,
+  MedioPago,
+  Moneda,
+} from './dto/expenses.dto';
+import type {
+  AgregarGastoCompraDto,
+  RegistrarGastoCompraDto,
+} from './dto/compra-gasto.dto';
+import {
+  CATEGORIA_POR_ROL_OTRO_GASTO,
   CODIGO_COMPRA_GASTO,
   MENSAJE_COMPRA_GASTO,
   TC_COMPRA_MAX,
   TC_COMPRA_MIN,
+  comprobanteDeFoto,
   cuerpoGastoDeCompra,
+  cuerpoOtroGastoDeCompra,
+  mensajeCategoriaNoLigable,
   mensajeTcFueraDeRango,
   notasGastoDeCompra,
+  notasOtroGastoDeCompra,
   resumenGastoRegistrado,
+  validarAgregarGastoCompra,
   validarRegistrarGastoCompra,
 } from './compra-gasto.util';
 
@@ -274,5 +288,244 @@ describe('resumenGastoRegistrado', () => {
       fecha_gasto: null,
       estado_pago: null,
     });
+  });
+});
+
+// ===== «Agregar gasto a la compra» (4-nov-2026, invariante 116) =====
+
+const otro = (
+  extra: Partial<AgregarGastoCompraDto> = {},
+): AgregarGastoCompraDto => ({
+  rol: 'ENVIO',
+  monto: 1850.5,
+  moneda: Moneda.MXN,
+  tc_usd_mxn: 18.8052,
+  fecha_gasto: '2026-11-04',
+  medio_pago: MedioPago.TARJETA_CORP,
+  ...extra,
+});
+
+describe('validarAgregarGastoCompra: el rol, el monto, la categoría y el T.C., en ese orden', () => {
+  it('todo en orden ⇒ null; ENVIO, IMPUESTOS y OTRO pasan', () => {
+    for (const rol of ['ENVIO', 'IMPUESTOS', 'OTRO']) {
+      expect(validarAgregarGastoCompra({ rol, monto: 10, tc: 18 })).toBeNull();
+    }
+  });
+
+  it('rol MERCANCIA (o basura, o ausente) ⇒ 400 COMPRA_GASTO_ROL_MERCANCIA antes que cualquier otra cosa', () => {
+    for (const rol of ['MERCANCIA', 'mercancia', '', null, undefined, 'X']) {
+      const r = validarAgregarGastoCompra({ rol, monto: NaN, tc: 'x' });
+      expect(r).toMatchObject({
+        status: 400,
+        code: CODIGO_COMPRA_GASTO.ROL_MERCANCIA,
+        message: MENSAJE_COMPRA_GASTO.ROL_MERCANCIA,
+      });
+    }
+  });
+
+  it('monto ausente, vacío, texto, 0 o negativo ⇒ 400 COMPRA_GASTO_MONTO_REQUERIDO (antes del T.C.)', () => {
+    for (const monto of [undefined, null, '', 'mil', 0, -5]) {
+      expect(
+        validarAgregarGastoCompra({ rol: 'ENVIO', monto, tc: 'x' }),
+      ).toMatchObject({
+        status: 400,
+        code: CODIGO_COMPRA_GASTO.MONTO_REQUERIDO,
+      });
+    }
+  });
+
+  it('una categoría que no se liga a compras ⇒ 400 COMPRA_GASTO_CATEGORIA_NO_LIGABLE con la categoría en details; sin categoría manda la del rol (siempre ligable)', () => {
+    for (const categoria of [
+      'GAS',
+      'NOMINA',
+      'OTROS_MOVIMIENTOS',
+      'COMISARIATO',
+    ]) {
+      expect(
+        validarAgregarGastoCompra({
+          rol: 'OTRO',
+          monto: 10,
+          tc: 18,
+          categoria,
+        }),
+      ).toMatchObject({
+        status: 400,
+        code: CODIGO_COMPRA_GASTO.CATEGORIA_NO_LIGABLE,
+        message: mensajeCategoriaNoLigable(categoria),
+        details: { categoria },
+      });
+    }
+    expect(
+      validarAgregarGastoCompra({
+        rol: 'ENVIO',
+        monto: 10,
+        tc: 18,
+        categoria: 'REFACCION',
+      }),
+    ).toBeNull();
+    expect(
+      validarAgregarGastoCompra({
+        rol: 'ENVIO',
+        monto: 10,
+        tc: 18,
+        categoria: '  ',
+      }),
+    ).toBeNull();
+    expect(CATEGORIA_POR_ROL_OTRO_GASTO).toEqual({
+      ENVIO: CategoriaGasto.PAQUETERIA,
+      IMPUESTOS: CategoriaGasto.OTRO,
+      OTRO: CategoriaGasto.OTRO,
+    });
+  });
+
+  it('el T.C. es obligatorio y en banda, con los MISMOS códigos que «Registrar gasto»', () => {
+    for (const tc of [undefined, null, '', 'x', 0, -1]) {
+      expect(
+        validarAgregarGastoCompra({ rol: 'ENVIO', monto: 10, tc }),
+      ).toMatchObject({
+        code: CODIGO_COMPRA_GASTO.TC_REQUERIDO,
+      });
+    }
+    expect(
+      validarAgregarGastoCompra({ rol: 'ENVIO', monto: 10, tc: 188 }),
+    ).toMatchObject({
+      code: CODIGO_COMPRA_GASTO.TC_FUERA_DE_RANGO,
+      message: mensajeTcFueraDeRango(188),
+    });
+    expect(
+      validarAgregarGastoCompra({ rol: 'ENVIO', monto: 10, tc: TC_COMPRA_MIN }),
+    ).toBeNull();
+    expect(
+      validarAgregarGastoCompra({ rol: 'ENVIO', monto: 10, tc: TC_COMPRA_MAX }),
+    ).toBeNull();
+  });
+});
+
+describe('cuerpoOtroGastoDeCompra: el gasto nace con SU monto y SU moneda, sin avión, ligado por las notas', () => {
+  it('el envío de UPS en PESOS dentro de una compra en dólares: PAQUETERIA, MXN, el T.C. capturado, el proveedor de ESTE pago (jamás el de la compra) y el comprobante ⇒ FACTURA', () => {
+    const c = cuerpoOtroGastoDeCompra({
+      compra: COMPRA,
+      dto: otro({
+        proveedor_id: 'prov-ups',
+        tarjeta_terminacion: '6256',
+        folio_ticket: ' 1Z999 ',
+        foto_url: 'oficina/1762-abc-guia-ups.pdf',
+        notas: 'Guía 1Z999AA10123456784',
+      }),
+    });
+    expect(c).toEqual({
+      categoria: CategoriaGasto.PAQUETERIA,
+      monto: 1850.5,
+      moneda: Moneda.MXN,
+      tc_gasto: 18.8052,
+      fecha_gasto: '2026-11-04',
+      medio_pago: MedioPago.TARJETA_CORP,
+      tarjeta_terminacion: '6256',
+      proveedor_id: 'prov-ups',
+      folio_ticket: '1Z999',
+      foto_url: 'oficina/1762-abc-guia-ups.pdf',
+      estatus_comprobante: EstatusComprobante.FACTURA,
+      notas:
+        'Envío de la compra #12 · Ref. AS-1234567 · Aircraft Spruce\nGuía 1Z999AA10123456784',
+    });
+    // Ni avión ni vuelo: el avión paga por la SALIDA de bodega.
+    expect(c).not.toHaveProperty('aeronave_id');
+    expect(c).not.toHaveProperty('vuelo_id');
+  });
+
+  it('impuestos/aduana y otro cargo nacen OTRO; la categoría capturada manda; sin proveedor ni foto no se nombran; el monto va a centavos', () => {
+    const imp = cuerpoOtroGastoDeCompra({
+      compra: COMPRA,
+      dto: otro({ rol: 'IMPUESTOS', monto: 4525.834, moneda: Moneda.MXN }),
+    });
+    expect(imp.categoria).toBe(CategoriaGasto.OTRO);
+    expect(imp.monto).toBe(4525.83);
+    expect(imp).not.toHaveProperty('proveedor_id');
+    expect(imp).not.toHaveProperty('foto_url');
+    expect(imp).not.toHaveProperty('estatus_comprobante');
+    expect(imp.notas).toBe(
+      'Impuestos / aduana de la compra #12 · Ref. AS-1234567 · Aircraft Spruce',
+    );
+    const capturada = cuerpoOtroGastoDeCompra({
+      compra: COMPRA,
+      dto: otro({
+        rol: 'OTRO',
+        categoria: CategoriaGasto.OPERACIONES,
+        moneda: Moneda.USD,
+      }),
+    });
+    expect(capturada.categoria).toBe(CategoriaGasto.OPERACIONES);
+    expect(capturada.moneda).toBe(Moneda.USD);
+    expect(capturada.notas).toBe(
+      'Otro cargo de la compra #12 · Ref. AS-1234567 · Aircraft Spruce',
+    );
+  });
+
+  it('la cuenta SOLO viaja con un medio que la lleva (invariante 98); la tarjeta solo con TARJETA_CORP; la llave de idempotencia viaja', () => {
+    const transf = cuerpoOtroGastoDeCompra({
+      compra: COMPRA,
+      dto: otro({
+        medio_pago: MedioPago.TRANSFERENCIA,
+        cuenta_bancaria_id: 'cta-1',
+        tarjeta_terminacion: '6256',
+        client_request_id: '9b2c7a10-1d2e-4f30-8a4b-5c6d7e8f9a0b',
+      }),
+    });
+    expect(transf.cuenta_bancaria_id).toBe('cta-1');
+    expect(transf).not.toHaveProperty('tarjeta_terminacion');
+    expect(transf.client_request_id).toBe(
+      '9b2c7a10-1d2e-4f30-8a4b-5c6d7e8f9a0b',
+    );
+    const efectivo = cuerpoOtroGastoDeCompra({
+      compra: COMPRA,
+      dto: otro({
+        medio_pago: MedioPago.EFECTIVO,
+        cuenta_bancaria_id: 'cta-1',
+      }),
+    });
+    expect(efectivo).not.toHaveProperty('cuenta_bancaria_id');
+  });
+
+  it('notasOtroGastoDeCompra: cabecera con lo que haya (sin referencia ni proveedor también) y las notas debajo', () => {
+    expect(
+      notasOtroGastoDeCompra(
+        { folio: 3, referencia: null, proveedor: null },
+        'ENVIO',
+        '  ',
+      ),
+    ).toBe('Envío de la compra #3');
+    expect(
+      notasOtroGastoDeCompra(
+        { folio: 3, referencia: 'R-1', proveedor: null },
+        'OTRO',
+        'x',
+      ),
+    ).toBe('Otro cargo de la compra #3 · Ref. R-1\nx');
+  });
+});
+
+describe('comprobante (foto_url) en «Registrar gasto» y en «Agregar gasto» (4-nov-2026)', () => {
+  it('con path el gasto nace «Con comprobante» (FACTURA); vacío, espacios o ausente no nombran ninguna llave', () => {
+    expect(comprobanteDeFoto('oficina/1-a-factura.pdf')).toEqual({
+      foto_url: 'oficina/1-a-factura.pdf',
+      estatus_comprobante: EstatusComprobante.FACTURA,
+    });
+    expect(comprobanteDeFoto('  ')).toEqual({});
+    expect(comprobanteDeFoto(undefined)).toEqual({});
+    expect(comprobanteDeFoto(null)).toEqual({});
+    const con = cuerpoGastoDeCompra({
+      compra: COMPRA,
+      resumen: RESUMEN,
+      dto: dto({ foto_url: 'oficina/1-a-factura.pdf' }),
+    });
+    expect(con.foto_url).toBe('oficina/1-a-factura.pdf');
+    expect(con.estatus_comprobante).toBe(EstatusComprobante.FACTURA);
+    const sin = cuerpoGastoDeCompra({
+      compra: COMPRA,
+      resumen: RESUMEN,
+      dto: dto(),
+    });
+    expect(sin).not.toHaveProperty('foto_url');
+    expect(sin).not.toHaveProperty('estatus_comprobante');
   });
 });

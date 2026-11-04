@@ -15,6 +15,8 @@ import { lineaCompraDeRefaccion } from '../expenses/refaccion-inventario.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import {
   calcularCompra,
+  CATEGORIAS_MERCANCIA,
+  CATEGORIAS_NO_LIGABLES,
   parsearCantidadConcepto,
   RE_CONCEPTO_CARGO,
   rolPorTexto,
@@ -66,42 +68,11 @@ const TOPE_CANDIDATOS = 500;
 /** Ventana por default de los candidatos: 120 días hacia atrás. */
 export const DIAS_CANDIDATOS_DEFAULT = 120;
 
-/** Categorías de gasto que pueden ser la factura de MERCANCÍA. */
-export const CATEGORIAS_MERCANCIA = ['REFACCION', 'OTRO', 'OPERACIONES'];
-/**
- * Categorías que JAMÁS son pago de una compra de refacciones: dinero
- * personal del dueño, gastos de visita, gasolina de coches, combustible de
- * aviación, TUAS, permisos de pista y gastos fijos. Ligarlos metería al
- * costo de bodega dinero que no tiene nada que ver con la refacción.
- */
-const CATEGORIAS_NO_LIGABLES = [
-  'PERSONAL_DUENO',
-  'VISITA',
-  'GASOLINA',
-  'GAS',
-  'TUAS',
-  'PERMISO',
-  'FIJO',
-  // NOMINA y SERVICIOS (29-ago): sueldos y servicios al avión — nada que
-  // ver con el costo de bodega de una refacción.
-  'NOMINA',
-  'SERVICIOS',
-  // COMISION_VENDEDOR (28-sep-2026) y COMISION_VENDEDOR_AVION (13-oct-2026,
-  // invariante 61): el pago al vendedor —lo pague VuelaTour o el avión— no
-  // es costo de una refacción. Se usa con `.includes` en
-  // `assertGastoLigable`, en JS (nunca en un query).
-  'COMISION_VENDEDOR',
-  'COMISION_VENDEDOR_AVION',
-  // COMISARIATO (13-oct-2026, invariante 63): los snacks y bebidas de los
-  // pasajeros no son costo de bodega de una refacción.
-  'COMISARIATO',
-  // 20-oct-2026 (invariante 97): tampoco los otros gastos directos del vuelo.
-  // (PAQUETERIA sí se liga: el envío de una pieza es costo de la compra.)
-  'OTROS_DIRECTOS_VUELO',
-  // 23-oct-2026 (invariante 107): un egreso de VuelaTour de la hoja «otros
-  // movimientos» del Balance general no es costo de ninguna refacción.
-  'OTROS_MOVIMIENTOS',
-];
+// Las categorías que pueden ser pago de una compra (`CATEGORIAS_MERCANCIA`,
+// `CATEGORIAS_NO_LIGABLES`) viven en `compras.calculo.ts` (PURO) desde el
+// 4-nov-2026: también las valida «Agregar gasto a la compra» en el módulo de
+// gastos (`compra-gasto.util.ts`) sin arrastrar Nest ni la BD.
+export { CATEGORIAS_MERCANCIA };
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 
 /** Texto del 400 `TC_REQUERIDO` de «Entrada desde un gasto» en pesos. */

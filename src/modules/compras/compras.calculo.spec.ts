@@ -4,6 +4,9 @@ import {
   parsearCantidadConcepto,
   RE_CONCEPTO_CARGO,
   rolPorTexto,
+  CATEGORIAS_MERCANCIA,
+  CATEGORIAS_NO_LIGABLES,
+  categoriaLigableACompra,
 } from './compras.calculo';
 
 // Caso real del cliente (28-ago-2026): Aircraft Spruce en USD con Shipping
@@ -393,5 +396,18 @@ describe('calcularCompra — total_factura y gasto_estado', () => {
         pagadoMercancia: 0.99,
       }),
     ).toMatchObject({ gasto_estado: 'REGISTRADO' });
+  });
+});
+
+describe('categoriaLigableACompra (PURO, 4-nov-2026): lo que puede ser pago de una compra', () => {
+  it('REFACCION, OTRO, OPERACIONES y PAQUETERIA sí; dinero personal, combustible, nómina, comisiones, directos del vuelo y otros movimientos no; vacío no', () => {
+    for (const c of ['REFACCION', 'OTRO', 'OPERACIONES', 'PAQUETERIA']) {
+      expect(categoriaLigableACompra(c)).toBe(true);
+    }
+    for (const c of CATEGORIAS_NO_LIGABLES)
+      expect(categoriaLigableACompra(c)).toBe(false);
+    expect(categoriaLigableACompra('')).toBe(false);
+    expect(categoriaLigableACompra(null)).toBe(false);
+    expect(CATEGORIAS_MERCANCIA).toEqual(['REFACCION', 'OTRO', 'OPERACIONES']);
   });
 });

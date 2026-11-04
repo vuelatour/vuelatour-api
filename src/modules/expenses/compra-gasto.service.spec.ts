@@ -13,8 +13,11 @@ import { Rol } from '../../common/types/auth.types';
 import type { ComprasService } from '../compras/compras.service';
 import { CompraGastoService } from './compra-gasto.service';
 import { CODIGO_COMPRA_GASTO } from './compra-gasto.util';
-import { MedioPago } from './dto/expenses.dto';
-import type { RegistrarGastoCompraDto } from './dto/compra-gasto.dto';
+import { CategoriaGasto, MedioPago, Moneda } from './dto/expenses.dto';
+import type {
+  AgregarGastoCompraDto,
+  RegistrarGastoCompraDto,
+} from './dto/compra-gasto.dto';
 import type { ExpensesService } from './expenses.service';
 
 /**
@@ -292,5 +295,128 @@ describe('registrarGasto: rechazos ANTES de crear nada', () => {
       code: CODIGO_COMPRA_GASTO.NO_DISPONIBLE,
     });
     expect(expenses.create).not.toHaveBeenCalled();
+  });
+});
+
+// ===== «Agregar gasto a la compra» (4-nov-2026, invariante 116) =====
+
+const otro = (
+  extra: Partial<AgregarGastoCompraDto> = {},
+): AgregarGastoCompraDto => ({
+  rol: 'ENVIO',
+  monto: 1850.5,
+  moneda: Moneda.MXN,
+  tc_usd_mxn: 18.8052,
+  fecha_gasto: '2026-11-04',
+  medio_pago: MedioPago.TARJETA_CORP,
+  ...extra,
+});
+
+describe('agregarGasto: otro pago de la compra (envío, aduana, otro cargo)', () => {
+  it('bajo el candado: calcularDe → create con la liga {id, rol} y el cuerpo de SU factura (MXN, PAQUETERIA, comprobante) → fija el T.C. → responde el detalle + el gasto', async () => {
+    const { service, compras, expenses, orden } = armar();
+    expenses.create.mockImplementation(() => {
+      orden.push('create');
+      return Promise.resolve({
+        id: 'g-ups',
+        monto: '1850.50',
+        moneda: 'MXN',
+        tc_gasto: '18.805200',
+        fecha_gasto: '2026-11-04',
+        medio_pago: 'TARJETA_CORP',
+        compra_id: COMPRA_ID,
+        compra_rol: 'ENVIO',
+      });
+    });
+    const r = await service.agregarGasto(
+      COMPRA_ID,
+      otro({ proveedor_id: 'prov-ups', foto_url: 'oficina/1-a-guia.pdf' }),
+      'u-1',
+      Rol.ADMIN,
+    );
+    expect(orden).toEqual([
+      `candado:${COMPRA_ID}`,
+      'calcularDe',
+      'create',
+      'fijarTc',
+      'getDetail',
+    ]);
+    const [cuerpo, userId, rol, opts] = expenses.create.mock
+      .calls[0] as unknown as [
+      Record<string, unknown>,
+      string,
+      Rol,
+      { compra: { id: string; rol: string } },
+    ];
+    expect(cuerpo).toMatchObject({
+      categoria: CategoriaGasto.PAQUETERIA,
+      monto: 1850.5,
+      moneda: 'MXN',
+      tc_gasto: 18.8052,
+      fecha_gasto: '2026-11-04',
+      medio_pago: 'TARJETA_CORP',
+      proveedor_id: 'prov-ups',
+      foto_url: 'oficina/1-a-guia.pdf',
+      estatus_comprobante: 'FACTURA',
+      notas: 'Envío de la compra #12 · Ref. AS-1234567 · Aircraft Spruce',
+    });
+    expect(userId).toBe('u-1');
+    expect(rol).toBe(Rol.ADMIN);
+    expect(opts).toEqual({ compra: { id: COMPRA_ID, rol: 'ENVIO' } });
+    expect(compras.fijarTcSiFalta).toHaveBeenCalledWith(
+      COMPRA_ID,
+      18.8052,
+      'u-1',
+    );
+    expect(r).toMatchObject({
+      id: COMPRA_ID,
+      gasto_registrado: {
+        id: 'g-ups',
+        monto: 1850.5,
+        moneda: 'MXN',
+        tc_gasto: 18.8052,
+        medio_pago: 'TARJETA_CORP',
+      },
+      tc_compra_fijado: true,
+    });
+  });
+
+  it('rechaza ANTES de crear nada: rol MERCANCIA (400), monto en 0, categoría no ligable y T.C. fuera de banda', async () => {
+    const casos: Array<[Partial<AgregarGastoCompraDto>, string]> = [
+      [
+        { rol: 'MERCANCIA' as AgregarGastoCompraDto['rol'] },
+        CODIGO_COMPRA_GASTO.ROL_MERCANCIA,
+      ],
+      [{ monto: 0 }, CODIGO_COMPRA_GASTO.MONTO_REQUERIDO],
+      [
+        { categoria: CategoriaGasto.GAS },
+        CODIGO_COMPRA_GASTO.CATEGORIA_NO_LIGABLE,
+      ],
+      [{ tc_usd_mxn: 188 }, CODIGO_COMPRA_GASTO.TC_FUERA_DE_RANGO],
+    ];
+    for (const [extra, code] of casos) {
+      const { service, compras, expenses } = armar();
+      const f = await falla(
+        service.agregarGasto(COMPRA_ID, otro(extra), 'u-1'),
+      );
+      expect(f.status).toBe(400);
+      expect(f.code).toBe(code);
+      expect(expenses.create).not.toHaveBeenCalled();
+      expect(compras.fijarTcSiFalta).not.toHaveBeenCalled();
+    }
+  });
+
+  it('un fallo del alta de siempre (folio duplicado 409) sube tal cual y no toca el T.C. de la compra; 503 sin el módulo de compras', async () => {
+    const { service, compras, expenses } = armar();
+    expenses.create.mockRejectedValueOnce(
+      new HttpException({ error: 'FOLIO_DUPLICADO' }, 409),
+    );
+    const f = await falla(service.agregarGasto(COMPRA_ID, otro(), 'u-1'));
+    expect(f.status).toBe(409);
+    expect(compras.fijarTcSiFalta).not.toHaveBeenCalled();
+    const sin = armar({ sinCompras: true });
+    const g = await falla(sin.service.agregarGasto(COMPRA_ID, otro(), 'u-1'));
+    expect(g.status).toBe(503);
+    expect(g.code).toBe(CODIGO_COMPRA_GASTO.NO_DISPONIBLE);
   });
 });

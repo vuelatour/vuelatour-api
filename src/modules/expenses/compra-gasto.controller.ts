@@ -13,7 +13,10 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CompraGastoService } from './compra-gasto.service';
-import { RegistrarGastoCompraDto } from './dto/compra-gasto.dto';
+import {
+  AgregarGastoCompraDto,
+  RegistrarGastoCompraDto,
+} from './dto/compra-gasto.dto';
 
 /**
  * `POST /v1/compras/:id/registrar-gasto` (21-oct-2026, invariante 101). La
@@ -40,5 +43,19 @@ export class CompraGastoController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.compraGasto.registrarGasto(id, dto, c.userId, c.rol);
+  }
+
+  @Post(':id/gastos')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      'Agregar OTRO gasto a la compra (4-nov-2026): envío, impuestos/aduana u otro cargo que nace como gasto real en Gastos (su monto, su moneda, su medio, su comprobante) ligado a la compra con ese rol. Exige tc_usd_mxn (15–25), fecha_gasto y medio_pago; rol MERCANCIA ⇒ 400 (usa registrar-gasto).',
+  })
+  agregarGasto(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AgregarGastoCompraDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.compraGasto.agregarGasto(id, dto, c.userId, c.rol);
   }
 }
