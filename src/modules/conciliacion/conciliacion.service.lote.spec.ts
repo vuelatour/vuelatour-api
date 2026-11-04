@@ -1230,6 +1230,66 @@ describe('GET movimientos/:id/gastos-candidatos', () => {
     ).toBe(true);
   });
 
+  it('q con el FOLIO de la factura («AI-7351», «ai 7351», «7351»): la principal, la puente y el ticket (4-nov-2026)', async () => {
+    const db = mundo({
+      factura_recibida: [
+        { id: 'fr-ai', serie: 'AI', folio: '7351', uuid_fiscal: 'uuid-ai' },
+        { id: 'fr-otra', serie: 'AI', folio: '7388', uuid_fiscal: 'uuid-otra' },
+      ],
+      gasto_factura_recibida: [
+        { gasto_id: 'g326', factura_recibida_id: 'fr-ai', created_at: null },
+        { gasto_id: 'g319', factura_recibida_id: 'fr-otra', created_at: null },
+      ],
+    });
+    Object.assign(gasto(db, 'g315'), { factura_recibida_id: 'fr-ai' });
+    // Un ticket que TERMINA en 7351: solo lo trae la búsqueda numérica.
+    Object.assign(gasto(db, 'g318'), { folio_ticket: 'T-17351' });
+    const { svc, log } = armar(db);
+    const a = await svc.gastosCandidatosDeMovimiento('m8404', { q: 'AI-7351' });
+    expect(a.candidatos.map((c) => c.id).sort()).toEqual(['g315', 'g326']);
+    expect(
+      log.some(
+        (q) =>
+          q.tabla === 'gasto' &&
+          q.texto.includes('factura_recibida_id.in.(fr-ai)') &&
+          q.texto.includes('id.in.(g326)'),
+      ),
+    ).toBe(true);
+    const b = await svc.gastosCandidatosDeMovimiento('m8404', { q: 'ai 7351' });
+    expect(b.candidatos.map((c) => c.id).sort()).toEqual(['g315', 'g326']);
+    // Solo la serie («AI») no es un folio: no trae nada por factura.
+    const c = await svc.gastosCandidatosDeMovimiento('m8404', { q: 'AI' });
+    expect(c.candidatos.map((x) => x.id)).not.toContain('g315');
+    // ENTERO: los del monto [7351, 7352) (ninguno) MÁS los folios que
+    // terminan en 7351 (la factura, su puente y el ticket).
+    const n = await svc.gastosCandidatosDeMovimiento('m8404', { q: '7351' });
+    expect(n.candidatos.map((x) => x.id).sort()).toEqual([
+      'g315',
+      'g318',
+      'g326',
+    ]);
+    // «2801» sigue trayendo los de $2,801.40 (ningún folio termina así).
+    const m = await svc.gastosCandidatosDeMovimiento('m8404', { q: '2801' });
+    expect(m.candidatos.map((x) => x.id).sort()).toEqual([
+      'g236',
+      'g315',
+      'g319',
+      'g326',
+    ]);
+  });
+
+  it('folio de factura SIN la sonda serie/folio: la búsqueda sigue como antes', async () => {
+    const db = mundo({
+      factura_recibida: [
+        { id: 'fr-ai', serie: 'AI', folio: '7351', uuid_fiscal: 'uuid-ai' },
+      ],
+    });
+    Object.assign(gasto(db, 'g315'), { factura_recibida_id: 'fr-ai' });
+    const { svc } = armar(db, { sinSerieFolio: true });
+    const a = await svc.gastosCandidatosDeMovimiento('m8404', { q: 'AI-7351' });
+    expect(a.candidatos).toEqual([]);
+  });
+
   it('un patrón con comas/paréntesis no rompe el `or` (patronIlikeSeguro)', async () => {
     const { svc, log } = armar(mundo());
     await svc.gastosCandidatosDeMovimiento('m8404', { q: 'a,b(c)' });
@@ -2195,8 +2255,17 @@ describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => 
     const lecturas = log.filter(
       (q) => q.tabla === 'gasto' && q.texto.includes('eq:conciliado'),
     );
+    // Desde el 0.0.119 un ENTERO («212») lee ADEMÁS los folios que terminan
+    // así, con el MISMO filtro del universo (por eso son 2 con `neq`).
     expect(
       lecturas.filter((q) => q.texto.includes('neq:medio_pago')),
+    ).toHaveLength(2);
+    expect(
+      lecturas.filter(
+        (q) =>
+          q.texto.includes('neq:medio_pago') &&
+          q.texto.includes('or:folio_ticket.ilike.*212'),
+      ),
     ).toHaveLength(1);
     expect(
       lecturas.filter((q) => q.texto.includes('in:medio_pago')),

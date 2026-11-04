@@ -108,6 +108,8 @@ import {
   errorCobrosParcialesNoDisponibles,
 } from '../../common/cobros-parciales-disponible.util';
 import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
+import { gastoFacturasDisponible } from '../../common/gasto-facturas-disponible.util';
+import { ligasDeFacturas } from '../facturacion/gasto-facturas.lector';
 import {
   conFolioComprobante,
   embedFolioGasto,
@@ -206,6 +208,11 @@ import {
   errorSinMonedaCuenta,
   esMedioBancario,
   interpretarBusquedaGasto,
+  facturaCoincideBusqueda,
+  digitosFolioBusqueda,
+  folioNumericoDeBusqueda,
+  FOLIO_FACTURAS_TOPE,
+  unirPorId,
   MEDIO_BODEGA,
   MEDIOS_BANCARIOS,
   ordenarCandidatosPorNiveles,
@@ -1263,6 +1270,22 @@ const MOTIVO_GASTOS_MAX = 4000;
 const LOTE_IDS_OMISION = 150;
 /** Memo POSITIVO del id de la canónica «Omitido de la conciliación». */
 const OMITIDO_MEMO_MS = 10 * 60_000;
+
+/** Facturas recibidas con el folio buscado y los gastos de su puente. */
+interface IdsPorFolioFactura {
+  facturaIds: string[];
+  gastoIds: string[];
+}
+
+/** Condiciones del `.or()` de PostgREST para esas facturas y gastos. */
+function condicionesFactura(f: IdsPorFolioFactura): string[] {
+  return [
+    ...(f.facturaIds.length > 0
+      ? [`factura_recibida_id.in.(${f.facturaIds.join(',')})`]
+      : []),
+    ...(f.gastoIds.length > 0 ? [`id.in.(${f.gastoIds.join(',')})`] : []),
+  ];
+}
 /** Tope de omitidos que lee el renglón del pre-cierre (paginado). */
 const OMITIDOS_PRECIERRE_TOPE = 20_000;
 
@@ -9255,8 +9278,11 @@ export class ConciliacionService {
     // Universo y búsqueda: el MISMO lector de «Vincular gasto» de un cargo.
     const busqueda = interpretarBusquedaGasto(dto.q);
     const orTexto = await this.orTextoBusquedaGasto(busqueda);
-    const filas = await this.leerUniversoGastos({
-      cols: await this.gastoRicoCols(),
+    const orFolio =
+      busqueda.tipo === 'monto' ? await this.orFolioNumerico(dto.q) : null;
+    const colsLote = await this.gastoRicoCols();
+    const porMonto = await this.leerUniversoGastos({
+      cols: colsLote,
       moneda,
       conNoBancarios: false,
       ventana,
@@ -9270,6 +9296,20 @@ export class ConciliacionService {
           : null,
       orTexto,
     });
+    // FOLIO NUMÉRICO (0.0.119): como en «Vincular gasto» de un cargo.
+    const filas = orFolio
+      ? unirPorId(
+          porMonto,
+          await this.leerUniversoGastos({
+            cols: colsLote,
+            moneda,
+            conNoBancarios: false,
+            ventana,
+            montos: null,
+            orTexto: orFolio,
+          }),
+        )
+      : porMonto;
     const vinculado = await this.sumasLigadasDe(
       filas.map((g) => g.id as string),
     );
@@ -15091,8 +15131,10 @@ export class ConciliacionService {
    */
   /**
    * Búsqueda de TEXTO de «Vincular gasto» ⇒ el `.or()` de PostgREST:
-   * proveedores que se llaman así (≤ 50 ids, consulta aparte) o
-   * nota / lugar / folio del ticket (`patronIlikeSeguro`). Otra búsqueda ⇒ null.
+   * proveedores que se llaman así (≤ 50 ids, consulta aparte), nota /
+   * lugar / folio del ticket (`patronIlikeSeguro`) y, desde el 0.0.119, la
+   * FACTURA recibida por su folio («AI-7351»: `idsPorFolioFactura`, la
+   * principal y las de la puente). Otra búsqueda ⇒ null.
    */
   private async orTextoBusquedaGasto(
     busqueda: BusquedaGasto,
@@ -15108,11 +15150,72 @@ export class ConciliacionService {
     const provIds = ((provs ?? []) as Array<{ id: unknown }>)
       .map((p) => p.id)
       .filter((id): id is string => typeof id === 'string');
+    const factura = await this.idsPorFolioFactura(busqueda.texto, 'contiene');
     return [
       `notas.ilike.*${patron}*`,
       `lugar.ilike.*${patron}*`,
       `folio_ticket.ilike.*${patron}*`,
       ...(provIds.length > 0 ? [`proveedor_id.in.(${provIds.join(',')})`] : []),
+      ...condicionesFactura(factura),
+    ].join(',');
+  }
+
+  /**
+   * FOLIO DE LA FACTURA (4-nov-2026, 0.0.119): las facturas recibidas cuyo
+   * folio es el buscado y los gastos que las tienen por la PUENTE
+   * (`gasto_factura_recibida`; la principal se filtra con
+   * `factura_recibida_id.in`). Lee `factura_recibida` por los DÍGITOS del
+   * texto (o el texto si no trae; ≤ `FOLIO_FACTURAS_TOPE`) y decide en
+   * memoria con `facturaCoincideBusqueda` (serie + folio sin signos). Solo
+   * con la sonda serie/folio (20261005000002); la puente solo con la suya.
+   */
+  private async idsPorFolioFactura(
+    texto: string,
+    modo: 'contiene' | 'termina',
+  ): Promise<IdsPorFolioFactura> {
+    const vacio: IdsPorFolioFactura = { facturaIds: [], gastoIds: [] };
+    const sb = this.supabase.service;
+    if (!(await serieFolioRecibidaDisponible(sb))) return vacio;
+    const digitos = modo === 'termina' ? texto : digitosFolioBusqueda(texto);
+    const patron = patronIlikeSeguro(digitos ?? texto);
+    const { data, error } = await sb
+      .from('factura_recibida')
+      .select('id, serie, folio')
+      .ilike('folio', modo === 'termina' ? `%${patron}` : `%${patron}%`)
+      .limit(FOLIO_FACTURAS_TOPE);
+    if (error) throw new Error(error.message);
+    const facturaIds = (
+      (data ?? []) as Array<{ id?: unknown; serie?: unknown; folio?: unknown }>
+    )
+      .filter((f) => facturaCoincideBusqueda(f, texto, modo))
+      .map((f) => f.id)
+      .filter((id): id is string => typeof id === 'string');
+    if (facturaIds.length === 0) return vacio;
+    const gastoIds = (await gastoFacturasDisponible(sb))
+      ? [
+          ...new Set(
+            (await ligasDeFacturas(sb, facturaIds)).map((l) => l.gasto_id),
+          ),
+        ]
+      : [];
+    return { facturaIds, gastoIds };
+  }
+
+  /**
+   * Búsqueda de MONTO ENTERO («7351») que también es un folio (0.0.119):
+   * el `.or()` de los gastos cuyo `folio_ticket` o factura recibida TERMINA
+   * en esos dígitos. Se lee APARTE y se une por id (`unirPorId`): nunca
+   * `.or(and(…))` con el rango del monto. null si no son ≥ 3 dígitos.
+   */
+  private async orFolioNumerico(
+    q: string | null | undefined,
+  ): Promise<string | null> {
+    const digitos = folioNumericoDeBusqueda(q);
+    if (!digitos) return null;
+    const factura = await this.idsPorFolioFactura(digitos, 'termina');
+    return [
+      `folio_ticket.ilike.*${digitos}`,
+      ...condicionesFactura(factura),
     ].join(',');
   }
 
@@ -15198,6 +15301,9 @@ export class ConciliacionService {
 
     // Texto: proveedores que se llaman así (≤ 50), en una consulta aparte.
     const orTexto = await this.orTextoBusquedaGasto(busqueda);
+    // Entero: también como FOLIO (0.0.119), en una lectura aparte.
+    const orFolio =
+      busqueda.tipo === 'monto' ? await this.orFolioNumerico(query.q) : null;
 
     const colsRicas = await this.gastoRicoCols();
     type RangoMonto = RangoMontoGasto;
@@ -15215,6 +15321,7 @@ export class ConciliacionService {
       monedaQ: string,
       conNoBancarios: boolean,
       montos: RangoMonto | null,
+      orPropio: string | null = orTexto,
     ) =>
       this.leerUniversoGastos({
         cols: colsRicas,
@@ -15222,10 +15329,19 @@ export class ConciliacionService {
         conNoBancarios,
         ventana,
         montos,
-        orTexto,
+        orTexto: orPropio,
       });
 
-    const propios = await leer(moneda, incluirNoBancarios, rangoBusqueda);
+    const porMonto = await leer(moneda, incluirNoBancarios, rangoBusqueda);
+    // FOLIO NUMÉRICO (0.0.119): «7351» trae los del monto [7351, 7352) MÁS
+    // los gastos cuyo folio termina en 7351, unidos por id en su nivel de
+    // siempre (nunca `.or(and(…))`).
+    const propios = orFolio
+      ? unirPorId(
+          porMonto,
+          await leer(moneda, incluirNoBancarios, null, orFolio),
+        )
+      : porMonto;
     // CRUCE USD (0.0.75, invariante 70): en una cuenta en PESOS los gastos
     // USD BANCARIOS sin conciliar en banda del cargo entran SIEMPRE (también
     // al buscar), cada uno con su `tc_cruce` contra el T.C. oficial de TABLA

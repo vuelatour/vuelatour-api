@@ -388,3 +388,96 @@ export function errorSinMonedaCuenta(): ServiceUnavailableException {
     error: 'CUENTA_SIN_MONEDA',
   });
 }
+
+// =======================================================================
+// FOLIO DE LA FACTURA EN LA BÚSQUEDA (4-nov-2026, API 0.0.119)
+// =======================================================================
+// Pedido de la oficina (Jimmy, WhatsApp 4-nov-2026): en «Vincular gasto»,
+// además de buscar por monto, por los folios que se ven en el renglón del
+// candidato («Factura AI-7351 · N621TX · vuelo #427»). La búsqueda de
+// TEXTO lee las facturas recibidas por los dígitos y compara en memoria
+// (serie + folio sin signos); un ENTERO («7351») además busca los gastos
+// cuyo folio (ticket o factura) TERMINA en esos dígitos, sin dejar de ser
+// un monto.
+
+/** Tope de facturas recibidas que se leen por folio en una búsqueda. */
+export const FOLIO_FACTURAS_TOPE = 50;
+
+/** Dígitos mínimos para que un entero también se busque como folio. */
+export const FOLIO_NUMERICO_MIN = 3;
+
+/** Folio o texto tecleado, comparables: MAYÚSCULAS y solo [A-Z0-9]. */
+export function normalizarFolioBusqueda(s: string | null | undefined): string {
+  return (typeof s === 'string' ? s : '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+/** La tira de dígitos MÁS LARGA del texto (≥ 3), o null. */
+export function digitosFolioBusqueda(texto: string): string | null {
+  const tiras = texto.match(/\d+/g) ?? [];
+  let mejor = '';
+  for (const t of tiras) if (t.length > mejor.length) mejor = t;
+  return mejor.length >= FOLIO_NUMERICO_MIN ? mejor : null;
+}
+
+/**
+ * Búsqueda de MONTO ENTERO que también vale como folio («7351»): sus
+ * dígitos (≥ 3). «2801.40», «$ 2,801» o un texto ⇒ null.
+ */
+export function folioNumericoDeBusqueda(
+  q: string | null | undefined,
+): string | null {
+  const t = String(q ?? '')
+    .trim()
+    .replace(/^\$\s*/, '');
+  return new RegExp(`^\\d{${FOLIO_NUMERICO_MIN},}$`).test(t) ? t : null;
+}
+
+/** Lo que trae `factura_recibida` para comparar el folio. */
+export interface FacturaFolioBusqueda {
+  serie?: unknown;
+  folio?: unknown;
+}
+
+/**
+ * ¿La factura es la que buscó la oficina? `contiene`: el folio (sin signos
+ * ni mayúsculas) contiene el texto o, si el texto trae dígitos, serie +
+ * folio lo contiene («AI-7351», «ai 7351» o «7351» ⇔ serie AI + folio
+ * 7351); la serie sola («AI») no es un folio. `termina`: el folio termina
+ * en esos dígitos (búsqueda numérica: «7351» no es «73510»… sí es «AI-7351»).
+ */
+export function facturaCoincideBusqueda(
+  f: FacturaFolioBusqueda,
+  texto: string,
+  modo: 'contiene' | 'termina',
+): boolean {
+  const q = normalizarFolioBusqueda(texto);
+  const folio = normalizarFolioBusqueda(
+    typeof f.folio === 'string' ? f.folio : null,
+  );
+  if (!q || !folio) return false;
+  if (modo === 'termina') return folio.endsWith(q);
+  if (folio.includes(q)) return true;
+  if (!/\d/.test(q)) return false;
+  const serie = normalizarFolioBusqueda(
+    typeof f.serie === 'string' ? f.serie : null,
+  );
+  return (serie + folio).includes(q);
+}
+
+/** Unión de dos lecturas del universo por `id` (gana la primera). */
+export function unirPorId<T extends { id?: unknown }>(
+  a: readonly T[],
+  b: readonly T[],
+): T[] {
+  const vistos = new Set(a.map((x) => String(x.id)));
+  const out = [...a];
+  for (const x of b) {
+    const id = String(x.id);
+    if (vistos.has(id)) continue;
+    vistos.add(id);
+    out.push(x);
+  }
+  return out;
+}

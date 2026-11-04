@@ -4061,7 +4061,21 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`interpretarBusquedaGasto`, `gastos-candidatos.util.ts`): entero ⇒
       [q, q+1), con decimales ⇒ ±0.01, texto ⇒ DOS consultas (proveedor
       `ilike` ≤ 50 ids, luego `or(notas|lugar|folio_ticket ilike,
-      proveedor_id.in)` con `patronIlikeSeguro` de facturas-emitidas). Orden
+      proveedor_id.in, factura_recibida_id.in, id.in)` con `patronIlikeSeguro`
+      de facturas-emitidas). **FOLIO DE LA FACTURA (4-nov-2026, 0.0.119;
+      pedido de la oficina: «aparte de por monto, por los folios que están en
+      la nota de las facturas»)**: el texto también lee `factura_recibida`
+      por los DÍGITOS de la búsqueda (≤ `FOLIO_FACTURAS_TOPE` = 50, solo con
+      la sonda serie/folio), decide en memoria con `facturaCoincideBusqueda`
+      («AI-7351», «ai 7351» o «7351» ⇔ serie AI + folio 7351, sin signos ni
+      mayúsculas; la serie sola no es un folio) y suma los gastos de la
+      puente `gasto_factura_recibida` (`ligasDeFacturas`, solo con su sonda);
+      un ENTERO de ≥ 3 dígitos («7351») sigue siendo monto ([q, q+1) y para
+      `excluidos`) y ADEMÁS trae, en una lectura aparte unida por id
+      (`unirPorId`; nunca `.or(and(…))`), los gastos cuyo `folio_ticket` o
+      factura TERMINA en esos dígitos (`orFolioNumerico`). Helpers PUROS en
+      `gastos-candidatos.util.ts` (spec) y caso real en el spec del lote
+      (principal + puente + ticket, y sin la sonda serie/folio). Orden
       `ordenarCandidatosGasto`: los que cuadran (|monto o faltante − cargo|
       ≤ 1.00), cercanía de monto, cercanía de fecha, fecha desc. Respuesta
       `{movimiento {id, fecha, monto, moneda}, ventana {desde, hasta},

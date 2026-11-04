@@ -14,6 +14,11 @@ import {
   rangoBandaMxnDeUsd,
   rangoBandaUsd,
   rangosUsdDeBusqueda,
+  digitosFolioBusqueda,
+  facturaCoincideBusqueda,
+  folioNumericoDeBusqueda,
+  normalizarFolioBusqueda,
+  unirPorId,
 } from './gastos-candidatos.util';
 
 /**
@@ -538,5 +543,66 @@ describe('cruzados USD en 7 niveles (invariante 70)', () => {
     expect(rangosUsdDeBusqueda(interpretarBusquedaGasto('spruce'), of)).toEqual(
       [],
     );
+  });
+});
+
+describe('folio de la factura en la búsqueda (4-nov-2026)', () => {
+  it('normaliza y saca los dígitos', () => {
+    expect(normalizarFolioBusqueda(' ai-7351 ')).toBe('AI7351');
+    expect(normalizarFolioBusqueda(null)).toBe('');
+    expect(digitosFolioBusqueda('AI-7351')).toBe('7351');
+    expect(digitosFolioBusqueda('FEDCUN 195487')).toBe('195487');
+    expect(digitosFolioBusqueda('fact 12 de 7360')).toBe('7360');
+    expect(digitosFolioBusqueda('ASUR')).toBeNull();
+    expect(digitosFolioBusqueda('T-12')).toBeNull();
+  });
+
+  it('folioNumericoDeBusqueda: solo enteros de ≥ 3 dígitos', () => {
+    expect(folioNumericoDeBusqueda('7351')).toBe('7351');
+    expect(folioNumericoDeBusqueda(' $ 7351 ')).toBe('7351');
+    expect(folioNumericoDeBusqueda('12')).toBeNull();
+    expect(folioNumericoDeBusqueda('2801.40')).toBeNull();
+    expect(folioNumericoDeBusqueda('2,801')).toBeNull();
+    expect(folioNumericoDeBusqueda('AI-7351')).toBeNull();
+    expect(folioNumericoDeBusqueda(null)).toBeNull();
+  });
+
+  it('facturaCoincideBusqueda: serie + folio sin signos; «termina» exige el final', () => {
+    const f = { serie: 'AI', folio: '7351' };
+    expect(facturaCoincideBusqueda(f, 'AI-7351', 'contiene')).toBe(true);
+    expect(facturaCoincideBusqueda(f, 'ai 7351', 'contiene')).toBe(true);
+    expect(facturaCoincideBusqueda(f, '7351', 'contiene')).toBe(true);
+    expect(facturaCoincideBusqueda(f, 'AI-7352', 'contiene')).toBe(false);
+    expect(facturaCoincideBusqueda(f, 'AI', 'contiene')).toBe(false);
+    expect(facturaCoincideBusqueda(f, '7351', 'termina')).toBe(true);
+    expect(facturaCoincideBusqueda(f, '351', 'termina')).toBe(true);
+    expect(facturaCoincideBusqueda(f, '735', 'termina')).toBe(false);
+    expect(
+      facturaCoincideBusqueda({ serie: null, folio: null }, '7351', 'contiene'),
+    ).toBe(false);
+    expect(
+      facturaCoincideBusqueda(
+        { serie: 'FEDCUN', folio: '195487' },
+        'FEDCUN 195487',
+        'contiene',
+      ),
+    ).toBe(true);
+  });
+
+  it('unirPorId: gana la primera lectura y no repite', () => {
+    const a = [
+      { id: 'x', v: 1 },
+      { id: 'y', v: 1 },
+    ];
+    const b = [
+      { id: 'y', v: 2 },
+      { id: 'z', v: 2 },
+    ];
+    expect(unirPorId(a, b)).toEqual([
+      { id: 'x', v: 1 },
+      { id: 'y', v: 1 },
+      { id: 'z', v: 2 },
+    ]);
+    expect(unirPorId([], b)).toEqual(b);
   });
 });
