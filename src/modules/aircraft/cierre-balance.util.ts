@@ -188,6 +188,7 @@ export function aplicarFilaSombra(
   fila.op_vinculos = [];
   fila.piloto_vinculos = [];
   fila.otros_vinculos = [];
+  fila.costo_operador_estimado = false;
   fila.costo_usd = null;
   fila.costo_usd_siva = null;
   fila.iva_pagado_usd = null;

@@ -1085,6 +1085,14 @@ export interface BalanceAvionVueloPayload {
   op_vinculos?: BalanceVinculoGastoPayload[];
   piloto_vinculos?: BalanceVinculoGastoPayload[];
   otros_vinculos?: BalanceVinculoGastoPayload[];
+  /**
+   * ADITIVO (5-nov-2026, API 0.0.121, invariante 117): true cuando
+   * OPERACIONES carga el costo COTIZADO del operador externo porque aún no
+   * hay gasto que lo cubra (ni marcado como pago al operador ni
+   * coincidente). pyservices pinta la celda en ámbar y la nota (ya en
+   * `op_detalle`) dice «ESTIMADO». Ausente o false ⇒ nada cambia.
+   */
+  costo_operador_estimado?: boolean;
   // Bloque INDICADORES USD e IVA
   costo_usd: number | null;
   costo_usd_siva: number | null;

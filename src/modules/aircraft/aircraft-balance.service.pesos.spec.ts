@@ -288,6 +288,22 @@ const CAMBIOS_0105_GENERAL = [
   'gen.consolidado.vuelos.1.consecutivo_cliente: undefined -> null',
 ];
 
+/**
+ * COSTO DEL OPERADOR EXTERNO ESTIMADO (5-nov-2026, API 0.0.121, invariante
+ * 117): SOLO UNA BANDERA por fila de vuelo (`costo_operador_estimado`, false
+ * en este mundo: ningún vuelo es externo). Ningún peso ni dólar se mueve.
+ */
+const CAMBIOS_0121_INDIVIDUAL = [
+  'ind.vuelos.0.costo_operador_estimado: undefined -> false',
+  'ind.vuelos.1.costo_operador_estimado: undefined -> false',
+];
+const CAMBIOS_0121_GENERAL = [
+  'gen.aviones.0.vuelos.0.costo_operador_estimado: undefined -> false',
+  'gen.aviones.0.vuelos.1.costo_operador_estimado: undefined -> false',
+  'gen.consolidado.vuelos.0.costo_operador_estimado: undefined -> false',
+  'gen.consolidado.vuelos.1.costo_operador_estimado: undefined -> false',
+];
+
 /** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
@@ -359,6 +375,7 @@ describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
         ...CAMBIOS_0098_INDIVIDUAL,
         ...CAMBIOS_0101_INDIVIDUAL,
         ...CAMBIOS_0105_INDIVIDUAL,
+        ...CAMBIOS_0121_INDIVIDUAL,
       ].sort(),
     );
   });
@@ -376,6 +393,7 @@ describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
         ...CAMBIOS_0098_GENERAL,
         ...CAMBIOS_0101_GENERAL,
         ...CAMBIOS_0105_GENERAL,
+        ...CAMBIOS_0121_GENERAL,
       ].sort(),
     );
   });

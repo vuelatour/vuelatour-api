@@ -3697,6 +3697,12 @@ export class AircraftBalanceService {
       const opDetalle: string[] = [];
       const pilotoDetalle: string[] = [];
       const otrosDetalle: string[] = [];
+      // Costo del operador externo ESTIMADO (5-nov-2026, invariante 117):
+      // true cuando OPERACIONES carga el costo COTIZADO porque aún no hay
+      // gasto que lo cubra (ni marcado como pago al operador ni
+      // coincidente). pyservices pinta la celda en ámbar; la nota dice
+      // «ESTIMADO».
+      let costoOperadorEstimado = false;
       // VÍNCULOS gasto → celda (13-oct-2026, API 0.0.75, invariante 72):
       // TODA rama de abajo que empuja una línea de *Detalle nacida de un
       // GASTO empuja su vínculo con el MISMO monto. TUA y traslados van
@@ -4127,10 +4133,17 @@ export class AircraftBalanceService {
             const costoOperadorMxn = round2(costoOperadorUsd * K);
             opMxn = (opMxn ?? 0) + costoOperadorMxn;
             costoUsd += costoOperadorUsd;
+            // Pedido de la oficina (5-nov-2026, invariante 117): mientras el
+            // pago al operador no esté en Gastos, el costo es el COTIZADO —
+            // la nota lo dice, la celda va en ámbar (bandera) y, sin ningún
+            // gasto de columnas, el pendiente lo recuerda. Al capturar el
+            // gasto marcado «Es el pago al operador externo» (invariante
+            // 110) el balance toma lo pagado.
+            costoOperadorEstimado = true;
             opDetalle.push(
               `Costo operador externo (${operadorTexto}) — $${fmtMonto(
                 costoOperadorMxn,
-              )}`,
+              )} — ESTIMADO: es el precio cotizado al operador; el pago aún no está en Gastos (al registrarlo marcado como pago al operador, el balance toma lo pagado)`,
             );
             if (gastosColumna.length > 0) {
               // Coinciden pero ninguno cubre (el más cercano quedó sin T.C.
@@ -4146,6 +4159,14 @@ export class AircraftBalanceService {
                     ? `; ${coinciden} gasto(s) coinciden con el costo del operador`
                     : ''
                 }`,
+              );
+            } else {
+              pendientes.push(
+                `${etiqueta}: costo del operador externo (${operadorTexto}) ESTIMADO — $${fmtMonto(
+                  costoOperadorMxn,
+                )} es el precio cotizado ($${costoOperadorUsd.toLocaleString(
+                  'en-US',
+                )} USD); el pago aún no está en Gastos (captúralo marcado «Es el pago al operador externo» y el balance tomará lo pagado)`,
               );
             }
           } else {
@@ -4959,6 +4980,9 @@ export class AircraftBalanceService {
         op_vinculos: opVinculos,
         piloto_vinculos: pilotoVinculos,
         otros_vinculos: otrosVinculos,
+        // Costo del operador externo ESTIMADO (5-nov-2026, invariante 117):
+        // ANTES de `permiso_afac_mxn` por la misma razón.
+        costo_operador_estimado: costoOperadorEstimado,
         permiso_afac_mxn: X,
         // Tarifa del avión en CADA fila (12-oct-2026, invariante 53): la
         // hoja de la flota escribe PERMISO AFAC como fórmula por fila.

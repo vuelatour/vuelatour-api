@@ -486,10 +486,20 @@ describe('Reporte por vuelo — el gasto real cubre el costo del operador extern
     );
   });
 
-  it('costo sin gasto que coincida ⇒ igual que hoy (línea del costo + aviso)', async () => {
+  it('costo sin gasto que coincida ⇒ igual que hoy (línea del costo + aviso), con «ESTIMADO» en el detalle (invariante 117)', async () => {
     const solo = await reporte(vuelo(EXT), []);
     expect(solo.gastos_total_usd).toBe(1490.26);
     expect(lineaCosto(solo)).toHaveLength(1);
+    expect(lineaCosto(solo)[0].detalle).toBe(
+      'CarlosMuciño · ESTIMADO: precio cotizado, el pago al operador aún no está en Gastos',
+    );
+    const sinOperador = await reporte(
+      vuelo({ ...EXT, operador_externo: null }),
+      [],
+    );
+    expect(lineaCosto(sinOperador)[0].detalle).toBe(
+      'ESTIMADO: precio cotizado, el pago al operador aún no está en Gastos',
+    );
     const conPista = await reporte(vuelo(EXT), [PISTA]);
     expect(conPista.gastos_total_usd).toBe(
       Number((1118.12 / 17 + 1490.26).toFixed(2)),

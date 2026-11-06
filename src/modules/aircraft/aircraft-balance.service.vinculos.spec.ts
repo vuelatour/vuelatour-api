@@ -580,6 +580,9 @@ describe('Balance — el gasto real cubre el costo del operador externo (invaria
   };
   const NOTA_CUBIERTO =
     'Costo operador externo (CarlosMuciño) $25,334.42 — cubierto por el gasto «Operaciones · VLO PTU 10 SEPTIEMBRE XBORN · Proveedor: NUCLEUM SA DE CV» de $25,334.40 (no se suma dos veces)';
+  // Invariante 117: sin gasto que cubra, el costo cotizado se dice ESTIMADO.
+  const NOTA_ESTIMADO =
+    'Costo operador externo (CarlosMuciño) — $25,334.42 — ESTIMADO: es el precio cotizado al operador; el pago aún no está en Gastos (al registrarlo marcado como pago al operador, el balance toma lo pagado)';
 
   it('#308: costo + gasto igual ⇒ OPERACIONES cuenta el gasto UNA vez; el costo queda como nota y los vínculos cuadran', async () => {
     const { payload, fila } = await filaDe([PISTA, NUCLEUM], {
@@ -598,6 +601,8 @@ describe('Balance — el gasto real cubre el costo del operador externo (invaria
       { id: 'g-nucleum', rol: 'suma', monto_mxn: 25334.4 },
     ]);
     expect(sumaDe(fila.op_vinculos as Vinculo[])).toBe(Number(fila.op_mxn));
+    // Cubierto ⇒ el costo NO es estimado (invariante 117).
+    expect(fila.costo_operador_estimado).toBe(false);
     // Sin el aviso de «se resta doble» (la duda quedó resuelta).
     expect(
       payload.pendientes.some((p) =>
@@ -632,14 +637,33 @@ describe('Balance — el gasto real cubre el costo del operador externo (invaria
     ).toBe(true);
   });
 
-  it('costo sin gasto que coincida ⇒ igual que hoy (suma el costo y avisa los gastos)', async () => {
+  it('costo sin gasto que coincida ⇒ igual que hoy (suma el costo y avisa los gastos), marcado ESTIMADO (invariante 117)', async () => {
     const solo = await filaDe([], { vuelo: EXTERNO_308 });
     expect(Number(solo.fila.op_mxn)).toBeCloseTo(25334.42, 2);
+    // Bandera para el ámbar de pyservices, ANTES de `permiso_afac_mxn`.
+    expect(solo.fila.costo_operador_estimado).toBe(true);
+    const llaves = Object.keys(solo.fila);
+    expect(llaves.indexOf('costo_operador_estimado')).toBe(
+      llaves.indexOf('permiso_afac_mxn') - 1,
+    );
+    expect(solo.fila.op_detalle as string[]).toContain(NOTA_ESTIMADO);
+    // Sin ningún gasto de columnas, el pendiente lo recuerda.
+    expect(
+      solo.payload.pendientes.filter((p) =>
+        p.endsWith(
+          ': costo del operador externo (CarlosMuciño) ESTIMADO — $25,334.42 es el precio cotizado ($1,490.26 USD); el pago aún no está en Gastos (captúralo marcado «Es el pago al operador externo» y el balance tomará lo pagado)',
+        ),
+      ),
+    ).toHaveLength(1);
     const conPista = await filaDe([PISTA], { vuelo: EXTERNO_308 });
     expect(Number(conPista.fila.op_mxn)).toBeCloseTo(26452.54, 2);
-    expect(conPista.fila.op_detalle as string[]).toContain(
-      'Costo operador externo (CarlosMuciño) — $25,334.42',
-    );
+    expect(conPista.fila.costo_operador_estimado).toBe(true);
+    expect(conPista.fila.op_detalle as string[]).toContain(NOTA_ESTIMADO);
+    // Con gastos que no cubren sigue el aviso «ADEMÁS» de siempre, sin
+    // un segundo pendiente por el mismo vuelo.
+    expect(
+      conPista.payload.pendientes.some((p) => p.includes('ESTIMADO')),
+    ).toBe(false);
     expect(
       conPista.payload.pendientes.some(
         (p) =>

@@ -75,6 +75,10 @@ function n(v: unknown): number {
   return Number.isFinite(x) ? x : 0;
 }
 
+/** Invariante 117: el costo cotizado del operador externo, sin pago en Gastos. */
+export const DETALLE_COSTO_OPERADOR_ESTIMADO =
+  'ESTIMADO: precio cotizado, el pago al operador aún no está en Gastos';
+
 /**
  * Arma el reporte consolidado de UN vuelo (cotización + ingreso + tacómetro +
  * combustible + gastos) y lo renderiza en PDF/Excel vía pyservices.
@@ -711,7 +715,14 @@ export class FlightReportService {
       gastos.push({
         fecha: null,
         concepto: 'Costo operador externo',
-        detalle: (v.operador_externo as string | null) || null,
+        // ESTIMADO (5-nov-2026, invariante 117): es el precio cotizado;
+        // el pago al operador aún no está en Gastos.
+        detalle: [
+          (v.operador_externo as string | null) || null,
+          DETALLE_COSTO_OPERADOR_ESTIMADO,
+        ]
+          .filter((x): x is string => !!x)
+          .join(' · '),
         moneda: 'USD',
         monto: costoExternoUsd,
       });

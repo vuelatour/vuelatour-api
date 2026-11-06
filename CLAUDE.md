@@ -12574,6 +12574,44 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       nada; 503), `compra-gasto.controller.spec` (cableado, whitelist, roles,
       `foto_url`), `compras.calculo.spec` (`categoriaLigableACompra`).
 
+117. **EL COSTO DEL OPERADOR EXTERNO ES «ESTIMADO» MIENTRAS EL PAGO NO ESTÁ
+    EN GASTOS (5-nov-2026, API 0.0.121, SIN migración).** Pedido de la
+    oficina (captura del Balance con «Costo operador externo (Simon)
+    $15,804.43 — cubierto por el gasto marcado…»): «cuando aún no se le
+    paga al operador externo ponerlo en amarillo y que la nota diga que es
+    el precio estimado; ya después se pone el que sí se pagó cuando se
+    suba el gasto».
+    - **Regla**: en la rama de las invariantes 88/110 donde el costo
+      COTIZADO (`vuelo.costo_externo_usd × K`) suma a OPERACIONES porque
+      ningún gasto lo cubre (ni marcado ni coincidente), la fila lleva
+      `costo_operador_estimado: true` (ANTES de `permiso_afac_mxn`, como
+      los vínculos: comisiones.spec congela las últimas llaves), la línea
+      de `op_detalle` sigue con «— ESTIMADO: es el precio cotizado al
+      operador; el pago aún no está en Gastos (al registrarlo marcado como
+      pago al operador, el balance toma lo pagado)» y, si el vuelo no trae
+      NINGÚN gasto de columnas, `pendientes` lo recuerda («…: costo del
+      operador externo (X) ESTIMADO — $25,334.42 es el precio cotizado
+      ($1,490.26 USD); el pago aún no está en Gastos (captúralo marcado
+      «Es el pago al operador externo» y el balance tomará lo pagado)»);
+      con gastos que no cubren sigue SOLO el aviso «ADEMÁS del costo del
+      operador» de siempre. Cubierto, marcado, cancelado, sin costo o sin
+      K ⇒ `false`; la fila sombra del cierre la apaga
+      (`aplicarFilaSombra`). Los números NO cambian: solo la señal.
+    - **pyservices** (`costo_operador_estimado: bool = False` en
+      `BalanceAvionVuelo`): OPERACIONES (Balance mensual, individual y
+      flota) o TOTAL PARA PROVEEDOR (PESOS) (general) en ÁMBAR con la nota
+      de siempre, y una leyenda al pie SOLO cuando alguna fila lo trae;
+      el libro JSON de la vista en pantalla hereda el relleno. Sin la
+      bandera el libro es byte a byte. Orden de deploy: cualquiera.
+    - **Reporte por vuelo**: la línea «Costo operador externo» lleva en
+      `detalle` «<operador> · ESTIMADO: precio cotizado, el pago al
+      operador aún no está en Gastos» (`DETALLE_COSTO_OPERADOR_ESTIMADO`).
+    - Specs: `aircraft-balance.service.vinculos.spec` (bandera, su lugar
+      en la fila, nota y pendiente; cubierto ⇒ false),
+      `flight-report.service.pago-vendedor.spec` (detalle ESTIMADO) y el
+      golden de `aircraft-balance.service.pesos.spec` (`CAMBIOS_0121_*`:
+      la llave nueva en cada fila, ningún número se mueve).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
