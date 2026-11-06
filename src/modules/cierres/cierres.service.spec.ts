@@ -611,7 +611,7 @@ describe('INCLUIR EN EL MES (21-oct-2026): los cobrados después del corte se qu
       cobrado_posterior_usd: 1000,
       fecha_cobro_posterior: '2026-10-02',
       leyenda:
-        'Se queda en septiembre 2026 · cobrado el 2-oct, después del 30-sep (al 30-sep: $0.00 USD de $1,000.00 USD)',
+        'Se queda en septiembre 2026 · cobrado el 02/10/2026, después del 30/09/2026 (al 30/09/2026: $0.00 USD de $1,000.00 USD)',
     });
     expect(p.vuelos_incluidos[0]).not.toHaveProperty('destino');
     expect(p.totales).toMatchObject({

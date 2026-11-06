@@ -296,7 +296,7 @@ describe('cobradoDeMas — duplicado, sobre y el orden de las causas', () => {
       excedente_usd: 99.13,
       requiere_revision: true,
       explicacion:
-        'Lo cobrado ($4,274.38 USD) rebasa el monto total ($4,175.25 USD). Posible causa: hay dos cobros iguales ($1,700 MXN · Transferencia · 15 sep).',
+        'Lo cobrado ($4,274.38 USD) rebasa el monto total ($4,175.25 USD). Posible causa: hay dos cobros iguales ($1,700 MXN · Transferencia · 15/09/2026).',
       que_hacer:
         'Si es el mismo pago capturado dos veces, elimina uno (si está conciliado, desvincúlalo primero en Conciliación). Si de verdad fueron dos pagos, el cliente tiene un saldo a favor.',
       referencia: {
@@ -330,7 +330,7 @@ describe('cobradoDeMas — duplicado, sobre y el orden de las causas', () => {
     );
     expect(tres?.causa).toBe('COBRO_DUPLICADO');
     expect(tres?.explicacion).toContain(
-      '($1,000 USD · Transferencia · 15 sep y 18 sep)',
+      '($1,000 USD · Transferencia · 15/09/2026 y 18/09/2026)',
     );
     const cuatro = cobradoDeMas(
       entrada({

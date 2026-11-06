@@ -393,7 +393,7 @@ describe('ExpensesService — B3 ventana semanal contra capturado_en', () => {
       unknown
     >;
     expect(payload.notas).toBe(
-      'Taxi al hotel\n[Corrección capturada en la app el 13 sep 22:30 · recibida el 15 sep 16:00]',
+      'Taxi al hotel\n[Corrección capturada en la app el 13/09/2026 22:30 · recibida el 15/09/2026 16:00]',
     );
     expect(payload).not.toHaveProperty('capturado_en');
     // Edición de campo por rol de campo: limpia el sello de verificación.
@@ -443,7 +443,7 @@ describe('ExpensesService — B3 ventana semanal contra capturado_en', () => {
     expect(sello).toEqual({
       updated_by: 'u-piloto',
       notas:
-        'Taxi al hotel\n[Baja capturada en la app el 13 sep 22:30 · recibida el 15 sep 16:00]',
+        'Taxi al hotel\n[Baja capturada en la app el 13/09/2026 22:30 · recibida el 15/09/2026 16:00]',
     });
     expect(de(llamadas, 'gasto', 'delete')).toHaveLength(1);
   });

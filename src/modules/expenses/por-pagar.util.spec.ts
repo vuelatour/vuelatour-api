@@ -30,7 +30,7 @@ import {
 } from './por-pagar.util';
 
 /**
- * GASTOS «POR PAGAR» (19-oct-2026, invariante 93): reglas PURAS (tope de
+ * GASTOS «POR PAGAR» (19/10/2026, invariante 93): reglas PURAS (tope de
  * fecha por rol, bandera al escribir, estado de pago, «marcar pagado») y
  * TODOS los textos es-MX que el panel y la app enseñan tal cual.
  */
@@ -329,13 +329,13 @@ describe('por-pagar.util — textos', () => {
   it('celda «Pago» del Excel', () => {
     expect(
       celdaPagoExcel({ por_pagar: true, fecha_gasto: '2026-10-20' }, HOY),
-    ).toBe('Por pagar · vence 20-oct-2026');
+    ).toBe('Por pagar · vence 20/10/2026');
     expect(
       celdaPagoExcel({ por_pagar: true, fecha_gasto: '2026-10-19' }, HOY),
-    ).toBe('Por pagar · vence 19-oct-2026');
+    ).toBe('Por pagar · vence 19/10/2026');
     expect(
       celdaPagoExcel({ por_pagar: true, fecha_gasto: '2026-10-01' }, HOY),
-    ).toBe('Vencido desde 1-oct-2026');
+    ).toBe('Vencido desde 01/10/2026');
     expect(celdaPagoExcel({ por_pagar: false }, HOY)).toBe('');
     expect(
       celdaPagoExcel(
@@ -349,7 +349,7 @@ describe('por-pagar.util — textos', () => {
     expect(TITULO_RECORDATORIO_HOY).toBe('Gasto por pagar hoy');
     expect(TITULO_RECORDATORIO_VENCIDO).toBe('Gasto por pagar vencido');
     expect(LINK_GASTOS_POR_PAGAR).toBe('/admin/expenses?por_pagar=1');
-    // Revisión P15 (19-oct-2026): el dedupe es POR DESTINATARIO.
+    // Revisión P15 (19/10/2026): el dedupe es POR DESTINATARIO.
     expect(claveRecordatorioPorPagar('g-1', '2026-10-19', 'u-1')).toBe(
       'gasto_por_pagar:g-1:2026-10-19:u-1',
     );

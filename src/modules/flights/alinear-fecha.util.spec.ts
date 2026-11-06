@@ -152,7 +152,7 @@ describe('textos de la alineación (es-MX, fuente única)', () => {
     ).toEqual({
       titulo: 'Vuelo #338: la operación cambió de día',
       cuerpo:
-        'Tramos movidos (hora Cancún): CUN → HOL jue 15 oct 08:00 · HOL → CUN sáb 17 oct 16:00.',
+        'Tramos movidos (hora Cancún): CUN → HOL jue 15/10/2026 08:00 · HOL → CUN sáb 17/10/2026 16:00.',
     });
     expect(avisoOperacionMovida({ folio: 338, tramos: [] }).titulo).not.toMatch(
       /reagendado/,
@@ -165,9 +165,9 @@ describe('textos de la alineación (es-MX, fuente única)', () => {
     expect(MAX_TRAMOS_EN_AVISO).toBe(4);
     expect(
       avisoOperacionMovida({ folio: 1, tramos: muchos(4) }).cuerpo,
-    ).toMatch(/CUN → T4 jue 15 oct 08:00\.$/u);
+    ).toMatch(/CUN → T4 jue 15\/10\/2026 08:00\.$/u);
     const seis = avisoOperacionMovida({ folio: 1, tramos: muchos(6) }).cuerpo;
-    expect(seis).toMatch(/CUN → T3 jue 15 oct 08:00 · y 3 más\.$/u);
+    expect(seis).toMatch(/CUN → T3 jue 15\/10\/2026 08:00 · y 3 más\.$/u);
     expect(seis).not.toMatch(/T4/);
     // Sin fecha legible: lo dice, nunca «Invalid Date».
     expect(
@@ -231,7 +231,7 @@ describe('planAlinearFecha', () => {
   });
 
   it('el DÍA es el de Cancún, no el UTC (22:00 Cancún ya es mañana en UTC)', () => {
-    // 10-oct 22:00 Cancún = 11-oct 03:00 UTC; objetivo 13-oct ⇒ +3, no +2.
+    // 10/10/2026 22:00 Cancún = 11/10/2026 03:00 UTC; objetivo 13/10/2026 ⇒ +3, no +2.
     const plan = planAlinearFecha({
       fechaObjetivo: '2026-10-13T15:00:00.000Z',
       tramos: [
@@ -330,7 +330,7 @@ describe('planAlinearFecha', () => {
   it('multi-día: si la cotización YA movió el regreso, no se mueve otra vez', () => {
     // La oficina cambió salida (10 → 15) Y regreso (12 → 17) en la
     // cotización: `revise` ya escribió el regreso nuevo. Moverlo +5 lo
-    // desplazaría dos veces (22-oct).
+    // desplazaría dos veces (22/10/2026).
     const plan = planAlinearFecha({
       fechaObjetivo: '2026-10-15T14:00:00.000Z',
       tramos: [
@@ -357,13 +357,13 @@ describe('planAlinearFecha', () => {
     expect(plan.mover_traslado_final).toBe(false);
   });
 
-  describe('lo que la cotización ACABA de escribir no se vuelve a mover (revisión 5-oct)', () => {
+  describe('lo que la cotización ACABA de escribir no se vuelve a mover (revisión 05/10/2026)', () => {
     const horas = (plan: ReturnType<typeof planAlinearFecha>) =>
       plan.tramos.map((t) => fechaHoraCancun(t.fecha_salida_plan));
 
     it('tramo final SIN fecha + regreso capturado en el mismo guardado (repro de la revisión)', () => {
-      // Antes: tramo 1 el 10-oct 09:00, tramo 2 sin fecha, sin regreso. La
-      // oficina guarda salida 15-oct 09:00 y regreso 17-oct 16:00: revise
+      // Antes: tramo 1 el 10/10/2026 09:00, tramo 2 sin fecha, sin regreso. La
+      // oficina guarda salida 15/10/2026 09:00 y regreso 17/10/2026 16:00: revise
       // escribe fecha_vuelo=15, fecha_traslado_final=17 y LLENA el tramo 2
       // con el regreso (`fechas.fin`). Antes del arreglo: t2 y regreso al 22.
       const plan = planAlinearFecha({
@@ -404,7 +404,7 @@ describe('planAlinearFecha', () => {
     });
 
     it('cambio de días hacia ATRÁS con el regreso nuevo capturado: el tramo llenado se queda', () => {
-      // t2 vacío; la oficina guarda salida 8-oct y regreso 9-oct 16:00.
+      // t2 vacío; la oficina guarda salida 08/10/2026 y regreso 09/10/2026 16:00.
       const plan = planAlinearFecha({
         fechaObjetivo: '2026-10-08T14:00:00.000Z',
         tramos: [

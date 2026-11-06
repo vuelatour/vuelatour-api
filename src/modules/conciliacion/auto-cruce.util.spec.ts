@@ -88,7 +88,7 @@ function emparejarDuplicados<T extends LineaDedupe>(
 }
 
 /**
- * Casos REALES del Scotiabank MXN «GASTOS GNRAL» (semana 7-13 sep 2026),
+ * Casos REALES del Scotiabank MXN «GASTOS GNRAL» (semana 7-13/09/2026),
  * que es donde 44 de 67 movimientos quedaron pendientes. Aquí se congela la
  * regla: el auto-cruce liga solo lo INEQUÍVOCO; lo demás queda pendiente
  * con motivo, nunca ligado a la brava.
@@ -103,7 +103,7 @@ describe('terminacionDeMovimiento — la tarjeta solo cuenta si existe', () => {
     expect(terminacionDeMovimiento('9155656256', null, TARJETAS)).toBe('6256');
   });
 
-  it('NO inventa tarjeta con la referencia de 6 dígitos del 15-sep', () => {
+  it('NO inventa tarjeta con la referencia de 6 dígitos del 15/09/2026', () => {
     expect(terminacionDeMovimiento('174465', null, TARJETAS)).toBeNull();
     // Corta pero terminada como una tarjeta real: sigue sin contar (azar).
     expect(terminacionDeMovimiento('830577', null, TARJETAS)).toBeNull();
@@ -234,7 +234,7 @@ describe('elegirCandidato — liga solo lo inequívoco', () => {
     expect(r.motivo).toBe('SIN_CANDIDATOS');
   });
 
-  it('los DOS cargos de $125.82 del 4-sep los desempata la tarjeta', () => {
+  it('los DOS cargos de $125.82 del 04/09/2026 los desempata la tarjeta', () => {
     const r = elegirCandidato(
       {
         monto: 125.82,
@@ -338,8 +338,8 @@ describe('elegirMovimiento — camino inverso (gasto capturado después)', () =>
 });
 
 /**
- * DESFASE 0.00 GANA AL ±0.01 (2-oct-2026). Caso REAL de prod: el SPEI de
- * SAESA de $2,231.38 (24-sep, GASTOS GNRAL) se ligó solo al gasto #318 de
+ * DESFASE 0.00 GANA AL ±0.01 (02/10/2026). Caso REAL de prod: el SPEI de
+ * SAESA de $2,231.38 (24/09/2026, GASTOS GNRAL) se ligó solo al gasto #318 de
  * $2,231.37 y el gasto EXACTO #321 de $2,231.38 se capturó 15 min después.
  */
 describe('desfase 0.00 vs ±0.01 — el exacto gana, el centavo solo NO liga', () => {
@@ -595,12 +595,12 @@ describe('emparejarDuplicados — re-subir el mismo estado de cuenta', () => {
 });
 
 /**
- * INCIDENTE 29-sep-2026 («se me están duplicando los gastos»): las lecturas
+ * INCIDENTE 29/09/2026 («se me están duplicando los gastos»): las lecturas
  * REALES de prod del Scotiabank GASTOS GNRAL / COMBUSTIBLE, en el orden en
  * que se importaron (8, 15, 22 y 29 de septiembre). Cada `importar` simula
  * una subida: dedupe contra lo que ya hay y se inserta el resto.
  */
-describe('emparejarDuplicados — re-lecturas REALES de la IA (29-sep-2026)', () => {
+describe('emparejarDuplicados — re-lecturas REALES de la IA (29/09/2026)', () => {
   type Linea = {
     fecha: string;
     tipo: string;
@@ -620,16 +620,16 @@ describe('emparejarDuplicados — re-lecturas REALES de la IA (29-sep-2026)', ()
   });
 
   it('AEROPUERTO DE COZUMEL $125.82: 5 filas en prod ⇒ 2 (los 2 cargos reales)', () => {
-    // 8-sep: los DOS cargos reales del día, con la tarjeta de cada uno.
+    // 08/09/2026: los DOS cargos reales del día, con la tarjeta de cada uno.
     let base = importar([], [cozumel('0025830585'), cozumel('0025830577')]);
     expect(base).toHaveLength(2);
-    // 22-sep: la IA trae un consecutivo por línea.
+    // 22/09/2026: la IA trae un consecutivo por línea.
     base = importar(base, [
       cozumel('00000000000000000001'),
       cozumel('00000000000000000091'),
     ]);
     expect(base).toHaveLength(2);
-    // 29-sep: consecutivo + « AUT. 456529» pegado a la referencia.
+    // 29/09/2026: consecutivo + « AUT. 456529» pegado a la referencia.
     base = importar(base, [cozumel('00000000000000000001 AUT. 456529')]);
     expect(base).toHaveLength(2);
   });
@@ -1175,8 +1175,8 @@ describe('ventanaDias', () => {
 });
 
 /**
- * GASTO EN DÓLARES ↔ CARGO EN PESOS (13-oct-2026, lote 2, API 0.0.75,
- * invariante 70). Datos REALES de prod (SELECT del 13-oct-2026, 22:00
+ * GASTO EN DÓLARES ↔ CARGO EN PESOS (13/10/2026, lote 2, API 0.0.75,
+ * invariante 70). Datos REALES de prod (SELECT del 13/10/2026, 22:00
  * Cancún): las 6 ligas cruzadas correctas, las 2 equivocadas que se
  * corrigieron a las 21:40 y el señuelo.
  */
@@ -1217,7 +1217,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
     }
   });
 
-  it('(a) LEJOS: las 2 equivocadas, el señuelo y las bujías contra el oficial del 24-sep (manda el día del CARGO)', () => {
+  it('(a) LEJOS: las 2 equivocadas, el señuelo y las bujías contra el oficial del 24/09/2026 (manda el día del CARGO)', () => {
     expect(ev(8939.38, 422.86, of(17.0077))).toMatchObject({
       tc_implicito: 21.140283,
       desvio_pct: 24.3,
@@ -1293,20 +1293,20 @@ describe('T.C. oficial del día (invariante 70)', () => {
       'T.C. 17.55 · sin T.C. oficial del día',
     );
     expect(tituloTcCruce(ev(7214.14, 422.86, of(17.0077)))).toBe(
-      'T.C. exacto 17.060351 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01 sep 2026 · fuente open.er-api · tolerancia ±2 %',
+      'T.C. exacto 17.060351 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01/09/2026 · fuente open.er-api · tolerancia ±2 %',
     );
     expect(
       tituloTcCruce(
         ev(12451.49, 722.9, of(17.2881, '2026-08-04', 'BCE (frankfurter)')),
       ),
     ).toBe(
-      'T.C. exacto 17.224360 (pesos del cargo ÷ dólares del gasto) · oficial 17.2881 del 04 ago 2026 · fuente BCE (frankfurter) · tolerancia ±2 %',
+      'T.C. exacto 17.224360 (pesos del cargo ÷ dólares del gasto) · oficial 17.2881 del 04/08/2026 · fuente BCE (frankfurter) · tolerancia ±2 %',
     );
     expect(tituloTcCruce(ev(9062.34, 516.35, null))).toBe(
       'T.C. exacto 17.550770 (pesos del cargo ÷ dólares del gasto) · sin T.C. oficial del día del cargo: no se puede comparar',
     );
     expect(tituloTcCruce(ev(3740.63, 325, of(18.4067, '2026-10-12')))).toBe(
-      'T.C. exacto 11.509631 (pesos del cargo ÷ dólares del gasto) · oficial 18.4067 del 12 oct 2026 · fuente open.er-api · tolerancia ±2 % · fuera de la banda 15–25: la base de datos no deriva el T.C. de esta liga',
+      'T.C. exacto 11.509631 (pesos del cargo ÷ dólares del gasto) · oficial 18.4067 del 12/10/2026 · fuente open.er-api · tolerancia ±2 % · fuera de la banda 15–25: la base de datos no deriva el T.C. de esta liga',
     );
     expect(tcCruceUsdPublico(ev(8939.38, 422.86, of(17.0077)))).toEqual({
       tc_implicito: 21.140283,
@@ -1320,7 +1320,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
       fuera_de_lugar: true,
       texto: 'T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
       titulo:
-        'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01 sep 2026 · fuente open.er-api · tolerancia ±2 %',
+        'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01/09/2026 · fuente open.er-api · tolerancia ±2 %',
     });
   });
 
@@ -1458,7 +1458,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
       resultado: 'AMBIGUO',
       candidatos_n: 2,
       detalle:
-        '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 01 sep (20.00): vincúlalo a mano.',
+        '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 01/09/2026 (20.00): vincúlalo a mano.',
     });
 
     // Sintético: las bujías dentro de la ventana del 14,431.18 de AIRCRAFT,
@@ -1499,7 +1499,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
       resultado: 'AMBIGUO',
       candidatos_n: 1,
       detalle:
-        'No hay T.C. oficial del 27 jun para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.',
+        'No hay T.C. oficial del 27/06/2026 para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.',
     });
     expect(
       decidirCruceUsd(
@@ -1508,7 +1508,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
         null,
       ).detalle,
     ).toBe(
-      'No hay T.C. oficial del 27 jun para comprobar los 2 gastos en USD que podrían ser este cargo: vincúlalo a mano.',
+      'No hay T.C. oficial del 27/06/2026 para comprobar los 2 gastos en USD que podrían ser este cargo: vincúlalo a mano.',
     );
 
     expect(
@@ -1521,7 +1521,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
       resultado: 'SIN_CANDIDATOS',
       descartados_n: 2,
       detalle:
-        '2 gastos en USD quedan a más de ±2 % del T.C. oficial del 01 sep (17.01): no se liga ninguno.',
+        '2 gastos en USD quedan a más de ±2 % del T.C. oficial del 01/09/2026 (17.01): no se liga ninguno.',
     });
 
     // Fuera de banda: ni candidato ni descartado.
@@ -1565,13 +1565,13 @@ describe('T.C. oficial del día (invariante 70)', () => {
     ]);
     expect(cerca.map((c) => c.cargo.id)).toEqual(['c1']);
     expect(textoReciprocoCruceUsd(422.86, cerca)).toBe(
-      'El gasto en USD de $422.86 USD también cuadra con el cargo del 03 sep de $7,250.00 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
+      'El gasto en USD de $422.86 USD también cuadra con el cargo del 03/09/2026 de $7,250.00 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
     );
     const sinOficial = competidoresCruceUsd('propio', 422.86, [
       competidor('c2', 7250, null),
     ]);
     expect(textoReciprocoCruceUsd(422.86, sinOficial)).toBe(
-      'El gasto en USD de $422.86 USD también podría ser el cargo del 03 sep de $7,250.00 («AIRCRAFT SPRUCE AND SP»), y no hay T.C. oficial de ese día para descartarlo: vincúlalo a mano.',
+      'El gasto en USD de $422.86 USD también podría ser el cargo del 03/09/2026 de $7,250.00 («AIRCRAFT SPRUCE AND SP»), y no hay T.C. oficial de ese día para descartarlo: vincúlalo a mano.',
     );
     const dos = competidoresCruceUsd('propio', 422.86, [
       competidor('c1', 7250, of(17.0077)),
@@ -1630,7 +1630,7 @@ describe('T.C. oficial del día (invariante 70)', () => {
   });
 });
 
-describe('la cuenta del gasto manda (20-oct-2026, invariante 98)', () => {
+describe('la cuenta del gasto manda (20/10/2026, invariante 98)', () => {
   const HSBC = 'c-hsbc';
   const SCOTIA = 'c-scotia';
 
@@ -1699,13 +1699,13 @@ describe('la cuenta del gasto manda (20-oct-2026, invariante 98)', () => {
   });
 });
 
-describe('operacionesDedupe / mismaOperacionDedupe (4-nov-2026)', () => {
+describe('operacionesDedupe / mismaOperacionDedupe (04/11/2026)', () => {
   it('saca el número de operación sin ceros y descarta relleno, AUT. y tarjeta', () => {
     expect(operacionesDedupe('00000000182524573911 AUT. 470924')).toEqual([
       '182524573911',
     ]);
     expect(operacionesDedupe('00000000182524573911')).toEqual(['182524573911']);
-    // La IA del 2-nov soltó los ceros: mismo número.
+    // La IA del 02/11/2026 soltó los ceros: mismo número.
     expect(operacionesDedupe('270695199')).toEqual(['270695199']);
     expect(operacionesDedupe('00000000000270695199')).toEqual(['270695199']);
     // Relleno de Scotiabank en los SPEI: no identifica nada.
@@ -1742,7 +1742,7 @@ describe('operacionesDedupe / mismaOperacionDedupe (4-nov-2026)', () => {
   });
 });
 
-describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 4-nov-2026)', () => {
+describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 04/11/2026)', () => {
   type Linea = {
     fecha: string;
     tipo: string;
@@ -1754,7 +1754,7 @@ describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 4-
     return [...base, ...emparejarDuplicados(archivo, base).aInsertar];
   }
 
-  it('ADO $124 del 12-oct: «ADO» (PDF, 3 letras) y «ADO ADO\\AV UXMAL…» (XLSX) son la misma línea', () => {
+  it('ADO $124 del 12/10/2026: «ADO» (PDF, 3 letras) y «ADO ADO\\AV UXMAL…» (XLSX) son la misma línea', () => {
     let base = importar(
       [],
       [
@@ -1780,7 +1780,7 @@ describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 4-
     expect(base).toHaveLength(1);
   });
 
-  it('ES BACALAR $1,000.27 del 5-oct: el PDF pegó « REF. … AUT. …» a la referencia', () => {
+  it('ES BACALAR $1,000.27 del 05/10/2026: el PDF pegó « REF. … AUT. …» a la referencia', () => {
     let base = importar(
       [],
       [
@@ -1806,7 +1806,7 @@ describe('emparejarDuplicados — PDF por la IA vs XLSX/CSV del portal (prod, 4-
     expect(base).toHaveLength(1);
   });
 
-  it('domiciliación $15,682.76 del 15-oct: el PDF reordena la leyenda y suelta los ceros de la referencia', () => {
+  it('domiciliación $15,682.76 del 15/10/2026: el PDF reordena la leyenda y suelta los ceros de la referencia', () => {
     let base = importar(
       [],
       [

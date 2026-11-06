@@ -54,10 +54,10 @@ describe('lineaSelloCorreccion', () => {
   it('corrección tardía → «[Corrección capturada en la app el … · recibida el …]» en hora Cancún', () => {
     const s = resolverSelloCorreccion('2026-09-13T22:30:00-05:00', ahora);
     expect(lineaSelloCorreccion('Corrección', s, ahora)).toBe(
-      '[Corrección capturada en la app el 13 sep 22:30 · recibida el 15 sep 16:00]',
+      '[Corrección capturada en la app el 13/09/2026 22:30 · recibida el 15/09/2026 16:00]',
     );
     expect(lineaSelloCorreccion('Baja', s, ahora)).toMatch(
-      /^\[Baja capturada en la app el 13 sep 22:30 · recibida el 15 sep 16:00\]$/,
+      /^\[Baja capturada en la app el 13\/09\/2026 22:30 · recibida el 15\/09\/2026 16:00\]$/,
     );
   });
 });

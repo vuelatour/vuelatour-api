@@ -824,7 +824,7 @@ describe('createReserva — alta fresca', () => {
       USER,
     );
     expect(String((w.inserts.vuelo?.[0] as Row).notas_internas)).toMatch(
-      /^Nota\n\[Capturado en la app el 1 sep 09:00 · recibido el /,
+      /^Nota\n\[Capturado en la app el 01\/09\/2026 09:00 · recibido el /,
     );
     const w2 = armar({
       porLlave: null,

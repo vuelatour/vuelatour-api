@@ -286,12 +286,12 @@ export interface DecisionReverso {
   candidatos_n: number;
 }
 
-/** `YYYY-MM-DD` ⇒ `DD-MM` (notas y etiquetas: la ventana es < 1 año). */
+/** `YYYY-MM-DD` ⇒ `DD/MM/AAAA` (notas y etiquetas; invariante 120, antes `DD-MM`). */
 export function fechaCortaReverso(fecha: string | null | undefined): string {
   if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(fecha)) {
     return String(fecha ?? '');
   }
-  return `${fecha.slice(8, 10)}-${fecha.slice(5, 7)}`;
+  return `${fecha.slice(8, 10)}/${fecha.slice(5, 7)}/${fecha.slice(0, 4)}`;
 }
 
 function montoTexto(monto: number): string {
@@ -649,7 +649,7 @@ function unaLinea(s: string | null | undefined): string {
   return (s ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** Nota del ABONO: «Devuelve el cargo del 21-09 · ASUR CANCUN». */
+/** Nota del ABONO: «Devuelve el cargo del 21/09/2026 · ASUR CANCUN». */
 export function notaAbonoReverso(cargo: {
   fecha: string;
   descripcion?: string | null;
@@ -658,7 +658,7 @@ export function notaAbonoReverso(cargo: {
   return `Devuelve el cargo del ${fechaCortaReverso(cargo.fecha)}${d ? ` · ${d}` : ''}`;
 }
 
-/** Nota del CARGO: «Devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552». */
+/** Nota del CARGO: «Devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552». */
 export function notaCargoReverso(abono: {
   fecha: string;
   descripcion?: string | null;
@@ -667,8 +667,10 @@ export function notaCargoReverso(abono: {
   return `Devuelto el ${fechaCortaReverso(abono.fecha)}${d ? ` · ${d}` : ''}`;
 }
 
+// La fecha va en DD/MM/AAAA desde el 0.0.124 (invariante 120); las notas que
+// el emparejado escribió ANTES en prod traen «21-09»: se reconocen las dos.
 const RE_LINEA_REVERSO =
-  /^(Devuelve el cargo del|Devuelto el) \d{2}-\d{2}(?: · .*)?$/;
+  /^(Devuelve el cargo del|Devuelto el) (?:\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})(?: · .*)?$/;
 
 /**
  * Quita de las notas los renglones que escribió el emparejado (al

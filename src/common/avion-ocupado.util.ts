@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { diaCancun } from './fecha-cancun.util';
+import { diaCancun, diaDDMMAAAA } from './fecha-cancun.util';
 
 /**
  * Doble reserva del AVIÓN (4-sep-2026, base de la cotización de grupo):
@@ -104,13 +104,13 @@ export function avisoAvionOcupado(
   if (ocupados.length === 0) return null;
   const folios = ocupados
     .map((v) => {
-      const dia = v.fecha_vuelo
-        ? new Date(v.fecha_vuelo).toLocaleDateString('es-MX', {
-            day: 'numeric',
-            month: 'short',
-            timeZone: 'America/Cancun',
-          })
-        : null;
+      let dia: string | null = null;
+      try {
+        // «15/09/2026» (día Cancún; invariante 120).
+        dia = v.fecha_vuelo ? diaDDMMAAAA(diaCancun(v.fecha_vuelo)) : null;
+      } catch {
+        dia = null;
+      }
       return `#${v.folio ?? '?'}${dia ? ` (${dia})` : ''}`;
     })
     .join(', ');

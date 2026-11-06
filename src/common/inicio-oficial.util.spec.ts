@@ -69,7 +69,7 @@ describe('inicio-oficial.util', () => {
         expect((e as HttpException).getStatus()).toBe(400);
         expect((e as HttpException).getResponse()).toEqual({
           message:
-            'El sistema arranca el 1-sep-2026. Elige un periodo a partir de esa fecha.',
+            'El sistema arranca el 01/09/2026. Elige un periodo a partir de esa fecha.',
           error: 'PERIODO_ANTES_DEL_INICIO',
           details: { inicio: INICIO },
         });
@@ -103,8 +103,8 @@ describe('inicio-oficial.util', () => {
   });
 
   it('fechaInicioCorta', () => {
-    expect(fechaInicioCorta('2026-09-01')).toBe('1-sep-2026');
-    expect(fechaInicioCorta('2026-10-15')).toBe('15-oct-2026');
+    expect(fechaInicioCorta('2026-09-01')).toBe('01/09/2026');
+    expect(fechaInicioCorta('2026-10-15')).toBe('15/10/2026');
     expect(fechaInicioCorta('x')).toBe('x');
   });
 

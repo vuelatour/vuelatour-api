@@ -452,7 +452,7 @@ describe('ExpensesService.putRepartoIguales — nómina en partes iguales', () =
     });
     const porId = new Map(r.gastos.map((g) => [g.gasto_id, g]));
     expect(porId.get('g-sep')!.error!.message).toBe(
-      'Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.',
+      'Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para corregir.',
     );
     expect(porId.get('g-chico')!.error!.message).toBe(
       '$0.03 MXN no alcanza para repartir entre 4 aviones: cada avión necesita al menos un centavo.',

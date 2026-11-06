@@ -119,26 +119,9 @@ export function esAntesDelInicio(
   return dia < inicio;
 }
 
-const MESES_CORTOS = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-];
-
-/** `2026-09-01` ⇒ `1-sep-2026` (es-MX). Entrada inválida ⇒ tal cual. */
+/** `2026-09-01` ⇒ `01/09/2026` (DD/MM/AAAA, invariante 120). Entrada inválida ⇒ tal cual. */
 export function fechaInicioCorta(inicio: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(inicio);
-  if (!m) return inicio;
-  const mes = MESES_CORTOS[Number(m[2]) - 1];
-  if (!mes) return inicio;
-  return `${Number(m[3])}-${mes}-${m[1]}`;
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return inicio;
+  return `${m[3]}/${m[2]}/${m[1]}`;
 }

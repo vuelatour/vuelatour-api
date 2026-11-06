@@ -186,7 +186,7 @@ describe('notaTcUsdIngreso', () => {
     expect(
       notaTcUsdIngreso(convDe(reembolso, OFICIAL_0904, hojas), 45483.6),
     ).toBe(
-      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15/09/2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
     );
     expect(
       notaTcUsdIngreso(
@@ -197,7 +197,7 @@ describe('notaTcUsdIngreso', () => {
         45483.6,
       ),
     ).toBe(
-      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15-sep-2026, T.C. de costos del vuelo #430): reembolso y gasto se anulan en este libro.',
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del 15/09/2026, T.C. de costos del vuelo #430): reembolso y gasto se anulan en este libro.',
     );
     expect(
       notaTcUsdIngreso(convDe({ ...ING4, tc_usd_mxn: 17.5 }), 46550.8),
@@ -223,10 +223,10 @@ describe('notaTcUsdIngreso', () => {
     expect(
       notaTcUsdIngreso(convDe(de(1925.27), OFICIAL_0904, op), 1925.27),
     ).toBe(
-      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25-sep-2026, T.C. de costos del vuelo #383): este libro solo le carga $1,365.64 MXN de ese gasto al avión; los $559.63 MXN restantes del reembolso no se anulan con nada.',
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25/09/2026, T.C. de costos del vuelo #383): este libro solo le carga $1,365.64 MXN de ese gasto al avión; los $559.63 MXN restantes del reembolso no se anulan con nada.',
     );
     expect(notaTcUsdIngreso(convDe(de(1000), OFICIAL_0904, op), 1000)).toBe(
-      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25-sep-2026, T.C. de costos del vuelo #383): el reembolso anula $1,000 MXN de los $1,365.64 MXN que este libro le carga al avión de ese gasto.',
+      'T.C. con el que este libro convierte el gasto que reembolsa (gasto 8c60e428 del 25/09/2026, T.C. de costos del vuelo #383): el reembolso anula $1,000 MXN de los $1,365.64 MXN que este libro le carga al avión de ese gasto.',
     );
     expect(
       notaTcUsdIngreso(convDe(de(1365.645), OFICIAL_0904, op), 1365.645),
@@ -346,7 +346,7 @@ describe('hojaOtrosIngresosAvion', () => {
       neto_usd: 2700.52,
       tc_usd_origen: 'GASTO_LIGADO',
       tc_usd_nota:
-        'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-otro-m del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
+        'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-otro-m del 15/09/2026, T.C. promedio de las hojas): reembolso y gasto se anulan en este libro.',
     });
     // Ligado pero el libro solo carga una PARTE (TUA o extensión
     // trasladadas, parcial de un reparto) ⇒ pendiente del exceso.

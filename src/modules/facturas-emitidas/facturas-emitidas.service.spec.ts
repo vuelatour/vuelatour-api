@@ -2235,7 +2235,7 @@ describe('FacturasEmitidasService — cobro_ids (facturas por cobro, 16-oct-2026
       >
     )[0][0];
     expect(payload.columnas.at(-1)?.label).toBe('Cobros que ampara');
-    expect(payload.filas[0].at(-1)).toBe('#341: $68,208 MXN (21 sep 2026)');
+    expect(payload.filas[0].at(-1)).toBe('#341: $68,208 MXN (21/09/2026)');
     const cand = await svc.vuelosCandidatos({ ids: V1 });
     expect(cand[0].cobros?.map((c) => [c.id, c.factura])).toEqual([
       [c2, null],

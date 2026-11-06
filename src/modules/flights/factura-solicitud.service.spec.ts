@@ -241,7 +241,7 @@ describe('FacturaSolicitudService.solicitar', () => {
       tipo: 'factura_solicitada',
       titulo: 'Factura pedida: vuelo #341',
       cuerpo:
-        'Itzi pidió factura del vuelo #341 · Maqar · 27 sep · Total $8,050.40 USD. El cliente paga hasta recibir la factura. Nota: Lo pide para pagar',
+        'Itzi pidió factura del vuelo #341 · Maqar · 27/09/2026 · Total $8,050.40 USD. El cliente paga hasta recibir la factura. Nota: Lo pide para pagar',
       link: `/admin/facturas-emitidas?resaltar=${V1}#por-facturar`,
       data: { vuelo_id: V1, folio: 341, paga_contra_factura: true },
     });
@@ -288,7 +288,7 @@ describe('FacturaSolicitudService.solicitar', () => {
     const [, n] = notifyUser.mock.calls[0] as [string, Fila];
     expect(n.titulo).toBe('Factura pedida: grupo G-12');
     expect(n.cuerpo).toBe(
-      'Itzi pidió factura de los vuelos #341 y #342 (grupo G-12) · Maqar · 27 sep.',
+      'Itzi pidió factura de los vuelos #341 y #342 (grupo G-12) · Maqar · 27/09/2026.',
     );
     expect(n.data).toMatchObject({ vuelo_ids: [V1, V2], grupo_id: G });
     const upd = db.updates.filter((u) => u.tabla === 'vuelo');
@@ -500,7 +500,7 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
       tipo: 'factura_solicitada',
       titulo: 'Factura pendiente: vuelo #341',
       cuerpo:
-        'Cobro en HSBC Pesos registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep · Total $8,050.40 USD.',
+        'Cobro en HSBC Pesos registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27/09/2026 · Total $8,050.40 USD.',
       link: `/admin/facturas-emitidas?resaltar=${V1}#por-facturar`,
       data: {
         vuelo_id: V1,
@@ -718,7 +718,7 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
     const [, n] = notifyUser.mock.calls[0] as [string, Fila];
     expect(n.titulo).toBe('Factura pendiente: grupo G-12');
     expect(n.cuerpo).toBe(
-      'Cobro en HSBC Pesos registrado por Itzi: los vuelos #341 y #342 (grupo G-12) necesitan factura · Maqar · 27 sep.',
+      'Cobro en HSBC Pesos registrado por Itzi: los vuelos #341 y #342 (grupo G-12) necesitan factura · Maqar · 27/09/2026.',
     );
     expect(n.data).toEqual({
       vuelo_id: V1,
@@ -923,7 +923,7 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
         tipo: 'factura_solicitud_ya_no_aplica',
         titulo: 'Ya no aplica: factura del vuelo #341',
         cuerpo:
-          'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
+          'Se registró la devolución del dinero del vuelo #341 · Maqar · 27/09/2026: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
         link: `/admin/flights/${V1}#cobros`,
         data: {
           vuelo_id: V1,
@@ -959,7 +959,7 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
         tipo: 'factura_solicitud_vuelve_a_aplicar',
         titulo: 'Vuelve a aplicar: factura del vuelo #341',
         cuerpo:
-          'Entró dinero al vuelo #341 · Maqar · 27 sep (cobro por BillPocket) y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
+          'Entró dinero al vuelo #341 · Maqar · 27/09/2026 (cobro por BillPocket) y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
         link: `/admin/facturas-emitidas?resaltar=${V1}#por-facturar`,
         data: {
           vuelo_id: V1,
@@ -995,7 +995,7 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
       expect(rb.transicion).toBe('VUELVE_A_APLICAR');
       const [, nb] = baja.notifyUser.mock.calls[0] as [string, Fila];
       expect(nb.cuerpo).toBe(
-        'Se eliminó un reembolso del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+        'Se eliminó un reembolso del vuelo #341 · Maqar · 27/09/2026: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
       );
       expect(nb.data).toMatchObject({
         cobro_id: 'r-1',
@@ -1029,7 +1029,7 @@ describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77
       expect(rc.transicion).toBe('YA_NO_APLICA');
       const [, nc] = cambio.notifyUser.mock.calls[0] as [string, Fila];
       expect(nc.cuerpo).toBe(
-        'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
+        'Se corrigió un cobro del vuelo #341 · Maqar · 27/09/2026: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde el detalle del vuelo (botón «Retirar»).',
       );
     });
 

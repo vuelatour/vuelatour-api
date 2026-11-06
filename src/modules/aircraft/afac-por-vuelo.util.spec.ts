@@ -328,7 +328,7 @@ describe('filasAfacPorVuelo (invariante 90)', () => {
     expect(cerrado.filas[0].afac).toMatchObject({
       editable: false,
       motivo_no_editable:
-        'Septiembre 2026 ya está cerrado (Alejandra, 16-oct). Reábrelo en Reportes para corregir.',
+        'Septiembre 2026 ya está cerrado (Alejandra, 16/10/2026). Reábrelo en Reportes para corregir.',
     });
   });
 

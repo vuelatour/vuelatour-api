@@ -10,9 +10,9 @@ import type { IaUsoService } from '../ia-uso/ia-uso.service';
 import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
 
 /**
- * REVERSOS (30-sep-2026): «¿Cómo puedo conciliar los cargos reembolsados?».
- * Caso REAL de prod (GASTOS GNRAL): el 21-sep 8 cargos «ASUR CANCUN»
- * $825.13 (1 ya con su gasto) y el 23-sep 7 abonos «CARGO INDEBIDO 21 SEP
+ * REVERSOS (30/09/2026): «¿Cómo puedo conciliar los cargos reembolsados?».
+ * Caso REAL de prod (GASTOS GNRAL): el 21/09/2026 8 cargos «ASUR CANCUN»
+ * $825.13 (1 ya con su gasto) y el 23/09/2026 7 abonos «CARGO INDEBIDO 21 SEP
  * 355xx» de $825.13. Un cargo devuelto y su devolución se ANULAN: no son
  * gasto ni ingreso. Se congela:
  * - emparejar a mano (en los dos sentidos), idempotencia, 409 legibles y la
@@ -30,7 +30,7 @@ import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
 type Row = Record<string, unknown>;
 type Tablas = Record<string, Row[]>;
 
-const CTA = '76a931e0-7c06-47c6-a574-6c7d4a698c14';
+const CTA = '76a931e0-7c06/47/2026c6-a574-6c7d4a698c14';
 const CTA_OTRA = 'cta-otra';
 const USER = 'user-1';
 const CL_REVERSO = 'cl-reverso';
@@ -290,7 +290,7 @@ const mov = (id: string, extra: Row = {}): Row => ({
   ...extra,
 });
 
-/** Los 8 cargos REALES del 21-sep: el último ya tiene su gasto. */
+/** Los 8 cargos REALES del 21/09/2026: el último ya tiene su gasto. */
 const CARGOS_IDS = [
   '9d022c9a-c191-427b-94a7-b4e6d2f9e2f3',
   '4083e656-3204-424c-956b-0cc3d77d0b5d',
@@ -300,7 +300,7 @@ const CARGOS_IDS = [
   'dbc329cf-7102-4141-a1db-1c1adbb0c44a',
   '5196a770-b25a-4fdd-b093-b4b1a9c28115',
 ];
-const CARGO_CON_GASTO = '1263ca78-21d8-4c70-8009-6c0f311f37d7';
+const CARGO_CON_GASTO = '1263ca78/21/2026d8-4c70-8009-6c0f311f37d7';
 const ABONOS: Array<[string, string]> = [
   ['405466de-599b-4c0e-b2df-203133282530', '35552'],
   ['35d5c5eb-ebf6-4959-a22a-e5282cde329d', '35554'],
@@ -409,7 +409,7 @@ describe('emparejarReverso — a mano', () => {
       cobro_grupo_id: null,
       ingreso_id: null,
       notas:
-        'Devuelve el cargo del 21-09 · ASUR CANCUN\nAclaración 88 con el banco',
+        'Devuelve el cargo del 21/09/2026 · ASUR CANCUN\nAclaración 88 con el banco',
       updated_by: USER,
     });
     expect(fila(db, CARGO_1)).toMatchObject({
@@ -417,7 +417,7 @@ describe('emparejarReverso — a mano', () => {
       conciliado: true,
       gasto_id: null,
       reverso_de_id: null,
-      notas: 'Devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+      notas: 'Devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     });
     expect(r.idempotente).toBe(false);
     expect(r.abono.reverso_de).toEqual({
@@ -449,7 +449,7 @@ describe('emparejarReverso — a mano', () => {
     expect(r.idempotente).toBe(true);
     expect(log.filter((q) => q.op === 'update').length).toBe(antes);
     expect(fila(db, ABONO_1).notas).toBe(
-      'Devuelve el cargo del 21-09 · ASUR CANCUN',
+      'Devuelve el cargo del 21/09/2026 · ASUR CANCUN',
     );
   });
 
@@ -775,7 +775,9 @@ describe('autoReversos — «Emparejar devoluciones» con el CASO REAL', () => {
       USER,
     );
     expect(r).toMatchObject({ revisados: 1, emparejados: 0, ambiguos: 1 });
-    expect(r.detalle[0].motivo).toContain('fechas distintas (05-09, 12-09)');
+    expect(r.detalle[0].motivo).toContain(
+      'fechas distintas (05/09/2026, 12/09/2026)',
+    );
     expect(fila(db, 'dev').conciliado).toBe(false);
   });
 });
@@ -829,7 +831,7 @@ describe('«Cruzar pendientes» e importación — criterio REVERSO', () => {
       criterio: 'REVERSO',
     });
     expect(abono?.motivo).toMatch(
-      /^Devuelve el cargo del 21-09 · ASUR CANCUN\.$/,
+      /^Devuelve el cargo del 21\/09\/2026 · ASUR CANCUN\.$/,
     );
   });
 
@@ -852,7 +854,7 @@ describe('«Cruzar pendientes» e importación — criterio REVERSO', () => {
     expect(r.detalle[0]).toMatchObject({
       resultado: 'SIN_CANDIDATO',
       motivo:
-        'Devolución de un cargo: El banco indica un cargo del 21-09 y no hay uno pendiente por $825.13 en esa fecha.',
+        'Devolución de un cargo: El banco indica un cargo del 21/09/2026 y no hay uno pendiente por $825.13 en esa fecha.',
     });
   });
 
@@ -943,12 +945,12 @@ describe('lectores: lista y reporte', () => {
       payload.filas.map((f) => [`${String(f[0])}|${String(f[1])}`, f[7]]),
     );
     expect(conQue.get('2026-09-23|CARGO INDEBIDO 21 SEP 35552')).toBe(
-      'Reverso de un cargo · devuelve el cargo del 21-09 · ASUR CANCUN',
+      'Reverso de un cargo · devuelve el cargo del 21/09/2026 · ASUR CANCUN',
     );
     const cargosDel21 = payload.filas.filter(
       (f) =>
         f[7] ===
-        'Reverso de un cargo · devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+        'Reverso de un cargo · devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     );
     expect(cargosDel21).toHaveLength(1);
     const estatus = payload.filas.filter((f) =>
@@ -1025,7 +1027,7 @@ describe('SIN la migración 20260930000001', () => {
 });
 
 // =====================================================================
-// Revisión adversaria (30-sep-2026).
+// Revisión adversaria (30/09/2026).
 describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () => {
   /** Lote REAL de prod (jul/ago): «Rev ASUR Merida» $110.82. */
   const loteMerida = (): Row[] => [
@@ -1060,7 +1062,7 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
     }),
   ];
 
-  it('«Emparejar devoluciones» con el lote REAL de «REV»: el del 07-08 (su cargo tiene gasto) NO se lleva un cargo del 06-07', async () => {
+  it('«Emparejar devoluciones» con el lote REAL de «REV»: el del 07/08/2026 (su cargo tiene gasto) NO se lleva un cargo del 06/07/2026', async () => {
     const db = mundo({ movimiento_bancario: loteMerida() });
     const { svc } = armar(db);
     const r = await svc.autoReversos(
@@ -1073,7 +1075,7 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
       reverso_de_id: null,
       clasificacion_id: null,
     });
-    // Quedan DOS cargos del 06-07 pendientes (los reales, para su gasto) y
+    // Quedan DOS cargos del 06/07/2026 pendientes (los reales, para su gasto) y
     // el del gasto intacto.
     const pendientes06 = ['m1', 'm2', 'm3', 'm4'].filter(
       (id) => fila(db, id).conciliado === false,
@@ -1084,10 +1086,12 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
       clasificacion_id: null,
     });
     const d3 = r.detalle.find((d) => d.abono_id === 'r3');
-    expect(d3?.motivo).toContain('más reciente (07-08) ya está conciliado');
+    expect(d3?.motivo).toContain(
+      'más reciente (07/08/2026) ya está conciliado',
+    );
   });
 
-  it('diálogo desde esa devolución: lista los libres del 06-07 pero NO sugiere ninguno', async () => {
+  it('diálogo desde esa devolución: lista los libres del 06/07/2026 pero NO sugiere ninguno', async () => {
     const db = mundo({ movimiento_bancario: loteMerida() });
     const { svc } = armar(db);
     const c = await svc.candidatosReverso('r3');
@@ -1146,14 +1150,14 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
       reverso_de_id: CARGO_1,
       clasificacion_id: CL_REVERSO,
       conciliado: true,
-      notas: 'Devuelve el cargo del 21-09 · ASUR CANCUN',
+      notas: 'Devuelve el cargo del 21/09/2026 · ASUR CANCUN',
     });
     const r = await svc.emparejarReverso(ABONO_1, CARGO_1, USER);
     expect(r.idempotente).toBe(false);
     expect(fila(db, CARGO_1)).toMatchObject({
       conciliado: true,
       clasificacion_id: CL_REVERSO,
-      notas: 'Devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+      notas: 'Devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     });
     expect(r.cargo?.revertido_por).toMatchObject({ id: ABONO_1 });
     // Ya completo: ahora sí idempotente.
@@ -1162,7 +1166,7 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
     ).toBe(true);
   });
 
-  // Revisión del 14-oct-2026 (lote B, invariante 75).
+  // Revisión del 14/10/2026 (lote B, invariante 75).
   it('el abono apunta al cargo pero el cargo YA NO es su devolución (omitido o clasificado con otra cosa) ⇒ 409, jamás «idempotente»', async () => {
     const { svc, db, log } = armar(mundo());
     Object.assign(fila(db, ABONO_1), {
@@ -1314,7 +1318,7 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
 });
 
 /**
- * 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): un cargo que
+ * 1 cargo ↔ N gastos (02/10/2026, migración 20261002000002): un cargo que
  * paga VARIOS gastos tiene `gasto_id` null (espejo) y `gastos_n ≥ 2`. Para
  * el par cargo ↔ devolución cuenta como ligado a gasto: jamás se empareja
  * ni se ofrece, y frena al automático igual que un cargo con UN gasto.

@@ -276,8 +276,8 @@ describe('auto-cruce USD ↔ MXN (importación y «Cruzar pendientes»)', () => 
     expect(r.conciliados).toBe(0);
     expect(r.ambiguos).toBe(2);
     expect(r.detalle.map((d) => d.motivo)).toEqual([
-      'El gasto en USD de $422.86 USD también cuadra con el cargo del 03 sep de $7,250.00 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
-      'El gasto en USD de $422.86 USD también cuadra con el cargo del 01 sep de $7,214.14 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
+      'El gasto en USD de $422.86 USD también cuadra con el cargo del 03/09/2026 de $7,250.00 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
+      'El gasto en USD de $422.86 USD también cuadra con el cargo del 01/09/2026 de $7,214.14 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
     ]);
   });
 
@@ -342,7 +342,7 @@ describe('auto-cruce USD ↔ MXN (importación y «Cruzar pendientes»)', () => 
     ]);
     expect(r.ambiguos).toBe(1);
     expect(r.detalle[0].motivo).toBe(
-      'No hay T.C. oficial del 01 sep para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.',
+      'No hay T.C. oficial del 01/09/2026 para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.',
     );
   });
 
@@ -741,8 +741,8 @@ describe('ligasUsdTcFueraDeLugar — el aviso del pre-cierre', () => {
       ['340c3dc6', '613ad49a'],
     ]);
     expect(r?.ligas.map((l) => l.texto)).toEqual([
-      '$422.86 USD · Aircraft Spruce & Specialty Co. · Michelin Tube 7.00-6/8.00… (01 sep) ↔ cargo «ASA CANCUN» de $8,939.38 del 01 sep (COMBUSTIBLE): T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
-      '$794.61 USD · 1 Caja bujías Tempest Seneca, 1 filtro de aceite Champion 1… (24 sep) ↔ cargo «ASA CANCUN I\\CARR CANC» de $14,197.17 del 24 sep (COMBUSTIBLE): T.C. 17.87 · oficial 17.47 (+2.3 %): lejos del oficial',
+      '$422.86 USD · Aircraft Spruce & Specialty Co. · Michelin Tube 7.00-6/8.00… (01/09/2026) ↔ cargo «ASA CANCUN» de $8,939.38 del 01/09/2026 (COMBUSTIBLE): T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
+      '$794.61 USD · 1 Caja bujías Tempest Seneca, 1 filtro de aceite Champion 1… (24/09/2026) ↔ cargo «ASA CANCUN I\\CARR CANC» de $14,197.17 del 24/09/2026 (COMBUSTIBLE): T.C. 17.87 · oficial 17.47 (+2.3 %): lejos del oficial',
     ]);
     expect(r?.ligas[0]).toMatchObject({
       fecha_gasto: '2026-09-01',

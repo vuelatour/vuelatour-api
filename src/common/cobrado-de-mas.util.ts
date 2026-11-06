@@ -42,7 +42,11 @@
  */
 import { cobroEnUsd, cobrosEnUsd, type CobroLike } from './cobros-usd.util';
 import { fmtDineroTexto } from './dinero-texto.util';
-import { diaCancun, diasEntreDiasCancun } from './fecha-cancun.util';
+import {
+  diaCancun,
+  diaDDMMAAAA,
+  diasEntreDiasCancun,
+} from './fecha-cancun.util';
 import {
   particionIngresoVuelo,
   sobrecobroUsd,
@@ -204,26 +208,9 @@ function moverDia(dia: string, dias: number): string {
     .slice(0, 10);
 }
 
-const MESES_CORTOS = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-] as const;
-
-/** «15 sep» de un día YYYY-MM-DD (sin cero a la izquierda, como `fechaCortaCancun`). */
+/** «15/09/2026» de un día YYYY-MM-DD (DD/MM/AAAA, invariante 120). */
 function diaCorto(dia: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
-  if (!m) return dia;
-  return `${Number(m[3])} ${MESES_CORTOS[Number(m[2]) - 1] ?? m[2]}`;
+  return diaDDMMAAAA(dia);
 }
 
 /** Orden estable de los cobros: fecha (sin fecha al final) y luego id. */

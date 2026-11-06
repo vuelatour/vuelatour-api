@@ -181,7 +181,7 @@ describe('textos del 409 (es-MX, lo que lee el operador)', () => {
         cargos: [{ id: 'm1', fecha: '2026-09-07', monto: 277.79 }],
       }),
     ).toBe(
-      'Ese gasto ya está cubierto: $277.79 de $277.79 (cargo del 07 sep). ' +
+      'Ese gasto ya está cubierto: $277.79 de $277.79 (cargo del 07/09/2026). ' +
         'Si este cargo es otro pago de la misma factura, el gasto debe valer la suma de los dos.',
     );
   });
@@ -196,7 +196,7 @@ describe('textos del 409 (es-MX, lo que lee el operador)', () => {
       ],
     });
     expect(msg).toContain('$1,234.50 de $1,234.50');
-    expect(msg).toContain('(cargos del 07 sep, 09 sep)');
+    expect(msg).toContain('(cargos del 07/09/2026, 09/09/2026)');
   });
 
   it('moneda distinta: explica el 1 ↔ 1 y qué hacer', () => {
@@ -213,8 +213,8 @@ describe('textos del 409 (es-MX, lo que lee el operador)', () => {
 
 describe('formatos', () => {
   it('fecha corta sin corrimiento de zona', () => {
-    expect(fechaCortaEs('2026-09-07')).toBe('07 sep');
-    expect(fechaCortaEs('2026-01-31T05:00:00Z')).toBe('31 ene');
+    expect(fechaCortaEs('2026-09-07')).toBe('07/09/2026');
+    expect(fechaCortaEs('2026-01-31T05:00:00Z')).toBe('31/01/2026');
     expect(fechaCortaEs(null)).toBeNull();
     expect(fechaCortaEs('sin fecha')).toBeNull();
   });
@@ -264,7 +264,7 @@ describe('mensajeGastoYaCubierto — sin cargos previos', () => {
       montoNuevo: 50,
     });
     expect(msg).toBe(
-      'Ese gasto ya está cubierto: $277.79 de $277.79 (cargo del 07 sep). ' +
+      'Ese gasto ya está cubierto: $277.79 de $277.79 (cargo del 07/09/2026). ' +
         'Si este cargo es otro pago de la misma factura, el gasto debe valer ' +
         'la suma de los dos.',
     );

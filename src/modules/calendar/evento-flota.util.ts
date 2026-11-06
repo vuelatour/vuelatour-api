@@ -134,8 +134,9 @@ export function aEventoMe(ev: EventoInterno): EventoMe {
 const FMT_CORTA = new Intl.DateTimeFormat('es-MX', {
   timeZone: 'America/Cancun',
   weekday: 'short',
-  day: 'numeric',
-  month: 'short',
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
   hour: '2-digit',
   minute: '2-digit',
   hourCycle: 'h23',
@@ -154,14 +155,16 @@ function instante(iso: string): Date {
   return d;
 }
 
-/** "jue 3 sep, 09:45" en hora Cancún. */
+/** "jue 03/09/2026, 09:45" en hora Cancún (DD/MM/AAAA, invariante 120). */
 export function fechaHoraCancunCorta(iso: string): string {
   const partes = Object.fromEntries(
     FMT_CORTA.formatToParts(instante(iso))
       .filter((p) => p.type !== 'literal')
       .map((p) => [p.type, p.value]),
   ) as Record<string, string>;
-  return `${partes.weekday} ${partes.day} ${partes.month}, ${partes.hour}:${partes.minute}`;
+  const semana = (partes.weekday ?? '').replace(/[.,]/g, '');
+  const hora = partes.hour === '24' ? '00' : partes.hour;
+  return `${semana} ${partes.day}/${partes.month}/${partes.year}, ${hora}:${partes.minute}`;
 }
 
 /** "09:45" en hora Cancún. */
@@ -190,7 +193,7 @@ export function segmentosEvento(ev: EventoParaAviso): string[] {
 
 /**
  * Cuerpo canónico de todo aviso de evento:
- * "jue 3 sep, 09:45 · Llenar Bitácora · XA-VGV · Está en la oficina ⚠️".
+ * "jue 03/09/2026, 09:45 · Llenar Bitácora · XA-VGV · Está en la oficina ⚠️".
  * `encabezado` sustituye la fecha ("En 90 min · 09:45", "Mañana 09:45").
  */
 export function cuerpoEvento(ev: EventoParaAviso, encabezado?: string): string {

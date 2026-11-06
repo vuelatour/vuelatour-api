@@ -27,7 +27,7 @@ import {
   CATEGORIAS_GASTO_EMPRESA,
   categoriaEsPagoVendedor,
 } from './categoria-gasto.util';
-import { diaCancun } from './fecha-cancun.util';
+import { diaCancun, diaDDMMAAAA } from './fecha-cancun.util';
 import {
   diaContableDeVuelo,
   mesContableDeVuelo,
@@ -184,7 +184,7 @@ export function etiquetaMesMinuscula(mes: string): string {
   return `${MESES_LARGOS[m - 1]} ${y}`;
 }
 
-/** '16-oct' de un instante (día Cancún). */
+/** '16/10/2026' de un instante (día Cancún; DD/MM/AAAA, invariante 120). */
 export function diaCortoCancun(iso: string | null | undefined): string {
   if (!iso) return '';
   let dia: string;
@@ -193,15 +193,15 @@ export function diaCortoCancun(iso: string | null | undefined): string {
   } catch {
     return '';
   }
-  return `${Number(dia.slice(8, 10))}-${MESES_CORTOS[Number(dia.slice(5, 7)) - 1]}`;
+  return diaDDMMAAAA(dia);
 }
 
-/** '30-sep' de un día de pared 'YYYY-MM-DD' (sin pasar por zona horaria). */
+/** '30/09/2026' de un día de pared 'YYYY-MM-DD' (sin pasar por zona horaria; invariante 120). */
 export function diaCortoDeDia(dia: string | null | undefined): string {
   if (typeof dia !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(dia)) return '';
   const m = Number(dia.slice(5, 7));
   if (m < 1 || m > 12) return '';
-  return `${Number(dia.slice(8, 10))}-${MESES_CORTOS[m - 1]}`;
+  return diaDDMMAAAA(dia.slice(0, 10));
 }
 
 /**
@@ -460,9 +460,9 @@ export function nombreCorto(nombre: string | null | undefined): string {
 }
 
 /**
- * «Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para
- * corregir.» Con `matricula` (cierre POR AVIÓN, invariante 105): «N621TX ·
- * Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para
+ * «Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes
+ * para corregir.» Con `matricula` (cierre POR AVIÓN, invariante 105): «N621TX ·
+ * Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para
  * corregir.»
  */
 export function textoMesCerrado(c: CierreParaTexto): string {

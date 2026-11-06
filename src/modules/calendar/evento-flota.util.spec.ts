@@ -32,7 +32,9 @@ const EVENTO = {
 
 describe('formato Cancún', () => {
   it('fechaHoraCancunCorta: "jue 3 sep, 09:45"', () => {
-    expect(fechaHoraCancunCorta(EVENTO.fecha)).toMatch(/^jue 3 sept?, 09:45$/);
+    expect(fechaHoraCancunCorta(EVENTO.fecha)).toMatch(
+      /^jue 03\/09\/2026, 09:45$/,
+    );
   });
 
   it('horaCancun usa reloj de 24 h sin "24:xx" a medianoche', () => {
@@ -49,14 +51,14 @@ describe('formato Cancún', () => {
 describe('cuerpoEvento', () => {
   it('lleva hora Cancún, título, matrícula y notas', () => {
     expect(cuerpoEvento(EVENTO)).toMatch(
-      /^jue 3 sept?, 09:45 · Llenar Bitácora · XA-VGV · Está en la oficina ⚠️$/,
+      /^jue 03\/09\/2026, 09:45 · Llenar Bitácora · XA-VGV · Está en la oficina ⚠️$/,
     );
   });
 
   it('omite los segmentos vacíos (sin avión ni notas)', () => {
     expect(
       cuerpoEvento({ ...EVENTO, aeronave_matricula: null, notas: '  ' }),
-    ).toMatch(/^jue 3 sept?, 09:45 · Llenar Bitácora$/);
+    ).toMatch(/^jue 03\/09\/2026, 09:45 · Llenar Bitácora$/);
   });
 
   it('acepta encabezado propio (recordatorios)', () => {

@@ -666,7 +666,7 @@ describe('candados de la revisión adversaria', () => {
     expect(r.conciliados).toBe(0);
     expect(r.ambiguos).toBe(1);
     expect((r.detalle as Array<{ motivo: string }>)[0].motivo).toBe(
-      '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 08 sep (20.00): vincúlalo a mano.',
+      '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 08/09/2026 (20.00): vincúlalo a mano.',
     );
     expect(db.gasto.every((g) => g.conciliado !== true)).toBe(true);
     expect(db.movimiento_bancario[0].gasto_id ?? null).toBeNull();

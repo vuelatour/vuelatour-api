@@ -378,7 +378,7 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         neto_usd: r2(45483.6 / 17.1211),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-servic del 15-sep-2026, T.C. oficial del 2026-09-15): reembolso y gasto se anulan en este libro.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-servic del 15/09/2026, T.C. oficial del 2026-09-15): reembolso y gasto se anulan en este libro.',
       });
       expect(
         Math.abs(
@@ -436,7 +436,7 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         neto_usd: r2(2000 / 17.2),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-operac del 10-sep-2026, T.C. oficial del 2026-09-10): reembolso y gasto se anulan en este libro.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-operac del 10/09/2026, T.C. oficial del 2026-09-10): reembolso y gasto se anulan en este libro.',
       });
       expect(
         Math.abs(
@@ -533,7 +533,7 @@ describe('Ingreso de un avión: LA MISMA conversión en balance, reparto y table
         neto_usd: r2(2000 / 17.2),
         tc_usd_origen: 'GASTO_LIGADO',
         tc_usd_nota:
-          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-op-tua del 10-sep-2026, T.C. oficial del 2026-09-10): este libro solo le carga $1,500 MXN de ese gasto al avión; los $500 MXN restantes del reembolso no se anulan con nada.',
+          'T.C. con el que este libro convierte el gasto que reembolsa (gasto g-op-tua del 10/09/2026, T.C. oficial del 2026-09-10): este libro solo le carga $1,500 MXN de ese gasto al avión; los $500 MXN restantes del reembolso no se anulan con nada.',
       });
       const aviso =
         'ING-7 reembolsa $2,000 MXN de un gasto del que este libro solo le carga $1,500 MXN al avión: $500 MXN no se anulan con nada y suman al avión — si esa parte no es suya, corrige el monto o el avión del ingreso';

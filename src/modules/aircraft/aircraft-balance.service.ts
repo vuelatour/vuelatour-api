@@ -288,6 +288,7 @@ import {
   type ComisionVendedorDeAvion,
   type ComisionesDelVuelo,
 } from '../../common/comisiones-avion.util';
+import { diaDDMMAAAA } from '../../common/fecha-cancun.util';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
@@ -3044,11 +3045,11 @@ export class AircraftBalanceService {
 
     const permisoAfacUsdHr = pos(avion.permiso_afac_usd_hr);
     const pendientes: string[] = [];
-    const fmtDia = new Intl.DateTimeFormat('es-MX', {
-      timeZone: 'America/Cancun',
-      day: '2-digit',
-      month: 'short',
-    });
+    // «15/10/2026» (día Cancún; invariante 120) para la etiqueta del vuelo.
+    const diaVuelo = (iso: string): string => {
+      const dia = diaCancun(iso);
+      return dia ? diaDDMMAAAA(dia) : 'sin fecha';
+    };
 
     // ===== T.C. OFICIAL por día del gasto (19-oct-2026, API 0.0.98,
     // invariante 96) =====
@@ -3342,9 +3343,7 @@ export class AircraftBalanceService {
               : rutaBase;
       const folio = v.folio != null ? String(v.folio) : v.id.slice(0, 8);
       const etiqueta = `Vuelo #${folio} (${
-        v.fecha_vuelo
-          ? fmtDia.format(new Date(v.fecha_vuelo)).replace(/\s+/g, '-')
-          : 'sin fecha'
+        v.fecha_vuelo ? diaVuelo(v.fecha_vuelo) : 'sin fecha'
       } ${ruta})`;
 
       // ----- Bloque VENTA -----

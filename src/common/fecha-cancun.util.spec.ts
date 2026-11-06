@@ -87,11 +87,11 @@ describe('fechaHoraCancun', () => {
 });
 
 describe('fechaCortaCancun', () => {
-  it('"lun 14 sep" y "lun 14 sep 09:00" en hora Cancún, sin "de" ni puntos', () => {
+  it('"lun 14/09/2026" y "lun 14/09/2026 09:00" en hora Cancún, sin "de" ni puntos', () => {
     // 14:00Z = 09:00 Cancún del lunes 14-sep-2026.
-    expect(fechaCortaCancun('2026-09-14T14:00:00Z')).toBe('lun 14 sep');
+    expect(fechaCortaCancun('2026-09-14T14:00:00Z')).toBe('lun 14/09/2026');
     expect(fechaCortaCancun('2026-09-14T14:00:00Z', { hora: true })).toBe(
-      'lun 14 sep 09:00',
+      'lun 14/09/2026 09:00',
     );
   });
 

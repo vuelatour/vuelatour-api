@@ -323,9 +323,9 @@ const MESES_CORTOS = [
 ];
 
 /**
- * «regla sep-2026» (vigencia el día 1) o «regla desde 15-oct-2026»: el
- * nombre de la regla en los textos sale de la vigencia CONFIGURADA, nunca
- * fijo.
+ * «regla sep-2026» (vigencia el día 1) o «regla desde 15/10/2026» (DD/MM/AAAA,
+ * invariante 120): el nombre de la regla en los textos sale de la vigencia
+ * CONFIGURADA, nunca fijo.
  */
 export function etiquetaReglaComisiones(vigenteDesde: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(vigenteDesde);
@@ -333,7 +333,7 @@ export function etiquetaReglaComisiones(vigenteDesde: string): string {
   const mes = MESES_CORTOS[Number(m[2]) - 1] ?? m[2];
   return m[3] === '01'
     ? `regla ${mes}-${m[1]}`
-    : `regla desde ${m[3]}-${mes}-${m[1]}`;
+    : `regla desde ${m[3]}/${m[2]}/${m[1]}`;
 }
 
 /**

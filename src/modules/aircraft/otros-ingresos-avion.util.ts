@@ -40,6 +40,7 @@ import type {
   BalanceAvionOtroIngresoFilaPayload,
   BalanceAvionPayload,
 } from '../pyservices/pyservices.service';
+import { diaDDMMAAAA } from '../../common/fecha-cancun.util';
 
 function round2(x: number): number {
   return Math.round(x * 100) / 100;
@@ -53,26 +54,9 @@ function cuentaDeIngreso(i: IngresoParaLibro): string {
   return banco ? `${alias} · ${banco}` : alias;
 }
 
-const MESES_CORTOS = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-];
-
-/** «15-sep-2026» de un `AAAA-MM-DD` (otro texto, tal cual). */
+/** «15/09/2026» de un `AAAA-MM-DD` (otro texto, tal cual; invariante 120). */
 function diaCorto(dia: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
-  if (!m) return dia;
-  return `${Number(m[3])}-${MESES_CORTOS[Number(m[2]) - 1] ?? m[2]}-${m[1]}`;
+  return diaDDMMAAAA(dia);
 }
 
 /**

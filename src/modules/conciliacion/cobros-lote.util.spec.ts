@@ -666,7 +666,7 @@ describe('cobros-lote.util — un cobro, varios abonos (0.0.78, invariante 77)',
         ],
       }),
     ).toBe(
-      'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15 sep · $1,700.00 y 15 sep · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
+      'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15/09/2026 · $1,700.00 y 15/09/2026 · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
     );
     expect(
       mensajeCobroMonedaDistinta({
@@ -834,7 +834,7 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
       });
       expect(p3.details).not.toHaveProperty('por');
       expect(p3.mensaje).toBe(
-        'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15 sep · $1,700.00 y 16 sep · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
+        'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15/09/2026 · $1,700.00 y 16/09/2026 · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
       );
     }
   });
@@ -1567,7 +1567,7 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
         moneda: 'MXN',
       }),
     ).toBe(
-      'Este cobro está conciliado PARCIAL con el banco ($1,700.00 MXN de $3,400.00 MXN, abono del 15 sep). Para cambiar su monto, moneda, tipo de cambio o comisión, o para eliminarlo, primero desvincula ese abono en Conciliación.',
+      'Este cobro está conciliado PARCIAL con el banco ($1,700.00 MXN de $3,400.00 MXN, abono del 15/09/2026). Para cambiar su monto, moneda, tipo de cambio o comisión, o para eliminarlo, primero desvincula ese abono en Conciliación.',
     );
     expect(
       mensajeCobroConciliado({
@@ -1582,7 +1582,7 @@ describe('cobros-lote.util — VINCULAR: espejo del trigger A y de la G (0.0.78,
         moneda: 'MXN',
       }),
     ).toBe(
-      'Este cobro está conciliado con 2 abonos del banco (15 sep · $1,700.00 y 15 sep · $1,700.00). Para cambiar su dinero o eliminarlo, primero desvincula esos abonos en Conciliación.',
+      'Este cobro está conciliado con 2 abonos del banco (15/09/2026 · $1,700.00 y 15/09/2026 · $1,700.00). Para cambiar su dinero o eliminarlo, primero desvincula esos abonos en Conciliación.',
     );
     expect(
       mensajeCobroConciliado({

@@ -113,6 +113,6 @@ describe('avisoAvionOcupado', () => {
     expect(t).toContain('XB-ANU');
     expect(t).toContain('#101');
     // 03:30Z del 11 es todavía el 10 en Cancún.
-    expect(t).toMatch(/10 sept?/);
+    expect(t).toMatch(/10\/09\/2026/);
   });
 });

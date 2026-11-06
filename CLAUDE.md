@@ -12670,6 +12670,26 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     CANT» (misma cifra: salidas del periodo). Specs:
     `inventory.service.tiendita.spec` («PRECIO VENTA»).
 
+120. **TODA FECHA EN LOS TEXTOS DEL API VA EN DD/MM/AAAA (6-nov-2026, API
+  0.0.124).** Pedido del dueño: «estandarizar todas las fechas al formato
+  DD/MM/AAAA, en todos lados». `diaDDMMAAAA` (`common/fecha-cancun.util.ts`)
+  es la fuente única del formato; `fechaCortaCancun` da «lun 14/09/2026
+  [09:00]» (títulos y avisos de la app, posible duplicado), `fechaSelloCancun`
+  «14/09/2026 09:00» (bitácora de captura), `diaCortoCancun` /
+  `diaCortoDeDia` «16/10/2026» / «30/09/2026» (textos de cierre: «ya está
+  cerrado (Ale, 16/10/2026)», «cobrado el 02/10/2026», «al 30/09/2026»),
+  `fechaInicioCorta` «01/09/2026», `fechaCortaEs` «07/09/2026» (conciliación
+  parcial), `fechaCortaReverso` «23/09/2026» (antes «23-09»),
+  `fechaHoraCancunCorta` «jue 03/09/2026, 09:45» (avisos de eventos),
+  `etiquetaReglaComisiones` «regla desde 15/10/2026», `diaCortoCobro`
+  «21/09/2026» (Excel de facturas emitidas), la etiqueta «Vuelo #123
+  (15/10/2026 CUN → …)» del balance, «Doble reserva … #12 (15/09/2026)» y
+  los textos de cobrado de más / otros ingresos. Las etiquetas SOLO de mes
+  («sep-2026», «Septiembre 2026», «regla sep-2026») no cambian. Un formateador
+  nuevo con nombre de mes («2 oct», «30-sep», «15-sep-2026») es un bug: usar
+  `diaDDMMAAAA`. El panel hizo lo mismo el mismo día (`lib/datetime.ts`,
+  `FechaInput`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

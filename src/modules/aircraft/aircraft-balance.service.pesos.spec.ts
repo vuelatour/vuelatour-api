@@ -304,6 +304,22 @@ const CAMBIOS_0121_GENERAL = [
   'gen.consolidado.vuelos.1.costo_operador_estimado: undefined -> false',
 ];
 
+/**
+ * FECHAS EN DD/MM/AAAA (6-nov-2026, API 0.0.124, invariante 120): la etiqueta
+ * «Vuelo #501 (10-sep CUN-MID)» de los pendientes pasa a «(10/09/2026 CUN-MID)».
+ * Solo texto; ningún peso ni dólar se mueve.
+ */
+const CAMBIOS_0124_INDIVIDUAL = [
+  'ind.pendientes.1: "Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas" -> "Vuelo #501 (10/09/2026 CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas"',
+  'ind.pendientes.2: "Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)" -> "Vuelo #501 (10/09/2026 CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)"',
+];
+const CAMBIOS_0124_GENERAL = [
+  'gen.aviones.0.pendientes.0: "Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas" -> "Vuelo #501 (10/09/2026 CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas"',
+  'gen.aviones.0.pendientes.1: "Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)" -> "Vuelo #501 (10/09/2026 CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)"',
+  'gen.consolidado.pendientes.1: "XB-TST: Vuelo #501 (10-sep CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas" -> "XB-TST: Vuelo #501 (10/09/2026 CUN-MID): sin desglose canónico (snapshot viejo): partición estimada con columnas"',
+  'gen.consolidado.pendientes.2: "XB-TST: Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)" -> "XB-TST: Vuelo #501 (10/09/2026 CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)"',
+];
+
 /** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
@@ -376,6 +392,7 @@ describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
         ...CAMBIOS_0101_INDIVIDUAL,
         ...CAMBIOS_0105_INDIVIDUAL,
         ...CAMBIOS_0121_INDIVIDUAL,
+        ...CAMBIOS_0124_INDIVIDUAL,
       ].sort(),
     );
   });
@@ -394,6 +411,7 @@ describe('Balance EN PESOS (invariante 92) — los dólares de siempre', () => {
         ...CAMBIOS_0101_GENERAL,
         ...CAMBIOS_0105_GENERAL,
         ...CAMBIOS_0121_GENERAL,
+        ...CAMBIOS_0124_GENERAL,
       ].sort(),
     );
   });

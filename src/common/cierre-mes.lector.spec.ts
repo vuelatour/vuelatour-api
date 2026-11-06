@@ -141,7 +141,7 @@ describe('CANDADO 409 MES_CERRADO', () => {
     expect(e).toBeInstanceOf(ConflictException);
     expect(e.getResponse()).toEqual({
       message:
-        'Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.',
+        'Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para corregir.',
       error: 'MES_CERRADO',
       details: {
         periodo: '2026-09',

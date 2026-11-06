@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { diaDDMMAAAA, fechaHoraCancun } from './fecha-cancun.util';
 
 /**
  * `gasto.capturado_en` (7-sep-2026): momento REAL en que la persona capturó
@@ -82,25 +83,10 @@ export function capturadoAhora(ahora: Date = new Date()): string {
 // (la app volvería a sellar con el mismo reloj en cada reintento). Aquí el
 // valor raro se deja constancia y se sigue.
 
-const FMT_SELLO_CANCUN = new Intl.DateTimeFormat('es-MX', {
-  timeZone: 'America/Cancun',
-  day: 'numeric',
-  month: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-});
-
-/** "14 sep 09:00" en hora Cancún (día · mes corto · HH:mm). */
+/** "14/09/2026 09:00" en hora Cancún (DD/MM/AAAA · HH:mm; invariante 120). */
 export function fechaSelloCancun(d: Date): string {
-  const p: Record<string, string> = {};
-  for (const parte of FMT_SELLO_CANCUN.formatToParts(d)) {
-    p[parte.type] = parte.value;
-  }
-  const hora = p.hour === '24' ? '00' : p.hour;
-  // "sep." (con punto, según motor) → "sep".
-  const mes = (p.month ?? '').replace(/\.$/, '');
-  return `${p.day} ${mes} ${hora}:${p.minute}`;
+  const [dia, hora] = fechaHoraCancun(d).split(' ');
+  return dia && hora ? `${diaDDMMAAAA(dia)} ${hora}` : '';
 }
 
 /** Diferencia mínima para que valga la pena dejar el sello (ruido si no). */
@@ -110,7 +96,7 @@ export const SELLO_CAPTURA_MIN_MS = 2 * 60_000;
  * Línea de bitácora para `notas_internas` (reserva) / `notas` (evento):
  * - ausente / vacío → null (nada que anotar);
  * - válido (ISO con zona, no futuro > 10 min, ≥ 2020) y `ahora − valor >
- *   2 min` → `[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]`;
+ *   2 min` → `[Capturado en la app el 14/09/2026 09:00 · recibido el 14/09/2026 11:32]`;
  *   si la diferencia es menor → null (alta en línea normal: sin ruido);
  * - inválido (sin zona, futuro, año absurdo, basura) →
  *   `[Capturado en la app (hora del teléfono no confiable: <valor>) · recibido el …]`.

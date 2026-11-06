@@ -1397,10 +1397,9 @@ export function textoTcCruce(ev: EvaluacionTcCruce): string {
   return pieza;
 }
 
-/** «01 sep 2026». */
+/** «01/09/2026» (`fechaCortaEs` ya trae el año desde el 0.0.124, invariante 120). */
 function fechaConAnio(fecha: string | null): string {
-  const corta = fechaCortaEs(fecha);
-  return corta ? `${corta} ${String(fecha).slice(0, 4)}` : String(fecha ?? '');
+  return fechaCortaEs(fecha) ?? String(fecha ?? '');
 }
 
 /** Tooltip exacto de la liga (6 decimales, oficial con 4, fecha y fuente). */

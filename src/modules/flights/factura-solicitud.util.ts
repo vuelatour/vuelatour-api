@@ -531,7 +531,7 @@ export function linkAvisoCambioSolicitud(
 /**
  * Textos del aviso de transición de una solicitud AUTOMÁTICA (14-oct-2026,
  * invariante 60). Tramos vacíos se omiten (como `textoAvisoSolicitud`):
- * «vuelo #341 · Maqar · 27 sep». `origen` = `origenCobroTexto` de la fila
+ * «vuelo #341 · Maqar · 27/09/2026». `origen` = `origenCobroTexto` de la fila
  * del cambio (solo lo cita «Entró dinero …»); `eraReembolso` = la fila
  * borrada era un reembolso (COBRO_ELIMINADO). Un cobro NUEVO nunca quita la
  * exigencia (solo sube sumas y lo cobrado): su texto de «ya no aplica» es
@@ -636,12 +636,12 @@ export function elegirDestinatarios(
 
 // ============================ TEXTOS DE AVISOS ============================
 
-/** «27 sep» en hora Cancún (sin día de la semana); '' sin fecha. */
+/** «27/09/2026» en hora Cancún (sin día de la semana; invariante 120); '' sin fecha. */
 export function fechaDiaMes(iso: string | null | undefined): string {
   const t = fechaCortaCancun(iso);
   if (!t) return '';
-  const partes = t.split(' ');
-  return partes.length >= 3 ? partes.slice(1).join(' ') : t;
+  const m = /^[^\d\s]+ (.+)$/.exec(t);
+  return m ? m[1] : t;
 }
 
 /** «#341» · «#341 y #342» · «#341, #342 y #343». */
@@ -653,18 +653,18 @@ export function folios(folios: ReadonlyArray<number>): string {
 
 /**
  * Aviso `factura_solicitada` (§5): «Itzi pidió factura del vuelo #341 ·
- * Maqar · 27 sep · Total $8,050.40 USD.» (sin fecha o sin precio se omite
+ * Maqar · 27/09/2026 · Total $8,050.40 USD.» (sin fecha o sin precio se omite
  * ese tramo — nunca «Total $0 USD»); de grupo: «… de los vuelos #341, #342 y
- * #343 (grupo G-12) · Maqar · 27 sep.». + « El cliente paga hasta recibir la
+ * #343 (grupo G-12) · Maqar · 27/09/2026.». + « El cliente paga hasta recibir la
  * factura.» + « Nota: …».
  *
  * SOLICITUD AUTOMÁTICA por un cobro (13-oct-2026, invariante 60; campo
  * OPCIONAL `automatica`, sin él la salida es byte-idéntica): título «Factura
  * pendiente: vuelo #341» (grupo: «Factura pendiente: grupo G-12» / «Factura
  * pendiente: vuelos #341, #342 y #343») y cuerpo «Cobro en HSBC Pesos
- * registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep ·
+ * registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27/09/2026 ·
  * Total $8,050.40 USD.» (grupo: «… los vuelos #341, #342 y #343 (grupo
- * G-12) necesitan factura · Maqar · 27 sep.»). Sin el tramo «El cliente paga
+ * G-12) necesitan factura · Maqar · 27/09/2026.»). Sin el tramo «El cliente paga
  * hasta recibir la factura.» (siempre false) ni «Nota: …» (la nota
  * persistida ya dice lo mismo).
  */

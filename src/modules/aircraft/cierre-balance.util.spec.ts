@@ -208,7 +208,7 @@ describe('listas del bloque CIERRE DEL MES', () => {
     const llaves = Object.keys(it);
     expect(llaves.indexOf('motivo')).toBeGreaterThan(llaves.indexOf('leyenda'));
     expect(leyendaSombraBalance('2026-10', it, 'COBRO_POSTERIOR')).toBe(
-      'Pasa a octubre 2026 (cobrado después del 30-sep; al cierre: $0.00 MXN de $41,498.07 MXN)',
+      'Pasa a octubre 2026 (cobrado después del 30/09/2026; al cierre: $0.00 MXN de $41,498.07 MXN)',
     );
     expect(
       leyendaPasariaBalance('2026-10', {
@@ -216,7 +216,7 @@ describe('listas del bloque CIERRE DEL MES', () => {
         fecha_cobro_posterior: '2026-10-14',
       }),
     ).toBe(
-      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep',
+      'Pasará a octubre 2026 al cerrar · cobrado el 14/10/2026, después del 30/09/2026',
     );
     // Sin motivo (bitácora vieja / API previo): ni una llave nueva.
     const viejo = itemCierreDeFila(fila(), 'N621TX', {

@@ -25,13 +25,13 @@ import {
 } from './reverso-cruce.util';
 
 /**
- * REVERSOS (30-sep-2026). Caso REAL de prod (GASTOS GNRAL, cuenta
- * 76a931e0…): el 21-sep el banco cobró 8 veces «ASUR CANCUN» $825.13 —uno
- * era real y ya tenía su gasto— y el 23-sep devolvió 7 con «CARGO INDEBIDO
+ * REVERSOS (30/09/2026). Caso REAL de prod (GASTOS GNRAL, cuenta
+ * 76a931e0…): el 21/09/2026 el banco cobró 8 veces «ASUR CANCUN» $825.13 —uno
+ * era real y ya tenía su gasto— y el 23/09/2026 devolvió 7 con «CARGO INDEBIDO
  * 21 SEP 355xx», los 7 con la MISMA referencia. Pregunta del cliente:
  * «¿Cómo puedo conciliar los cargos reembolsados?».
  */
-const CTA = '76a931e0-7c06-47c6-a574-6c7d4a698c14';
+const CTA = '76a931e0-7c06/47/2026c6-a574-6c7d4a698c14';
 const OTRA_CTA = '0752514c-0000-4000-8000-000000000000';
 const CREADO_CARGOS = '2026-09-22 21:31:37.675974+00';
 const CREADO_ABONOS = '2026-09-29 20:20:37.125835+00';
@@ -55,7 +55,7 @@ const CARGOS_REALES: MovimientoReverso[] = [
   created_at: CREADO_CARGOS,
 }));
 
-/** Las 7 devoluciones reales del 23-sep (misma referencia en las 7). */
+/** Las 7 devoluciones reales del 23/09/2026 (misma referencia en las 7). */
 const ABONOS_REALES: MovimientoReverso[] = [
   ['405466de-599b-4c0e-b2df-203133282530', '35552'],
   ['35d5c5eb-ebf6-4959-a22a-e5282cde329d', '35554'],
@@ -113,7 +113,7 @@ describe('patronDevolucion / esDevolucionDeCargo', () => {
     ['ABONO POR ACLARACION 99', 'ABONO POR ACLARACION'],
     ['Abono por aclaración', 'ABONO POR ACLARACION'],
     ['RECLAMACION RESUELTA', 'RECLAMACION'],
-    // Prefijo del banco que ya detectaba `patronReverso` (24-sep-2026).
+    // Prefijo del banco que ya detectaba `patronReverso` (24/09/2026).
     ['REV ASUR MERIDA', 'REV'],
     ['REV.DLO*DIDI PAYIN', 'REV'],
   ])('«%s» ⇒ %s', (desc, patron) => {
@@ -138,7 +138,7 @@ describe('patronDevolucion / esDevolucionDeCargo', () => {
 });
 
 describe('pistaFechaDevolucion', () => {
-  it('«CARGO INDEBIDO 21 SEP 35552» del 23-sep ⇒ 2026-09-21 (el número de la cola no es fecha)', () => {
+  it('«CARGO INDEBIDO 21 SEP 35552» del 23/09/2026 ⇒ 2026-09-21 (el número de la cola no es fecha)', () => {
     expect(
       pistaFechaDevolucion('CARGO INDEBIDO 21 SEP 35552', '2026-09-23'),
     ).toBe('2026-09-21');
@@ -156,7 +156,7 @@ describe('pistaFechaDevolucion', () => {
     );
   });
 
-  it('un «28 DIC» devuelto el 5-ene es del año ANTERIOR', () => {
+  it('un «28 DIC» devuelto el 05/01/2026 es del año ANTERIOR', () => {
     expect(pistaFechaDevolucion('CARGO INDEBIDO 28 DIC', '2027-01-05')).toBe(
       '2026-12-28',
     );
@@ -250,7 +250,7 @@ describe('elegirCargoReverso', () => {
       candidatos_n: 2,
     });
     expect(d.motivo).toBe(
-      'Devuelve el cargo del 21-09 (fecha indicada por el banco).',
+      'Devuelve el cargo del 21/09/2026 (fecha indicada por el banco).',
     );
   });
 
@@ -270,7 +270,7 @@ describe('elegirCargoReverso', () => {
     expect(d.resultado).toBe('SIN_CANDIDATO');
     expect(d.cargo_id).toBeNull();
     expect(d.motivo).toBe(
-      'El banco indica un cargo del 21-09 y no hay uno pendiente por $825.13 en esa fecha.',
+      'El banco indica un cargo del 21/09/2026 y no hay uno pendiente por $825.13 en esa fecha.',
     );
   });
 
@@ -299,7 +299,7 @@ describe('elegirCargoReverso', () => {
     expect(d.resultado).toBe('AMBIGUO');
     expect(d.cargo_id).toBeNull();
     expect(d.motivo).toBe(
-      '2 cargos pendientes por $825.13 en fechas distintas (10-09, 21-09): elige a mano cuál devolvió el banco.',
+      '2 cargos pendientes por $825.13 en fechas distintas (10/09/2026, 21/09/2026): elige a mano cuál devolvió el banco.',
     );
   });
 
@@ -316,7 +316,7 @@ describe('elegirCargoReverso', () => {
 });
 
 describe('emparejarReversos — CASO REAL 21/23-sep (7 devoluciones, 7 cargos pendientes)', () => {
-  it('empareja las 7 con 7 cargos DISTINTOS del 21-sep', () => {
+  it('empareja las 7 con 7 cargos DISTINTOS del 21/09/2026', () => {
     const d = emparejarReversos(ABONOS_REALES, CARGOS_REALES);
     expect(d).toHaveLength(7);
     expect(d.every((x) => x.resultado === 'EMPAREJADO')).toBe(true);
@@ -520,22 +520,22 @@ describe('notas y etiquetas', () => {
   const a = { fecha: '2026-09-23', descripcion: 'CARGO INDEBIDO 21 SEP 35552' };
 
   it('textos exactos del contrato', () => {
-    expect(fechaCortaReverso('2026-09-21')).toBe('21-09');
+    expect(fechaCortaReverso('2026-09-21')).toBe('21/09/2026');
     expect(notaAbonoReverso(c)).toBe(
-      'Devuelve el cargo del 21-09 · ASUR CANCUN',
+      'Devuelve el cargo del 21/09/2026 · ASUR CANCUN',
     );
     expect(notaCargoReverso(a)).toBe(
-      'Devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+      'Devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     );
     expect(notaAbonoReverso({ fecha: '2026-09-21', descripcion: null })).toBe(
-      'Devuelve el cargo del 21-09',
+      'Devuelve el cargo del 21/09/2026',
     );
     expect(
       notaCargoReverso({
         fecha: '2026-09-23',
         descripcion: 'ASA CANCUN\nCARR',
       }),
-    ).toBe('Devuelto el 23-09 · ASA CANCUN CARR');
+    ).toBe('Devuelto el 23/09/2026 · ASA CANCUN CARR');
   });
 
   it('se ANTEPONE sin pisar lo de la oficina, y no se duplica al re-emparejar', () => {
@@ -544,23 +544,25 @@ describe('notas y etiquetas', () => {
       notaAbonoReverso(c),
     );
     expect(conOficina).toBe(
-      'Devuelve el cargo del 21-09 · ASUR CANCUN\nRevisado con el banco (folio 88)',
+      'Devuelve el cargo del 21/09/2026 · ASUR CANCUN\nRevisado con el banco (folio 88)',
     );
     expect(anteponerNotaReverso(conOficina, notaAbonoReverso(c))).toBe(
       conOficina,
     );
     expect(anteponerNotaReverso(null, notaCargoReverso(a))).toBe(
-      'Devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+      'Devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     );
   });
 
   it('al desemparejar se quita SOLO lo del emparejado', () => {
     expect(
       quitarNotaReverso(
-        'Devuelve el cargo del 21-09 · ASUR CANCUN\nRevisado con el banco (folio 88)',
+        'Devuelve el cargo del 21/09/2026 · ASUR CANCUN\nRevisado con el banco (folio 88)',
       ),
     ).toBe('Revisado con el banco (folio 88)');
-    expect(quitarNotaReverso('Devuelto el 23-09 · CARGO INDEBIDO')).toBeNull();
+    expect(
+      quitarNotaReverso('Devuelto el 23/09/2026 · CARGO INDEBIDO'),
+    ).toBeNull();
     expect(quitarNotaReverso('Regla: SEL TRASPASO')).toBe(
       'Regla: SEL TRASPASO',
     );
@@ -569,19 +571,19 @@ describe('notas y etiquetas', () => {
 
   it('«Conciliado con» del reporte', () => {
     expect(etiquetaConciliadoReverso('ABONO', c)).toBe(
-      'Reverso de un cargo · devuelve el cargo del 21-09 · ASUR CANCUN',
+      'Reverso de un cargo · devuelve el cargo del 21/09/2026 · ASUR CANCUN',
     );
     expect(etiquetaConciliadoReverso('CARGO', a)).toBe(
-      'Reverso de un cargo · devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552',
+      'Reverso de un cargo · devuelto el 23/09/2026 · CARGO INDEBIDO 21 SEP 35552',
     );
     expect(
       etiquetaConciliadoReverso('CARGO', { fecha: '2026-09-23' }, 'Reverso'),
-    ).toBe('Reverso · devuelto el 23-09');
+    ).toBe('Reverso · devuelto el 23/09/2026');
   });
 });
 
 // =====================================================================
-// Revisión adversaria (30-sep-2026): un cargo YA explicado con dinero
+// Revisión adversaria (30/09/2026): un cargo YA explicado con dinero
 // (gasto/cobro/sobre/ingreso) nunca se empareja, pero FRENA al automático
 // cuando es el que más probablemente devolvió el banco.
 describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () => {
@@ -592,7 +594,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
   ): MovimientoReverso =>
     cargo(id, fecha, { monto: 110.82, descripcion: 'ASUR Merida', ...extra });
 
-  it('CASO REAL «REV.ASUR MERIDA» 07-08: su cargo del 07-08 tiene gasto ⇒ AMBIGUO, NO se toma uno del 06-07', () => {
+  it('CASO REAL «REV.ASUR MERIDA» 07/08/2026: su cargo del 07/08/2026 tiene gasto ⇒ AMBIGUO, NO se toma uno del 06/07/2026', () => {
     const d = elegirCargoReverso(
       abono('rev', '2026-08-07', 'REV.ASUR MERIDA', { monto: 110.82 }),
       [merida('m1', '2026-07-06'), merida('m2', '2026-07-06')],
@@ -601,7 +603,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
     expect(d.resultado).toBe('AMBIGUO');
     expect(d.cargo_id).toBeNull();
     expect(d.motivo).toBe(
-      'El cargo por $110.82 más reciente (07-08) ya está conciliado con un gasto o cobro y los pendientes son de otra fecha (06-07): elige a mano cuál devolvió el banco.',
+      'El cargo por $110.82 más reciente (07/08/2026) ya está conciliado con un gasto o cobro y los pendientes son de otra fecha (06/07/2026): elige a mano cuál devolvió el banco.',
     );
     // Sin el freno (lo de antes) se habría emparejado con m1, un mes antes.
     expect(
@@ -612,7 +614,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
     ).toBe('m1');
   });
 
-  it('un ligado del MISMO día que los libres no frena (el caso real del 21-sep)', () => {
+  it('un ligado del MISMO día que los libres no frena (el caso real del 21/09/2026)', () => {
     const d = elegirCargoReverso(
       abono('a', '2026-09-23', 'CARGO INDEBIDO 21 SEP 35552'),
       CARGOS_REALES,
@@ -644,7 +646,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
     );
     expect(d.resultado).toBe('SIN_CANDIDATO');
     expect(d.motivo).toBe(
-      'El banco indica un cargo del 21-09 por $825.13 y ese cargo ya está conciliado con un gasto o cobro: revísalo a mano.',
+      'El banco indica un cargo del 21/09/2026 por $825.13 y ese cargo ya está conciliado con un gasto o cobro: revísalo a mano.',
     );
   });
 
@@ -655,7 +657,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
       [cargo('g22', '2026-09-22')],
     );
     expect(d.resultado).toBe('AMBIGUO');
-    expect(d.motivo).toContain('(el del 22-09) ya está conciliado');
+    expect(d.motivo).toContain('(el del 22/09/2026) ya está conciliado');
     // Ligado más lejos que el libre: sí se empareja.
     expect(
       elegirCargoReverso(
@@ -679,7 +681,7 @@ describe('elegirCargoReverso — freno de los cargos ya ligados a un gasto', () 
     expect(d).toMatchObject({ resultado: 'EMPAREJADO', cargo_id: 'c01' });
   });
 
-  it('LOTE REAL de los «REV» de jul/ago: los dos del 06-07 se emparejan; el del 07-08 queda para el humano', () => {
+  it('LOTE REAL de los «REV» de jul/ago: los dos del 06/07/2026 se emparejan; el del 07/08/2026 queda para el humano', () => {
     const libres = [1, 2, 3, 4].map((n) =>
       merida(`m${n}`, '2026-07-06', {
         created_at: `2026-07-07 10:00:0${n}+00`,
@@ -732,7 +734,7 @@ describe('cargoLigadoConDinero', () => {
 });
 
 /**
- * 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): un cargo que
+ * 1 cargo ↔ N gastos (02/10/2026, migración 20261002000002): un cargo que
  * paga VARIOS gastos tiene `gasto_id` null (espejo) y `gastos_n ≥ 2`. Para
  * el par cargo ↔ devolución cuenta como ligado a gasto, igual que el
  * trigger (`gasto_id is not null or gastos_n > 0`).

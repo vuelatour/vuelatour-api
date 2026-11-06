@@ -103,11 +103,11 @@ describe('selloCapturaApp', () => {
 
   it('válido y más de 2 min antes → "[Capturado en la app el … · recibido el …]" en hora Cancún', () => {
     expect(selloCapturaApp('2026-09-14T09:00:00-05:00', AHORA)).toBe(
-      '[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]',
+      '[Capturado en la app el 14/09/2026 09:00 · recibido el 14/09/2026 11:32]',
     );
     // Instante en Z: 14:00Z = 09:00 Cancún.
     expect(selloCapturaApp('2026-09-14T14:00:00Z', AHORA)).toBe(
-      '[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]',
+      '[Capturado en la app el 14/09/2026 09:00 · recibido el 14/09/2026 11:32]',
     );
   });
 
@@ -118,13 +118,13 @@ describe('selloCapturaApp', () => {
 
   it('futuro (> 10 min): reloj del teléfono no confiable, NO rechaza', () => {
     expect(selloCapturaApp('2026-09-14T17:00:00Z', AHORA)).toBe(
-      '[Capturado en la app (hora del teléfono no confiable: 2026-09-14T17:00:00Z) · recibido el 14 sep 11:32]',
+      '[Capturado en la app (hora del teléfono no confiable: 2026-09-14T17:00:00Z) · recibido el 14/09/2026 11:32]',
     );
   });
 
   it('inválido (sin zona, basura, antes de 2020): no confiable, NO rechaza', () => {
     expect(selloCapturaApp('2026-09-14T09:00:00', AHORA)).toMatch(
-      /^\[Capturado en la app \(hora del teléfono no confiable: 2026-09-14T09:00:00\) · recibido el 14 sep 11:32\]$/,
+      /^\[Capturado en la app \(hora del teléfono no confiable: 2026-09-14T09:00:00\) · recibido el 14\/09\/2026 11:32\]$/,
     );
     expect(selloCapturaApp('ayer', AHORA)).toMatch(/no confiable: ayer\)/);
     expect(selloCapturaApp('2001-01-01T00:00:00Z', AHORA)).toMatch(

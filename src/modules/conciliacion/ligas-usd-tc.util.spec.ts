@@ -99,7 +99,7 @@ describe('textoLigaUsdTc — los 2 casos reales (antes de la corrección)', () =
         }),
       ),
     ).toBe(
-      '$422.86 USD · Aircraft Spruce & Specialty Co. · Michelin Tube 7.00-6/8.00… (01 sep) ↔ cargo «ASA CANCUN» de $8,939.38 del 01 sep (COMBUSTIBLE): T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
+      '$422.86 USD · Aircraft Spruce & Specialty Co. · Michelin Tube 7.00-6/8.00… (01/09/2026) ↔ cargo «ASA CANCUN» de $8,939.38 del 01/09/2026 (COMBUSTIBLE): T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
     );
   });
 
@@ -118,7 +118,7 @@ describe('textoLigaUsdTc — los 2 casos reales (antes de la corrección)', () =
         }),
       ),
     ).toBe(
-      '$794.61 USD · 1 Caja bujías Tempest Seneca, 1 filtro de aceite Champion 1… (24 sep) ↔ cargo «ASA CANCUN I\\CARR CANC» de $14,197.17 del 24 sep (COMBUSTIBLE): T.C. 17.87 · oficial 17.47 (+2.3 %): lejos del oficial',
+      '$794.61 USD · 1 Caja bujías Tempest Seneca, 1 filtro de aceite Champion 1… (24/09/2026) ↔ cargo «ASA CANCUN I\\CARR CANC» de $14,197.17 del 24/09/2026 (COMBUSTIBLE): T.C. 17.87 · oficial 17.47 (+2.3 %): lejos del oficial',
     );
   });
 });

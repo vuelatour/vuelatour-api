@@ -130,26 +130,12 @@ export function puedeLigar(input: PuedeLigarInput): PuedeLigarResultado {
   };
 }
 
-/** `2026-09-07` → `07 sep` (sin Date: ningún corrimiento de zona). */
+/** `2026-09-07` → `07/09/2026` (DD/MM/AAAA, invariante 120; sin Date: ningún corrimiento de zona). */
 export function fechaCortaEs(fecha: string | null | undefined): string | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(fecha ?? ''));
   if (!m) return null;
-  const meses = [
-    'ene',
-    'feb',
-    'mar',
-    'abr',
-    'may',
-    'jun',
-    'jul',
-    'ago',
-    'sep',
-    'oct',
-    'nov',
-    'dic',
-  ];
-  const mes = meses[Number(m[2]) - 1];
-  return mes ? `${m[3]} ${mes}` : null;
+  const mes = Number(m[2]);
+  return mes >= 1 && mes <= 12 ? `${m[3]}/${m[2]}/${m[1]}` : null;
 }
 
 /** `$1,234.50` (es-MX, determinista: sin Intl). */

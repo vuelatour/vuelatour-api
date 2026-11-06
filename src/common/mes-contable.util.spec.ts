@@ -34,8 +34,8 @@ import {
 } from './mes-contable.util';
 
 /**
- * CIERRE DE MES (16-oct-2026, API 0.0.88, invariante 89): reglas PURAS.
- * Casos REALES de prod (SELECT del 16-oct-2026): los 5 vuelos de
+ * CIERRE DE MES (16/10/2026, API 0.0.88, invariante 89): reglas PURAS.
+ * Casos REALES de prod (SELECT del 16/10/2026): los 5 vuelos de
  * septiembre cobrados en octubre (#316, #337, #343, #344, #351) PASAN a
  * octubre con motivo COBRO_POSTERIOR aunque hoy su bandera `cobrado` sea
  * true.
@@ -64,19 +64,23 @@ const completado = (total: number, tc: number | null = null) => ({
 describe('decisionDiferir — los 5 vuelos de septiembre cobrados en octubre (prod)', () => {
   it.each([
     [
-      '#316 Mike Nelson (USD 1-oct)',
+      '#316 Mike Nelson (USD 01/10/2026)',
       2076.4,
       [usd(2076.4, '2026-10-01T17:00:00Z')],
     ],
     [
-      '#337 Ambulancia (86,997.99 MXN @17.6425, 2-oct)',
+      '#337 Ambulancia (86,997.99 MXN @17.6425, 02/10/2026)',
       4931.16,
       [mxn(86997.99, 17.6425, '2026-10-02T17:00:00Z')],
     ],
-    ['#343 ACP (USD 6-oct)', 2697, [usd(2697, '2026-10-06T17:00:00Z')]],
-    ['#344 Mike Nelson (USD 1-oct)', 4152, [usd(4152, '2026-10-01T17:00:00Z')]],
+    ['#343 ACP (USD 06/10/2026)', 2697, [usd(2697, '2026-10-06T17:00:00Z')]],
     [
-      '#351 Hernan Garza (41,498.07 MXN @17.71, 14-oct)',
+      '#344 Mike Nelson (USD 01/10/2026)',
+      4152,
+      [usd(4152, '2026-10-01T17:00:00Z')],
+    ],
+    [
+      '#351 Hernan Garza (41,498.07 MXN @17.71, 14/10/2026)',
       2343.2,
       [mxn(41498.07, 17.71, '2026-10-14T17:00:00Z')],
     ],
@@ -99,8 +103,8 @@ describe('decisionDiferir — los 5 vuelos de septiembre cobrados en octubre (pr
       FIN_SEP,
     );
     expect(d351?.fecha_cobro_posterior).toBe('2026-10-14');
-    // Varios cobros después del corte: el más reciente; 1-oct 03:00Z es el
-    // 30-sep en Cancún (cuenta al corte, no después). Todo cubierto ⇒
+    // Varios cobros después del corte: el más reciente; 01/10/2026 03:00Z es el
+    // 30/09/2026 en Cancún (cuenta al corte, no después). Todo cubierto ⇒
     // COBRO_POSTERIOR; con un faltante ⇒ COBRO_PARCIAL, también con fecha.
     const d = decisionDiferir(
       completado(1000),
@@ -231,7 +235,7 @@ describe('decisionDiferir — reglas', () => {
     expect(d?.cobrado_usd).toBe(0);
   });
 
-  it('corte por DÍA CANCÚN: 30-sep 23:30 Cancún cuenta en septiembre; 1-oct 00:30 Cancún, no', () => {
+  it('corte por DÍA CANCÚN: 30/09/2026 23:30 Cancún cuenta en septiembre; 01/10/2026 00:30 Cancún, no', () => {
     expect(
       decisionDiferir(
         completado(2000),
@@ -281,7 +285,7 @@ describe('mes contable del vuelo y del gasto', () => {
     ...extra,
   });
 
-  it('OPERACIONES de un vuelo diferido (eje vuelo) ⇒ octubre aunque su fecha sea 28-sep', () => {
+  it('OPERACIONES de un vuelo diferido (eje vuelo) ⇒ octubre aunque su fecha sea 28/09/2026', () => {
     expect(ejeContableDeGasto(gasto('OPERACIONES'))).toBe('vuelo');
     expect(mesContableDeGasto(gasto('OPERACIONES'))).toBe('2026-10');
     expect(diaContableDeGasto(gasto('OPERACIONES'))).toBe('2026-10-01');
@@ -398,7 +402,7 @@ describe('meses, periodos y ¿se puede cerrar?', () => {
       '2026-10-01T00:00:00-05:00',
     );
     expect(mesDePeriodo('2026-09-01')).toBe('2026-09');
-    // 'YYYY-MM' tal cual (new Date('2026-09') sería el 31-ago en Cancún).
+    // 'YYYY-MM' tal cual (new Date('2026-09') sería el 31/08/2026 en Cancún).
     expect(mesDePeriodo('2026-09')).toBe('2026-09');
     expect(mesDePeriodo('2026-10-01T05:00:00+00:00')).toBe('2026-10');
     expect(mesCalendarioDeRango('2026-09-01', '2026-09-30')).toBe('2026-09');
@@ -428,7 +432,7 @@ describe('meses, periodos y ¿se puede cerrar?', () => {
     );
   });
 
-  it('el 1-nov con septiembre abierto, octubre no se puede (MES_ANTERIOR_ABIERTO)', () => {
+  it('el 01/11/2026 con septiembre abierto, octubre no se puede (MES_ANTERIOR_ABIERTO)', () => {
     expect(
       motivoNoCerrable({ ...base, mesEnCurso: '2026-11', mes: '2026-10' }),
     ).toBe('MES_ANTERIOR_ABIERTO');
@@ -452,7 +456,7 @@ describe('textos es-MX (fuente única; el panel y pyservices copian)', () => {
         cerrado_por_nombre: 'Alejandra Pérez',
       }),
     ).toBe(
-      'Septiembre 2026 ya está cerrado (Alejandra, 16-oct). Reábrelo en Reportes para corregir.',
+      'Septiembre 2026 ya está cerrado (Alejandra, 16/10/2026). Reábrelo en Reportes para corregir.',
     );
     expect(textoMesCerrado({ periodo: '2026-09-01' })).toBe(
       'Septiembre 2026 ya está cerrado (la oficina). Reábrelo en Reportes para corregir.',
@@ -501,16 +505,16 @@ describe('textos es-MX (fuente única; el panel y pyservices copian)', () => {
       fecha_cobro_posterior: '2026-10-14',
     };
     expect(leyendaPasara('2026-10', d)).toBe(
-      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+      'Pasará a octubre 2026 al cerrar · cobrado el 14/10/2026, después del 30/09/2026 (al 30/09/2026: $0.00 USD de $2,343.20 USD)',
     );
     expect(leyendaPasaA('2026-10', d)).toBe(
-      'Pasa a octubre 2026 · cobrado el 14-oct, después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+      'Pasa a octubre 2026 · cobrado el 14/10/2026, después del 30/09/2026 (al 30/09/2026: $0.00 USD de $2,343.20 USD)',
     );
     expect(leyendaPasaraAlCerrar('2026-10', d)).toBe(
       leyendaPasara('2026-10', d),
     );
     expect(marcaPasaraAlCerrar('2026-10', d)).toBe(
-      'Pasará a octubre 2026 al cerrar · cobrado el 14-oct, después del 30-sep',
+      'Pasará a octubre 2026 al cerrar · cobrado el 14/10/2026, después del 30/09/2026',
     );
     // Desde la bitácora (mes ya cerrado) no se sabe la fecha:
     expect(
@@ -520,12 +524,12 @@ describe('textos es-MX (fuente única; el panel y pyservices copian)', () => {
         venta_usd: 2343.2,
       }),
     ).toBe(
-      'Pasa a octubre 2026 · cobrado después del 30-sep (al 30-sep: $0.00 USD de $2,343.20 USD)',
+      'Pasa a octubre 2026 · cobrado después del 30/09/2026 (al 30/09/2026: $0.00 USD de $2,343.20 USD)',
     );
     // Corte de febrero y de diciembre ⇒ enero.
     expect(corteDeDestino('2027-03')).toBe('2027-02-28');
     expect(corteDeDestino('2027-01')).toBe('2026-12-31');
-    expect(diaCortoDeDia('2026-12-31')).toBe('31-dic');
+    expect(diaCortoDeDia('2026-12-31')).toBe('31/12/2026');
     expect(diaCortoDeDia('nada')).toBe('');
     for (const t of [
       leyendaPasara('2026-10', d),
@@ -547,7 +551,7 @@ describe('textos es-MX (fuente única; el panel y pyservices copian)', () => {
         fecha_cobro_posterior: '2026-10-06',
       }),
     ).toBe(
-      'Pendiente de cobro: pasará a octubre 2026 al cerrar (al 30-sep: cobrado $400.00 USD de $1,000.00 USD; después: $300.00 USD)',
+      'Pendiente de cobro: pasará a octubre 2026 al cerrar (al 30/09/2026: cobrado $400.00 USD de $1,000.00 USD; después: $300.00 USD)',
     );
     // Sin nada después: byte a byte la de siempre.
     expect(

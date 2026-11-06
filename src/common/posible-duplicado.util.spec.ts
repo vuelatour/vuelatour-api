@@ -206,7 +206,7 @@ describe('filtrarPosiblesDuplicados', () => {
 });
 
 describe('resumirDuplicado / textoPosibleDuplicado', () => {
-  it('arma «Posible duplicado: #118 · lun 14 sep 09:00 · CUN → HOL → CUN · XA-VGV» en hora Cancún', () => {
+  it('arma «Posible duplicado: #118 · lun 14/09/2026 09:00 · CUN → HOL → CUN · XA-VGV» en hora Cancún', () => {
     const r = resumirDuplicado(vuelo({}));
     expect(r).toEqual({
       id: 'v-1',
@@ -219,7 +219,7 @@ describe('resumirDuplicado / textoPosibleDuplicado', () => {
       grupo_folio: null,
     });
     expect(textoPosibleDuplicado(r)).toBe(
-      'Posible duplicado: #118 · lun 14 sep 09:00 · CUN → HOL → CUN · XA-VGV',
+      'Posible duplicado: #118 · lun 14/09/2026 09:00 · CUN → HOL → CUN · XA-VGV',
     );
   });
 

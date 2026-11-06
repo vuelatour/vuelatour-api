@@ -9,7 +9,11 @@
  * vacío y el resumen trae los totales por moneda).
  */
 import type { TablaXlsxPayload } from '../pyservices/pyservices.service';
-import { diaCancun, fechaHoraCancun } from '../../common/fecha-cancun.util';
+import {
+  diaCancun,
+  diaDDMMAAAA,
+  fechaHoraCancun,
+} from '../../common/fecha-cancun.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { fechaInicioCorta } from '../../common/inicio-oficial.util';
 import type {
@@ -89,34 +93,17 @@ function diaVuelo(iso: string | null): string {
   }
 }
 
-const MESES_CORTOS = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-];
-
-/** Instante ⇒ «21 sep 2026» (día Cancún; '' si no es válido). */
+/** Instante ⇒ «21/09/2026» (día Cancún; '' si no es válido; invariante 120). */
 export function diaCortoCobro(iso: string | null | undefined): string {
   if (!iso) return '';
   try {
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(diaCancun(iso));
-    if (!m) return '';
-    return `${Number(m[3])} ${MESES_CORTOS[Number(m[2]) - 1] ?? ''} ${m[1]}`;
+    return diaDDMMAAAA(diaCancun(iso));
   } catch {
     return '';
   }
 }
 
-/** Columna «Cobros que ampara»: «#332: $68,208.00 MXN (21 sep 2026); …». */
+/** Columna «Cobros que ampara»: «#332: $68,208.00 MXN (21/09/2026); …». */
 export function textoCobrosQueAmpara(
   f: Pick<FacturaEmitida, 'cobros'>,
 ): string {

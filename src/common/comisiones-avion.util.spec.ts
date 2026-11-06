@@ -912,7 +912,7 @@ describe('textos de la regla', () => {
   it('la etiqueta sale de la vigencia CONFIGURADA', () => {
     expect(etiquetaReglaComisiones('2026-09-01')).toBe('regla sep-2026');
     expect(etiquetaReglaComisiones('2026-10-15')).toBe(
-      'regla desde 15-oct-2026',
+      'regla desde 15/10/2026',
     );
   });
 

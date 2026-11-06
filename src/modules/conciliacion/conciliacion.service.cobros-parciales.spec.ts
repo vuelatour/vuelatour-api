@@ -277,7 +277,7 @@ describe('Vincular — un cobro, varios abonos (camionetas de Beh Kay, #315 $3,4
         movimiento_id: 'm1',
       });
       expect(r3.message).toBe(
-        'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15 sep · $1,700.00 y 16 sep · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
+        'El cobro del vuelo #315 ya está conciliado completo: $3,400.00 MXN con 2 abonos del banco (15/09/2026 · $1,700.00 y 16/09/2026 · $1,700.00). Si este abono es otro pago del mismo vuelo, regístralo como un cobro nuevo; si uno de los abonos se ligó por error, desvincúlalo en Conciliación.',
       );
       expect(escrituras().length).toBe(antes);
       expect(db.movimiento_bancario[2]).toMatchObject({

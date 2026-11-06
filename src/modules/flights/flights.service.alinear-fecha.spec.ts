@@ -702,7 +702,7 @@ describe('FlightsService.alinearFechaTramos', () => {
     expect(aviso.tipo).toBe('vuelo_asignado');
     expect(aviso.titulo).toBe('Vuelo #338: la operación cambió de día');
     expect(aviso.cuerpo).toBe(
-      'Tramos movidos (hora Cancún): CUN → CZM mar 13 oct 09:00.',
+      'Tramos movidos (hora Cancún): CUN → CZM mar 13/10/2026 09:00.',
     );
     expect(aviso.data).toEqual(expect.objectContaining({ vuelo_id: V }));
     expect(aviso.link).toBe(`/flights/${V}`);
@@ -722,7 +722,7 @@ describe('FlightsService.alinearFechaTramos', () => {
     await vaciarPromesas();
     const aviso = m.notifyUser.mock.calls[0][1] as { cuerpo: string };
     expect(aviso.cuerpo).toBe(
-      'Tramos movidos (hora Cancún): CUN → CZM jue 15 oct 09:00 · CZM → CUN sáb 17 oct 16:00.',
+      'Tramos movidos (hora Cancún): CUN → CZM jue 15/10/2026 09:00 · CZM → CUN sáb 17/10/2026 16:00.',
     );
   });
 
@@ -740,7 +740,7 @@ describe('FlightsService.alinearFechaTramos', () => {
     await vaciarPromesas();
     const aviso = m.notifyUser.mock.calls[0][1] as { cuerpo: string };
     expect(aviso.cuerpo).toBe(
-      'Tramos movidos (hora Cancún): CUN → CZM mar 13 oct 09:00.',
+      'Tramos movidos (hora Cancún): CUN → CZM mar 13/10/2026 09:00.',
     );
   });
 

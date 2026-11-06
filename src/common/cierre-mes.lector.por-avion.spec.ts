@@ -346,7 +346,7 @@ describe('CANDADO 409 MES_CERRADO por avión', () => {
     );
     expect(cuerpo(e)).toEqual({
       message:
-        'N621TX · Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.',
+        'N621TX · Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para corregir.',
       error: 'MES_CERRADO',
       details: {
         periodo: '2026-09',
@@ -387,7 +387,7 @@ describe('CANDADO 409 MES_CERRADO por avión', () => {
     );
     const e = await atrapa(assertMesAbierto(sbDe(f), '2026-09', 'caja_chica'));
     expect(cuerpo(e).message).toBe(
-      'Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.',
+      'Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para corregir.',
     );
     expect(cuerpo(e).details.aeronave).toBeNull();
     const e2 = await atrapa(
@@ -439,7 +439,7 @@ describe('CANDADO 409 MES_CERRADO por avión', () => {
       cuerpo(errorMesCerrado(base, 'cobro', { id: AV621, matricula: 'N621TX' }))
         .message,
     ).toBe(
-      'N621TX · Septiembre 2026 ya está cerrado (Ale, 16-oct). Reábrelo en Reportes para corregir.',
+      'N621TX · Septiembre 2026 ya está cerrado (Ale, 16/10/2026). Reábrelo en Reportes para corregir.',
     );
     expect(cuerpo(errorMesCerrado(base, 'cobro', null)).details.aeronave).toBe(
       null,

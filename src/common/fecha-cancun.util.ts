@@ -96,18 +96,31 @@ export function fechaHoraCancun(iso: string | Date | null | undefined): string {
 const FORMATO_CORTO_CANCUN = new Intl.DateTimeFormat('es-MX', {
   timeZone: 'America/Cancun',
   weekday: 'short',
-  day: 'numeric',
-  month: 'short',
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
   hour: '2-digit',
   minute: '2-digit',
   hourCycle: 'h23',
 });
 
 /**
- * "lun 14 sep" o, con `hora`, "lun 14 sep 09:00" en hora Cancún (textos de
- * avisos y títulos de la app, 9-sep-2026). Se arma por partes: el formato
- * es-MX de Intl mete "14 de sep," y puntos según el motor. Cadena vacía si
- * el valor no es un instante válido — nunca lanza.
+ * «2026-09-14» ⇒ «14/09/2026». FUENTE ÚNICA del formato de fecha de los
+ * TEXTOS del API (6-nov-2026, invariante 120): pedido del dueño de «todas
+ * las fechas en DD/MM/AAAA, en todos lados». Lo que no empiece por un día
+ * `YYYY-MM-DD` se regresa tal cual (nunca lanza).
+ */
+export function diaDDMMAAAA(dia: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dia ?? ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(dia ?? '');
+}
+
+/**
+ * "lun 14/09/2026" o, con `hora`, "lun 14/09/2026 09:00" en hora Cancún
+ * (textos de avisos y títulos de la app, 9-sep-2026; DD/MM/AAAA desde el
+ * 6-nov-2026, invariante 120). Se arma por partes: el día de la semana es-MX
+ * trae punto o coma según el motor. Cadena vacía si el valor no es un
+ * instante válido — nunca lanza.
  */
 export function fechaCortaCancun(
   iso: string | Date | null | undefined,
@@ -120,9 +133,8 @@ export function fechaCortaCancun(
   for (const parte of FORMATO_CORTO_CANCUN.formatToParts(d)) {
     p[parte.type] = parte.value;
   }
-  const limpiar = (v: string | undefined) => (v ?? '').replace(/[.,]/g, '');
-  const dia =
-    `${limpiar(p.weekday)} ${limpiar(p.day)} ${limpiar(p.month)}`.trim();
+  const semana = (p.weekday ?? '').replace(/[.,]/g, '');
+  const dia = `${semana} ${p.day}/${p.month}/${p.year}`.trim();
   if (!opts.hora) return dia;
   const hora = p.hour === '24' ? '00' : p.hour;
   return `${dia} ${hora}:${p.minute}`;
