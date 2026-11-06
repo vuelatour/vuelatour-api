@@ -12650,6 +12650,26 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       única, combinaciones, Excel y subtítulos),
       `expenses.controller.reparto-iguales.spec` (booleanos de query, 400).
 
+119. **PRECIO VENTA EN LA HOJA «INVENTARIO» DEL BALANCE GENERAL (6-nov-2026,
+    API 0.0.123, SIN migración).** Pedido del dueño (captura de la hoja):
+    «falta poner el precio unitario de venta y en lugar de SALIDAS CANT que
+    diga VENDIDOS CANT». Cada fila de `resumenTiendita` lleva (ADITIVO, tras
+    `costo_unitario_usd`) `precio_venta_mxn` / `precio_venta_usd`: a cuánto
+    se cobra HOY al avión UNA unidad, con la MISMA precedencia de la ficha
+    y de la salida —fuente única PURA `precioVentaHoyDeItem`
+    (`inventario-cardex.util`) sobre `precioVentaDeSalida`: precio de venta
+    fijo del producto → último precio de compra + margen de la tienda → a
+    costo (los dos null)—. En PESOS a centavos cuando se puede (MXN tal
+    cual; USD × T.C. oficial de hoy, el mismo `tc_hoy` del valorizado); si
+    es USD sin T.C., SOLO `precio_venta_usd` (invariante 8). Nunca los dos.
+    `resumenTiendita` lee `precio_venta, precio_venta_moneda` del ítem. Es
+    un precio, no un importe: pyservices no lo suma en TOTALES; pinta la(s)
+    columna(s) «PRECIO VENTA MXN» / «PRECIO VENTA USD (sin T.C.)» entre
+    COSTO UNITARIO y VALOR A COSTO solo si alguna fila trae valor (un
+    pyservices viejo las ignora) y renombra «SALIDAS CANT» a «VENDIDOS
+    CANT» (misma cifra: salidas del periodo). Specs:
+    `inventory.service.tiendita.spec` («PRECIO VENTA»).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

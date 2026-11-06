@@ -403,6 +403,52 @@ export function ventaUnitariaConMargen(
   return round(costo * (1 + pct / 100), 4);
 }
 
+/**
+ * PRECIO VENTA de la hoja «inventario» del Balance general (6-nov-2026,
+ * invariante 119; pedido del dueño: «falta poner el precio unitario de
+ * venta»): a cuánto se cobraría HOY al avión UNA unidad, con la MISMA
+ * precedencia de la ficha y de la salida (`precioVentaDeSalida` sin precio
+ * capturado): precio de venta fijo del producto → último precio de compra
+ * + margen → a costo (sin venta ⇒ los dos null). En PESOS cuando se puede
+ * (MXN tal cual; USD × `tcHoy`, redondeado a centavos); si es USD y no hay
+ * T.C., en `precio_venta_usd` (invariante 8: jamás un USD en un campo
+ * «mxn»). Nunca los dos a la vez.
+ */
+export function precioVentaHoyDeItem(p: {
+  itemPrecio?: number | string | null;
+  itemMoneda?: Moneda | null;
+  costoVigente: CostoVigente | null;
+  margenPct: number;
+  tcHoy: number | null;
+}): { precio_venta_mxn: number | null; precio_venta_usd: number | null } {
+  const venta = precioVentaDeSalida({
+    itemPrecio: p.itemPrecio ?? null,
+    itemMoneda: p.itemMoneda ?? null,
+    costoUnitario: p.costoVigente?.unitario ?? 0,
+    monedaSalida: p.costoVigente?.moneda ?? 'MXN',
+    margenPct: p.margenPct,
+  });
+  if (venta.ventaUnitaria == null || !(venta.ventaUnitaria > 0)) {
+    return { precio_venta_mxn: null, precio_venta_usd: null };
+  }
+  if (venta.ventaMoneda === 'MXN') {
+    return {
+      precio_venta_mxn: round(venta.ventaUnitaria, 2),
+      precio_venta_usd: null,
+    };
+  }
+  const tc = tcPositivo(p.tcHoy);
+  return tc != null
+    ? {
+        precio_venta_mxn: round(venta.ventaUnitaria * tc, 2),
+        precio_venta_usd: null,
+      }
+    : {
+        precio_venta_mxn: null,
+        precio_venta_usd: round(venta.ventaUnitaria, 2),
+      };
+}
+
 /** De dónde salió el precio que paga el avión en una SALIDA. */
 export type OrigenVenta =
   | 'PRECIO_CAPTURADO'

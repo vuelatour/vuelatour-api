@@ -1814,6 +1814,18 @@ export interface BalanceInventarioItemFilaPayload {
    */
   costo_unitario_mxn: number | null;
   costo_unitario_usd: number | null;
+  /**
+   * ADITIVOS (6-nov-2026, API 0.0.123, invariante 119): PRECIO VENTA = a
+   * cuánto se cobra HOY al avión una unidad (precio fijo del producto o
+   * último precio de compra + margen de la tienda; `precioVentaHoyDeItem`,
+   * la misma precedencia de la ficha y de la salida). `precio_venta_mxn` en
+   * PESOS a centavos (MXN tal cual; USD × T.C. oficial de hoy);
+   * `precio_venta_usd` SOLO si es USD sin T.C. Nunca los dos; null sin
+   * precio (producto que sale a costo). pyservices pinta la(s) columna(s)
+   * solo si alguna fila trae valor; un pyservices viejo las ignora.
+   */
+  precio_venta_mxn: number | null;
+  precio_venta_usd: number | null;
   /** Cantidad y costo de las ENTRADAs del periodo (compras reales; una
    *  DEVOLUCION/AJUSTE suma stock pero no es compra). */
   compradas_cant: number | null;
