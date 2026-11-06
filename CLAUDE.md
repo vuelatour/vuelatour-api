@@ -12669,6 +12669,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     pyservices viejo las ignora) y renombra «SALIDAS CANT» a «VENDIDOS
     CANT» (misma cifra: salidas del periodo). Specs:
     `inventory.service.tiendita.spec` («PRECIO VENTA»).
+    - **REVISIÓN 2 (6-nov-2026, API 0.0.125; captura del dueño: «falta la
+      columna del precio en el que se vendió por unitario… o al menos el
+      último precio de venta que tenemos por unidad»)**: el precio de lista
+      de hoy (`precioVentaHoyDeItem`) se QUITÓ. `precio_venta_mxn` = precio
+      UNITARIO DE VENTA del periodo = Σ venta MXN de las salidas con precio ÷
+      sus unidades (pesos primero; PRECIO × VENDIDOS CANT cuadra con VENDIDO
+      MXN); sin ventas con precio en el periodo, el de la ÚLTIMA venta
+      registrada en todo el cardex (`precio_venta_fuente: 'ULTIMA_VENTA'`;
+      pyservices la pinta en gris cursiva y lo explica al pie); null si
+      nunca se vendió con precio. `precio_venta_usd` solo si la venta fue
+      USD sin T.C. Lo calcula la agregación ÚNICA `agregadosDeItem`
+      (`precio_venta_unitario_mxn/usd`, `precio_venta_fuente`), la misma de
+      la lista, la ficha y el resumen de la tienda. `resumenTiendita` ya no
+      lee el precio fijo del ítem para esto.
 
 120. **TODA FECHA EN LOS TEXTOS DEL API VA EN DD/MM/AAAA (6-nov-2026, API
   0.0.124).** Pedido del dueño: «estandarizar todas las fechas al formato
@@ -12689,6 +12703,28 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
   nuevo con nombre de mes («2 oct», «30-sep», «15-sep-2026») es un bug: usar
   `diaDDMMAAAA`. El panel hizo lo mismo el mismo día (`lib/datetime.ts`,
   `FechaInput`).
+
+121. **LA RESERVA DE OVERHAUL SE DESCUENTA A TODOS LOS SOCIOS (6-nov-2026,
+    API 0.0.125, migración `20261106000001`).** Decisión del cliente: «lo de
+    overhaul ya se les va a apartar en las utilidades a los socios, a todos
+    los socios; antes estaba para poder elegir si se les reservaba de las
+    utilidades o solo se les informaba, pero ya decidieron que a todos se les
+    va a reservar». SUPERSEDE la opción por socio de la invariante 99:
+    `descuentaReservaSocio` (`common/reserva-overhaul.util`, constante
+    `DESCONTAR_RESERVA_A_TODOS = true`) es la fuente única y el reparto
+    (`computeAvion`, `reparto[].descuenta_reserva`, `monto_*` = utilidad −
+    reserva, `reserva_retenida_*` = Σ de todas), el balance por avión
+    (`balance.socios[]`) y la cuenta corriente de cada socio descuentan su
+    parte a TODOS. La reserva sigue sin restar del saldo del avión (invariante
+    96): se reparte por socio y se retiene de lo que recibe cada uno. La
+    columna `aeronave_socio.descontar_reserva_overhaul` queda en true (y con
+    default true) y el DTO la acepta sin efecto (deprecada): si el cliente
+    vuelve a querer la opción, basta regresar la constante a false. Los
+    cierres ya cerrados conservan su snapshot (con quien descontaba y quien
+    no); pyservices y el panel eligen los textos por los datos
+    (`descuenta_reserva` de cada socio), así los PDF/Excel viejos siguen
+    diciendo la verdad. Specs: `profit-sharing.service.cascada-balance.spec`,
+    `aircraft-balance.service.reserva.spec`.
 
 ## Convenciones NestJS
 

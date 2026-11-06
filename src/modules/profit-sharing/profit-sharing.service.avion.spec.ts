@@ -239,7 +239,8 @@ describe('ProfitSharingService.avionDetalle — la pantalla por avión', () => {
     expect(hernan.monto_mxn).toBe(repHernan.monto_mxn);
     expect(hernan.utilidad_mxn).toBe(repHernan.utilidad_mxn);
     expect(hernan.reserva_mxn).toBe(repHernan.reserva_mxn);
-    expect(hernan.descuenta_reserva).toBe(false);
+    // A TODOS se les descuenta la reserva (6-nov-2026, invariante 121).
+    expect(hernan.descuenta_reserva).toBe(true);
     expect(hernan.por_entregar_mxn).toBe(r2(repHernan.monto_mxn - 2850));
     expect(acc.entregado_mxn).toBe(0);
     expect(acc.por_entregar_mxn).toBe(acc.monto_mxn);

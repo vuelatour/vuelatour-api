@@ -212,13 +212,13 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(a.pesos_sin_tc_usd).toBe(0);
   });
 
-  it('3. la RESERVA ya no resta: por socio «lo que debe guardar»; se descuenta SOLO a quien lo pidió y VuelaTour la retiene', async () => {
+  it('3. la RESERVA no resta del saldo: por socio «lo que debe guardar», se le descuenta a TODOS (invariante 121) y VuelaTour la retiene; la bandera por socio ya no decide', async () => {
     const m = mundoPesos();
-    const { a: sinFlag } = await avion(m);
+    const { a } = await avion(m);
     // 3.5 h × 40 = 140 USD × 18.6 = 2,604 MXN, repartida 40.92 / 59.08 por
-    // residuo mayor; nadie la descuenta: monto = utilidad.
-    expect(sinFlag.reserva_overhaul_usd).toBe(140);
-    expect(sinFlag.reparto).toEqual([
+    // residuo mayor y descontada a los dos: monto = utilidad − su reserva.
+    expect(a.reserva_overhaul_usd).toBe(140);
+    expect(a.reparto).toEqual([
       expect.objectContaining({
         socio_id: HERNAN,
         porcentaje: 40.92,
@@ -226,55 +226,44 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
         utilidad_mxn: 34531.9,
         reserva_usd: 57.29,
         reserva_mxn: 1065.56,
-        descuenta_reserva: false,
-        monto_usd: 1836.82,
-        monto_mxn: 34531.9,
+        descuenta_reserva: true,
+        monto_usd: 1779.53,
+        monto_mxn: 33466.34,
       }),
       expect.objectContaining({
         porcentaje: 59.08,
+        utilidad_usd: 2651.98,
+        utilidad_mxn: 49856.9,
         reserva_usd: 82.71,
         reserva_mxn: 1538.44,
-        descuenta_reserva: false,
-        monto_usd: 2651.98,
-        monto_mxn: 49856.9,
+        descuenta_reserva: true,
+        monto_usd: 2569.27,
+        monto_mxn: 48318.46,
       }),
     ]);
-    expect(sinFlag.reserva_retenida_usd).toBe(0);
-    expect(sinFlag.reserva_retenida_mxn).toBe(0);
-    expect(r2(sinFlag.reparto.reduce((s, x) => s + x.monto_usd, 0))).toBe(
-      sinFlag.saldo_disponible_usd,
-    );
-
-    // Hernán pide que se le descuente.
-    m.aeronave_socio = m.aeronave_socio.map((s) =>
-      s.socio_id === HERNAN ? { ...s, descontar_reserva_overhaul: true } : s,
-    );
-    const { a } = await avion(m);
-    const hernan = a.reparto.find((s) => s.socio_id === HERNAN)!;
-    const acc = a.reparto.find((s) => s.socio_id !== HERNAN)!;
-    expect(hernan).toMatchObject({
-      descuenta_reserva: true,
-      utilidad_usd: 1836.82,
-      reserva_usd: 57.29,
-      monto_usd: 1779.53,
-      utilidad_mxn: 34531.9,
-      reserva_mxn: 1065.56,
-      monto_mxn: 33466.34,
-    });
-    expect(acc).toMatchObject({
-      descuenta_reserva: false,
-      monto_usd: 2651.98,
-      monto_mxn: 49856.9,
-    });
-    expect(a.reserva_retenida_usd).toBe(57.29);
-    expect(a.reserva_retenida_mxn).toBe(1065.56);
-    // El saldo del avión no cambia: lo retenido sale de la parte del socio.
+    expect(a.reserva_retenida_usd).toBe(140);
+    expect(a.reserva_retenida_mxn).toBe(2604);
+    // El saldo del avión no cambia: lo retenido sale de la parte de cada socio.
     expect(a.saldo_disponible_usd).toBe(4488.8);
     expect(
       r2(
         a.reparto.reduce((s, x) => s + x.monto_usd, 0) + a.reserva_retenida_usd,
       ),
     ).toBe(a.saldo_disponible_usd);
+
+    // La bandera por socio (invariante 99) ya no decide: con true, false o
+    // ausente el resultado es el MISMO.
+    for (const bandera of [true, false, undefined]) {
+      const m2 = mundoPesos();
+      m2.aeronave_socio = m2.aeronave_socio.map((s) => ({
+        ...s,
+        descontar_reserva_overhaul: bandera,
+      }));
+      const { a: a2 } = await avion(m2);
+      expect(a2.reparto.map((s) => [s.monto_usd, s.descuenta_reserva])).toEqual(
+        a.reparto.map((s) => [s.monto_usd, s.descuenta_reserva]),
+      );
+    }
 
     // El balance dice lo MISMO por socio (utilidad cobrada × % − su reserva).
     const b = await libro(m);
@@ -289,17 +278,14 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(bh.monto_mxn).toBe(r2(bh.utilidad_mxn! - 1065.56));
     const ba = b.balance.socios.find((s) => s.nombre !== 'Hernán Pérez')!;
     expect(ba).toMatchObject({
-      descuenta_reserva: false,
+      descuenta_reserva: true,
       reserva_usd: 82.71,
     });
-    expect(ba.monto_usd).toBe(ba.utilidad_usd);
+    expect(ba.monto_usd).toBe(r2(ba.utilidad_usd! - 82.71));
   });
 
-  it('3b. reserva sin oficial del cierre: solo deja incompleta la parte del socio que la descuenta', async () => {
+  it('3b. reserva sin oficial del cierre: deja incompleta la parte de cada socio (se descuenta a todos)', async () => {
     const m = mundoPesos();
-    m.aeronave_socio = m.aeronave_socio.map((s) =>
-      s.socio_id === HERNAN ? { ...s, descontar_reserva_overhaul: true } : s,
-    );
     const svc = (() => {
       const f = fakeSupabaseReparto(m);
       const s = new ProfitSharingService(
@@ -313,9 +299,9 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     })();
     const r = await svc.compute({ desde: DESDE, hasta: HASTA });
     const a = r.aviones.find((x) => x.aeronave.id === AV)!;
-    // 1,280 de siempre (#502, comisión, REFACCION, FIJO USD) + los 57.29 de
-    // la reserva de Hernán, que se le descuenta sin pesos.
-    expect(a.pesos_sin_tc_usd).toBe(r2(1280 + 57.29));
+    // 1,280 de siempre (#502, comisión, REFACCION, FIJO USD) + los 140 de la
+    // reserva (57.29 + 82.71), que se le descuenta a los dos sin pesos.
+    expect(a.pesos_sin_tc_usd).toBe(r2(1280 + 140));
     expect(a.reserva_overhaul_mxn).toBe(0);
     // Sin oficial el saldo USD también cambia (GAS e ING-14 MXN sin T.C.
     // quedan fuera de los dólares): 2,070.24 × 40.92 % = 847.14 − 57.29.

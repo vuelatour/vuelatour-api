@@ -197,8 +197,10 @@ const CAMBIOS_0098_INDIVIDUAL = [
   'ind.balance.permisos_usd: 26.14 -> 27.78',
   'ind.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
   'ind.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
-  'ind.balance.socios.0.monto_usd: 2869.03 -> 2858.76',
-  'ind.balance.socios.1.monto_usd: 1987.15 -> 1980.04',
+  // 6-nov-2026 (invariante 121): a cada socio se le descuenta su reserva
+  // (82.71 / 57.29 USD) de lo que recibe: 2,858.76 ⇒ 2,776.05 y 1,980.04 ⇒ 1,922.75.
+  'ind.balance.socios.0.monto_usd: 2869.03 -> 2776.05',
+  'ind.balance.socios.1.monto_usd: 1987.15 -> 1922.75',
   'ind.balance.utilidad_antes_comisiones_usd: 3305 -> 3300',
 ];
 const CAMBIOS_0098_GENERAL = [
@@ -231,12 +233,13 @@ const CAMBIOS_0098_GENERAL = [
   'gen.aviones.0.balance.permisos_usd: 26.14 -> 27.78',
   'gen.aviones.0.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
   'gen.aviones.0.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
-  'gen.aviones.0.balance.socios.0.monto_usd: 2869.03 -> 2858.76',
-  'gen.aviones.0.balance.socios.1.monto_usd: 1987.15 -> 1980.04',
+  // 6-nov-2026 (invariante 121): netos de la reserva de cada socio.
+  'gen.aviones.0.balance.socios.0.monto_usd: 2869.03 -> 2776.05',
+  'gen.aviones.0.balance.socios.1.monto_usd: 1987.15 -> 1922.75',
   'gen.aviones.0.balance.utilidad_antes_comisiones_usd: 3305 -> 3300',
-  'gen.empresa.participaciones.0.monto_usd: 2869.03 -> 2858.76',
-  'gen.empresa.participacion_usd: 2869.03 -> 2858.76',
-  'gen.empresa.resultado_usd: 2301.28 -> 2291.01',
+  'gen.empresa.participaciones.0.monto_usd: 2869.03 -> 2776.05',
+  'gen.empresa.participacion_usd: 2869.03 -> 2776.05',
+  'gen.empresa.resultado_usd: 2301.28 -> 2208.3',
 ];
 
 /**
@@ -454,11 +457,13 @@ describe('Balance EN PESOS — la cascada del bloque `balance`', () => {
     expect(b.utilidad_cobrada_mxn).toBe(
       r2(b.utilidad_despues_mxn! - b.por_cobrar_mxn!),
     );
-    // Socios: % × la utilidad cobrada EN PESOS (lo que se transfiere).
+    // Socios: % × la utilidad cobrada EN PESOS, menos su parte de la reserva
+    // de overhaul (a todos, invariante 121) = lo que se transfiere.
     for (const s of b.socios) {
-      expect(s.monto_mxn).toBe(
+      expect(s.utilidad_mxn).toBe(
         r2((s.porcentaje / 100) * b.utilidad_cobrada_mxn!),
       );
+      expect(s.monto_mxn).toBe(r2(s.utilidad_mxn! - s.reserva_mxn!));
     }
   });
 

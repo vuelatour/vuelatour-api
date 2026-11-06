@@ -137,11 +137,20 @@ const LLAVES_RESERVA = [
 function sinReserva(b: BalanceAvionPayload['balance']) {
   const c = { ...b } as Record<string, unknown>;
   for (const k of LLAVES_RESERVA) delete c[k];
-  // Invariante 99: la parte de la reserva de cada socio también es «reserva».
+  // Invariante 99: la parte de la reserva de cada socio también es «reserva»;
+  // desde la 121 (se descuenta a TODOS) también lo que recibe cada socio
+  // (`monto_*`, `por_entregar_mxn`) y la suma por entregar del avión.
+  delete c.por_entregar_socios_mxn;
   c.socios = (c.socios as Array<Record<string, unknown>>).map((s) => {
     const t = { ...s };
-    delete t.reserva_usd;
-    delete t.reserva_mxn;
+    for (const k of [
+      'reserva_usd',
+      'reserva_mxn',
+      'monto_usd',
+      'monto_mxn',
+      'por_entregar_mxn',
+    ])
+      delete t[k];
     return t;
   });
   return c;
@@ -178,22 +187,40 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
     // en los dos libros, por socio, y no resta en ninguno).
     expect(b.utilidad_cobrada_usd).toBe(4838.8);
     expect(r.reserva_overhaul_usd).toBe(140);
+    // A TODOS se les descuenta (6-nov-2026, invariante 121).
     expect(r.reparto.map((s) => [s.reserva_usd, s.descuenta_reserva])).toEqual([
-      [57.29, false],
-      [82.71, false],
+      [57.29, true],
+      [82.71, true],
     ]);
     expect(b.socios.map((s) => [s.reserva_usd, s.descuenta_reserva])).toEqual([
-      [82.71, false],
-      [57.29, false],
+      [82.71, true],
+      [57.29, true],
     ]);
   });
 
-  it('NO resta de nada: sin la tarifa de reserva, el bloque es el MISMO salvo las llaves de la reserva (USD y pesos)', async () => {
+  it('NO resta del avión: sin la tarifa de reserva, el bloque es el MISMO salvo las llaves de la reserva y lo que recibe cada socio (su utilidad − su reserva, invariante 121)', async () => {
     const con = (await libro()).balance;
     const m = mundoPesos();
     m.reserva_overhaul = [];
     const sin = (await libro(m)).balance;
     expect(sinReserva(con)).toEqual(sinReserva(sin));
+    // Utilidades cobradas idénticas; a cada socio se le descuenta SU parte.
+    expect(con.utilidad_cobrada_usd).toBe(sin.utilidad_cobrada_usd);
+    con.socios.forEach((s, i) => {
+      const t = sin.socios[i];
+      expect(s.utilidad_usd).toBe(t.utilidad_usd);
+      expect(s.monto_usd).toBe(
+        Math.round((t.monto_usd! - s.reserva_usd!) * 100) / 100,
+      );
+      expect(s.monto_mxn).toBe(
+        Math.round((t.monto_mxn! - s.reserva_mxn!) * 100) / 100,
+      );
+    });
+    expect(con.por_entregar_socios_mxn).toBe(
+      Math.round(
+        (sin.por_entregar_socios_mxn! - con.reserva_overhaul_mxn!) * 100,
+      ) / 100,
+    );
     // Sin tarifa y con horas voladas: 0 y el aviso de «incompleta».
     expect(sin).toMatchObject({
       reserva_overhaul_usd: 0,

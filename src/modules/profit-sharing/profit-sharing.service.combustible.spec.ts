@@ -272,6 +272,26 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
     );
   });
 
+  /**
+   * Invariante 121 (6-nov-2026): la reserva de overhaul se descuenta a TODOS
+   * los socios. El golden 0101 es de cuando nadie la descontaba (monto =
+   * utilidad, nada retenido): se deshace SOLO eso para que la identidad de
+   * los directos siga siendo byte a byte.
+   */
+  const comoAntesDel0125 = (r: unknown): unknown => {
+    const c = JSON.parse(JSON.stringify(r)) as {
+      aviones?: Array<Record<string, unknown>>;
+    };
+    for (const a of c.aviones ?? []) {
+      a.reserva_retenida_usd = 0;
+      for (const s of (a.reparto as Array<Record<string, unknown>>) ?? []) {
+        s.monto_usd = s.utilidad_usd;
+        s.descuenta_reserva = false;
+      }
+    }
+    return c;
+  };
+
   it('3. IDENTIDAD con el golden 0.0.101: directos + combustible = los directos de antes y nada más se movió (byte a byte, con oficial, sin oficial y vacía)', async () => {
     const compute = (
       m: Record<string, Fila[]> = mundoPesos(),
@@ -303,23 +323,31 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
     expect([tst.gastos.directos_usd, tst.gastos.combustible_usd]).toEqual([
       200, 167.6,
     ]);
-    expect(JSON.stringify(comoAntesDel0103(hoy))).toBe(
+    expect(JSON.stringify(comoAntesDel0103(comoAntesDel0125(hoy)))).toBe(
       JSON.stringify(GOLDEN_0101.reparto_oficial),
     );
     expect(
       JSON.stringify(
-        comoAntesDel0103(sinLlavesPesos(await compute(mundoPesos(), null))),
+        comoAntesDel0103(
+          comoAntesDel0125(sinLlavesPesos(await compute(mundoPesos(), null))),
+        ),
       ),
     ).toBe(JSON.stringify(GOLDEN_0101.reparto_sin_oficial));
     expect(
       JSON.stringify(
         comoAntesDel0103(
-          sinLlavesPesos(await compute({ ...mundoPesos(), aeronave: [] })),
+          comoAntesDel0125(
+            sinLlavesPesos(await compute({ ...mundoPesos(), aeronave: [] })),
+          ),
         ),
       ),
     ).toBe(JSON.stringify(GOLDEN_0101.reparto_vacio));
     expect(
-      JSON.stringify(comoAntesDel0103(sinLlavesPesosPayload(await payload()))),
+      JSON.stringify(
+        comoAntesDel0103(
+          comoAntesDel0125(sinLlavesPesosPayload(await payload())),
+        ),
+      ),
     ).toBe(JSON.stringify(GOLDEN_0101.payload_oficial));
   });
 

@@ -9,11 +9,7 @@ jest.mock('../realtime/notifications.service', () => ({
 import { Logger } from '@nestjs/common';
 import { InventoryService } from './inventory.service';
 import type { SupabaseService } from '../supabase/supabase.service';
-import {
-  precioVentaHoyDeItem,
-  statsDe,
-  type MovForFifo,
-} from './inventario-cardex.util';
+import { statsDe, type MovForFifo } from './inventario-cardex.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 
 /**
@@ -535,113 +531,113 @@ describe('resumenTiendita: COSTO UNITARIO = último precio de compra (13-oct-202
 });
 
 /**
- * PRECIO VENTA (6-nov-2026, API 0.0.123, invariante 119; pedido del dueño:
- * «falta poner el precio unitario de venta»): a cuánto se cobra HOY al avión
- * una unidad, con la precedencia de la ficha (`precioVentaHoyDeItem`): precio
- * fijo del producto → último precio + margen (25 % por default) → a costo.
+ * PRECIO VENTA UNITARIO (6-nov-2026, invariante 119 rev. 2; pedido del dueño
+ * con la captura de la hoja: «falta la columna del precio en el que se vendió
+ * por unitario… o al menos el último precio de venta que tenemos por
+ * unidad»): el precio POR UNIDAD al que se vendió en el periodo (Σ venta MXN
+ * de las salidas con precio ÷ sus unidades, así PRECIO × VENDIDOS CANT =
+ * VENDIDO MXN) o, sin ventas en el periodo, el de la última venta registrada
+ * (`precio_venta_fuente`). Ya no es el precio de lista de hoy.
  */
-describe('resumenTiendita: PRECIO VENTA = lo que se cobra hoy al avión (6-nov-2026, API 0.0.123)', () => {
+describe('resumenTiendita: PRECIO VENTA = precio unitario al que se vendió (6-nov-2026, API 0.0.125)', () => {
   const AGO = ['2026-08-01', '2026-08-31'] as const;
-  const ITEMS_PRECIO: Fila[] = [
-    { id: 'it-a', nombre: 'Aceite 15w 50', numero_parte: null },
-    // Precio de venta FIJO en pesos: gana sobre el margen.
-    {
-      id: 'it-b',
-      nombre: 'Bujia',
-      numero_parte: 'REM40E',
-      precio_venta: '500',
-      precio_venta_moneda: 'MXN',
-    },
-    { id: 'it-c', nombre: 'Cable', numero_parte: null },
+  const venta = (
+    id: string,
+    item_id: string,
+    cantidad: number,
+    unitaria: number,
+    moneda: 'MXN' | 'USD',
+    fecha: string,
+    costo = 200,
+    costoMoneda: 'MXN' | 'USD' = 'MXN',
+  ): Fila =>
+    mov(id, item_id, 'SALIDA', cantidad, costo, costoMoneda, null, {
+      venta_unitaria: unitaria,
+      venta_moneda: moneda,
+      fecha_movimiento: fecha,
+      created_at: `${fecha}T15:00:00Z`,
+    });
+  const CARDEX_VENTAS: Fila[] = [
+    ...CARDEX,
+    // Bujía: dos ventas en agosto a precios distintos (2 × 350 + 1 × 380).
+    venta('s1', 'it-b', 2, 350, 'MXN', '2026-08-30'),
+    venta('s2', 'it-b', 1, 380, 'MXN', '2026-08-31'),
+    // Cable: su única venta fue en JULIO (fuera del periodo) a 70.
+    venta('s3', 'it-c', 1, 70, 'MXN', '2026-07-15', 50),
   ];
 
-  it('con T.C. de hoy todo en pesos: margen sobre el último precio (USD × T.C.), precio fijo tal cual, nunca los dos', async () => {
-    const r = await armar(CARDEX, ITEMS_PRECIO, 17.6729).resumenTiendita(
+  it('vendido en el periodo: Σ venta ÷ unidades (PRECIO × VENDIDOS CANT = VENDIDO MXN), fuente PERIODO', async () => {
+    const r = await armar(CARDEX_VENTAS, ITEMS, 17.6729).resumenTiendita(
+      ...AGO,
+    );
+    const bujia = r.filas.find((f) => f.nombre === 'Bujia · REM40E');
+    expect(bujia).toMatchObject({
+      salidas_cant: 3,
+      vendido_mxn: 1080,
+      precio_venta_mxn: 360,
+      precio_venta_usd: null,
+      precio_venta_fuente: 'PERIODO',
+    });
+    expect(
+      Math.round(
+        (bujia?.precio_venta_mxn ?? 0) * (bujia?.salidas_cant ?? 0) * 100,
+      ) / 100,
+    ).toBe(bujia?.vendido_mxn);
+  });
+
+  it('sin ventas en el periodo: el último precio de venta registrado (fuente ULTIMA_VENTA); nunca vendido ⇒ null', async () => {
+    const r = await armar(CARDEX_VENTAS, ITEMS, 17.6729).resumenTiendita(
       ...AGO,
     );
     const por = new Map(r.filas.map((f) => [f.nombre, f]));
-    // 110 USD × 1.25 = 137.5 USD × 17.6729 = 2,430.02
-    expect(por.get('Aceite 15w 50')).toMatchObject({
-      precio_venta_mxn: 2430.02,
-      precio_venta_usd: null,
-    });
-    expect(por.get('Bujia · REM40E')).toMatchObject({
-      precio_venta_mxn: 500,
-      precio_venta_usd: null,
-    });
-    // 50 MXN × 1.25
     expect(por.get('Cable')).toMatchObject({
-      precio_venta_mxn: 62.5,
+      salidas_cant: null,
+      vendido_mxn: null,
+      precio_venta_mxn: 70,
       precio_venta_usd: null,
+      precio_venta_fuente: 'ULTIMA_VENTA',
     });
+    // El aceite solo tiene compras: ningún precio (ni de lista).
+    expect(por.get('Aceite 15w 50')).toMatchObject({
+      precio_venta_mxn: null,
+      precio_venta_usd: null,
+      precio_venta_fuente: null,
+    });
+    // En JULIO la venta del cable sí es del periodo.
+    const jul = await armar(CARDEX_VENTAS, ITEMS, 17.6729).resumenTiendita(
+      '2026-07-01',
+      '2026-07-31',
+    );
+    expect(jul.filas.find((f) => f.nombre === 'Cable')).toMatchObject({
+      precio_venta_mxn: 70,
+      precio_venta_fuente: 'PERIODO',
+    });
+  });
+
+  it('venta en DÓLARES sin T.C. del día: el precio unitario va en su propio campo, con o sin T.C. de hoy (invariante 8)', async () => {
+    const cardex = [
+      ...CARDEX,
+      venta('s4', 'it-a', 1, 150, 'USD', '2026-08-30', 110, 'USD'),
+    ];
+    for (const tcHoy of [undefined, 17.6729]) {
+      const r = await armar(cardex, ITEMS, tcHoy).resumenTiendita(...AGO);
+      expect(r.filas.find((f) => f.nombre === 'Aceite 15w 50')).toMatchObject({
+        precio_venta_mxn: null,
+        precio_venta_usd: 150,
+        precio_venta_fuente: 'PERIODO',
+      });
+    }
+  });
+
+  it('nunca los dos campos a la vez; es un precio, no un importe (el total de la hoja no lo suma)', async () => {
+    const r = await armar(CARDEX_VENTAS, ITEMS, 17.6729).resumenTiendita(
+      ...AGO,
+    );
     for (const f of r.filas) {
       expect(f.precio_venta_mxn != null && f.precio_venta_usd != null).toBe(
         false,
       );
     }
-  });
-
-  it('sin T.C. de hoy: el margen sobre un último precio en dólares va EN DÓLARES; el precio fijo en pesos no depende del T.C.', async () => {
-    const r = await armar(CARDEX, ITEMS_PRECIO).resumenTiendita(...AGO);
-    const por = new Map(r.filas.map((f) => [f.nombre, f]));
-    expect(por.get('Aceite 15w 50')).toMatchObject({
-      precio_venta_mxn: null,
-      precio_venta_usd: 137.5,
-    });
-    expect(por.get('Bujia · REM40E')).toMatchObject({
-      precio_venta_mxn: 500,
-      precio_venta_usd: null,
-    });
-    expect(por.get('Cable')).toMatchObject({
-      precio_venta_mxn: 62.5,
-      precio_venta_usd: null,
-    });
-  });
-
-  it('sin compra con costo y sin precio fijo ⇒ sale a costo: los dos null; con precio fijo en USD, en dólares sin T.C. y en pesos con él', async () => {
-    const gratis = [mov('c0', 'it-c', 'ENTRADA', 5, 0, 'MXN')];
-    const sinPrecio = await armar(gratis, [ITEMS[2]], 17.6729).resumenTiendita(
-      ...AGO,
-    );
-    expect(sinPrecio.filas[0]).toMatchObject({
-      precio_venta_mxn: null,
-      precio_venta_usd: null,
-    });
-    const fijoUsd: Fila = {
-      ...ITEMS[2],
-      precio_venta: 80,
-      precio_venta_moneda: 'USD',
-    };
-    const sinTc = await armar(gratis, [fijoUsd]).resumenTiendita(...AGO);
-    expect(sinTc.filas[0]).toMatchObject({
-      precio_venta_mxn: null,
-      precio_venta_usd: 80,
-    });
-    const conTc = await armar(gratis, [fijoUsd], 17.6729).resumenTiendita(
-      ...AGO,
-    );
-    expect(conTc.filas[0]).toMatchObject({
-      precio_venta_mxn: 1413.83,
-      precio_venta_usd: null,
-    });
-  });
-
-  it('es la MISMA fuente que la ficha (precioVentaHoyDeItem sobre statsDe.costo_vigente)', async () => {
-    const r = await armar(CARDEX, ITEMS_PRECIO, 17.6729).resumenTiendita(
-      ...AGO,
-    );
-    const movsDe = (itemId: string): MovForFifo[] =>
-      CARDEX.filter((m) => m.item_id === itemId) as unknown as MovForFifo[];
-    const esperado = precioVentaHoyDeItem({
-      costoVigente: statsDe(movsDe('it-a'), {
-        hoy: hoyCancun(),
-        tcHoy: 17.6729,
-      }).costo_vigente,
-      margenPct: 25,
-      tcHoy: 17.6729,
-    });
-    expect(r.filas.find((f) => f.nombre === 'Aceite 15w 50')).toMatchObject(
-      esperado,
-    );
+    expect(r.total_vendido_mxn).toBe(1080);
   });
 });

@@ -70,3 +70,24 @@ export function reservaOverhaulIncompleta(
 ): boolean {
   return horasVoladas > 0 && !(usdPorHora > 0);
 }
+
+/**
+ * RESERVA PARA TODOS LOS SOCIOS (6-nov-2026, API 0.0.125, invariante 121).
+ * Decisión del cliente: «lo de overhaul ya se les va a apartar en las
+ * utilidades a los socios, a TODOS los socios; antes estaba para poder
+ * elegir si se les reservaba de las utilidades o solo se les informaba, pero
+ * ya decidieron que a todos se les va a reservar». La bandera por socio
+ * `aeronave_socio.descontar_reserva_overhaul` (invariante 99) deja de
+ * decidir: el reparto, el balance por avión y la cuenta de cada socio le
+ * DESCUENTAN su parte de la reserva a TODOS. La columna se conserva (la
+ * migración 20261106000001 la deja en true y con default true) por si el
+ * cliente vuelve a querer la opción: entonces basta poner esto en false.
+ */
+export const DESCONTAR_RESERVA_A_TODOS = true as boolean;
+
+/** ¿Se le descuenta la reserva a este socio? (a todos desde el 6-nov-2026). */
+export function descuentaReservaSocio(s: {
+  descontar_reserva_overhaul?: boolean | null;
+}): boolean {
+  return DESCONTAR_RESERVA_A_TODOS || s.descontar_reserva_overhaul === true;
+}

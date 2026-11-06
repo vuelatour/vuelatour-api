@@ -91,7 +91,6 @@ import {
   montoGastoDeSalida,
   precioTxt,
   precioVentaDeSalida,
-  precioVentaHoyDeItem,
   REGLA_COSTO,
   resumenDiarioDe,
   nombreDeJoin,
@@ -109,7 +108,6 @@ import {
   ventaDeSalida,
   type AgregadosItem,
   type CostoVigente,
-  type Moneda,
   type MovCardex,
   type MovCosto,
   type MovForFifo,
@@ -1255,31 +1253,23 @@ export class InventoryService {
       {
         nombre: string;
         numero_parte: string | null;
-        precio_venta: number | string | null;
-        precio_venta_moneda: Moneda | null;
       }
     >();
     if (ids.length > 0) {
       // SIN filtrar activo: un ítem eliminado con cardex sigue contando.
-      // El precio de venta fijo del producto (6-nov-2026, invariante 119):
-      // la columna PRECIO VENTA de la hoja.
       const { data: items, error: eItems } = await this.supabase.service
         .from('inventario_item')
-        .select('id, nombre, numero_parte, precio_venta, precio_venta_moneda')
+        .select('id, nombre, numero_parte')
         .in('id', ids);
       if (eItems) throw new Error(eItems.message);
       for (const it of (items ?? []) as Array<{
         id: string;
         nombre: string;
         numero_parte: string | null;
-        precio_venta?: number | string | null;
-        precio_venta_moneda?: Moneda | null;
       }>) {
         nombrePorItem.set(it.id, {
           nombre: it.nombre,
           numero_parte: it.numero_parte,
-          precio_venta: it.precio_venta ?? null,
-          precio_venta_moneda: it.precio_venta_moneda ?? null,
         });
       }
     }
@@ -1343,20 +1333,18 @@ export class InventoryService {
           stats.costo_vigente != null && stats.costo_vigente_mxn == null
             ? stats.costo_vigente.unitario_usd
             : null,
-        // ADITIVOS (6-nov-2026, invariante 119): PRECIO VENTA = a cuánto se
-        // cobra HOY al avión una unidad, con la MISMA precedencia de la ficha
-        // y de la salida (`precioVentaDeSalida`, fuente única): precio de
-        // venta fijo del producto → último precio de compra + margen de la
-        // tienda → a costo (null). En pesos cuando se puede (MXN tal cual;
-        // USD × T.C. oficial de hoy); si es USD sin T.C., en su propio
-        // campo (invariante 8). Nunca los dos; un pyservices viejo lo ignora.
-        ...precioVentaHoyDeItem({
-          itemPrecio: info?.precio_venta ?? null,
-          itemMoneda: info?.precio_venta_moneda ?? null,
-          costoVigente: stats.costo_vigente,
-          margenPct: margen,
-          tcHoy: tcHoy?.tc ?? null,
-        }),
+        // ADITIVOS (6-nov-2026, invariante 119 rev. 2; pedido del dueño: «el
+        // precio en el que se vendió por unitario… o al menos el último
+        // precio de venta que tenemos por unidad»): PRECIO VENTA = precio
+        // unitario de VENTA del periodo (VENDIDO ÷ unidades vendidas con
+        // precio) o, sin ventas en el periodo, el de la última venta
+        // registrada (`precio_venta_fuente`). En pesos cuando se puede; si la
+        // venta fue USD sin T.C., en su propio campo (invariante 8). Nunca
+        // los dos; null si nunca se vendió con precio. La agregación única
+        // `agregadosDeItem` lo calcula; un pyservices viejo lo ignora.
+        precio_venta_mxn: a.precio_venta_unitario_mxn,
+        precio_venta_usd: a.precio_venta_unitario_usd,
+        precio_venta_fuente: a.precio_venta_fuente,
         compradas_cant: a.compradas_cant,
         compradas_costo_mxn: a.compradas_costo_mxn,
         salidas_cant: a.salidas_cant,

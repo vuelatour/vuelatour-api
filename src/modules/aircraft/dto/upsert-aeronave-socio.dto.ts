@@ -51,11 +51,13 @@ export class CreateAeronaveSocioDto {
   /**
    * RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): true = su
    * parte de la reserva del periodo se le DESCUENTA de la utilidad (VuelaTour
-   * la retiene); false/omitido = solo se le informa cuánto debe guardar.
+   * la retiene); false = solo se le informa cuánto debe guardar. DEPRECADA
+   * desde el 6-nov-2026 (invariante 121): se acepta y se guarda, pero la
+   * reserva se descuenta a TODOS los socios; la columna queda en true.
    */
   @ApiPropertyOptional({
     description:
-      'true = su parte de la reserva de overhaul se descuenta de su utilidad; false (default) = solo se le informa.',
+      'Deprecada (6-nov-2026, invariante 121): la reserva de overhaul se descuenta a TODOS los socios; se acepta y se guarda sin efecto.',
   })
   @IsOptional()
   @IsBoolean()
@@ -120,10 +122,10 @@ export class UpdateAeronaveSocioDto {
   @IsString()
   notas?: string;
 
-  /** RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99). */
+  /** RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99). DEPRECADA desde el 6-nov-2026 (invariante 121): sin efecto, se descuenta a todos. */
   @ApiPropertyOptional({
     description:
-      'true = su parte de la reserva de overhaul se descuenta de su utilidad; false = solo se le informa.',
+      'Deprecada (6-nov-2026, invariante 121): la reserva de overhaul se descuenta a TODOS los socios; se acepta y se guarda sin efecto.',
   })
   @IsOptional()
   @IsBoolean()

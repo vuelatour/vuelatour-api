@@ -403,52 +403,6 @@ export function ventaUnitariaConMargen(
   return round(costo * (1 + pct / 100), 4);
 }
 
-/**
- * PRECIO VENTA de la hoja «inventario» del Balance general (6-nov-2026,
- * invariante 119; pedido del dueño: «falta poner el precio unitario de
- * venta»): a cuánto se cobraría HOY al avión UNA unidad, con la MISMA
- * precedencia de la ficha y de la salida (`precioVentaDeSalida` sin precio
- * capturado): precio de venta fijo del producto → último precio de compra
- * + margen → a costo (sin venta ⇒ los dos null). En PESOS cuando se puede
- * (MXN tal cual; USD × `tcHoy`, redondeado a centavos); si es USD y no hay
- * T.C., en `precio_venta_usd` (invariante 8: jamás un USD en un campo
- * «mxn»). Nunca los dos a la vez.
- */
-export function precioVentaHoyDeItem(p: {
-  itemPrecio?: number | string | null;
-  itemMoneda?: Moneda | null;
-  costoVigente: CostoVigente | null;
-  margenPct: number;
-  tcHoy: number | null;
-}): { precio_venta_mxn: number | null; precio_venta_usd: number | null } {
-  const venta = precioVentaDeSalida({
-    itemPrecio: p.itemPrecio ?? null,
-    itemMoneda: p.itemMoneda ?? null,
-    costoUnitario: p.costoVigente?.unitario ?? 0,
-    monedaSalida: p.costoVigente?.moneda ?? 'MXN',
-    margenPct: p.margenPct,
-  });
-  if (venta.ventaUnitaria == null || !(venta.ventaUnitaria > 0)) {
-    return { precio_venta_mxn: null, precio_venta_usd: null };
-  }
-  if (venta.ventaMoneda === 'MXN') {
-    return {
-      precio_venta_mxn: round(venta.ventaUnitaria, 2),
-      precio_venta_usd: null,
-    };
-  }
-  const tc = tcPositivo(p.tcHoy);
-  return tc != null
-    ? {
-        precio_venta_mxn: round(venta.ventaUnitaria * tc, 2),
-        precio_venta_usd: null,
-      }
-    : {
-        precio_venta_mxn: null,
-        precio_venta_usd: round(venta.ventaUnitaria, 2),
-      };
-}
-
 /** De dónde salió el precio que paga el avión en una SALIDA. */
 export type OrigenVenta =
   | 'PRECIO_CAPTURADO'
@@ -1170,6 +1124,35 @@ export interface AgregadosItem {
   salidas_a_costo_cant: number | null;
   /** Filas del cardex COMPLETO con monto ≠ 0 no expresable en pesos. */
   movimientos_sin_tc: number;
+  // --- ADITIVOS (6-nov-2026, invariante 119 rev. 2): PRECIO VENTA UNITARIO ---
+  /**
+   * Precio POR UNIDAD al que se VENDIÓ en el periodo (Σ venta MXN de las
+   * salidas con precio ÷ sus unidades); sin ventas con precio en el periodo,
+   * el de la ÚLTIMA venta registrada en todo el cardex; null si nunca se
+   * vendió con precio. En pesos cuando se puede (venta MXN tal cual; USD × el
+   * T.C. del día de la venta).
+   */
+  precio_venta_unitario_mxn: number | null;
+  /** Lo mismo EN DÓLARES solo cuando la venta fue en USD sin T.C. (invariante 8). */
+  precio_venta_unitario_usd: number | null;
+  /** De dónde sale el precio unitario (null sin ventas con precio). */
+  precio_venta_fuente: FuentePrecioVenta | null;
+}
+
+/** «PERIODO» = se vendió en el periodo; «ULTIMA_VENTA» = la última venta registrada (fuera del periodo). */
+export type FuentePrecioVenta = 'PERIODO' | 'ULTIMA_VENTA';
+
+/** Precio unitario de UNA venta en pesos (o en dólares si fue USD sin T.C.). */
+function ventaUnitariaEnPesos(v: VentaDeSalida): {
+  mxn: number | null;
+  usd: number | null;
+} {
+  const unit = v.ventaUnitaria ?? 0;
+  if (v.ventaMoneda === 'MXN') return { mxn: round(unit, 2), usd: null };
+  const tc = tcPositivo(v.tcVenta);
+  return tc != null
+    ? { mxn: round(unit * tc, 2), usd: null }
+    : { mxn: null, usd: round(unit, 2) };
 }
 
 /**
@@ -1203,6 +1186,12 @@ export function agregadosDeItem(
   let ventasSinUtilidad = 0;
   let sinCosto = false;
   let sinTc = 0;
+  // PRECIO VENTA UNITARIO (invariante 119 rev. 2): unidades de las salidas que
+  // sumaron en `vendido` (pesos) y en el respaldo en dólares, y la ÚLTIMA
+  // venta con precio de TODO el cardex (en orden cronológico, la última gana).
+  let vendidoCantMxn = 0;
+  let vendidoCantUsd = 0;
+  let ultimaVenta: { mxn: number | null; usd: number | null } | null = null;
   const matriculas = new Set<string>();
   for (const m of sortChrono(movs)) {
     // Un TRASPASO no compra, no vende ni tiene montos (invariante 111).
@@ -1212,10 +1201,14 @@ export function agregadosDeItem(
     }
     // Banderas sobre el cardex COMPLETO (como con_entradas_sin_costo).
     if (movimientoSinTc(m)) sinTc += 1;
+    const ventaCompleta = m.tipo === SALIDA ? ventaDeSalida(m) : null;
+    if (ventaCompleta?.conVenta && ventaCompleta.ventaUnitaria != null) {
+      ultimaVenta = ventaUnitariaEnPesos(ventaCompleta);
+    }
     if (!enPeriodo(m)) continue;
     const cant = Number(m.cantidad);
-    if (m.tipo === SALIDA) {
-      const venta = ventaDeSalida(m);
+    if (m.tipo === SALIDA && ventaCompleta) {
+      const venta = ventaCompleta;
       haySalida = true;
       salidasCant = round(salidasCant + cant);
       if (venta.conVenta) {
@@ -1226,6 +1219,9 @@ export function agregadosDeItem(
         // utilidad (incompleta).
         if (venta.monedaUtilidad !== 'USD') {
           vendido = sumar(vendido, venta.ventaTotalMxn);
+          if (venta.ventaTotalMxn != null) {
+            vendidoCantMxn = round(vendidoCantMxn + cant);
+          }
         }
         if (venta.gananciaMxn != null) {
           costoVentas = sumar(costoVentas, venta.costoMxn);
@@ -1238,6 +1234,7 @@ export function agregadosDeItem(
           vendidoUsd = sumar(vendidoUsd, venta.ventaTotalUsd);
           costoVentasUsd = sumar(costoVentasUsd, venta.costoUsd);
           utilidadUsd = sumar(utilidadUsd, venta.gananciaUsd);
+          vendidoCantUsd = round(vendidoCantUsd + cant);
         }
         if (venta.utilidadIncompleta) ventasSinUtilidad += 1;
       } else {
@@ -1256,6 +1253,29 @@ export function agregadosDeItem(
       }
     }
   }
+  // Precio unitario de venta: el del PERIODO (pesos primero; el respaldo en
+  // dólares solo si no hubo ventas en pesos) o, sin ventas en el periodo, el
+  // de la última venta registrada. Un precio, no un importe.
+  const unitario: {
+    mxn: number | null;
+    usd: number | null;
+    fuente: FuentePrecioVenta | null;
+  } =
+    vendido != null && vendidoCantMxn > 0
+      ? {
+          mxn: round(vendido / vendidoCantMxn, 2),
+          usd: null,
+          fuente: 'PERIODO',
+        }
+      : vendidoUsd != null && vendidoCantUsd > 0
+        ? {
+            mxn: null,
+            usd: round(vendidoUsd / vendidoCantUsd, 2),
+            fuente: 'PERIODO',
+          }
+        : ultimaVenta
+          ? { ...ultimaVenta, fuente: 'ULTIMA_VENTA' }
+          : { mxn: null, usd: null, fuente: null };
   return {
     compradas_cant: hayCompra ? compradasCant : null,
     compradas_costo_mxn: hayCompra ? compradasCosto : null,
@@ -1277,6 +1297,9 @@ export function agregadosDeItem(
     ventas_a_costo_mxn: aCostoMxn,
     salidas_a_costo_cant: aCostoCant,
     movimientos_sin_tc: sinTc,
+    precio_venta_unitario_mxn: unitario.mxn,
+    precio_venta_unitario_usd: unitario.usd,
+    precio_venta_fuente: unitario.fuente,
   };
 }
 

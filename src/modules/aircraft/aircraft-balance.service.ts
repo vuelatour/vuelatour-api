@@ -90,6 +90,7 @@ import {
   type RepartoPagoRow,
 } from '../profit-sharing/reparto-pago.util';
 import {
+  descuentaReservaSocio,
   reservaOverhaulIncompleta,
   reservaOverhaulPeriodoUsd,
   tarifaReservaOverhaul,
@@ -5841,9 +5842,10 @@ export class AircraftBalanceService {
           utilidadCobradaMxn != null
             ? round2((pct / 100) * utilidadCobradaMxn)
             : null,
-        // RESERVA POR SOCIO (20-oct-2026, invariante 99): se completa
-        // abajo, cuando ya se conoce la reserva del periodo.
-        descuenta_reserva: s.descontar_reserva_overhaul === true,
+        // RESERVA POR SOCIO (20-oct-2026, invariante 99; a TODOS desde el
+        // 6-nov-2026, invariante 121): se completa abajo, cuando ya se
+        // conoce la reserva del periodo.
+        descuenta_reserva: descuentaReservaSocio(s),
       };
     });
 
@@ -5971,10 +5973,11 @@ export class AircraftBalanceService {
     }
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la MISMA
     // regla del reparto a socios — su parte (reserva × %) se INFORMA siempre
-    // (`reserva_*`, «cuánto debe guardar») y, solo al socio que lo pidió
-    // (`descontar_reserva_overhaul`), se le DESCUENTA de `monto_*`:
-    // `utilidad_*` conserva su parte de la utilidad cobrada ANTES de la
-    // reserva. Sin reserva (EXTERNOS, 0 horas): reserva 0 y nada cambia.
+    // (`reserva_*`, «cuánto debe guardar») y se le DESCUENTA de `monto_*`
+    // (a TODOS los socios desde el 6-nov-2026, invariante 121; antes solo a
+    // quien lo pidió con `descontar_reserva_overhaul`): `utilidad_*`
+    // conserva su parte de la utilidad cobrada ANTES de la reserva. Sin
+    // reserva (EXTERNOS, 0 horas): reserva 0 y nada cambia.
     const sociosConReserva = socios.map((s) => {
       const pct = s.porcentaje;
       const reservaUsd = reservaBalance

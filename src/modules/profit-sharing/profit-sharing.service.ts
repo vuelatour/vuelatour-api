@@ -51,6 +51,7 @@ import {
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd, retieneCobros } from '../../common/cobros-usd.util';
 import {
+  descuentaReservaSocio,
   reservaOverhaulIncompleta,
   reservaOverhaulPeriodoUsd,
   tarifaReservaOverhaul,
@@ -739,7 +740,9 @@ interface SocioRow {
   /**
    * RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99, migración
    * `20261020000005`): true = su parte de la reserva (reserva × %) se le
-   * DESCUENTA de la utilidad; false/ausente = solo se le informa.
+   * DESCUENTA de la utilidad; false/ausente = solo se le informa. Desde el
+   * 6-nov-2026 (invariante 121) la bandera no decide: se descuenta a TODOS
+   * (`descuentaReservaSocio`).
    */
   descontar_reserva_overhaul?: boolean | null;
 }
@@ -3418,8 +3421,9 @@ export class ProfitSharingService {
     // (SIN combustible desde el 23-oct-2026, invariante 104) − combustible −
     // indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
     // ingresos. La RESERVA DE OVERHAUL YA NO RESTA AQUÍ (como en el balance
-    // desde el 0.0.98): se informa, y solo al socio que lo pidió se le
-    // descuenta SU parte (`descontar_reserva_overhaul`, abajo).
+    // desde el 0.0.98): se informa por socio y a CADA socio se le descuenta
+    // SU parte de lo que recibe (a todos desde el 6-nov-2026, invariante 121;
+    // abajo).
     // «UTILIDAD ANTES DE GASTOS» (invariante 104): la línea del Excel del
     // cliente = venta cobrada − comisiones − directos − PROVISIÓN AFAC; de
     // ahí, − combustible − indirectos − permisos − fijos + otros ingresos =
@@ -3489,17 +3493,18 @@ export class ProfitSharingService {
     const centsMxn = centavosPorResiduoMayor(pcts, saldoMxn);
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la parte
     // de cada socio (reserva × su %, residuo mayor) se INFORMA siempre —
-    // «cuánto es lo que debe guardar cada socio»— y, solo si la fila de
-    // `aeronave_socio` lo pide (`descontar_reserva_overhaul`), se le
-    // DESCUENTA de su utilidad: VuelaTour la retiene para el overhaul
-    // (`reserva_retenida_*`). Sin la bandera, el socio recibe su parte del
-    // saldo completa y el dato de lo que debe guardar.
+    // «cuánto es lo que debe guardar cada socio»— y se le DESCUENTA de su
+    // utilidad: VuelaTour la retiene para el overhaul (`reserva_retenida_*`).
+    // Desde el 6-nov-2026 (invariante 121) se descuenta a TODOS los socios
+    // (`descuentaReservaSocio`); la bandera `descontar_reserva_overhaul` de
+    // `aeronave_socio` ya no decide (antes, sin ella, el socio recibía su
+    // parte del saldo completa y solo el dato de lo que debía guardar).
     const centsReservaUsd = centavosPorResiduoMayor(pcts, reservaR);
     const centsReservaMxn = centavosPorResiduoMayor(pcts, reservaMxnR);
     let reservaRetenidaUsd = 0;
     let reservaRetenidaMxn = 0;
     const reparto = vigentes.map((s, i) => {
-      const descuenta = s.descontar_reserva_overhaul === true;
+      const descuenta = descuentaReservaSocio(s);
       const utilidadUsd = centsUsd[i] / 100;
       const utilidadMxn = centsMxn[i] / 100;
       const reservaUsd = centsReservaUsd[i] / 100;
@@ -3613,9 +3618,10 @@ export class ProfitSharingService {
         permisos_mxn: permisosMxnR,
         otros_prorrateados_mxn: otrosMxnR,
       },
-      // RESERVA DE OVERHAUL (20-oct-2026, invariante 99): INFORMATIVA — ya no
-      // resta del saldo (como en el balance desde el 0.0.98); se reparte por
-      // socio en `reparto[].reserva_*` y solo se descuenta a quien lo pidió.
+      // RESERVA DE OVERHAUL (20-oct-2026, invariante 99): no resta del saldo
+      // (como en el balance desde el 0.0.98); se reparte por socio en
+      // `reparto[].reserva_*` y se le descuenta a cada socio de lo que
+      // recibe (a TODOS desde el 6-nov-2026, invariante 121).
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
       // «UTILIDAD ANTES DE GASTOS» (23-oct-2026, invariante 104): la línea
