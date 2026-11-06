@@ -274,4 +274,36 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     expect(malo.status).toBe(400);
     expect(svc.list).toHaveBeenCalledTimes(1);
   });
+
+  it('GET /v1/expenses y /export aceptan `sin_compras` / `solo_compras` como booleanos de query (invariante 118); un texto raro ⇒ 400', async () => {
+    const lista = await request(http())
+      .get('/v1/expenses')
+      .query({ sin_compras: 'true', excluir_categoria: 'NOMINA' });
+    expect(lista.status).toBe(200);
+    expect(svc.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sin_compras: true,
+        excluir_categoria: 'NOMINA',
+      }),
+    );
+    const solo = await request(http())
+      .get('/v1/expenses')
+      .query({ solo_compras: '1' });
+    expect(solo.status).toBe(200);
+    expect(svc.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ solo_compras: true }),
+    );
+    const xlsx = await request(http())
+      .get('/v1/expenses/export')
+      .query({ sin_compras: 'true' });
+    expect(xlsx.status).toBe(200);
+    expect(svc.listXlsx).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sin_compras: true }),
+      { detalleBanco: true },
+    );
+    const malo = await request(http())
+      .get('/v1/expenses')
+      .query({ sin_compras: 'quizás' });
+    expect(malo.status).toBe(400);
+  });
 });

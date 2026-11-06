@@ -1019,6 +1019,24 @@ export class ListGastosQuery {
   @IsUUID()
   compra_id?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Deja FUERA los gastos ligados a una compra de refacciones (gasto.compra_id no nulo). COMPRAS FUERA DE GASTOS (6-nov-2026, invariante 118): el módulo Gastos lo manda siempre; esos pagos viven en Inventario/Tienda → Compras. Aplica a la lista, su conteo, la bandeja, duplicados, orden=captura y el Excel. Con `compra_id` ⇒ lista vacía.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  sin_compras?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'SOLO los gastos ligados a una compra de refacciones (la lista «Gastos de compras» de Inventario/Tienda, invariante 118). Con `sin_compras` ⇒ lista vacía.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  solo_compras?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()

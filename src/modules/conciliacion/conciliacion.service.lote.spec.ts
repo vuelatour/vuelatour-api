@@ -2817,7 +2817,7 @@ describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => 
     expect(
       log.some((q) =>
         q.texto.includes(
-          'gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago,',
+          'gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, compra_id, medio_pago,',
         ),
       ),
     ).toBe(true);

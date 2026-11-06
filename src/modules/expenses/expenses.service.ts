@@ -962,8 +962,14 @@ export class ExpensesService {
     const sinCategoria = filters.excluir_categoria
       ? ` · sin ${etiquetaCategoriaGasto(filters.excluir_categoria)}`
       : '';
+    // Invariante 118: y si dejó fuera (o trae solo) los gastos de compras.
+    const compras = filters.sin_compras
+      ? ' · sin compras de refacciones'
+      : filters.solo_compras
+        ? ' · solo compras de refacciones'
+        : '';
     // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
-    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${sinCategoria}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
+    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${sinCategoria}${compras}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
     if (!opts.detalleBanco) {
       return this.pyservices.generateTablaXlsx({
         titulo: 'Gastos por avión / categoría',
@@ -1220,6 +1226,15 @@ export class ExpensesService {
     // (`listParaXlsx` pasa por aquí). Con `categoria` igual ⇒ lista vacía.
     if (filters.excluir_categoria)
       q = q.neq('categoria', filters.excluir_categoria);
+    // COMPRAS FUERA DE GASTOS (6-nov-2026, invariante 118): el módulo Gastos
+    // manda `sin_compras=true` (los pagos de una compra de refacciones viven
+    // en Inventario/Tienda → Compras, como la nómina en su módulo) y la lista
+    // «Gastos de compras» manda `solo_compras=true`. Es la MISMA consulta
+    // única: lista, conteo, bandeja, duplicados, `orden=captura` y Excel.
+    // Conciliación, balance, reparto y dashboards NO pasan por aquí: siguen
+    // contando esos gastos.
+    if (filters.sin_compras) q = q.is('compra_id', null);
+    if (filters.solo_compras) q = q.not('compra_id', 'is', null);
     if (filters.estatus_comprobante)
       q = q.eq('estatus_comprobante', filters.estatus_comprobante);
     // NO_FACTURADA = pendiente o solicitada (para "todo lo que falta por

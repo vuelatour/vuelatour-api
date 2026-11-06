@@ -12612,6 +12612,44 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       golden de `aircraft-balance.service.pesos.spec` (`CAMBIOS_0121_*`:
       la llave nueva en cada fila, ningún número se mueve).
 
+118. **LOS GASTOS DE COMPRAS VIVEN EN INVENTARIO/TIENDA, FUERA DE GASTOS
+    (6-nov-2026, API 0.0.122, SIN migración; misma filosofía que la
+    nómina, invariante 91).** Pedido del dueño (captura de la compra #14):
+    «los gastos que se hacen de las compras siempre los vamos a mantener
+    independientes, no en Gastos, para no revolver con los gastos de la
+    empresa; para la conciliación sí debemos ver los gastos de las compras…
+    la tiendita/inventario mantendrá apartados sus gastos, como lo hicimos
+    con la nómina». Decisión: el DATO no cambia (cada pago sigue siendo un
+    `gasto` con `compra_id` + `compra_rol`, invariantes 101 y 116) y los
+    LECTORES de dinero no cambian: conciliación (liga cargo↔gasto, auto-match,
+    sugerencia IA), balance por avión / general (hoja «refacciones», reparto
+    de bodega), reparto a socios, pre-cierre, dashboards, Libro Dinero, caja
+    chica y la app siguen leyéndolos. Solo la PANTALLA Gastos (y su Excel)
+    los esconde.
+    - **`ListGastosQuery.sin_compras`** (booleano de query, `ToBooleanQuery`)
+      ⇒ `.is('compra_id', null)` en la consulta ÚNICA de `list()` (lista +
+      `count`, bandeja, duplicados, `orden=captura`) y en el Excel
+      (`listParaXlsx`; subtítulo «· sin compras de refacciones»). Con
+      `compra_id` ⇒ lista vacía. **`solo_compras`** ⇒ `.not('compra_id',
+      'is', null)` (la lista «Gastos de compras» de Inventario/Tienda;
+      subtítulo «· solo compras de refacciones»); los dos juntos ⇒ vacía.
+      Sin ninguno, la consulta de siempre (la app, el detalle de la compra con
+      `compra_id` y cualquier cliente previo no cambian).
+    - **Conciliación**: la lista de movimientos (`listMovimientos`, select de
+      11630) embebe `compra_id` en `gasto` (ADITIVO) para que el panel mande
+      «abrir el gasto» a la compra (`/admin/inventory/compras/<compra_id>`)
+      en vez de a Gastos, donde ya no está.
+    - **Panel**: Gastos manda SIEMPRE `sin_compras=true` (lista, contadores
+      de pestaña y Excel) salvo en una vista ENFOCADA (`?gasto=` de
+      Conciliación o `ids` del pre-cierre), que incluye las compras para que
+      el gasto buscado aparezca; nota permanente bajo los filtros con «Ir a
+      Compras»; en Inventario/Tienda → Compras, la tarjeta «Gastos de
+      compras» (`solo_compras=true`, últimos 100) con enlace a la compra y a
+      «Ver / editar» (Gastos enfocado). Ver su AGENTS.md.
+    - Specs: `expenses.service.sin-compras.spec` (is/not en la consulta
+      única, combinaciones, Excel y subtítulos),
+      `expenses.controller.reparto-iguales.spec` (booleanos de query, 400).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

@@ -11627,7 +11627,7 @@ export class ConciliacionService {
         // `gasto.medio_pago` (ADITIVO 6-oct-2026): «Efectivo» en la celda.
         // `notas_fc` (0.0.75): solo para la coherencia de `factura_concepto`
         // («fact NNNN» en la 1.ª línea); se RETIRA de la respuesta.
-        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}${colCobros}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, notas_fc:notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}${colCobros}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, compra_id, medio_pago, notas_fc:notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
