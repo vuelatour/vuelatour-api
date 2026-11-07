@@ -12769,7 +12769,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     `es_oficina_documentos()` incluyen DIRECCION; Ale y Pablo pasaron a
     DIRECCION por email.
 
-123. **LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, API
+123. **LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (6-nov-2026, API
     0.0.127, SIN migración).** Pedido de Pablo (audios): «en Gastos habría que
     sacar todo lo que tenga que ver con refacciones: todo se metería a la
     tienda y desde ahí se le cargaría al avión… las balatas del 27 de octubre

@@ -135,7 +135,7 @@ describe('GET /v1/expenses — `sin_compras` (invariante 118)', () => {
   });
 });
 
-// LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, invariante 123):
+// LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (6-nov-2026, invariante 123):
 // Gastos manda además `sin_refacciones=true`; la consulta única deja fuera la
 // categoría REFACCION completa y el Excel lo dice.
 describe('GET /v1/expenses — `sin_refacciones` (invariante 123)', () => {

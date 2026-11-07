@@ -1243,7 +1243,7 @@ export class ExpensesService {
     // contando esos gastos.
     if (filters.sin_compras) q = q.is('compra_id', null);
     if (filters.solo_compras) q = q.not('compra_id', 'is', null);
-    // LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, invariante
+    // LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (6-nov-2026, invariante
     // 123; pedido de Pablo: «sacar de Gastos todo lo que tenga que ver con
     // refacciones»): el módulo Gastos manda `sin_refacciones=true` junto con
     // `sin_compras`. Deja fuera TODA la categoría REFACCION: las compras
