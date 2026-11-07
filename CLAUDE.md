@@ -12769,6 +12769,45 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     `es_oficina_documentos()` incluyen DIRECCION; Ale y Pablo pasaron a
     DIRECCION por email.
 
+123. **LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, API
+    0.0.127, SIN migración).** Pedido de Pablo (audios): «en Gastos habría que
+    sacar todo lo que tenga que ver con refacciones: todo se metería a la
+    tienda y desde ahí se le cargaría al avión… las balatas del 27 de octubre
+    siguen apareciendo en Gastos y deberían aparecer en Compras de la
+    tienda». Decisión: el DATO no cambia (los gastos REFACCION siguen siendo
+    gastos; sus números en balance, reparto, conciliación, dashboards, caja y
+    la app no se mueven) y SOLO cambian las pantallas, como con la nómina
+    (91) y los gastos de compras (118).
+    - **`ListGastosQuery.sin_refacciones`** (`ToBooleanQuery`) ⇒
+      `.neq('categoria', 'REFACCION')` en la consulta ÚNICA de `list()`
+      (lista + `count`, bandeja, duplicados, `orden=captura`) y en el Excel
+      (subtítulo «· sin refacciones»). Deja fuera TODA la categoría: las
+      compras capturadas como gasto (sin `compra_id`) y las salidas de bodega
+      (`medio_pago` BODEGA, el cargo del cardex al avión). Con
+      `categoria=REFACCION` ⇒ lista vacía. Sin el parámetro, la consulta de
+      siempre.
+    - Panel (Gastos): manda SIEMPRE `sin_compras=true` + `sin_refacciones=true`
+      salvo en la vista enfocada (`?gasto=`, `ids`); el alta «Nuevo gasto
+      (oficina)» ya NO ofrece la categoría Refacción y enlaza a Compras de
+      la tienda (la EDICIÓN de un gasto histórico y el filtro la conservan).
+    - Panel (Compras de la tienda): tarjeta «Refacciones registradas como
+      gasto (por convertir)» = `GET /expenses?categoria=REFACCION&
+      sin_compras=true` filtrado sin BODEGA; cada renglón «Convertir en
+      compra» = `POST /compras { gasto_mercancia_id }` (ya existía: hereda
+      proveedor/fecha/moneda/T.C. y arma las líneas desde
+      `valor_ia_extraido.conceptos` o una sola línea) y abre el detalle de la
+      compra para recibirla en bodega y venderla al avión. Nada se convierte
+      solo: convertir una refacción con avión mueve su costo del avión a la
+      bodega hasta la salida, y eso lo decide la oficina (meses cerrados:
+      candado de siempre).
+    - **NO se bloquea en el API** el alta de un gasto REFACCION sin compra:
+      la app de oficina (`admin_factura_screen`, «Compra de refacciones»)
+      crea el gasto y DESPUÉS la compra con `gasto_mercancia_id`; un 400
+      rompería ese flujo. La app del piloto dejó de ofrecer Refacción en
+      «Registrar gasto» (App 1.1.4+89). Si algún día la app crea la compra
+      primero, aquí se puede cerrar la puerta.
+    - Specs: `expenses.service.sin-compras.spec` (bloque `sin_refacciones`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

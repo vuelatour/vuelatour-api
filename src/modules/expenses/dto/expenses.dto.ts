@@ -1037,6 +1037,15 @@ export class ListGastosQuery {
   @IsBoolean()
   solo_compras?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Deja FUERA toda la categoría REFACCION: las compras de refacciones capturadas como gasto y las salidas de bodega (cargo del cardex al avión). LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, invariante 123): el módulo Gastos lo manda siempre junto con `sin_compras`. Misma consulta única (lista, conteo, bandeja, duplicados, orden=captura y Excel). Balance, reparto, conciliación y la app no lo mandan y siguen leyéndolas.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  sin_refacciones?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()

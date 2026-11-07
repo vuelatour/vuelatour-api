@@ -134,3 +134,65 @@ describe('GET /v1/expenses — `sin_compras` (invariante 118)', () => {
     ).toMatch(/ · 2026-11-01 a hoy · solo compras de refacciones$/);
   });
 });
+
+// LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, invariante 123):
+// Gastos manda además `sin_refacciones=true`; la consulta única deja fuera la
+// categoría REFACCION completa y el Excel lo dice.
+describe('GET /v1/expenses — `sin_refacciones` (invariante 123)', () => {
+  it.each([
+    ['normal', {}],
+    ['pendientes (bandeja sin avión)', { pendientes: true }],
+    ['duplicados', { duplicados: true }],
+    ['orden=captura', { orden: 'captura' }],
+  ])(
+    '%s ⇒ la consulta que pagina Y cuenta lleva neq categoria REFACCION (y sigue sin compras)',
+    async (_n, over) => {
+      const { svc, listas, lleva } = armar();
+      await svc.list(
+        q({
+          ...(over as Partial<ListGastosQuery>),
+          sin_compras: true,
+          sin_refacciones: true,
+        }),
+      );
+      const [lista] = listas();
+      expect(lleva(lista, 'neq', 'categoria', CategoriaGasto.REFACCION)).toBe(
+        true,
+      );
+      expect(lleva(lista, 'is', 'compra_id', null)).toBe(true);
+    },
+  );
+
+  it('sin el parámetro no hay neq sobre categoria: «Refacciones por convertir» (categoria=REFACCION + sin_compras), la app y el detalle de la compra siguen igual', async () => {
+    const { svc, listas } = armar();
+    await svc.list(
+      q({ categoria: CategoriaGasto.REFACCION, sin_compras: true }),
+    );
+    const [lista] = listas();
+    expect(
+      lista.ops.some((o) => o.m === 'neq' && o.args[0] === 'categoria'),
+    ).toBe(false);
+  });
+
+  it('el Excel lleva el filtro y el subtítulo termina en «sin refacciones»', async () => {
+    const { svc, gen, listas, lleva } = armar();
+    await svc.listXlsx(
+      q({
+        excluir_categoria: CategoriaGasto.NOMINA,
+        sin_compras: true,
+        sin_refacciones: true,
+        desde: '2026-11-01',
+      }),
+    );
+    expect(listas().length).toBeGreaterThan(0);
+    for (const l of listas()) {
+      expect(lleva(l, 'neq', 'categoria', CategoriaGasto.REFACCION)).toBe(true);
+    }
+    const payload = (gen.mock.calls as unknown[][])[0][0] as {
+      subtitulo: string;
+    };
+    expect(payload.subtitulo).toMatch(
+      / · 2026-11-01 a hoy · sin Nómina · sin compras de refacciones · sin refacciones$/,
+    );
+  });
+});

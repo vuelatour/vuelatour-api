@@ -974,8 +974,10 @@ export class ExpensesService {
       : filters.solo_compras
         ? ' · solo compras de refacciones'
         : '';
+    // Invariante 123: y si dejó fuera la categoría REFACCION completa.
+    const refacciones = filters.sin_refacciones ? ' · sin refacciones' : '';
     // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
-    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${sinCategoria}${compras}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
+    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${sinCategoria}${compras}${refacciones}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
     if (!opts.detalleBanco) {
       return this.pyservices.generateTablaXlsx({
         titulo: 'Gastos por avión / categoría',
@@ -1241,6 +1243,17 @@ export class ExpensesService {
     // contando esos gastos.
     if (filters.sin_compras) q = q.is('compra_id', null);
     if (filters.solo_compras) q = q.not('compra_id', 'is', null);
+    // LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (7-nov-2026, invariante
+    // 123; pedido de Pablo: «sacar de Gastos todo lo que tenga que ver con
+    // refacciones»): el módulo Gastos manda `sin_refacciones=true` junto con
+    // `sin_compras`. Deja fuera TODA la categoría REFACCION: las compras
+    // capturadas como gasto (viven en «Refacciones por convertir» de Compras
+    // de la tienda) y las salidas de bodega (cargo del cardex al avión).
+    // Misma consulta única; balance, reparto, conciliación y la app no lo
+    // mandan y siguen leyéndolas.
+    if (filters.sin_refacciones) {
+      q = q.neq('categoria', CategoriaGasto.REFACCION);
+    }
     if (filters.estatus_comprobante)
       q = q.eq('estatus_comprobante', filters.estatus_comprobante);
     // NO_FACTURADA = pendiente o solicitada (para "todo lo que falta por
