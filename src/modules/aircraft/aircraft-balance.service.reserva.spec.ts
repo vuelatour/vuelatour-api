@@ -131,6 +131,9 @@ const LLAVES_RESERVA = [
   'reserva_overhaul_tc',
   'reserva_overhaul_tc_dia',
   'reserva_overhaul_incompleta',
+  // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124).
+  'utilidad_a_repartir_usd',
+  'utilidad_a_repartir_mxn',
 ];
 
 /** El bloque `balance` sin la reserva (todo lo demás debe quedar igual). */
@@ -169,7 +172,22 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
       reserva_overhaul_tc_dia: '2026-09-30',
       reserva_overhaul_incompleta: false,
     });
+    // LA RESERVA SE RETIENE (invariante 124): la base del reparto a socios
+    // = utilidad cobrada − reserva, en las dos monedas.
+    expect(b.utilidad_a_repartir_usd).toBe(
+      Math.round((b.utilidad_cobrada_usd! - 140) * 100) / 100,
+    );
+    expect(b.utilidad_a_repartir_mxn).toBe(
+      Math.round((b.utilidad_cobrada_mxn! - 2604) * 100) / 100,
+    );
     const r = await reparto();
+    // Y es el saldo a repartir del reparto + los fijos prorrateados (la
+    // única resta que el balance no hace), como la utilidad cobrada.
+    expect(b.utilidad_a_repartir_usd).toBe(
+      Math.round(
+        (r.saldo_a_repartir_usd + r.gastos.otros_prorrateados_usd) * 100,
+      ) / 100,
+    );
     expect(b.reserva_overhaul_usd).toBe(r.reserva_overhaul_usd);
     expect(b.reserva_overhaul_mxn).toBe(r.reserva_overhaul_mxn);
     expect(b.reserva_overhaul_tc).toBe(r.detalle.reserva.tc);
@@ -206,6 +224,14 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
     expect(sinReserva(con)).toEqual(sinReserva(sin));
     // Utilidades cobradas idénticas; a cada socio se le descuenta SU parte.
     expect(con.utilidad_cobrada_usd).toBe(sin.utilidad_cobrada_usd);
+    // Sin reserva, la base del reparto ES la utilidad cobrada.
+    expect(sin.utilidad_a_repartir_usd).toBe(sin.utilidad_cobrada_usd);
+    expect(sin.utilidad_a_repartir_mxn).toBe(sin.utilidad_cobrada_mxn);
+    expect(con.utilidad_a_repartir_usd).toBe(
+      Math.round(
+        (con.utilidad_cobrada_usd! - con.reserva_overhaul_usd!) * 100,
+      ) / 100,
+    );
     con.socios.forEach((s, i) => {
       const t = sin.socios[i];
       expect(s.utilidad_usd).toBe(t.utilidad_usd);

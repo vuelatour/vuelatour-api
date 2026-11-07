@@ -5919,13 +5919,16 @@ export class AircraftBalanceService {
       for (const t of [num(e.taco_salida), num(e.taco_llegada)])
         if (t != null && t > maxTacoPeriodo) maxTacoPeriodo = t;
     }
-    // RESERVA DE OVERHAUL INFORMATIVA (19-oct-2026, API 0.0.98, invariante
-    // 96): lo que el avión DEBE APORTAR para el overhaul de sus motores en
-    // el periodo, con la MISMA aritmética del reparto (fuente única
-    // `common/reserva-overhaul.util`). NO se resta de ninguna utilidad del
-    // balance (decisión del cliente del 19-oct-2026): pyservices la pinta
-    // como bloque aparte. En pesos, al T.C. oficial del cierre (día
-    // min(hasta, hoy Cancún)), el mismo del reparto. EXTERNOS no la lleva.
+    // RESERVA DE OVERHAUL (19-oct-2026, API 0.0.98, invariante 96): lo que el
+    // avión DEBE APORTAR para el overhaul de sus motores en el periodo, con
+    // la MISMA aritmética del reparto (fuente única
+    // `common/reserva-overhaul.util`). En pesos, al T.C. oficial del cierre
+    // (día min(hasta, hoy Cancún)), el mismo del reparto. EXTERNOS no la
+    // lleva. LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124):
+    // `utilidad_a_repartir_*` = utilidad cobrada − reserva es la base del
+    // reparto a socios (pyservices la pinta como fila «(−) RESERVA DE
+    // OVERHAUL» + «UTILIDAD A REPARTIR» después de UTILIDAD COBRADA); las
+    // utilidades de arriba (después de gastos, cobrada) NO cambian.
     let reservaBalance: {
       reserva_overhaul_usd: number;
       reserva_overhaul_mxn: number | null;
@@ -5935,6 +5938,8 @@ export class AircraftBalanceService {
       reserva_overhaul_tc: number | null;
       reserva_overhaul_tc_dia: string | null;
       reserva_overhaul_incompleta: boolean;
+      utilidad_a_repartir_usd: number | null;
+      utilidad_a_repartir_mxn: number | null;
     } | null = null;
     if (!modoExternos && aircraftId) {
       const tarifa = tarifaReservaOverhaul(reservasOverhaul, aircraftId);
@@ -5952,14 +5957,15 @@ export class AircraftBalanceService {
           : ((await this.tcOficialDeDias([diaReserva], memoTc)).get(
               diaReserva,
             ) ?? null);
+      const reservaMxnBalance =
+        reservaUsd === 0
+          ? 0
+          : detReserva
+            ? round2(reservaUsd * detReserva.tc)
+            : null;
       reservaBalance = {
         reserva_overhaul_usd: reservaUsd,
-        reserva_overhaul_mxn:
-          reservaUsd === 0
-            ? 0
-            : detReserva
-              ? round2(reservaUsd * detReserva.tc)
-              : null,
+        reserva_overhaul_mxn: reservaMxnBalance,
         reserva_overhaul_horas_hr: round2(horasVoladas),
         reserva_overhaul_usd_hr: tarifa.usd_por_hora,
         reserva_overhaul_motores: tarifa.motores,
@@ -5969,6 +5975,14 @@ export class AircraftBalanceService {
           horasVoladas,
           tarifa.usd_por_hora,
         ),
+        // LA RESERVA SE RETIENE (invariante 124): la base del reparto. null
+        // si falta la utilidad cobrada (o la reserva en pesos sin T.C.).
+        utilidad_a_repartir_usd:
+          utilidadCobrada == null ? null : round2(utilidadCobrada - reservaUsd),
+        utilidad_a_repartir_mxn:
+          utilidadCobradaMxn == null || reservaMxnBalance == null
+            ? null
+            : round2(utilidadCobradaMxn - reservaMxnBalance),
       };
     }
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la MISMA
@@ -6169,8 +6183,9 @@ export class AircraftBalanceService {
         utilidad_despues_mxn: utilidadDespuesMxn,
         por_cobrar_mxn: porCobrarMxnTotal,
         utilidad_cobrada_mxn: utilidadCobradaMxn,
-        // RESERVA DE OVERHAUL INFORMATIVA (19-oct-2026, API 0.0.98,
-        // invariante 96; ADITIVA, nunca en EXTERNOS): NO se resta de nada.
+        // RESERVA DE OVERHAUL (19-oct-2026, API 0.0.98, invariante 96;
+        // ADITIVA, nunca en EXTERNOS) y, desde el 7-nov-2026 (invariante
+        // 124), `utilidad_a_repartir_*` = utilidad cobrada − reserva.
         ...(reservaBalance ?? {}),
         // ENTREGAS A SOCIOS DEL AVIÓN (21-oct-2026, invariante 100;
         // ADITIVAS, solo con la cuenta corriente disponible): Σ entregado y

@@ -77,7 +77,10 @@ import {
  * con el código actual; luego se documenta aquí por qué cambió.
  */
 
-const GOLDEN_ARCHIVO = 'libros-pesos.golden-0125.json';
+// 7-nov-2026 (API 0.0.128, invariante 124): `saldo_a_repartir_*` (saldo −
+// reserva) en cada avión y en el payload ⇒ golden recapturado como 0128
+// (el 0125 se queda para el spec de identidad de la reserva retenida).
+const GOLDEN_ARCHIVO = 'libros-pesos.golden-0128.json';
 // Sin el archivo (primera recaptura con ACTUALIZAR_GOLDEN) el spec carga y
 // los tests del golden fallan solos.
 const GOLDEN = (
@@ -164,7 +167,7 @@ if (process.env.ACTUALIZAR_GOLDEN) {
 }
 
 describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre', () => {
-  it('GOLDEN: sin las llaves en pesos, la respuesta es BYTE A BYTE la del golden 0.0.125 (con oficial, sin oficial y vacía)', async () => {
+  it('GOLDEN: sin las llaves en pesos, la respuesta es BYTE A BYTE la del golden 0.0.128 (con oficial, sin oficial y vacía)', async () => {
     expect(JSON.stringify(sinLlavesPesos(await compute()))).toBe(
       JSON.stringify(GOLDEN.reparto_oficial),
     );
@@ -178,10 +181,41 @@ describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre'
     ).toBe(JSON.stringify(GOLDEN.reparto_vacio));
   });
 
-  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.125', async () => {
+  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.128', async () => {
     expect(JSON.stringify(sinLlavesPesosPayload(await payload()))).toBe(
       JSON.stringify(GOLDEN.payload_oficial),
     );
+  });
+
+  // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124): lo
+  // ÚNICO nuevo frente al 6-nov-2026 es `saldo_a_repartir_*` (saldo −
+  // reserva); ningún otro número ni llave se movió.
+  it('IDENTIDAD con el golden 0.0.125: sin `saldo_a_repartir_*` la respuesta y el payload son BYTE A BYTE los del 6-nov-2026', async () => {
+    const g0125 = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, 'libros-pesos.golden-0125.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const sinSaldoARepartir = (r: unknown): unknown => {
+      const c = r as { aviones?: Array<Record<string, unknown>> };
+      for (const a of c.aviones ?? []) {
+        delete a.saldo_a_repartir_usd;
+        delete a.saldo_a_repartir_mxn;
+      }
+      return c;
+    };
+    expect(
+      JSON.stringify(sinSaldoARepartir(sinLlavesPesos(await compute()))),
+    ).toBe(JSON.stringify(g0125.reparto_oficial));
+    expect(
+      JSON.stringify(
+        sinSaldoARepartir(sinLlavesPesos(await compute(mundoPesos(), null))),
+      ),
+    ).toBe(JSON.stringify(g0125.reparto_sin_oficial));
+    expect(
+      JSON.stringify(sinSaldoARepartir(sinLlavesPesosPayload(await payload()))),
+    ).toBe(JSON.stringify(g0125.payload_oficial));
   });
 
   it('la respuesta lleva `reparto_en_pesos: true` en la raíz, también VACÍA (sin aviones activos)', async () => {

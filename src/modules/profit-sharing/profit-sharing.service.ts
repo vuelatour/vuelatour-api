@@ -996,14 +996,20 @@ export class ProfitSharingService {
         pesos_sin_tc_usd: a.pesos_sin_tc_usd,
         reserva_tc: a.detalle.reserva.tc,
         // ADITIVOS (20-oct-2026, invariante 99; `reparto_como_balance`): la
-        // provisión AFAC que resta y la reserva retenida a los socios que
-        // la descuentan. `reserva_overhaul_*` pasa a ser INFORMATIVA.
+        // provisión AFAC que resta y la reserva retenida a los socios (a
+        // todos desde el 6-nov-2026, invariante 121).
         afac_reservado_usd: a.afac_reservado_usd,
         afac_reservado_mxn: a.afac_reservado_mxn,
         afac_horas_cobradas_hr: a.detalle.afac.horas_cobradas_hr,
         afac_tarifa_usd_hr: a.detalle.afac.tarifa_usd_hr,
         reserva_retenida_usd: a.reserva_retenida_usd,
         reserva_retenida_mxn: a.reserva_retenida_mxn,
+        // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
+        // ADITIVOS, opcionales en pydantic): el saldo que de hecho se reparte
+        // (saldo − reserva). pyservices nuevo pinta la reserva como resta de
+        // la cascada y «Saldo a repartir»; uno anterior los ignora.
+        saldo_a_repartir_usd: a.saldo_a_repartir_usd,
+        saldo_a_repartir_mxn: a.saldo_a_repartir_mxn,
         // CIERRE POR AVIÓN (23-oct-2026, invariante 105, ADITIVO): solo con
         // la migración por avión (`RepartoCierreAvion` de pyservices). Va
         // ANTES de las tres llaves que los specs fijan como las últimas.
@@ -1034,8 +1040,8 @@ export class ProfitSharingService {
       // los specs fijan como la última.
       reparto_en_pesos: true as const,
       // ADITIVA (20-oct-2026, invariante 99): la cascada del balance —
-      // provisión AFAC en la cascada y reserva de overhaul informativa (por
-      // socio, descontada solo a quien lo pidió).
+      // provisión AFAC en la cascada y reserva de overhaul por socio (desde
+      // el 7-nov-2026, invariante 124, retenida: `saldo_a_repartir_*`).
       reparto_como_balance: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real, en dos categorías —
@@ -3420,10 +3426,11 @@ export class ProfitSharingService {
     // cliente: «que cuadren»): saldo = venta cobrada − comisiones − directos
     // (SIN combustible desde el 23-oct-2026, invariante 104) − combustible −
     // indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
-    // ingresos. La RESERVA DE OVERHAUL YA NO RESTA AQUÍ (como en el balance
-    // desde el 0.0.98): se informa por socio y a CADA socio se le descuenta
-    // SU parte de lo que recibe (a todos desde el 6-nov-2026, invariante 121;
-    // abajo).
+    // ingresos. Es el saldo ANTES de la reserva de overhaul: la reserva se
+    // RETIENE (7-nov-2026, invariante 124) y lo que de hecho se reparte es
+    // `saldo_a_repartir_*` = saldo − reserva; a CADA socio se le descuenta
+    // SU parte de lo que recibe (a todos desde el 6-nov-2026, invariante
+    // 121; abajo).
     // «UTILIDAD ANTES DE GASTOS» (invariante 104): la línea del Excel del
     // cliente = venta cobrada − comisiones − directos − PROVISIÓN AFAC; de
     // ahí, − combustible − indirectos − permisos − fijos + otros ingresos =
@@ -3618,10 +3625,10 @@ export class ProfitSharingService {
         permisos_mxn: permisosMxnR,
         otros_prorrateados_mxn: otrosMxnR,
       },
-      // RESERVA DE OVERHAUL (20-oct-2026, invariante 99): no resta del saldo
-      // (como en el balance desde el 0.0.98); se reparte por socio en
-      // `reparto[].reserva_*` y se le descuenta a cada socio de lo que
-      // recibe (a TODOS desde el 6-nov-2026, invariante 121).
+      // RESERVA DE OVERHAUL: se reparte por socio en `reparto[].reserva_*` y
+      // se le RETIENE a cada socio de lo que recibe (a TODOS desde el
+      // 6-nov-2026, invariante 121). `saldo_disponible_*` es el saldo ANTES
+      // de la reserva; `saldo_a_repartir_*` (abajo, invariante 124), después.
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
       // «UTILIDAD ANTES DE GASTOS» (23-oct-2026, invariante 104): la línea
@@ -3644,6 +3651,15 @@ export class ProfitSharingService {
       afac_reservado_mxn: afacMxnR,
       reserva_retenida_usd: reservaRetenidaUsdR,
       reserva_retenida_mxn: reservaRetenidaMxnR,
+      // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
+      // ADITIVOS): lo que de hecho se reparte = saldo − reserva de overhaul.
+      // Σ `reparto[].monto_*` = esto al centavo cuando los porcentajes suman
+      // 100 y todos la descuentan (residuo mayor en las dos partes).
+      // `saldo_disponible_*` sigue siendo el saldo ANTES de la reserva. Sin
+      // T.C. oficial del cierre la reserva en pesos es 0 y los pesos quedan
+      // incompletos: `pesos_sin_tc_usd` lo avisa, como siempre.
+      saldo_a_repartir_usd: round2(saldo - reservaR),
+      saldo_a_repartir_mxn: round2(saldoMxn - reservaMxnR),
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
       // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
@@ -6329,6 +6345,8 @@ export class ProfitSharingService {
       saldo_mxn: 0,
       reserva_mxn: 0,
       reserva_retenida_mxn: 0,
+      // LA RESERVA SE RETIENE (7-nov-2026, invariante 124): saldo − reserva.
+      saldo_a_repartir_mxn: 0,
       entregado_mxn: 0,
       pesos_sin_tc_usd: 0,
       saldo_usd: 0,
@@ -6359,6 +6377,7 @@ export class ProfitSharingService {
         saldo_mxn: a.saldo_disponible_mxn,
         reserva_mxn: a.reserva_overhaul_mxn,
         reserva_retenida_mxn: a.reserva_retenida_mxn,
+        saldo_a_repartir_mxn: a.saldo_a_repartir_mxn,
         entregado_mxn: round2(
           entregasMes.reduce((acc, p) => acc + p.monto_mxn, 0),
         ),

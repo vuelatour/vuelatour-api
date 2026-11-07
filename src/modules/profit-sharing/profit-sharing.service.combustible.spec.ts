@@ -284,6 +284,9 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
     };
     for (const a of c.aviones ?? []) {
       a.reserva_retenida_usd = 0;
+      // 0.0.128 (invariante 124): `saldo_a_repartir_*` no existía.
+      delete a.saldo_a_repartir_usd;
+      delete a.saldo_a_repartir_mxn;
       for (const s of (a.reparto as Array<Record<string, unknown>>) ?? []) {
         s.monto_usd = s.utilidad_usd;
         s.descuenta_reserva = false;

@@ -187,10 +187,13 @@ export class DashboardsService {
     let otrosIngresosAviones = 0;
     const porAvion = profit.aviones.map((a) => {
       // COMISIONES A CARGO DEL AVIÓN (invariante 50, desde sep-2026): el
-      // saldo del reparto ya las descontó (cobrado − comisiones − gastos −
-      // reserva), así que también van en «Gastos» — si no, Ingresos − Gastos
-      // ≠ Saldo por ese monto en el KPI y en la tabla por avión. Antes de la
-      // vigencia valen 0 (nada cambia en meses viejos).
+      // saldo del reparto ya las descontó (cobrado − comisiones − gastos),
+      // así que también van en «Gastos» — si no, Ingresos − Gastos ≠ Saldo
+      // por ese monto en el KPI y en la tabla por avión. Antes de la
+      // vigencia valen 0 (nada cambia en meses viejos). LA RESERVA SE
+      // RETIENE (7-nov-2026, invariante 124): va en «Gastos» y el saldo es
+      // `saldo_a_repartir_usd` (saldo − reserva), así ingresos + otros −
+      // gastos == saldo vuelve a cuadrar al centavo.
       const comisionesAvion = a.ingresos.comisiones_venta_usd ?? 0;
       const gastosAvion =
         a.gastos.directos_usd +
@@ -209,7 +212,7 @@ export class DashboardsService {
       otrosIngresosVuelatour += a.ingresos.otros_ingresos_vuelatour_usd;
       gastos += gastosAvion;
       comisiones += comisionesAvion;
-      saldo += a.saldo_disponible_usd;
+      saldo += a.saldo_a_repartir_usd;
       return {
         aeronave_id: a.aeronave.id,
         matricula: a.aeronave.matricula,
@@ -217,7 +220,7 @@ export class DashboardsService {
         vuelos: a.ingresos.vuelos_cobrados + a.ingresos.vuelos_pendientes,
         ingresos_cobrado_usd: a.ingresos.cobrado_usd,
         gastos_usd: round2(gastosAvion),
-        saldo_usd: a.saldo_disponible_usd,
+        saldo_usd: a.saldo_a_repartir_usd,
         // ADITIVO (6-oct-2026): de `gastos_usd`, las comisiones que absorbe
         // el avión (parte de la bancaria + el pago REAL del vendedor desde
         // el API 0.0.74, invariante 61; hasta el 0.0.73, su provisión).

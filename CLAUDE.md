@@ -12808,6 +12808,45 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       primero, aquí se puede cerrar la puerta.
     - Specs: `expenses.service.sin-compras.spec` (bloque `sin_refacciones`).
 
+124. **LA RESERVA DE OVERHAUL SE RETIENE: FILA DE LA CASCADA Y «A REPARTIR»
+    (7-nov-2026, API 0.0.128, SIN migración).** Pedido del cliente con la
+    captura del Balance de N621TX (nov-2026): «lo de la reserva de overhaul
+    aún no se está reteniendo de las utilidades para cada socio en cada
+    avión, aún dice informativa, no se resta; debe verse bien y retenerse
+    bien en el balance por avión y general, y verse también en el reparto de
+    utilidades». Desde el 6-nov (121) cada socio ya recibía utilidad −
+    reserva, pero las cascadas seguían «informativas» y los textos decían
+    «no se resta». Ahora la reserva es una RESTA explícita antes de repartir;
+    las utilidades de arriba NO cambian.
+    - **Reparto (`computeAvion`)**, ADITIVOS: `saldo_a_repartir_usd/_mxn` =
+      round2(`saldo_disponible_*` − `reserva_overhaul_*`) (Σ
+      `reparto[].monto_*` al centavo con porcentajes que suman 100; sin T.C.
+      oficial del cierre la reserva en pesos es 0 y `pesos_sin_tc_usd` lo
+      avisa). `saldo_disponible_*` queda como el saldo ANTES de la reserva
+      (los cierres y el pre-cierre lo siguen usando así). `avionHistorico`:
+      `saldo_a_repartir_mxn` por mes y en `totales`. `buildRepartoPayload`
+      manda `saldo_a_repartir_*` (opcionales en pydantic: pyservices nuevo
+      pinta «Saldo antes de la reserva» − «(−) Reserva de overhaul (se
+      retiene)» = «Saldo a repartir»; uno anterior, lo de siempre).
+    - **Balance (`buildPayload`)**, ADITIVOS dentro del grupo de la reserva
+      (nunca en EXTERNOS): `utilidad_a_repartir_usd` = round2(utilidad
+      cobrada USD − reserva USD) y `utilidad_a_repartir_mxn` = round2(utilidad
+      cobrada MXN − reserva MXN; null sin alguna de las dos). `socios[]` NO
+      cambia (`monto_*` = round2(% × cobrada) − round2(% × reserva), la
+      fórmula que pyservices escribe en la celda). pyservices (con
+      `utilidad_a_repartir_usd`): filas «(−) RESERVA DE OVERHAUL (MXN)» y
+      «UTILIDAD A REPARTIR (MXN)» después de UTILIDAD COBRADA, título
+      «Reparto a socios (utilidad A REPARTIR …)», bloque de la reserva «se
+      retiene» con su «Cómo se calcula»; el general por bloques igual.
+    - **Tablero** (`dashboards/overview`): `saldo_usd` por avión y
+      `saldo_disponible_usd` del resumen = `saldo_a_repartir_usd`; la reserva
+      ya iba en «Gastos» ⇒ ingresos + otros − gastos == saldo vuelve a
+      cuadrar (desde el 20-oct estaba roto por la reserva).
+    - Specs: `profit-sharing.service.cascada-balance.spec` (saldo a repartir
+      = Σ montos), `aircraft-balance.service.reserva.spec`
+      (`utilidad_a_repartir_*`), `dashboards.service.overview-*.spec`,
+      golden `libros-pesos.golden-0128.json`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

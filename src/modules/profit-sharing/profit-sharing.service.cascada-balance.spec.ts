@@ -245,6 +245,18 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(a.reserva_retenida_mxn).toBe(2604);
     // El saldo del avión no cambia: lo retenido sale de la parte de cada socio.
     expect(a.saldo_disponible_usd).toBe(4488.8);
+    // LA RESERVA SE RETIENE (7-nov-2026, invariante 124): lo que de hecho se
+    // reparte = saldo − reserva = Σ de lo que recibe cada socio, al centavo.
+    expect(a.saldo_a_repartir_usd).toBe(r2(4488.8 - a.reserva_overhaul_usd));
+    expect(a.saldo_a_repartir_mxn).toBe(
+      r2(a.saldo_disponible_mxn - a.reserva_overhaul_mxn),
+    );
+    expect(r2(a.reparto.reduce((s, x) => s + x.monto_usd, 0))).toBe(
+      a.saldo_a_repartir_usd,
+    );
+    expect(r2(a.reparto.reduce((s, x) => s + x.monto_mxn, 0))).toBe(
+      a.saldo_a_repartir_mxn,
+    );
     expect(
       r2(
         a.reparto.reduce((s, x) => s + x.monto_usd, 0) + a.reserva_retenida_usd,

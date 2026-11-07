@@ -489,8 +489,16 @@ describe('Balance por avión — ENTREGAS A SOCIOS (invariante 100)', () => {
     for (const s of b.socios)
       expect(Object.keys(s).slice(-4)).toEqual([...LLAVES_SOCIO]);
     const keys = Object.keys(b);
-    const i = keys.indexOf('reserva_overhaul_incompleta');
-    expect(i).toBeGreaterThan(0);
+    // LA RESERVA SE RETIENE (7-nov-2026, invariante 124): el grupo de la
+    // reserva cierra con `utilidad_a_repartir_usd/_mxn`; las entregas van
+    // justo después.
+    const r = keys.indexOf('reserva_overhaul_incompleta');
+    expect(r).toBeGreaterThan(0);
+    expect(keys.slice(r + 1, r + 3)).toEqual([
+      'utilidad_a_repartir_usd',
+      'utilidad_a_repartir_mxn',
+    ]);
+    const i = r + 2;
     expect(keys.slice(i + 1, i + 3)).toEqual([
       'entregado_socios_mxn',
       'por_entregar_socios_mxn',

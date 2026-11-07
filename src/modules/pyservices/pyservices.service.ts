@@ -226,6 +226,11 @@ export interface RepartoAvionPayload {
   afac_tarifa_usd_hr?: number | null;
   reserva_retenida_usd?: number;
   reserva_retenida_mxn?: number;
+  /** LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
+   *  ADITIVOS): saldo − reserva de overhaul = lo que de hecho se reparte;
+   *  `saldo_*` queda como el saldo ANTES de la reserva. */
+  saldo_a_repartir_usd?: number;
+  saldo_a_repartir_mxn?: number;
 }
 
 /**
@@ -1730,6 +1735,12 @@ export interface BalanceAvionBalancePayload {
   reserva_overhaul_tc_dia?: string | null;
   /** Voló horas y el avión no tiene tarifa de reserva configurada. */
   reserva_overhaul_incompleta?: boolean;
+  /** LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
+   *  ADITIVOS): utilidad cobrada − reserva de overhaul = la base del
+   *  reparto a socios (pyservices: filas «(−) RESERVA DE OVERHAUL» y
+   *  «UTILIDAD A REPARTIR» tras UTILIDAD COBRADA). */
+  utilidad_a_repartir_usd?: number | null;
+  utilidad_a_repartir_mxn?: number | null;
   /**
    * ENTREGAS A SOCIOS (21-oct-2026, invariante 100; ADITIVAS, solo con la
    * cuenta corriente disponible, justo después de la reserva): Σ de

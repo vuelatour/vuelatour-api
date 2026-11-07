@@ -323,14 +323,22 @@ const CAMBIOS_0124_GENERAL = [
   'gen.consolidado.pendientes.2: "XB-TST: Vuelo #501 (10-sep CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)" -> "XB-TST: Vuelo #501 (10/09/2026 CUN-MID): comisión del vendedor cotizada ($80.00 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour (\'otros movimientos\' del Balance general)"',
 ];
 
-/** Lo ADITIVO del 0.0.98 (bandera, reserva informativa, ganancia antes de comisiones). */
+/**
+ * Lo ADITIVO del 0.0.98 (bandera, reserva, ganancia antes de comisiones) y
+ * del 0.0.128 (`utilidad_a_repartir_*` = cobrada − reserva, invariante 124;
+ * sus números los prueba `aircraft-balance.service.reserva.spec`).
+ */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
   delete p.usd_por_gasto;
   const b = p.balance as Record<string, unknown> | undefined;
   if (b)
     for (const k of Object.keys(b))
-      if (k.startsWith('reserva_overhaul_')) delete b[k];
+      if (
+        k.startsWith('reserva_overhaul_') ||
+        k.startsWith('utilidad_a_repartir_')
+      )
+        delete b[k];
   for (const v of (p.vuelos as Array<Record<string, unknown>>) ?? [])
     delete v.ganancia_antes_comisiones_usd;
 }

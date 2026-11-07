@@ -307,6 +307,8 @@ export function sinLlavesPesos(r: unknown): unknown {
       delete gas[k];
     delete a.reserva_overhaul_mxn;
     delete a.saldo_disponible_mxn;
+    // 0.0.128 (invariante 124): el saldo a repartir en pesos.
+    delete a.saldo_a_repartir_mxn;
     delete a.utilidad_antes_gastos_mxn;
     delete a.pesos_sin_tc_usd;
     // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
@@ -354,6 +356,7 @@ export function sinLlavesPesosPayload(p: unknown): unknown {
       'reserva_overhaul_mxn',
       'otros_ingresos_avion_mxn',
       'saldo_mxn',
+      'saldo_a_repartir_mxn',
       'pesos_sin_tc_usd',
       'reserva_tc',
       // Cascada del balance (20-oct-2026, invariante 99): sus pesos también.
