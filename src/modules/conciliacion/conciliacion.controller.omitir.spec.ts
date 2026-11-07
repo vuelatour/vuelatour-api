@@ -37,6 +37,7 @@ describe('ConciliacionController — omitir por metadata', () => {
       expect(Reflect.getMetadata(ROLES_KEY, proto[m])).toBeUndefined();
     }
     expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
     ]);

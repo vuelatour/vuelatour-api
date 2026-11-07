@@ -71,6 +71,7 @@ describe('vuelo-seguimiento.util — constantes del contrato', () => {
       'seguimiento_cotizacion_pendiente',
     );
     expect([...ROLES_SEGUIMIENTO_LECTURA]).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,
@@ -78,6 +79,7 @@ describe('vuelo-seguimiento.util — constantes del contrato', () => {
       Rol.ANALISTA,
     ]);
     expect([...ROLES_SEGUIMIENTO_ESCRITURA]).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,

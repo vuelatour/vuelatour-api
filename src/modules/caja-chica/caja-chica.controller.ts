@@ -40,7 +40,9 @@ export class CajaChicaController {
   constructor(private readonly caja: CajaChicaService) {}
 
   @Get('me')
-  @ApiOperation({ summary: 'Mi fondo de caja chica (saldo + movimientos recientes)' })
+  @ApiOperation({
+    summary: 'Mi fondo de caja chica (saldo + movimientos recientes)',
+  })
   myFondo(@CurrentUser() c: AuthenticatedUser) {
     return this.caja.getMyFondo(c.userId);
   }
@@ -59,22 +61,34 @@ export class CajaChicaController {
   @Get('fondos')
   @Roles(...LECTURA)
   @ApiOperation({ summary: 'List funds with computed balance' })
-  listFondos(@Query() q: ListFondosQuery) {
-    return this.caja.listFondos(q);
+  listFondos(@Query() q: ListFondosQuery, @CurrentUser() c: AuthenticatedUser) {
+    // Administración no ve la caja de Dirección (invariante 122).
+    return this.caja.listFondos(q, c.rol);
   }
 
   @Post('fondos')
   @Roles(...GESTION)
-  @ApiOperation({ summary: 'Open a petty-cash fund for a person (ADMIN/FACTURACION)' })
-  createFondo(@Body() dto: CreateFondoDto, @CurrentUser() c: AuthenticatedUser) {
+  @ApiOperation({
+    summary: 'Open a petty-cash fund for a person (ADMIN/FACTURACION)',
+  })
+  createFondo(
+    @Body() dto: CreateFondoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.caja.createFondo(dto, c.userId);
   }
 
   @Get('fondos/:id')
   @Roles(...LECTURA)
-  @ApiOperation({ summary: 'Fund detail: balance + unified ledger (movements + cash expenses)' })
-  getFondo(@Param('id', ParseUUIDPipe) id: string) {
-    return this.caja.getFondoDetail(id);
+  @ApiOperation({
+    summary:
+      'Fund detail: balance + unified ledger (movements + cash expenses)',
+  })
+  getFondo(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.caja.getFondoDetail(id, c.rol);
   }
 
   // Excel de lo PENDIENTE por reponer HOY (24-sep-2026): el mismo formato
@@ -87,8 +101,9 @@ export class CajaChicaController {
   })
   async porReponerXlsx(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
   ): Promise<StreamableFile> {
-    const { buffer, filename } = await this.caja.porReponerXlsx(id);
+    const { buffer, filename } = await this.caja.porReponerXlsx(id, c.rol);
     return new StreamableFile(buffer, {
       type: XLSX_MIME,
       disposition: dispositionXlsx(filename),
@@ -103,18 +118,20 @@ export class CajaChicaController {
     @Body() dto: UpdateFondoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.caja.updateFondo(id, dto, c.userId);
+    return this.caja.updateFondo(id, dto, c.userId, c.rol);
   }
 
   @Post('fondos/:id/movimientos')
   @Roles(...GESTION)
-  @ApiOperation({ summary: 'Record a movement (reposición / reintegro / ajuste)' })
+  @ApiOperation({
+    summary: 'Record a movement (reposición / reintegro / ajuste)',
+  })
   createMovimiento(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateCajaMovimientoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.caja.createMovimiento(id, dto, c.userId);
+    return this.caja.createMovimiento(id, dto, c.userId, c.rol);
   }
 
   // Excel de lo que repuso UNA reposición (24-sep-2026, pedido del
@@ -128,8 +145,9 @@ export class CajaChicaController {
   })
   async reposicionXlsx(
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
   ): Promise<StreamableFile> {
-    const { buffer, filename } = await this.caja.reposicionXlsx(id);
+    const { buffer, filename } = await this.caja.reposicionXlsx(id, c.rol);
     return new StreamableFile(buffer, {
       type: XLSX_MIME,
       disposition: dispositionXlsx(filename),
@@ -147,7 +165,7 @@ export class CajaChicaController {
     @Body() dto: UpdateCajaMovimientoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.caja.updateMovimiento(id, dto, c.userId);
+    return this.caja.updateMovimiento(id, dto, c.userId, c.rol);
   }
 
   @Delete('movimientos/:id')
@@ -156,7 +174,10 @@ export class CajaChicaController {
   @ApiOperation({
     summary: 'Elimina un movimiento de caja (la UI confirma antes).',
   })
-  removeMovimiento(@Param('id', ParseUUIDPipe) id: string) {
-    return this.caja.removeMovimiento(id);
+  removeMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.caja.removeMovimiento(id, c.rol);
   }
 }

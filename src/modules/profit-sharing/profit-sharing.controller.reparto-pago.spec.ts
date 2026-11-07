@@ -82,7 +82,7 @@ describe('ProfitSharingController — cuenta del socio: @Roles en CADA ruta', ()
 
 describe('ProfitSharingController — cuenta del socio por HTTP', () => {
   let app: INestApplication;
-  let rol: Rol = Rol.ADMIN;
+  let rol: Rol = Rol.DIRECCION;
   const resumen = jest.fn();
   const estadoDeCuenta = jest.fn();
   const configurarCuenta = jest.fn();
@@ -135,7 +135,7 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
   });
 
   beforeEach(() => {
-    rol = Rol.ADMIN;
+    rol = Rol.DIRECCION;
     for (const f of [
       resumen,
       estadoDeCuenta,
@@ -160,8 +160,8 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     subirComprobante.mockResolvedValue({ pago: { id: PAGO } });
   });
 
-  it('GET socios: ADMIN, ANALISTA, FACTURACION y SOCIO leen (el service recibe al actor); los demás ⇒ 403; no cae en el reparto', async () => {
-    for (const r of [Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO]) {
+  it('GET socios: DIRECCION, ANALISTA, FACTURACION y SOCIO leen (ADMIN ya no, invariante 122) (el service recibe al actor); los demás ⇒ 403; no cae en el reparto', async () => {
+    for (const r of [Rol.DIRECCION, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO]) {
       rol = r;
       expect(
         (await request(http()).get('/v1/profit-sharing/socios')).status,
@@ -170,7 +170,9 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     expect(resumen).toHaveBeenLastCalledWith(
       expect.objectContaining({ userId: USER, rol: Rol.SOCIO }),
     );
+    // Administración (ADMIN) salió de Pagos a socios (invariante 122).
     for (const r of [
+      Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.PILOTO,
       Rol.MECANICO,
@@ -193,7 +195,7 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
     expect(estadoDeCuenta).toHaveBeenCalledWith(
       MAURICIO,
       { desde: '2026-09', hasta: '2026-10' },
-      expect.objectContaining({ userId: USER, rol: Rol.ADMIN }),
+      expect.objectContaining({ userId: USER, rol: Rol.DIRECCION }),
     );
     for (const url of [
       '/v1/profit-sharing/socios/no-uuid/estado-cuenta',
@@ -359,6 +361,7 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
   it('GET pre-cierre: el controller pasa el ROL al service; COORDINADOR sigue entrando', async () => {
     for (const r of [
       Rol.ADMIN,
+      Rol.DIRECCION,
       Rol.ANALISTA,
       Rol.FACTURACION,
       Rol.COORDINADOR,

@@ -12726,6 +12726,49 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     diciendo la verdad. Specs: `profit-sharing.service.cascada-balance.spec`,
     `aircraft-balance.service.reserva.spec`.
 
+122. **ROLES «DIRECCIÓN» Y «ADMINISTRACIÓN» (6-nov-2026, API 0.0.126,
+    migraciones `20261106000002` + `20261106000003`).** Pedido del dueño:
+    «un nuevo rol que sea Super usuario o Dirección … se le dará al usuario de
+    Ale Canales y Pablo Canales, además del rol de piloto que ya tienen; los
+    demás que están de ADMIN sean de Administración». `Rol.DIRECCION` es
+    superconjunto de ADMIN: `RolesGuard` lo deja pasar por CUALQUIER `@Roles`
+    sin que las listas lo nombren; las comprobaciones inline usan
+    `esAdminODireccion` o incluyen `Rol.DIRECCION` en la lista que se consulta
+    con `.includes` (`ROLES_POR_BUCKET`, `ROLES_AFAC_REAL`,
+    `ROLES_CONCILIACION`, `ROLES_SEGUIMIENTO_*`, `ROLES_PAGOS_SOCIOS_*`,
+    `ROLES_REVISAN_COTIZACION`, `ROLES_OFICINA_FACTURACION`);
+    `notifyRole(ADMIN)` llega también a DIRECCION (`rolesDestinatarios`).
+    ADMIN = «Administración» y pierde SOLO los módulos de Dirección:
+    `GET dashboards/overview|gastos|tarjetas`; la pantalla de Ingresos
+    (`ROLES_PANTALLA_INGRESOS`: resumen, entradas, Excel, lista, alta,
+    detalle, edición, baja y aplicaciones — lo que usan Conciliación y el
+    detalle del vuelo conserva `ROLES_INGRESOS`); las categorías NOMINA y
+    PERSONAL_DUENO (403 `CATEGORIA_SOLO_DIRECCION` al listar o exportar por
+    esa categoría y al crear o editar un gasto con ella; `reparto-iguales`
+    sin ADMIN); `GET profit-sharing` (compute), `aviones/:id(/historico)` y
+    Pagos a socios (`ROLES_PAGOS_SOCIOS_*`, el bucket `reparto-comprobantes` y
+    los renglones de socios del pre-cierre); `aircraft/:id/metrics` le
+    entrega `finanzas` solo con gastos (`finanzasParaRol`,
+    `finanzas_solo_gastos: true`); la caja chica cuyo dueño es DIRECCION no
+    sale en `caja-chica/fondos` y responde 403 `CAJA_SOLO_DIRECCION` en el
+    detalle y en toda escritura; en Usuarios no da el rol DIRECCION ni
+    edita/desactiva/cambia la contraseña/reenvía la invitación a quien lo
+    tiene (403 `SOLO_DIRECCION_EDITA_DIRECCION`). SE CONSERVAN para ADMIN
+    (decisión del dueño: «de momento pueden ver todo» en Reportes):
+    pre-cierre, cierre de mes, `profit-sharing/pdf|xlsx|dinero.xlsx`, los
+    balances en Excel, `dashboards/operativo` (Inicio) y `horas-piloto`.
+    Costuras conocidas: `GET expenses/:id` de un gasto de nómina y las
+    sugerencias de Conciliación siguen abiertas; la edición de un gasto de
+    nómina por Administración solo se veta cuando el PATCH trae la categoría o
+    ya se leyó la fila vigente (`necesitaActual`). Fuente única:
+    `common/roles.util.ts` (+ spec); `direccion-modulos.spec` congela la
+    matriz de rutas; `users.controller.direccion.spec`,
+    `caja-chica.service.direccion.spec`,
+    `expenses.controller.categoria-direccion.spec`. BD: enum `rol_usuario` +
+    'DIRECCION', la política `usuario_admin_select_all` y
+    `es_oficina_documentos()` incluyen DIRECCION; Ale y Pablo pasaron a
+    DIRECCION por email.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

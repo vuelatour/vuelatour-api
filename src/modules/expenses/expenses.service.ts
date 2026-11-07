@@ -269,6 +269,12 @@ import {
 import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
+import {
+  CODIGO_CATEGORIA_SOLO_DIRECCION,
+  MENSAJE_CATEGORIA_SOLO_DIRECCION,
+  esAdminODireccion,
+  rolVedaCategoria,
+} from '../../common/roles.util';
 import { normalizarTc } from '../../common/tc.util';
 import {
   CATEGORIAS_GASTO_SIN_AVION,
@@ -2563,6 +2569,18 @@ export class ExpensesService {
     return data ? conEstadoPago(data, hoyCancun()) : null;
   }
 
+  /** Nómina y gastos personales son solo de Dirección (invariante 122). */
+  private vetarCategoriaSoloDireccion(
+    rol: Rol | undefined,
+    categoria: string | null | undefined,
+  ): void {
+    if (!rolVedaCategoria(rol, categoria)) return;
+    throw new ForbiddenException({
+      message: MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      error: CODIGO_CATEGORIA_SOLO_DIRECCION,
+    });
+  }
+
   private async crearGasto(
     dto: CreateGastoDto,
     userId: string,
@@ -2784,6 +2802,9 @@ export class ExpensesService {
         'Un gasto INDIRECTO no se liga a un vuelo; usa otra categoría o quita el vuelo.',
       );
     }
+    // SOLO DIRECCIÓN (6-nov-2026, invariante 122): Administración no registra
+    // nómina ni gastos personales (sus módulos no los ve).
+    this.vetarCategoriaSoloDireccion(rol, dto.categoria);
     // NOMINA (29-ago): espejo de INDIRECTO — sin vuelo (avión opcional).
     if (dto.categoria === CategoriaGasto.NOMINA && dto.vuelo_id) {
       throw new BadRequestException(
@@ -2872,7 +2893,7 @@ export class ExpensesService {
     let capturaId = userId;
     let aeronaveId = dto.aeronave_id;
     if (dto.capturar_como_piloto === true) {
-      if (rol !== Rol.ADMIN && rol !== Rol.COORDINADOR) {
+      if (!esAdminODireccion(rol) && rol !== Rol.COORDINADOR) {
         throw new BadRequestException(
           'Solo oficina (admin/coordinador) puede registrar un gasto a nombre del piloto.',
         );
@@ -4922,6 +4943,11 @@ export class ExpensesService {
       : null;
     // «Pago de AFAC» (invariante 90): eco igual ⇒ fuera del DTO; cambio ⇒
     // oficina, Permiso y la migración (403 / 400 / 503) ANTES de escribir.
+    // SOLO DIRECCIÓN (invariante 122): Administración no edita nómina ni
+    // gastos personales (ni mueve un gasto hacia esas categorías). Se decide
+    // con la categoría del PATCH o la de la fila vigente cuando ya se leyó
+    // (`necesitaActual`); no se agrega una lectura solo para esto.
+    this.vetarCategoriaSoloDireccion(rol, dto.categoria ?? actual?.categoria);
     await this.validarPagoAfacPatch(dto, rol, actual);
     // «Pago al operador externo» (invariante 110): eco igual ⇒ fuera del
     // DTO; cambio ⇒ oficina y, al marcar, vuelo externo + categoría (403 /

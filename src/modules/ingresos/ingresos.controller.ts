@@ -60,6 +60,20 @@ export const ROLES_INGRESOS = [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION];
 export const ROLES_CONCILIAR = [Rol.ADMIN, Rol.FACTURACION];
 
 /**
+ * LA PANTALLA «Ingresos» ES SOLO DE DIRECCIÓN (6-nov-2026, invariante 122):
+ * resumen, lista de entradas, Excel, los ingresos registrados y su
+ * alta/edición/baja/aplicación salen de Administración (ADMIN). Conservan
+ * los roles de la clase lo que usan Conciliación y el detalle del vuelo:
+ * vuelos candidatos, «Es el pago de un vuelo», desaplicar un anticipo y el
+ * comprobante.
+ */
+export const ROLES_PANTALLA_INGRESOS = [
+  Rol.DIRECCION,
+  Rol.COORDINADOR,
+  Rol.FACTURACION,
+];
+
+/**
  * Multipart del comprobante: campo `archivo` (uno). Multer corta con 1 MB de
  * margen sobre los 10 MB de negocio para que el servicio diga el peso EXACTO
  * (413 ARCHIVO_MUY_GRANDE).
@@ -93,6 +107,7 @@ export class IngresosController {
   constructor(private readonly svc: IngresosService) {}
 
   @Get('resumen')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Tarjetas por moneda del periodo (default: mes corriente Cancún): cobros de vuelos (conciliado / sin conciliar / no pasa por el banco), otros ingresos, anticipos (saldo por aplicar), aportaciones, abonos por identificar. NOMINAL por moneda; los cobros aplicados de un anticipo no suman otra vez.',
@@ -102,6 +117,7 @@ export class IngresosController {
   }
 
   @Get('entradas')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Todo el dinero que entra en una lista (solo lectura): cobros de vuelos + ingresos registrados, orden por día desc. Filtros: origen, moneda, método, categoría, conciliación, vuelo=por_volar, q. Paginado 1..200.',
@@ -111,6 +127,7 @@ export class IngresosController {
   }
 
   @Get('export.xlsx')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Excel de ingresos (Resumen · Ingresos · Cobros de vuelos · Anticipos) con los filtros de «entradas» + vista.',
@@ -150,6 +167,7 @@ export class IngresosController {
   }
 
   @Get()
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Ingresos registrados: vista=otros|anticipos|todos, categoría, moneda, cuenta, cliente, conciliación, saldo=con_saldo|todos (anticipos), bajas=excluir|incluir|solo, q. Paginado 1..200 con totales por moneda.',
@@ -159,6 +177,7 @@ export class IngresosController {
   }
 
   @Post()
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @UseInterceptors(ArchivoIngresoInterceptor())
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
@@ -177,6 +196,7 @@ export class IngresosController {
   }
 
   @Get(':id')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Detalle: ingreso, aplicaciones (anticipo), abono que lo concilia y bitácora (≤ 100, más nueva primero).',
@@ -186,6 +206,7 @@ export class IngresosController {
   }
 
   @Patch(':id')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @UseInterceptors(ArchivoIngresoInterceptor())
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
@@ -202,6 +223,7 @@ export class IngresosController {
   }
 
   @Post(':id/baja')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -237,6 +259,7 @@ export class IngresosController {
   }
 
   @Post(':id/aplicaciones')
+  @Roles(...ROLES_PANTALLA_INGRESOS)
   @ApiOperation({
     summary:
       'Aplica un anticipo a un vuelo: crea un cobro NORMAL del vuelo (createCobro) ligado al anticipo. client_request_id OBLIGATORIO (reintento ⇒ 200 idempotente). 409 ANTICIPO_SIN_SALDO / ANTICIPO_OTRO_CLIENTE / NO_ES_ANTICIPO / COBRO_EXCEDE_SALDO.',

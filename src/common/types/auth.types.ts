@@ -1,4 +1,13 @@
 export enum Rol {
+  /**
+   * DIRECCIÓN (6-nov-2026, invariante 122): superusuario (Ale y Pablo
+   * Canales). Pasa cualquier `@Roles` (RolesGuard) y ve lo que ADMIN
+   * («Administración») ya no: Estadísticas, Ingresos, Nómina, Gastos
+   * personales, Reparto de utilidades, Pagos a socios, el dinero del avión
+   * y la caja chica de Dirección. Reglas: `common/roles.util.ts`.
+   */
+  DIRECCION = 'DIRECCION',
+  /** Administración (la oficina). Antes «acceso total»; ver invariante 122. */
   ADMIN = 'ADMIN',
   COORDINADOR = 'COORDINADOR',
   ANALISTA = 'ANALISTA',

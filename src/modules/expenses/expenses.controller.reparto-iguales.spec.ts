@@ -47,7 +47,7 @@ const RESPUESTA = {
 
 describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () => {
   let app: INestApplication;
-  let rol: Rol = Rol.ADMIN;
+  let rol: Rol = Rol.DIRECCION;
   const svc = {
     putRepartoIguales: jest.fn(),
     putRepartoMasivo: jest.fn(),
@@ -95,15 +95,15 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
   });
 
   beforeEach(() => {
-    rol = Rol.ADMIN;
+    rol = Rol.DIRECCION;
     jest.clearAllMocks();
     svc.putRepartoIguales.mockResolvedValue(RESPUESTA);
     svc.list.mockResolvedValue({ data: [], count: 0, limit: 50, offset: 0 });
     svc.listXlsx.mockResolvedValue(Buffer.from('xlsx'));
   });
 
-  it('ADMIN, COORDINADOR y FACTURACION ⇒ 200 (no 201) con la respuesta del servicio, que recibe (dto, usuario)', async () => {
-    for (const r of [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION]) {
+  it('DIRECCION, COORDINADOR y FACTURACION ⇒ 200 (no 201) con la respuesta del servicio, que recibe (dto, usuario)', async () => {
+    for (const r of [Rol.DIRECCION, Rol.COORDINADOR, Rol.FACTURACION]) {
       rol = r;
       const res = await request(http()).post(ruta).send(CUERPO);
       expect(res.status).toBe(200);
@@ -113,8 +113,9 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     expect(svc.findById).not.toHaveBeenCalled();
   }, 20_000);
 
-  it('ANALISTA, SOCIO, PILOTO, MECANICO y VISITANTE ⇒ 403 sin llamar al servicio', async () => {
+  it('ADMIN (Administración, invariante 122), ANALISTA, SOCIO, PILOTO, MECANICO y VISITANTE ⇒ 403 sin llamar al servicio', async () => {
     for (const r of [
+      Rol.ADMIN,
       Rol.ANALISTA,
       Rol.SOCIO,
       Rol.PILOTO,
@@ -129,15 +130,19 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     expect(svc.putRepartoIguales).not.toHaveBeenCalled();
   }, 20_000);
 
-  it('@Roles = los MISMOS del reparto masivo', () => {
+  it('@Roles: Dirección en vez de Administración (invariante 122); COORDINADOR y FACTURACION siguen', () => {
     const roles = (metodo: string) =>
       Reflect.getMetadata(
         ROLES_KEY,
         Object.getOwnPropertyDescriptor(ExpensesController.prototype, metodo)!
           .value as object,
       ) as Rol[];
-    expect(roles('repartoIguales')).toEqual(roles('repartoMasivo'));
     expect(roles('repartoIguales')).toEqual([
+      Rol.DIRECCION,
+      Rol.COORDINADOR,
+      Rol.FACTURACION,
+    ]);
+    expect(roles('repartoMasivo')).toEqual([
       Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,

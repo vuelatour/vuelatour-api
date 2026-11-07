@@ -19,6 +19,7 @@ import {
   IngresosController,
   ROLES_CONCILIAR,
   ROLES_INGRESOS,
+  ROLES_PANTALLA_INGRESOS,
 } from './ingresos.controller';
 import { IngresosService } from './ingresos.service';
 
@@ -41,7 +42,12 @@ describe('IngresosController — roles por metadata', () => {
     );
   });
 
-  it('solo DESAPLICAR y «cobro-de-vuelo» restringen (ADMIN, FACTURACION)', () => {
+  it('la PANTALLA es solo de Dirección (invariante 122): sus rutas llevan ROLES_PANTALLA_INGRESOS; desaplicar y «cobro-de-vuelo» siguen con ROLES_CONCILIAR', () => {
+    expect(ROLES_PANTALLA_INGRESOS).toEqual([
+      Rol.DIRECCION,
+      Rol.COORDINADOR,
+      Rol.FACTURACION,
+    ]);
     expect(ROLES_CONCILIAR).toEqual([Rol.ADMIN, Rol.FACTURACION]);
     const proto = IngresosController.prototype as unknown as Record<
       string,
@@ -50,7 +56,38 @@ describe('IngresosController — roles por metadata', () => {
     const conRoles = Object.getOwnPropertyNames(proto)
       .filter((m) => m !== 'constructor')
       .filter((m) => Reflect.getMetadata(ROLES_KEY, proto[m]) !== undefined);
-    expect(conRoles.sort()).toEqual(['cobroDeVuelo', 'desaplicar']);
+    expect(conRoles.sort()).toEqual([
+      'aplicar',
+      'baja',
+      'cobroDeVuelo',
+      'crear',
+      'desaplicar',
+      'editar',
+      'entradas',
+      'exportXlsx',
+      'lista',
+      'obtener',
+      'resumen',
+    ]);
+    for (const m of [
+      'resumen',
+      'entradas',
+      'exportXlsx',
+      'lista',
+      'crear',
+      'obtener',
+      'editar',
+      'baja',
+      'aplicar',
+    ]) {
+      expect(Reflect.getMetadata(ROLES_KEY, proto[m])).toEqual(
+        ROLES_PANTALLA_INGRESOS,
+      );
+    }
+    // Lo que usa Conciliación y el detalle del vuelo hereda la clase (ADMIN sigue).
+    for (const m of ['vuelosCandidatos', 'archivoUrl', 'quitarArchivo']) {
+      expect(Reflect.getMetadata(ROLES_KEY, proto[m])).toBeUndefined();
+    }
     expect(Reflect.getMetadata(ROLES_KEY, proto.desaplicar)).toEqual(
       ROLES_CONCILIAR,
     );
@@ -83,7 +120,7 @@ describe('IngresosController — roles por metadata', () => {
 
 describe('IngresosController — por HTTP', () => {
   let app: INestApplication;
-  let rol: Rol = Rol.ADMIN;
+  let rol: Rol = Rol.DIRECCION;
   const svc = {
     resumen: jest.fn().mockResolvedValue({ por_moneda: [] }),
     entradas: jest.fn().mockResolvedValue({ data: [] }),
@@ -144,7 +181,7 @@ describe('IngresosController — por HTTP', () => {
   });
 
   beforeEach(() => {
-    rol = Rol.ADMIN;
+    rol = Rol.DIRECCION;
     jest.clearAllMocks();
   });
 
@@ -225,7 +262,7 @@ describe('IngresosController — por HTTP', () => {
     expect(svc.crear).toHaveBeenCalledWith(
       JSON.stringify({ categoria: 'OTRO_INGRESO' }),
       expect.objectContaining({ originalname: 'a.pdf' }),
-      expect.objectContaining({ userId: 'u-1', rol: Rol.ADMIN }),
+      expect.objectContaining({ userId: 'u-1', rol: Rol.DIRECCION }),
     );
     const extra = await request(http())
       .post('/v1/ingresos')

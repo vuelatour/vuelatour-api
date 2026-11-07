@@ -38,6 +38,7 @@ describe('ConciliacionController — lote por metadata', () => {
       Reflect.getMetadata(ROLES_KEY, proto.gastosCandidatos),
     ).toBeUndefined();
     expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
     ]);
@@ -52,6 +53,7 @@ describe('ConciliacionController — lote por metadata', () => {
       Reflect.getMetadata(ROLES_KEY, proto.conciliacionDeGasto),
     ).toBeUndefined();
     expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
     ]);

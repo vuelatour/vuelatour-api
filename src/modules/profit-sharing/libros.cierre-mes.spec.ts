@@ -604,7 +604,7 @@ describe('PRE-CIERRE con el cierre de mes', () => {
       estado: 'ABIERTO',
       puede_cerrar: false,
       motivo_no_cerrable: 'MES_EN_CURSO',
-      roles_cierran: ['ADMIN', 'FACTURACION'],
+      roles_cierran: ['DIRECCION', 'ADMIN', 'FACTURACION'],
     });
   });
 

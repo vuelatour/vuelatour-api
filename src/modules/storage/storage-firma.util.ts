@@ -62,6 +62,7 @@ export const BUCKETS_TRIPULACION: readonly BucketFirmable[] = [
 
 /** Roles de oficina (los que ven el panel). */
 export const ROLES_OFICINA_FIRMA: readonly Rol[] = [
+  Rol.DIRECCION,
   Rol.ADMIN,
   Rol.COORDINADOR,
   Rol.FACTURACION,
@@ -94,20 +95,31 @@ export const ROLES_POR_BUCKET: Readonly<
   'inventario-fotos': ROLES_OFICINA_FIRMA,
   // = `POST flights/cobro-voucher-urls` (el panel le dice al SOCIO «Solo
   // oficina abre el comprobante»).
-  'cobro-vouchers': [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION],
+  'cobro-vouchers': [
+    Rol.DIRECCION,
+    Rol.ADMIN,
+    Rol.COORDINADOR,
+    Rol.FACTURACION,
+  ],
   // Privados SIN política de lectura: copian el `@Roles` de su endpoint.
   // facturas = factura-cliente/facturas-emitidas `archivo-url`.
-  facturas: [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION],
+  facturas: [Rol.DIRECCION, Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION],
   // ingresos = `ROLES_INGRESOS` (`GET ingresos/:id/archivo-url`).
-  ingresos: [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION],
+  ingresos: [Rol.DIRECCION, Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION],
   // documentos-flota = `GET expirations/:id/archivo` y la póliza.
-  'documentos-flota': [Rol.ADMIN, Rol.COORDINADOR],
+  'documentos-flota': [Rol.DIRECCION, Rol.ADMIN, Rol.COORDINADOR],
   // estados-cuenta = controller de conciliación.
-  'estados-cuenta': [Rol.ADMIN, Rol.FACTURACION],
+  'estados-cuenta': [Rol.DIRECCION, Rol.ADMIN, Rol.FACTURACION],
   // reparto-comprobantes = `GET profit-sharing/pagos`
   // (`ROLES_PAGOS_SOCIOS_LECTURA`): el SOCIO ve el comprobante de SUS pagos
   // (el listado solo le entrega sus renglones y sus paths).
-  'reparto-comprobantes': [Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO],
+  // Pagos a socios es solo de Dirección (invariante 122): ADMIN salió.
+  'reparto-comprobantes': [
+    Rol.DIRECCION,
+    Rol.FACTURACION,
+    Rol.ANALISTA,
+    Rol.SOCIO,
+  ],
 };
 
 /** Todos los roles que llegan al endpoint (para `@Roles`). */

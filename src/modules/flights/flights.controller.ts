@@ -30,6 +30,7 @@ import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
+import { esAdminODireccion } from '../../common/roles.util';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateCobroDto,
@@ -1098,7 +1099,7 @@ export class FlightsController {
     // cobro y los únicos que ven el selector). A COORDINADOR y PILOTO el
     // campo se les DESCARTA (patrón `delete dto.tua_incluida`, invariante
     // 66): jamás un 400 por un campo que su app no ve.
-    if (c.rol !== Rol.ADMIN && c.rol !== Rol.FACTURACION) {
+    if (!esAdminODireccion(c.rol) && c.rol !== Rol.FACTURACION) {
       delete dto.factura_emitida_id;
     }
     return this.flights.createCobro(id, dto, c.userId, c.rol);

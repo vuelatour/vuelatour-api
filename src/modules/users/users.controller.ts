@@ -16,6 +16,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
+import { esAdminODireccion } from '../../common/roles.util';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CreateSocioDto } from './dto/create-socio.dto';
 import { CreateUsuarioDto } from './dto/create-usuario.dto';
@@ -43,8 +44,11 @@ export class UsersController {
     summary:
       'Create / invite user. supabase_auth_id queda null hasta el primer login. Útil para pre-cargar pilotos antes de que se logueen con Google.',
   })
-  create(@Body() dto: CreateUsuarioDto, @CurrentUser() current: AuthenticatedUser) {
-    return this.users.create(dto, current.userId);
+  create(
+    @Body() dto: CreateUsuarioDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.users.create(dto, current.userId, current.rol);
   }
 
   @Post('socios')
@@ -66,7 +70,7 @@ export class UsersController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() current: AuthenticatedUser,
   ) {
-    if (current.rol !== Rol.ADMIN && current.userId !== id) {
+    if (!esAdminODireccion(current.rol) && current.userId !== id) {
       throw new ForbiddenException('Only ADMIN can view other users');
     }
     return this.users.findById(id);
@@ -98,7 +102,12 @@ export class UsersController {
     @Body() dto: ResetPasswordDto,
     @CurrentUser() current: AuthenticatedUser,
   ) {
-    return this.users.resetPassword(id, dto.password, current.userId);
+    return this.users.resetPassword(
+      id,
+      dto.password,
+      current.userId,
+      current.rol,
+    );
   }
 
   @Post(':id/resend-invitation')
@@ -108,8 +117,11 @@ export class UsersController {
     summary:
       'Reenvía por correo (Resend) la invitación/aviso de acceso al usuario. Devuelve sent=false si Resend está deshabilitado.',
   })
-  resendInvitation(@Param('id', ParseUUIDPipe) id: string) {
-    return this.users.resendInvitation(id);
+  resendInvitation(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.users.resendInvitation(id, current.rol);
   }
 
   @Delete(':id')
@@ -123,6 +135,6 @@ export class UsersController {
     if (current.userId === id) {
       throw new ForbiddenException('Cannot deactivate yourself');
     }
-    return this.users.softDelete(id, current.userId);
+    return this.users.softDelete(id, current.userId, current.rol);
   }
 }

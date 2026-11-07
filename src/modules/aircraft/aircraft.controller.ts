@@ -135,8 +135,12 @@ export class AircraftController {
     summary:
       'Métricas operativas: apto-para-volar, utilización (horas/vuelos) y finanzas',
   })
-  metrics(@Param('id', ParseUUIDPipe) id: string) {
-    return this.aircraft.aircraftMetrics(id);
+  metrics(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    // ADMINISTRACIÓN (invariante 122): recibe solo los GASTOS en `finanzas`.
+    return this.aircraft.aircraftMetrics(id, c.rol);
   }
 
   @Get(':id/combustible-mensual')
@@ -337,7 +341,11 @@ export class AircraftController {
   ) {
     if (!current) throw new ForbiddenException();
     if (permanente) return this.aircraft.deleteOwner(ownerId);
-    return this.aircraft.closeOwner(ownerId, hasta || undefined, current.userId);
+    return this.aircraft.closeOwner(
+      ownerId,
+      hasta || undefined,
+      current.userId,
+    );
   }
 
   // ============ Seguros ============

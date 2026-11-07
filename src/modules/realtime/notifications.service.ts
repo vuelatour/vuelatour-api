@@ -3,6 +3,7 @@ import { corteTs, inicioOficialDe } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Rol } from '../../common/types/auth.types';
+import { rolesDestinatarios } from '../../common/roles.util';
 import { PushService, type DispositivoPush } from './push.service';
 import { RealtimeGateway } from './realtime.gateway';
 
@@ -35,7 +36,8 @@ const SIN_ENTREGA: EntregaNotificacion = {
   plataformas: [],
 };
 
-const NOTIF_COLS = 'id, usuario_id, tipo, titulo, cuerpo, data, link, leida, created_at, read_at';
+const NOTIF_COLS =
+  'id, usuario_id, tipo, titulo, cuerpo, data, link, leida, created_at, read_at';
 const SOCKET_EVENT = 'notification';
 
 @Injectable()
@@ -165,17 +167,22 @@ export class NotificationsService {
     excludeUsuarioId?: string,
   ): Promise<number> {
     try {
-      const { data: users, error: usersErr } = await this.supabase.service
+      const consulta = this.supabase.service
         .from('usuario')
         .select('id')
-        .eq('rol', rol)
+        // Dirección recibe lo de Administración (invariante 122).
+        .in('rol', rolesDestinatarios(rol))
         .eq('estado', 'ACTIVO')
         // Externos sin acceso: fuera de los broadcasts por rol.
         .eq('es_piloto_externo', false);
+      const { data: users, error: usersErr } = (await consulta) as {
+        data: Array<{ id: string }> | null;
+        error: { message: string } | null;
+      };
       if (usersErr) throw new Error(usersErr.message);
 
       const targets = (users ?? [])
-        .map((u) => (u as { id: string }).id)
+        .map((u) => u.id)
         .filter((id) => id !== excludeUsuarioId);
       if (targets.length === 0) return 0;
 
@@ -187,7 +194,9 @@ export class NotificationsService {
         data: n.data ?? {},
         link: n.link ?? null,
       }));
-      const { error } = await this.supabase.service.from('notificacion').insert(rows);
+      const { error } = await this.supabase.service
+        .from('notificacion')
+        .insert(rows);
       if (error) throw new Error(error.message);
 
       // Push a cada destinatario (best-effort, no-op si está deshabilitado).
@@ -196,14 +205,17 @@ export class NotificationsService {
 
       // Emisión en vivo: al room del rol (excepto el emisor, que ya tiene su
       // propio room por usuario y queda excluido de la persistencia arriba).
-      this.gateway.emitToRole(rol, SOCKET_EVENT, {
+      const vivo = {
         tipo: n.tipo,
         titulo: n.titulo,
         cuerpo: n.cuerpo ?? null,
         data: n.data ?? {},
         link: n.link ?? null,
         created_at: new Date().toISOString(),
-      });
+      };
+      for (const r of rolesDestinatarios(rol)) {
+        this.gateway.emitToRole(r, SOCKET_EVENT, vivo);
+      }
       return targets.length;
     } catch (err) {
       this.logger.warn(
@@ -230,7 +242,12 @@ export class NotificationsService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
-    return { data: data ?? [], count: count ?? 0, limit: opts.limit, offset: opts.offset };
+    return {
+      data: data ?? [],
+      count: count ?? 0,
+      limit: opts.limit,
+      offset: opts.offset,
+    };
   }
 
   async unreadCount(usuarioId: string): Promise<number> {
@@ -250,7 +267,10 @@ export class NotificationsService {
   async markRead(usuarioId: string, id: string): Promise<{ updated: boolean }> {
     const { error, count } = await this.supabase.service
       .from('notificacion')
-      .update({ leida: true, read_at: new Date().toISOString() }, { count: 'exact' })
+      .update(
+        { leida: true, read_at: new Date().toISOString() },
+        { count: 'exact' },
+      )
       .eq('id', id)
       .eq('usuario_id', usuarioId)
       .eq('leida', false);
@@ -261,7 +281,10 @@ export class NotificationsService {
   async markAllRead(usuarioId: string): Promise<{ updated: number }> {
     const { error, count } = await this.supabase.service
       .from('notificacion')
-      .update({ leida: true, read_at: new Date().toISOString() }, { count: 'exact' })
+      .update(
+        { leida: true, read_at: new Date().toISOString() },
+        { count: 'exact' },
+      )
       .eq('usuario_id', usuarioId)
       .eq('leida', false);
     if (error) throw new Error(error.message);

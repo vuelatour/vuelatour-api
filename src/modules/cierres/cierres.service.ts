@@ -124,9 +124,13 @@ import {
 } from './dto/cierres.dto';
 
 /** Roles que CIERRAN un mes. */
-export const ROLES_CIERRAN_MES = [Rol.ADMIN, Rol.FACTURACION] as const;
+export const ROLES_CIERRAN_MES = [
+  Rol.DIRECCION,
+  Rol.ADMIN,
+  Rol.FACTURACION,
+] as const;
 /** Roles que REABREN un mes. */
-export const ROLES_REABREN_MES = [Rol.ADMIN] as const;
+export const ROLES_REABREN_MES = [Rol.DIRECCION, Rol.ADMIN] as const;
 
 /** Los 6 renglones del pre-cierre que bloquean (`listo`). */
 export { CLAVES_BLOQUEANTES_PRECIERRE };

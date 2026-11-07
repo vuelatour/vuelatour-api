@@ -15,7 +15,11 @@ import { Rol } from '../../common/types/auth.types';
  * cuentas ni el bucket): cambiar esta lista cambia quién ve qué y el spec
  * de paridad lo grita.
  */
-export const ROLES_CONCILIACION: readonly Rol[] = [Rol.ADMIN, Rol.FACTURACION];
+export const ROLES_CONCILIACION: readonly Rol[] = [
+  Rol.DIRECCION,
+  Rol.ADMIN,
+  Rol.FACTURACION,
+];
 
 /**
  * ¿Este rol ve el detalle del banco (cargo, cuenta y estado de cuenta)?

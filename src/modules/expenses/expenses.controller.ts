@@ -19,6 +19,11 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
+import {
+  CODIGO_CATEGORIA_SOLO_DIRECCION,
+  MENSAJE_CATEGORIA_SOLO_DIRECCION,
+  rolVedaCategoria,
+} from '../../common/roles.util';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CambioFechaGastoDto,
@@ -67,6 +72,7 @@ export class ExpensesController {
   })
   async list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
+    this.vetarCategoriaSoloDireccion(c.rol, filters.categoria);
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
     // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
     // mecánico, además, solo combustible (GAS) — no ve el resto de gastos.
@@ -96,6 +102,21 @@ export class ExpensesController {
       return res;
     }
     return this.expenses.list(filters);
+  }
+
+  /**
+   * NÓMINA Y GASTOS PERSONALES SOLO DE DIRECCIÓN (6-nov-2026, invariante
+   * 122): Administración (ADMIN) no lista ni exporta esas categorías.
+   */
+  private vetarCategoriaSoloDireccion(
+    rol: Rol | undefined,
+    categoria: string | null | undefined,
+  ): void {
+    if (!rolVedaCategoria(rol, categoria)) return;
+    throw new ForbiddenException({
+      message: MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      error: CODIGO_CATEGORIA_SOLO_DIRECCION,
+    });
   }
 
   @Get('sugerir-vuelo')
@@ -139,6 +160,7 @@ export class ExpensesController {
     @Query() q: ListGastosQuery,
     @CurrentUser() c: AuthenticatedUser,
   ): Promise<StreamableFile> {
+    this.vetarCategoriaSoloDireccion(c.rol, q.categoria);
     const buffer = await this.expenses.listXlsx(q, {
       detalleBanco: puedeVerDetalleBanco(c.rol),
     });
@@ -362,7 +384,8 @@ export class ExpensesController {
   // masivo.
 
   @Post('reparto-iguales')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  // Solo Dirección (invariante 122): es el reparto de la NÓMINA.
+  @Roles(Rol.DIRECCION, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -407,6 +430,7 @@ export class ExpensesController {
     // ADITIVO (16-oct-2026, invariante 87): las facturas del gasto para
     // «Verificar / editar» (solo oficina; sin la llave si la lectura falla).
     if (
+      c.rol === Rol.DIRECCION ||
       c.rol === Rol.ADMIN ||
       c.rol === Rol.COORDINADOR ||
       c.rol === Rol.FACTURACION

@@ -2,6 +2,7 @@ import { assertMesAbierto } from '../../common/cierre-mes.lector';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -9,6 +10,14 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import type { Rol } from '../../common/types/auth.types';
+import {
+  CODIGO_CAJA_SOLO_DIRECCION,
+  MENSAJE_CAJA_SOLO_DIRECCION,
+  esAdministracion,
+  rolVeFondo,
+  type FondoConDueno,
+} from '../../common/roles.util';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import {
   CONCEPTO_CAJA,
@@ -348,7 +357,7 @@ export class CajaChicaService {
 
   // ===== Fondos =====
 
-  async listFondos(filters: ListFondosQuery) {
+  async listFondos(filters: ListFondosQuery, actorRol?: Rol) {
     let q = this.supabase.service
       .from('caja_chica_fondo')
       .select(FONDO_COLS, { count: 'exact' })
@@ -359,7 +368,13 @@ export class CajaChicaService {
 
     const { data: fondos, error, count } = await q;
     if (error) throw new Error(error.message);
-    const rows = fondos ?? [];
+    // CAJA DE DIRECCIÓN (invariante 122): Administración no la ve (ni en el
+    // conteo).
+    const todas = fondos ?? [];
+    const rows = todas.filter((f) =>
+      rolVeFondo(actorRol, f as unknown as FondoConDueno),
+    );
+    const ocultos = todas.length - rows.length;
 
     const fondoIds = rows.map((f) => (f as { id: string }).id);
     const usuarioIds = rows.map(
@@ -392,7 +407,7 @@ export class CajaChicaService {
 
     return {
       data,
-      count: count ?? 0,
+      count: Math.max(0, (count ?? 0) - ocultos),
       limit: filters.limit,
       offset: filters.offset,
     };
@@ -450,6 +465,30 @@ export class CajaChicaService {
       map.get(k)!.push(g);
     }
     return map;
+  }
+
+  /**
+   * CAJA DE DIRECCIÓN (6-nov-2026, invariante 122): Administración (ADMIN)
+   * ni la ve ni la toca; el dueño del fondo decide (`usuario.rol`).
+   */
+  private assertFondoVisible(fondo: FondoConDueno, actorRol?: Rol): void {
+    if (rolVeFondo(actorRol, fondo)) return;
+    throw new ForbiddenException({
+      message: MENSAJE_CAJA_SOLO_DIRECCION,
+      error: CODIGO_CAJA_SOLO_DIRECCION,
+    });
+  }
+
+  /** Misma veda a partir del id del fondo; solo lee de más para Administración. */
+  private async assertFondoIdVisible(
+    fondoId: string,
+    actorRol?: Rol,
+  ): Promise<void> {
+    if (!esAdministracion(actorRol)) return;
+    this.assertFondoVisible(
+      (await this.findFondo(fondoId)) as unknown as FondoConDueno,
+      actorRol,
+    );
   }
 
   async findFondo(id: string) {
@@ -606,8 +645,9 @@ export class CajaChicaService {
   }
 
   /** Detalle con historial unificado (movimientos + gastos efectivo) y saldo corrido. */
-  async getFondoDetail(id: string) {
+  async getFondoDetail(id: string, actorRol?: Rol) {
     const fondo = (await this.findFondo(id)) as FondoRow;
+    this.assertFondoVisible(fondo as unknown as FondoConDueno, actorRol);
     const { movs, efectivo, historial, porPagar } =
       await this.cargarLibro(fondo);
     const ultimo = historial[historial.length - 1];
@@ -934,7 +974,13 @@ export class CajaChicaService {
     return data!;
   }
 
-  async updateFondo(id: string, dto: UpdateFondoDto, userId: string) {
+  async updateFondo(
+    id: string,
+    dto: UpdateFondoDto,
+    userId: string,
+    actorRol?: Rol,
+  ) {
+    await this.assertFondoIdVisible(id, actorRol);
     if (Object.keys(dto).length === 0) return this.findFondo(id);
     // CAJAS VINCULADAS (20-ago-2026): validar el vínculo ANTES de escribir.
     // `retroactivo` es una instrucción, no una columna — se separa del patch.
@@ -999,8 +1045,10 @@ export class CajaChicaService {
     fondoId: string,
     dto: CreateCajaMovimientoDto,
     userId: string,
+    actorRol?: Rol,
   ) {
     const fondo = (await this.findFondo(fondoId)) as { moneda: MonedaCaja }; // 404 si no existe
+    this.assertFondoVisible(fondo as unknown as FondoConDueno, actorRol);
 
     if (dto.monto === 0)
       throw new BadRequestException('El monto no puede ser cero.');
@@ -1205,6 +1253,7 @@ export class CajaChicaService {
     id: string,
     dto: UpdateCajaMovimientoDto,
     userId: string,
+    actorRol?: Rol,
   ) {
     const { data: mov, error: readErr } = await this.supabase.service
       .from('caja_chica_movimiento')
@@ -1213,6 +1262,10 @@ export class CajaChicaService {
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    await this.assertFondoIdVisible(
+      (mov as { fondo_id: string }).fondo_id,
+      actorRol,
+    );
     // Un ESPEJO sigue a su origen: se corrige desde la reposición de la
     // caja vinculada, nunca directo (divergirían los dos lados).
     if ((mov as { espejo_de_id?: string | null }).espejo_de_id) {
@@ -1315,14 +1368,18 @@ export class CajaChicaService {
   /** Elimina un movimiento (la UI confirma): el saldo recalcula solo.
    * Borrar una REPOSICIÓN de caja vinculada arrastra su espejo (CASCADE);
    * el espejo directo no se borra — se quita desde su origen. */
-  async removeMovimiento(id: string) {
+  async removeMovimiento(id: string, actorRol?: Rol) {
     const { data: mov, error: readErr } = await this.supabase.service
       .from('caja_chica_movimiento')
-      .select('id, espejo_de_id, fecha')
+      .select('id, fondo_id, espejo_de_id, fecha')
       .eq('id', id)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    await this.assertFondoIdVisible(
+      (mov as { fondo_id: string }).fondo_id,
+      actorRol,
+    );
     // CIERRE DE MES (invariante 89): borrar un movimiento de un mes cerrado.
     await assertMesAbierto(
       this.supabase.service,
@@ -1699,6 +1756,7 @@ export class CajaChicaService {
    */
   async reposicionXlsx(
     movimientoId: string,
+    actorRol?: Rol,
   ): Promise<{ buffer: Buffer; filename: string }> {
     const { data: mov, error } = await this.supabase.service
       .from('caja_chica_movimiento')
@@ -1709,6 +1767,10 @@ export class CajaChicaService {
     if (!mov) {
       throw new NotFoundException('Ese movimiento de caja chica ya no existe.');
     }
+    await this.assertFondoIdVisible(
+      (mov as { fondo_id: string }).fondo_id,
+      actorRol,
+    );
     const tipo = (mov as { tipo: string }).tipo;
     if (tipo !== TIPO_REPOSICION) {
       throw new ConflictException({
@@ -1742,8 +1804,10 @@ export class CajaChicaService {
    */
   async porReponerXlsx(
     fondoId: string,
+    actorRol?: Rol,
   ): Promise<{ buffer: Buffer; filename: string }> {
     const fondo = (await this.findFondo(fondoId)) as FondoRow;
+    this.assertFondoVisible(fondo as unknown as FondoConDueno, actorRol);
     const { historial } = await this.cargarLibro(fondo);
     const tramo = tramoDeReposicion(historial, null)!;
     return this.excelDeTramo('pendiente', fondo, tramo);

@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import { Rol } from '../types/auth.types';
+import { esDireccion } from '../roles.util';
 
 /**
  * Superficie mínima del VISITANTE (27-ago): este guard es default-ABIERTO
@@ -50,6 +51,10 @@ export class RolesGuard implements CanActivate {
       }
       return true;
     }
+
+    // DIRECCIÓN (6-nov-2026, invariante 122): superconjunto de ADMIN — pasa
+    // CUALQUIER @Roles sin que las listas lo nombren (common/roles.util).
+    if (esDireccion(req.user?.rol)) return true;
 
     if (!required || required.length === 0) return true;
 

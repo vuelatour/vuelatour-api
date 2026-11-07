@@ -52,6 +52,7 @@ export function esPagoAfac(g: GastoConMarcaAfac | null | undefined): boolean {
  * validar en cada escritura.
  */
 export const ROLES_AFAC_REAL: readonly Rol[] = [
+  Rol.DIRECCION,
   Rol.ADMIN,
   Rol.FACTURACION,
   Rol.COORDINADOR,

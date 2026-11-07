@@ -11,6 +11,7 @@ import {
 } from 'class-validator';
 
 const ROLES = [
+  'DIRECCION',
   'ADMIN',
   'COORDINADOR',
   'ANALISTA',

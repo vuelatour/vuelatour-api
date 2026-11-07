@@ -31,6 +31,7 @@ import {
 } from '../flights/factura-cliente.util';
 import { validarComprobanteCobro } from '../flights/comprobante-cobro.util';
 import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
+import { esAdminODireccion } from '../../common/roles.util';
 import {
   categoriaIngresoAdmiteAvion,
   categoriaIngresoAdmiteVuelo,
@@ -2337,7 +2338,11 @@ export class IngresosService {
     );
     // 2) ROL: conciliar con el banco = ADMIN y FACTURACION.
     const movId = dto.movimiento_bancario_id ?? null;
-    if (movId && actor.rol !== Rol.ADMIN && actor.rol !== Rol.FACTURACION) {
+    if (
+      movId &&
+      !esAdminODireccion(actor.rol) &&
+      actor.rol !== Rol.FACTURACION
+    ) {
       throw new ForbiddenException({
         message: 'Solo Administración y Facturación concilian con el banco.',
         error: 'CONCILIAR_SOLO_ADMIN_FACTURACION',
@@ -3282,7 +3287,7 @@ export class IngresosService {
     idempotente?: true;
   }> {
     await this.assertDisponible();
-    if (actor.rol !== Rol.ADMIN && actor.rol !== Rol.FACTURACION) {
+    if (!esAdminODireccion(actor.rol) && actor.rol !== Rol.FACTURACION) {
       throw new ForbiddenException({
         message: 'Solo Administración y Facturación concilian con el banco.',
         error: 'CONCILIAR_SOLO_ADMIN_FACTURACION',

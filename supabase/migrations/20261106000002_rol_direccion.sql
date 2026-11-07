@@ -1,0 +1,11 @@
+-- ROL «DIRECCIÓN» (6-nov-2026, API 0.0.126, invariante 122). Pedido del
+-- dueño: «un nuevo rol que sea Super usuario o Dirección … se le dará a Ale
+-- Canales y Pablo Canales; los demás que están de ADMIN sean de
+-- Administración». El enum gana el valor; el alcance de cada rol lo decide
+-- el API (common/roles.util.ts).
+--
+-- PASO 1 de 2 (en su PROPIA transacción): un valor nuevo de enum no se puede
+-- usar en la misma transacción que lo crea (PostgreSQL: «unsafe use of new
+-- value»). El paso 2 (políticas, función y las altas de Ale y Pablo) va en
+-- 20261106000003.
+alter type public.rol_usuario add value if not exists 'DIRECCION' before 'ADMIN';

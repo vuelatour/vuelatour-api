@@ -18,7 +18,8 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
+import { ROLES_AFAC_REAL } from '../../common/afac-real.util';
+import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { PutAfacRealDto } from './dto/afac-real.dto';
 import { AfacRealService } from './afac-real.service';
 
@@ -29,7 +30,7 @@ export class AfacRealController {
   constructor(private readonly afac: AfacRealService) {}
 
   @Put(':id/afac-real')
-  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @Roles(...ROLES_AFAC_REAL)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -45,7 +46,7 @@ export class AfacRealController {
   }
 
   @Delete(':id/afac-real')
-  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.COORDINADOR)
+  @Roles(...ROLES_AFAC_REAL)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:

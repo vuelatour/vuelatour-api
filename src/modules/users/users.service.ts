@@ -8,6 +8,14 @@ import {
 } from '@nestjs/common';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import { Rol } from '../../common/types/auth.types';
+import {
+  CODIGO_SOLO_DIRECCION_USUARIOS,
+  MENSAJE_SOLO_DIRECCION_ASIGNA,
+  MENSAJE_SOLO_DIRECCION_EDITA,
+  actorPuedeAsignarRol,
+  actorPuedeTocarUsuario,
+  esAdminODireccion,
+} from '../../common/roles.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { EmailService } from '../notifications/email.service';
 import { PushService } from '../realtime/push.service';
@@ -298,9 +306,21 @@ export class UsersService {
     return data as unknown as UsuarioRow;
   }
 
-  async create(dto: CreateUsuarioDto, createdBy: string): Promise<UsuarioRow> {
+  async create(
+    dto: CreateUsuarioDto,
+    createdBy: string,
+    actorRol?: Rol,
+  ): Promise<UsuarioRow> {
     if (!dto.nombre?.trim() || !dto.email?.trim()) {
       throw new BadRequestException('nombre and email are required');
+    }
+    // SOLO DIRECCIÓN DA DIRECCIÓN (invariante 122): Administración no crea
+    // superusuarios. Antes de tocar nada.
+    if (actorRol !== undefined && !actorPuedeAsignarRol(actorRol, dto.rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_SOLO_DIRECCION_ASIGNA,
+        error: CODIGO_SOLO_DIRECCION_USUARIOS,
+      });
     }
 
     const payload: Record<string, unknown> = {
@@ -375,8 +395,12 @@ export class UsersService {
    * Reenvía el correo de invitación/acceso a un usuario ya existente. Devuelve
    * si el correo se envió (false si Resend está deshabilitado o falló).
    */
-  async resendInvitation(id: string): Promise<{ ok: true; sent: boolean; email: string }> {
+  async resendInvitation(
+    id: string,
+    actorRol?: Rol,
+  ): Promise<{ ok: true; sent: boolean; email: string }> {
     const user = await this.findById(id);
+    this.assertActorTocaUsuario(actorRol, user);
     if (user.estado === 'INACTIVO') {
       throw new BadRequestException(
         'El usuario está inactivo; reactívalo antes de reenviar la invitación.',
@@ -534,6 +558,40 @@ export class UsersService {
   }
 
   /**
+   * ADMINISTRACIÓN frente a DIRECCIÓN (6-nov-2026, invariante 122): ni da el
+   * rol de Dirección ni edita a quien ya lo tiene. Dirección edita todo.
+   */
+  private async autorizarEdicionAdministracion(
+    id: string,
+    patch: UpdateUsuarioDto,
+  ): Promise<void> {
+    if (
+      patch.rol !== undefined &&
+      !actorPuedeAsignarRol(Rol.ADMIN, patch.rol)
+    ) {
+      throw new ForbiddenException({
+        message: MENSAJE_SOLO_DIRECCION_ASIGNA,
+        error: CODIGO_SOLO_DIRECCION_USUARIOS,
+      });
+    }
+    this.assertActorTocaUsuario(Rol.ADMIN, await this.findById(id));
+  }
+
+  /** 403 si Administración intenta tocar a un usuario de Dirección. */
+  private assertActorTocaUsuario(
+    actorRol: Rol | undefined,
+    usuario: { rol?: string | null },
+  ): void {
+    if (actorRol === undefined || actorPuedeTocarUsuario(actorRol, usuario)) {
+      return;
+    }
+    throw new ForbiddenException({
+      message: MENSAJE_SOLO_DIRECCION_EDITA,
+      error: CODIGO_SOLO_DIRECCION_USUARIOS,
+    });
+  }
+
+  /**
    * `actorRol` (2-oct-2026): el rol de quien edita. ADMIN (o un llamado
    * interno sin rol, p. ej. `softDelete`) edita todo como siempre; cualquier
    * otro rol pasa por `autorizarEdicionAcotada`.
@@ -544,8 +602,13 @@ export class UsersService {
     updatedBy: string,
     actorRol?: Rol,
   ): Promise<UsuarioRow> {
-    if (actorRol !== undefined && actorRol !== Rol.ADMIN) {
+    if (actorRol !== undefined && !esAdminODireccion(actorRol)) {
       await this.autorizarEdicionAcotada(id, patch, actorRol);
+    }
+    // ADMINISTRACIÓN (invariante 122): ni da el rol de Dirección ni toca a un
+    // usuario de Dirección (editar, desactivar, contraseña, invitación).
+    if (actorRol === Rol.ADMIN) {
+      await this.autorizarEdicionAdministracion(id, patch);
     }
     if (Object.keys(patch).length === 0) {
       return this.findById(id);
@@ -633,8 +696,17 @@ export class UsersService {
     return data as unknown as UsuarioRow;
   }
 
-  async softDelete(id: string, updatedBy: string): Promise<UsuarioRow> {
-    return this.update(id, { estado: 'INACTIVO' as never }, updatedBy);
+  async softDelete(
+    id: string,
+    updatedBy: string,
+    actorRol?: Rol,
+  ): Promise<UsuarioRow> {
+    return this.update(
+      id,
+      { estado: 'INACTIVO' as never },
+      updatedBy,
+      actorRol,
+    );
   }
 
   /**
@@ -654,12 +726,18 @@ export class UsersService {
     id: string,
     newPassword: string,
     actorId: string,
-  ): Promise<{ ok: true; created_auth_user: boolean; supabase_auth_id: string }> {
+    actorRol?: Rol,
+  ): Promise<{
+    ok: true;
+    created_auth_user: boolean;
+    supabase_auth_id: string;
+  }> {
     if (!newPassword || newPassword.length < 6) {
       throw new BadRequestException('Password must be at least 6 characters');
     }
 
     const user = await this.findById(id);
+    this.assertActorTocaUsuario(actorRol, user);
     // Piloto externo (doc 3.7): JAMÁS tiene acceso — esta vía crearía su
     // cuenta de auth y le abriría la puerta aunque la allowlist lo excluya.
     if (user.es_piloto_externo) {
@@ -753,7 +831,8 @@ export class UsersService {
         string,
         unknown
       > | null;
-      const pilotoTramo = (e.piloto_id as string | null) ?? (vuelo?.piloto_id as string | null);
+      const pilotoTramo =
+        (e.piloto_id as string | null) ?? (vuelo?.piloto_id as string | null);
       if (pilotoTramo !== userId) continue;
       if (e.taco_salida == null || e.taco_llegada == null) continue;
       const h = Number(e.taco_llegada) - Number(e.taco_salida);

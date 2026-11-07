@@ -35,8 +35,9 @@ describe('afac-real.util (invariante 90)', () => {
     expect(esPagoAfac(undefined)).toBe(false);
   });
 
-  it('roles de oficina: ADMIN, FACTURACION, COORDINADOR (ANALISTA ve sin editar)', () => {
+  it('roles de oficina: DIRECCION, ADMIN, FACTURACION, COORDINADOR (ANALISTA ve sin editar)', () => {
     expect([...ROLES_AFAC_REAL]).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
       Rol.COORDINADOR,

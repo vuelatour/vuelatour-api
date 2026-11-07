@@ -5655,7 +5655,7 @@ export class ProfitSharingService {
       cerrado_por_nombre: fila?.cerrado_por?.nombre ?? null,
       puede_cerrar: mes != null && motivoFlota == null,
       motivo_no_cerrable: motivoFlota,
-      roles_cierran: ['ADMIN', 'FACTURACION'],
+      roles_cierran: ['DIRECCION', 'ADMIN', 'FACTURACION'],
       ...(flota
         ? {
             aviones_activos: flota.aviones_activos,

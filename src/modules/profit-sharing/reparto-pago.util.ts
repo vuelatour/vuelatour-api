@@ -85,9 +85,12 @@ export const FECHA_DIA_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * Quién LEE las cuentas y las entregas (SOCIO: solo la suya). La matriz de
  * `storage/firmar` copia esta lista para `reparto-comprobantes`.
+ * PAGOS A SOCIOS ES SOLO DE DIRECCIÓN (6-nov-2026, invariante 122): ADMIN
+ * (Administración) salió de las dos listas; DIRECCION entra explícito porque
+ * `preCierre` y el controller las consultan con `.includes`.
  */
 export const ROLES_PAGOS_SOCIOS_LECTURA: readonly Rol[] = [
-  Rol.ADMIN,
+  Rol.DIRECCION,
   Rol.ANALISTA,
   Rol.FACTURACION,
   Rol.SOCIO,
@@ -95,7 +98,7 @@ export const ROLES_PAGOS_SOCIOS_LECTURA: readonly Rol[] = [
 
 /** Quién REGISTRA, corrige y da de baja entregas y configura cuentas. */
 export const ROLES_PAGOS_SOCIOS_ESCRITURA: readonly Rol[] = [
-  Rol.ADMIN,
+  Rol.DIRECCION,
   Rol.FACTURACION,
 ];
 

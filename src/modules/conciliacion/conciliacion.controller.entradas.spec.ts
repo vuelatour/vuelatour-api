@@ -40,6 +40,7 @@ describe('ConciliacionController — conciliación al revés de una ENTRADA por 
       Reflect.getMetadata(ROLES_KEY, proto.conciliacionDeIngresoBanco),
     ).toBeUndefined();
     expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
     ]);

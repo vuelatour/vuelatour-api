@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { AllExceptionsFilter } from '../../common/filters/all-exceptions.filter';
 import { ROLES_KEY } from '../../common/decorators/roles.decorator';
@@ -49,6 +50,14 @@ describe('CajaChicaController — Excel de reposición por HTTP', () => {
       }),
     );
     app.useGlobalFilters(new AllExceptionsFilter());
+    // El controller pasa `c.rol` al servicio (caja de Dirección, invariante 122).
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as unknown as { user: unknown }).user = {
+        userId: 'u-1',
+        rol: Rol.ADMIN,
+      };
+      next();
+    });
     await app.init();
   });
 
@@ -87,7 +96,7 @@ describe('CajaChicaController — Excel de reposición por HTTP', () => {
         "filename*=UTF-8''Reposicion%20caja%20Alexander%20E.%20Saab%202026-09-21.xlsx",
     );
     expect((res.body as Buffer).toString()).toBe('PK-reposicion');
-    expect(reposicionXlsx).toHaveBeenCalledWith(MOV);
+    expect(reposicionXlsx).toHaveBeenCalledWith(MOV, Rol.ADMIN);
   });
 
   it('GET fondos/:id/por-reponer.xlsx NO lo captura `fondos/:id` (ruta propia)', async () => {
@@ -99,7 +108,7 @@ describe('CajaChicaController — Excel de reposición por HTTP', () => {
     expect(res.headers['content-disposition']).toContain(
       'filename="Por reponer caja Luis Caceres 2026-09-24.xlsx"',
     );
-    expect(porReponerXlsx).toHaveBeenCalledWith(FONDO);
+    expect(porReponerXlsx).toHaveBeenCalledWith(FONDO, Rol.ADMIN);
     expect(getFondoDetail).not.toHaveBeenCalled();
   });
 

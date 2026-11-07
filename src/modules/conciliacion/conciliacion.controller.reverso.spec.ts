@@ -25,6 +25,7 @@ const CTA = 'eeeeeeee-0000-4000-8000-000000000003';
 describe('ConciliacionController — reversos por metadata', () => {
   it('las rutas nuevas NO abren roles: heredan los de la clase (ADMIN, FACTURACION)', () => {
     expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.FACTURACION,
     ]);

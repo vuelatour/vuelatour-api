@@ -382,7 +382,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     const { svc, compute } = armar();
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     // Un compute por MES calendario (septiembre y el mes en curso).
     expect(compute.mock.calls.map((c) => [c[0].desde, c[0].hasta])).toEqual([
@@ -432,7 +432,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     });
     expect(r.listo).toBe(true);
     // Mes cerrado memoizado: otra corrida solo recalcula el mes en curso.
-    await svc.preCierre(SEPTIEMBRE, Rol.ADMIN);
+    await svc.preCierre(SEPTIEMBRE, Rol.DIRECCION);
     expect(compute).toHaveBeenCalledTimes(3);
   });
 
@@ -462,7 +462,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     });
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     expect(porEntregarDe(r)).toMatchObject({
       count: 1,
@@ -505,7 +505,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     });
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     const ids = (x: Record<string, unknown> | undefined) =>
       (x!.socios as Array<{ socio: { id: string } }>).map((s) => s.socio.id);
@@ -524,7 +524,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     });
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     expect(adelantadosDe(r)).toMatchObject({
       count: 1,
@@ -543,7 +543,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     const { svc } = armar();
     const r = (await svc.preCierre(
       { desde: '2026-08-01', hasta: '2026-08-31' },
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     expect(porEntregarDe(r)).toMatchObject({
       count: 0,
@@ -561,7 +561,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
       { desde: '2026-08-01', hasta: '2026-09-30' },
       { desde: '2026-10-01', hasta: '2026-10-01' },
     ]) {
-      const r = (await svc.preCierre(q, Rol.ADMIN)) as unknown as Respuesta;
+      const r = (await svc.preCierre(q, Rol.DIRECCION)) as unknown as Respuesta;
       expect(porEntregarDe(r)).toBeUndefined();
       expect(adelantadosDe(r)).toBeUndefined();
     }
@@ -572,7 +572,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     const { svc, compute } = armar({ sinMigracion: true });
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     expect(porEntregarDe(r)).toMatchObject({
       count: 0,
@@ -593,7 +593,7 @@ describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
     compute.mockRejectedValueOnce(new Error('timeout'));
     const r = (await svc.preCierre(
       SEPTIEMBRE,
-      Rol.ADMIN,
+      Rol.DIRECCION,
     )) as unknown as Respuesta;
     expect(porEntregarDe(r)).toMatchObject({
       count: 0,

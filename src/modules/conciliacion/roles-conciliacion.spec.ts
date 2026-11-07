@@ -15,13 +15,13 @@ import { puedeVerDetalleBanco, ROLES_CONCILIACION } from './roles-conciliacion';
  * abre uno sin el otro, este spec falla.
  */
 describe('ROLES_CONCILIACION — paridad', () => {
-  it('es la metadata de la clase ConciliacionController (ADMIN, FACTURACION)', () => {
+  it('es la metadata de la clase ConciliacionController (DIRECCION, ADMIN, FACTURACION)', () => {
     const meta: unknown = Reflect.getMetadata(
       ROLES_KEY,
       ConciliacionController,
     );
     expect(meta).toEqual([...ROLES_CONCILIACION]);
-    expect(meta).toEqual([Rol.ADMIN, Rol.FACTURACION]);
+    expect(meta).toEqual([Rol.DIRECCION, Rol.ADMIN, Rol.FACTURACION]);
   });
 
   it('es la fila «estados-cuenta» de ROLES_POR_BUCKET', () => {
@@ -32,7 +32,8 @@ describe('ROLES_CONCILIACION — paridad', () => {
 });
 
 describe('puedeVerDetalleBanco', () => {
-  it('solo ADMIN y FACTURACION', () => {
+  it('solo DIRECCION, ADMIN y FACTURACION', () => {
+    expect(puedeVerDetalleBanco(Rol.DIRECCION)).toBe(true);
     expect(puedeVerDetalleBanco(Rol.ADMIN)).toBe(true);
     expect(puedeVerDetalleBanco(Rol.FACTURACION)).toBe(true);
     for (const r of [

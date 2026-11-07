@@ -433,6 +433,7 @@ export function resumenPrecierreSeguimiento(
 
 /** Leen la lista: oficina + SOCIO/ANALISTA (solo GET). */
 export const ROLES_SEGUIMIENTO_LECTURA: readonly Rol[] = Object.freeze([
+  Rol.DIRECCION,
   Rol.ADMIN,
   Rol.COORDINADOR,
   Rol.FACTURACION,
@@ -442,6 +443,7 @@ export const ROLES_SEGUIMIENTO_LECTURA: readonly Rol[] = Object.freeze([
 
 /** Crean, resuelven/reabren, editan y borran notas. */
 export const ROLES_SEGUIMIENTO_ESCRITURA: readonly Rol[] = Object.freeze([
+  Rol.DIRECCION,
   Rol.ADMIN,
   Rol.COORDINADOR,
   Rol.FACTURACION,

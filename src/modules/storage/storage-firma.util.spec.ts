@@ -67,6 +67,7 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
 
   describe('roles por bucket', () => {
     const OFICINA = [
+      Rol.DIRECCION,
       Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,
@@ -76,7 +77,12 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
 
     // Matriz esperada: NUNCA más que el endpoint específico del bucket o la
     // política de lectura de Storage (revisión adversarial 1-oct-2026).
-    const ADMIN_COORD_FACT = [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION];
+    const ADMIN_COORD_FACT = [
+      Rol.DIRECCION,
+      Rol.ADMIN,
+      Rol.COORDINADOR,
+      Rol.FACTURACION,
+    ];
     const MATRIZ: Record<string, Rol[]> = {
       'gasto-fotos': [...OFICINA, Rol.PILOTO, Rol.MECANICO],
       'taco-fotos': [...OFICINA, Rol.PILOTO, Rol.MECANICO],
@@ -85,11 +91,12 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
       'cobro-vouchers': ADMIN_COORD_FACT,
       facturas: ADMIN_COORD_FACT,
       ingresos: ADMIN_COORD_FACT,
-      'documentos-flota': [Rol.ADMIN, Rol.COORDINADOR],
-      'estados-cuenta': [Rol.ADMIN, Rol.FACTURACION],
+      'documentos-flota': [Rol.DIRECCION, Rol.ADMIN, Rol.COORDINADOR],
+      'estados-cuenta': [Rol.DIRECCION, Rol.ADMIN, Rol.FACTURACION],
       // = `GET profit-sharing/pagos` (ROLES_PAGOS_SOCIOS_LECTURA).
+      // Pagos a socios es solo de Dirección (invariante 122): ADMIN salió.
       'reparto-comprobantes': [
-        Rol.ADMIN,
+        Rol.DIRECCION,
         Rol.FACTURACION,
         Rol.ANALISTA,
         Rol.SOCIO,
@@ -113,6 +120,7 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
         [...ROLES_PAGOS_SOCIOS_LECTURA].sort(),
       );
       for (const rol of [
+        Rol.ADMIN,
         Rol.COORDINADOR,
         Rol.PILOTO,
         Rol.MECANICO,

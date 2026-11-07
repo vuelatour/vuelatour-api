@@ -235,7 +235,12 @@ const CLAVES_SECCION_PROPIA: Record<string, string> = {
 };
 
 /** Roles de oficina que pueden ser responsables de facturación. */
-const ROLES_OFICINA_FACTURACION = ['ADMIN', 'COORDINADOR', 'FACTURACION'];
+const ROLES_OFICINA_FACTURACION = [
+  'DIRECCION',
+  'ADMIN',
+  'COORDINADOR',
+  'FACTURACION',
+];
 
 /**
  * Roles que pueden revisar una cotización (`@Roles` de `POST
@@ -244,7 +249,11 @@ const ROLES_OFICINA_FACTURACION = ['ADMIN', 'COORDINADOR', 'FACTURACION'];
  * de estos roles: un usuario de FACTURACION en la lista no podría revisar de
  * todos modos, y el permiso no debe decir lo contrario.
  */
-export const ROLES_REVISAN_COTIZACION = ['ADMIN', 'COORDINADOR'] as const;
+export const ROLES_REVISAN_COTIZACION = [
+  'DIRECCION',
+  'ADMIN',
+  'COORDINADOR',
+] as const;
 
 /** Fila cacheada de una bandera: estado on/off + valor numérico opcional. */
 type ConfigRow = { activa: boolean; valor_numerico: number | null };
@@ -603,7 +612,10 @@ export class ConfiguracionService {
         .filter((u): u is UsuarioOficina => !!u)
         .map(aviso),
       facturacion: oficina.filter((u) => u.rol === 'FACTURACION').map(aviso),
-      admins: oficina.filter((u) => u.rol === 'ADMIN').map(aviso),
+      // Administración y Dirección (invariante 122): los «admins» de siempre.
+      admins: oficina
+        .filter((u) => u.rol === 'ADMIN' || u.rol === 'DIRECCION')
+        .map(aviso),
     };
   }
 

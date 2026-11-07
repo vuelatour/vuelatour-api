@@ -8,6 +8,8 @@ import {
   Optional,
 } from '@nestjs/common';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+import { esAdministracion, finanzasParaRol } from '../../common/roles.util';
+import type { Rol } from '../../common/types/auth.types';
 // PROPIETARIOS (19-oct-2026, invariante 95): fechas de pared, textos y el
 // plan de sustitución viven en la regla pura; aquí solo se lee y escribe.
 import {
@@ -174,7 +176,7 @@ export class AircraftService {
    *  - utilización: horas voladas y # de vuelos (mes / año / total).
    *  - finanzas: ingresos cobrados vs gastos por moneda.
    */
-  async aircraftMetrics(id: string) {
+  async aircraftMetrics(id: string, rol?: Rol) {
     const aeronave = await this.findById(id);
     // Cortes de mes/año SIEMPRE en hora Cancún (regla del repo): con Date.UTC
     // un vuelo de las 7–11pm Cancún del último día del mes caía al mes
@@ -494,7 +496,10 @@ export class AircraftService {
         vuelos_mes: vuelosMes.size,
         vuelos_anio: vuelosAnio.size,
       },
-      finanzas,
+      // ADMINISTRACIÓN (6-nov-2026, invariante 122): solo los gastos — lo
+      // cobrado y la utilidad van en null y `finanzas_solo_gastos` lo dice.
+      finanzas: finanzasParaRol(finanzas, rol),
+      finanzas_solo_gastos: esAdministracion(rol),
       // ADITIVO (invariante 86): desde cuándo suman las finanzas (null = de
       // por vida, como 0.0.83).
       finanzas_desde: inicioFinanzas,

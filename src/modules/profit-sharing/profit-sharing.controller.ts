@@ -70,7 +70,10 @@ export class ProfitSharingController {
   @Get()
   // SOCIO: su rol declara "Lectura + PDFs de reparto" y el menú del panel le
   // ofrece esta página — sin él aquí, el destinatario del reparto veía 403.
-  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
+  // SOLO DIRECCIÓN (6-nov-2026, invariante 122): Administración (ADMIN) no
+  // ve el reparto; DIRECCION pasa por el guard. `pdf`, `xlsx` y `dinero.xlsx`
+  // siguen con ADMIN porque Reportes los ofrece («de momento pueden ver todo»).
+  @Roles(Rol.DIRECCION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary: 'Compute the profit-sharing breakdown per aircraft for a period',
   })
@@ -238,7 +241,7 @@ export class ProfitSharingController {
   // ===== PANTALLA POR AVIÓN (20-oct-2026, invariante 99) =====
 
   @Get('aviones/:aeronaveId')
-  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
+  @Roles(Rol.DIRECCION, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
   @ApiOperation({
     summary:
       'Reparto de UN avión en el periodo con el detalle gasto por gasto (detalle.gastos[]: grupo, clave, pesos), las entregas «corresponde a» ese avión en los meses del periodo y, por socio, lo generado / entregado / por entregar DE ESE AVIÓN en pesos. 404 AERONAVE_NO_EXISTE.',
@@ -252,7 +255,7 @@ export class ProfitSharingController {
   }
 
   @Get('aviones/:aeronaveId/historico')
-  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
+  @Roles(Rol.DIRECCION, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
   @ApiOperation({
     summary:
       'Histórico de UN avión mes a mes (un reparto por mes, EN PESOS): cascada, reparto por socio con su reserva, lo entregado de ese avión por mes y acumulados del rango. ?desde=AAAA-MM&hasta=AAAA-MM (default: del inicio oficial al mes en curso; máximo 36 meses). 400 RANGO_INVALIDO, 404 AERONAVE_NO_EXISTE.',

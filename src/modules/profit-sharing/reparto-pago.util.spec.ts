@@ -424,12 +424,12 @@ describe('reparto-pago.util — forma, orden y constantes', () => {
     );
   });
 
-  it('roles: leen oficina + SOCIO; escriben ADMIN y FACTURACION', () => {
+  it('roles (invariante 122): leen Dirección, ANALISTA, FACTURACION y SOCIO; escriben Dirección y FACTURACION', () => {
     expect([...ROLES_PAGOS_SOCIOS_LECTURA].sort()).toEqual(
-      [Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO].sort(),
+      [Rol.DIRECCION, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO].sort(),
     );
     expect([...ROLES_PAGOS_SOCIOS_ESCRITURA].sort()).toEqual(
-      [Rol.ADMIN, Rol.FACTURACION].sort(),
+      [Rol.DIRECCION, Rol.FACTURACION].sort(),
     );
   });
 });

@@ -18,7 +18,11 @@ export class DashboardsController {
   constructor(private readonly dashboards: DashboardsService) {}
 
   @Get('overview')
-  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
+  // SOLO DIRECCIÓN (6-nov-2026, invariante 122): las finanzas, los gastos
+  // por avión y las tarjetas no los ve Administración (ADMIN); DIRECCION
+  // pasa por el guard. `operativo` y `horas-piloto` siguen abiertos a ADMIN
+  // (Inicio y Reportes los usan).
+  @Roles(Rol.DIRECCION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary: 'Executive overview: financials, operations pipeline, top clients',
   })
@@ -37,7 +41,7 @@ export class DashboardsController {
   }
 
   @Get('gastos')
-  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @Roles(Rol.DIRECCION, Rol.ANALISTA)
   @ApiOperation({
     summary:
       'Expenses dashboard: expense per aircraft and period, cost/hour and profit/hour',
@@ -47,7 +51,7 @@ export class DashboardsController {
   }
 
   @Get('tarjetas')
-  @Roles(Rol.ADMIN)
+  @Roles(Rol.DIRECCION)
   @ApiOperation({
     summary:
       'Corporate card spend dashboard: live spend by card, by person and by category',
