@@ -12952,6 +12952,52 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     nunca se cae por un nombre). El panel pinta «por <nombre>» junto a la
     fecha de cada versión. Spec: `quotes.service.versiones-autor.spec`.
 
+128. **EL CORREO AL CLIENTE NO SALE SOLO: MANUAL, CON VISTA PREVIA Y
+    BITÁCORA (9-nov-2026, API 0.0.133, migración `20261109000001`).** Hasta
+    el 0.0.132 `QuotesService.confirm` mandaba SOLO el correo «Vuelo
+    confirmado» al cliente (best-effort con `void`, sin registro). La
+    oficina lo descubrió por un correo que nadie pidió (folio #538) y pidió:
+    «que se cancele el envío automático…, que solo hasta que ellos le den en
+    enviar de forma manual, solo si se requiere, y saber si se mandó o no y
+    con qué contenido». Reglas:
+    - **NINGÚN camino del API le manda un correo a un CLIENTE sin un humano
+      detrás.** `confirm()` (panel y app vía `CONFIRMADOR_COTIZACION`) ya no
+      envía nada; `EmailService.sendFlightConfirmation` se ELIMINÓ. Los
+      correos INTERNOS (invitación, asignación al piloto, alertas) no
+      cambiaron.
+    - El único envío es `QuotesCorreoService.enviar` (`POST
+      /v1/quotes/:id/correo-confirmacion`, ADMIN/COORDINADOR): vuelo
+      CONFIRMADO o RESERVA y cliente con correo válido, si no **409
+      `CORREO_NO_ENVIABLE`** (`details.codigo` ∈ SIN_CLIENTE |
+      ESTADO_NO_CONFIRMADO | SIN_EMAIL | CORREO_APAGADO; fuente PURA
+      `bloqueoCorreoConfirmacion`). Ya enviado y sin `reenviar: true` ⇒ **409
+      `CORREO_YA_ENVIADO`** (`details.ultimo_envio`); envío simultáneo ⇒ 409
+      `CORREO_EN_PROCESO` (Set en memoria por vuelo).
+    - **Lo que se ve es lo que se manda**: la vista previa (`GET
+      :id/correo-confirmacion`, no envía) y el envío arman asunto/HTML/texto
+      con el MISMO `armarCorreoConfirmacion` (PURO,
+      `notifications/correo-confirmacion.util.ts`). Datos que usa: nombre y
+      correo del cliente; folio, origen → destino, pasajeros, fecha (hora
+      Cancún) y total USD del vuelo (SIEMPRE 2 decimales: el #538 decía
+      «$2,488.2 USD»).
+    - **Todo intento queda en `correo_cliente`** (ENVIADO o FALLIDO con su
+      error): contenido EXACTO, destinatario, remitente (`RESEND_FROM`),
+      quién y cuándo. SIN FK al vuelo a propósito (bitácora, patrón
+      `vuelo_eliminado`). La bitácora se LEE antes de enviar: si no se puede
+      leer ⇒ 503 `BITACORA_CORREOS_NO_DISPONIBLE` y NO se envía (un envío
+      sin registro es lo que el cliente rechazó). Un fallo de Resend
+      responde 200 `{ enviado: false, mensaje, correo }` (queda FALLIDO).
+    - Lecturas (ADMIN/COORDINADOR/FACTURACION/ANALISTA,
+      `ROLES_VEN_CORREOS_CLIENTE`): `GET :id/correos` (del vuelo) y `GET
+      /v1/quotes/correos?desde&hasta&limite` (todos; cortes en hora Cancún,
+      default 90 días / 200, `truncado`), con `enviado_por_nombre`
+      (`fetchNombresUsuarios`). Los envíos AUTOMÁTICOS anteriores al 9-nov
+      no están en la bitácora (no se registraban; viven en el panel de
+      Resend). `QuotesService` conserva `EmailService` en su constructor sin
+      usarlo (los specs lo arman por posición). Specs:
+      `correo-confirmacion.util.spec`, `quotes-correo.service.spec`,
+      `quotes.service.confirmar.spec` (confirmar no envía).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

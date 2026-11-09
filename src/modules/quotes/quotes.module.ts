@@ -11,6 +11,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
 import { RoutesModule } from '../routes/routes.module';
 import { QuotesController } from './quotes.controller';
 import { QuotesService } from './quotes.service';
+import { QuotesCorreoService } from './quotes-correo.service';
 import { QuotesPdfService } from './quotes-pdf.service';
 import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 
@@ -37,6 +38,8 @@ import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
     QuotesService,
     QuotesPdfService,
     QuotesPdfInternoService,
+    // Correo al cliente MANUAL con bitácora (9-nov-2026, invariante 128).
+    QuotesCorreoService,
     // Confirmar desde el detalle del vuelo (16-oct-2026, invariante 85):
     // FlightsService recibe `QuotesService.confirm` por este token (sin
     // importar la clase, para no crear el ciclo flights ↔ quotes en runtime).

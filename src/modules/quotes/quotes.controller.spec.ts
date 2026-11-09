@@ -8,6 +8,7 @@ jest.mock('./quotes-pdf-interno.service', () => ({
 }));
 
 import type { Response } from 'express';
+import type { QuotesCorreoService } from './quotes-correo.service';
 import { QuotesController, ROLES_PDF_INTERNO } from './quotes.controller';
 import { ROLES_KEY } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
@@ -61,6 +62,7 @@ function controller(
     {} as QuotesService,
     pdf as QuotesPdfService,
     interno as QuotesPdfInternoService,
+    {} as QuotesCorreoService,
   );
 }
 

@@ -4052,7 +4052,8 @@ export class QuotesService implements ConfirmadorCotizacion {
    * COTIZADO → CONFIRMADO. Desde el 16-oct-2026 también lo llama
    * `FlightsService.confirmar` (app, token `CONFIRMADOR_COTIZACION`), así que
    * el UPDATE lleva **CAS por estado** (`.eq('estado', 'COTIZADO')`): dos
-   * clics (app + panel) ya no duplican tramos del REDONDO, correo ni avisos.
+   * clics (app + panel) ya no duplican tramos del REDONDO ni avisos (el
+   * correo al cliente dejó de salir aquí el 9-nov-2026, invariante 128).
    * Si el CAS pierde y la relectura ya está CONFIRMADO ⇒ la fila con
    * `idempotente: true` (ADITIVO; el panel lo ignora); otro estado ⇒ el 409
    * de siempre.
@@ -4089,7 +4090,9 @@ export class QuotesService implements ConfirmadorCotizacion {
     // REDONDO: crea los 2 tramos (ida + regreso) para asignarlos por separado.
     await this.ensureRedondoEscalas(data, userId);
     void this.calendar.syncFlight(vueloId);
-    void this.sendConfirmationEmail(data);
+    // 9-nov-2026 (invariante 128): confirmar YA NO manda correo al cliente.
+    // Ese correo solo sale cuando alguien pulsa «Enviar confirmación al
+    // cliente» (`QuotesCorreoService.enviar`), con vista previa y bitácora.
     // Tripulación ya asignada (21-ago): el vuelo queda EN FIRME.
     void this.notificarTripulacion(data, {
       titulo: `Vuelo #${data.folio as number} confirmado`,
@@ -4165,31 +4168,6 @@ export class QuotesService implements ConfirmadorCotizacion {
       throw new Error(
         `No se pudieron crear los tramos del redondo: ${error.message}`,
       );
-  }
-
-  /** Envía el correo de confirmación al cliente (best-effort). */
-  private async sendConfirmationEmail(
-    vuelo: Record<string, unknown>,
-  ): Promise<void> {
-    const clienteId = vuelo.cliente_id as string | null;
-    if (!clienteId) return;
-    const { data: cliente } = await this.supabase.service
-      .from('cliente')
-      .select('nombre, email')
-      .eq('id', clienteId)
-      .maybeSingle();
-    const email = (cliente as { email: string | null } | null)?.email;
-    if (!email) return;
-    void this.email.sendFlightConfirmation({
-      to: email,
-      clienteNombre: (cliente as { nombre: string }).nombre ?? 'Cliente',
-      folio: vuelo.folio as number,
-      origenIata: vuelo.origen_iata as string,
-      destinoIata: vuelo.destino_iata as string,
-      pasajeros: Number(vuelo.pasajeros ?? 0),
-      fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
-      montoTotalUsd: Number(vuelo.monto_total_usd ?? 0),
-    });
   }
 
   async cancel(vueloId: string, motivo: string | undefined, userId: string) {

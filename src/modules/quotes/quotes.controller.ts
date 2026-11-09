@@ -18,6 +18,10 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
+import {
+  EnviarCorreoConfirmacionDto,
+  ListCorreosClienteQuery,
+} from './dto/correo-cliente.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import {
   CancelQuoteDto,
@@ -33,6 +37,7 @@ import { PreviewQuoteDto } from './dto/preview-quote.dto';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
+import { QuotesCorreoService } from './quotes-correo.service';
 import { QuotesPdfService } from './quotes-pdf.service';
 import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 
@@ -55,6 +60,18 @@ export const ROLES_PDF_INTERNO = [
   Rol.ANALISTA,
 ] as const;
 
+/**
+ * Roles que VEN los correos enviados a clientes y su vista previa
+ * (9-nov-2026, invariante 128): la oficina. ENVIAR es de quien confirma
+ * (ADMIN/COORDINADOR). Sin SOCIO ni PILOTO.
+ */
+export const ROLES_VEN_CORREOS_CLIENTE = [
+  Rol.ADMIN,
+  Rol.COORDINADOR,
+  Rol.FACTURACION,
+  Rol.ANALISTA,
+] as const;
+
 @ApiTags('Quotes')
 @ApiBearerAuth()
 @Controller({ path: 'quotes', version: '1' })
@@ -63,6 +80,7 @@ export class QuotesController {
     private readonly quotes: QuotesService,
     private readonly quotesPdf: QuotesPdfService,
     private readonly quotesPdfInterno: QuotesPdfInternoService,
+    private readonly quotesCorreo: QuotesCorreoService,
   ) {}
 
   @Post('calculate')
@@ -169,6 +187,16 @@ export class QuotesController {
   }
 
   // Sub-ruta de ':id' declarada ANTES de ':id' (convención del repo).
+  @Get('correos')
+  @Roles(...ROLES_VEN_CORREOS_CLIENTE)
+  @ApiOperation({
+    summary:
+      'Correos enviados a CLIENTES (9-nov-2026): bitácora correo_cliente de un periodo (desde/hasta YYYY-MM-DD en hora Cancún; default últimos 90 días; limite 1–500, default 200), más reciente primero, con el contenido EXACTO (asunto, html, texto), destinatario, remitente, estado ENVIADO|FALLIDO y enviado_por_nombre. `truncado` = hay más que el límite.',
+  })
+  correos(@Query() q: ListCorreosClienteQuery) {
+    return this.quotesCorreo.listar(q);
+  }
+
   @Get(':id/vecinos')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
@@ -285,12 +313,47 @@ export class QuotesController {
     return this.quotes.setPdfPresentacionVuelo(id, dto, c.userId);
   }
 
+  @Get(':id/correos')
+  @Roles(...ROLES_VEN_CORREOS_CLIENTE)
+  @ApiOperation({
+    summary:
+      'Correos enviados al cliente de ESTE vuelo/cotización (bitácora correo_cliente, más reciente primero): { correos[] } con contenido exacto, estado y quién lo envió.',
+  })
+  correosDeVuelo(@Param('id', ParseUUIDPipe) id: string) {
+    return this.quotesCorreo.historial(id);
+  }
+
+  @Get(':id/correo-confirmacion')
+  @Roles(...ROLES_VEN_CORREOS_CLIENTE)
+  @ApiOperation({
+    summary:
+      'VISTA PREVIA del correo «Vuelo confirmado» (NO envía nada): puede_enviar, codigo/motivo cuando no se puede (SIN_CLIENTE | ESTADO_NO_CONFIRMADO | SIN_EMAIL | CORREO_APAGADO), destinatario, remitente, asunto, html, texto, enviados y ultimo_envio.',
+  })
+  correoConfirmacionPreview(@Param('id', ParseUUIDPipe) id: string) {
+    return this.quotesCorreo.vistaPrevia(id);
+  }
+
+  @Post(':id/correo-confirmacion')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'ENVÍA al cliente el correo «Vuelo confirmado» (el ÚNICO camino: desde el 9-nov-2026 confirmar ya no lo manda). Solo con el vuelo CONFIRMADO o RESERVA y cliente con correo: si no, 409 CORREO_NO_ENVIABLE (details.codigo). Si ya se envió y no viene reenviar:true ⇒ 409 CORREO_YA_ENVIADO (details.ultimo_envio). 200 { enviado, mensaje, correo }: enviado:false = el proveedor falló y quedó registrado como FALLIDO.',
+  })
+  correoConfirmacionEnviar(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: EnviarCorreoConfirmacionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotesCorreo.enviar(id, c.userId, dto ?? {});
+  }
+
   @Post(':id/confirm')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version.',
+      'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version. Desde el 9-nov-2026 NO manda correo al cliente (ver POST :id/correo-confirmacion).',
   })
   confirm(
     @Param('id', ParseUUIDPipe) id: string,

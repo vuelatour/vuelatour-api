@@ -7,6 +7,9 @@ jest.mock('./quotes-pdf.service', () => ({ QuotesPdfService: class {} }));
 jest.mock('./quotes-pdf-interno.service', () => ({
   QuotesPdfInternoService: class {},
 }));
+jest.mock('./quotes-correo.service', () => ({
+  QuotesCorreoService: class {},
+}));
 
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
@@ -23,6 +26,7 @@ import { ROLES_KEY } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import { VecinosQuotesQuery } from './dto/list-quotes.query';
 import { QuotesController } from './quotes.controller';
+import { QuotesCorreoService } from './quotes-correo.service';
 import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 import { QuotesPdfService } from './quotes-pdf.service';
 import { QuotesService } from './quotes.service';
@@ -150,6 +154,7 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
         { provide: QuotesService, useValue: svc },
         { provide: QuotesPdfService, useValue: {} },
         { provide: QuotesPdfInternoService, useValue: {} },
+        { provide: QuotesCorreoService, useValue: {} },
       ],
     }).compile();
     app = moduleRef.createNestApplication();

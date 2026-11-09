@@ -86,7 +86,8 @@ function vueloRow(extra: Row = {}): Row {
   return {
     id: V1,
     folio: 241,
-    // Sin cliente: el correo de confirmación (best-effort) no se intenta.
+    // Desde el 9-nov-2026 (invariante 128) confirmar NO manda correo,
+    // tenga o no cliente (ver el caso «con cliente» abajo).
     cliente_id: null,
     aeronave_id: null,
     piloto_id: null,
@@ -120,17 +121,22 @@ function armar(m: { vuelo?: Row; casPierde?: Row }) {
   });
   const syncFlight = jest.fn().mockResolvedValue(undefined);
   const notifyUser = jest.fn().mockResolvedValue(true);
+  // Cualquier intento de mandar un correo desde confirm() se vería aquí.
+  const correo = {
+    enviar: jest.fn(),
+    sendFlightConfirmation: jest.fn(),
+  };
   const service = new QuotesService(
     {} as AircraftService,
     {} as AirportsService,
     {} as RoutesService,
     supabase,
     { syncFlight } as unknown as CalendarSyncService,
-    {} as EmailService,
+    correo as unknown as EmailService,
     { notifyUser } as unknown as NotificationsService,
     {} as FlightsService,
   );
-  return { service, llamadas, updates, syncFlight, notifyUser };
+  return { service, llamadas, updates, syncFlight, notifyUser, correo };
 }
 
 const esperarAvisos = () => new Promise((r) => setImmediate(r));
@@ -151,6 +157,19 @@ describe('QuotesService.confirm — CAS por estado (revisión 16-oct-2026)', () 
     expect(out).not.toHaveProperty('idempotente');
     expect(w.syncFlight).toHaveBeenCalledWith(V1);
     await esperarAvisos();
+  });
+
+  it('con cliente (y correo capturado): confirmar NO manda correo ni lee al cliente (9-nov-2026, invariante 128)', async () => {
+    const w = armar({
+      vuelo: vueloRow({ cliente_id: 'aaaaaaaa-0000-4000-8000-0000000000d1' }),
+    });
+    const out = await w.service.confirm(V1, USER);
+    expect(out.estado).toBe('CONFIRMADO');
+    await esperarAvisos();
+    expect(w.correo.enviar).not.toHaveBeenCalled();
+    expect(w.correo.sendFlightConfirmation).not.toHaveBeenCalled();
+    // El correo era lo ÚNICO que leía `cliente` en confirm().
+    expect(w.llamadas.some((l) => l.tabla === 'cliente')).toBe(false);
   });
 
   it('no COTIZADO ⇒ 409 de siempre sin escribir', async () => {
