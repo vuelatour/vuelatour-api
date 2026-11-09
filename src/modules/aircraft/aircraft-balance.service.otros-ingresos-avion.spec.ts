@@ -326,9 +326,6 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
         'balance.por_entregar_socios_mxn',
         'balance.utilidad_cobrada_mxn',
         'balance.utilidad_despues_mxn',
-        // Invariante 124 (7-nov-2026): la base del reparto = cobrada − reserva.
-        'balance.utilidad_a_repartir_usd',
-        'balance.utilidad_a_repartir_mxn',
         'otros_ingresos_avion.filas.0',
         'otros_ingresos_avion.total_mxn',
         'otros_ingresos_avion.usd',

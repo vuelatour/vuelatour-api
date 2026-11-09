@@ -12847,6 +12847,68 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`utilidad_a_repartir_*`), `dashboards.service.overview-*.spec`,
       golden `libros-pesos.golden-0128.json`.
 
+125. **LA RESERVA DE OVERHAUL RESTA EN LA CASCADA, ANTES DEL TOTAL
+    (9-nov-2026, API 0.0.129, SIN migración).** Reclamo del cliente dos días
+    después del 0.0.128, con los cierres de octubre detenidos: «sigo sin
+    resolver el tema del overhaul, no puedo entregar los cierres… necesito
+    que quede ANTES del total». En su Excel manual (hoja «utilidades»:
+    columna OVERHAUL antes de TOTAL) y en el Diseño Funcional §4.8 la
+    reserva es UNA RESTA MÁS de la cascada: INGRESOS − DIRECTOS −
+    INDIRECTOS − OTROS GASTOS − PERMISOS − RESERVA OVERHAUL − PENDIENTE DE
+    COBRO = SALDO DISPONIBLE → socios %. La colocación del 0.0.128 (después
+    de la utilidad cobrada / del saldo, con `utilidad_a_repartir_*` y
+    `saldo_a_repartir_*`) se RETIRA: ningún API la vuelve a mandar.
+    - **Discriminador ÚNICO, aditivo**: `reserva_overhaul_en_cascada: true`
+      en cada avión del reparto (`compute`), en `aviones[]` del payload de
+      pyservices (junto a `reserva_overhaul_usd`), en la raíz de
+      `avionHistorico` y en el bloque `balance` del libro (cierra el grupo
+      de la reserva, antes de las entregas; nunca en EXTERNOS ni en el
+      consolidado FLOTA). Sin la llave (API previo, snapshots de cierres
+      viejos) el panel y pyservices pintan lo de antes, por datos.
+    - **Reparto (`computeAvion`)**: `saldo_disponible_*` = venta cobrada −
+      comisiones − directos − combustible − indirectos − permisos − fijos
+      prorrateados − PROVISIÓN AFAC − RESERVA + otros ingresos (ya NETO).
+      `saldoAntesReserva` solo reparte la parte de cada socio:
+      `reparto[].utilidad_*` (su % del saldo ANTES de la reserva, residuo
+      mayor) − `reparto[].reserva_*` (su % de la reserva) = `monto_*`; Σ
+      `monto_*` = `saldo_disponible_*` al centavo con % que suman 100.
+      **Ningún monto por socio se movió** frente al 0.0.128 (spec de
+      identidad contra el golden 0128: el saldo de hoy es el «saldo a
+      repartir» de entonces y todo lo demás es byte a byte). Sin T.C.
+      oficial del cierre la reserva en pesos es 0: `pesos_sin_tc_usd` suma
+      la reserva UNA vez (antes, por socio). `avionHistorico`: `saldo_mxn`
+      y `totales.saldo_mxn` ya netos; `saldo_a_repartir_mxn` desaparece.
+    - **Balance (`buildPayload`)**: la reserva se calcula ANTES de la
+      cascada; `utilidad_despues_*` = antes − combustible − indirectos −
+      refacciones − otros − permisos − RESERVA + otros ingresos (en pesos,
+      `reserva_overhaul_mxn` null ⇒ la cascada en pesos se propaga en null
+      desde ahí, como cualquier hoja sin pesos); `utilidad_cobrada_*` =
+      después − pendiente; `socios[].monto_*` = round2(% × cobrada) SIN otra
+      resta; `socios[].utilidad_*` = su % de la cobrada ANTES de la reserva
+      (cobrada + reserva, como en el reparto) y `reserva_*` su parte
+      (informativas; utilidad − reserva ≈ monto). pyservices: fila «(−)
+      RESERVA DE OVERHAUL» después de «(−) PERMISOS» y antes de «(+) OTROS
+      INGRESOS» / UTILIDAD DESPUÉS DE GASTOS; socio = ROUND(% × cobrada);
+      bloque final «ya restada en la cascada».
+    - **Tablero**: `saldo_usd`/`saldo_disponible_usd` vuelven a
+      `saldo_disponible_usd` (ya neto; la reserva va en «Gastos»: ingresos +
+      otros − gastos == saldo). **Cierres/pre-cierre**: sin cambio de
+      código; su `saldo_usd` (= `saldo_disponible_usd`) pasa a ser el saldo
+      neto, que es lo que el cliente entrega.
+    - **`GET /v1/version`** (compuerta) gana `pyservices: { commit }`: el
+      API consulta `GET <PYSERVICES_BASE_URL>/version` (3 s, null si no
+      responde) porque la URL de pyservices en Railway es interna y desde
+      fuera no se podía confirmar su deploy (el 7-nov nadie pudo verificar
+      que bb3fe07 estuviera activo).
+    - Specs: `aircraft-balance.service.reserva.spec` (resta exacta en USD y
+      MXN, socios, bandera, general), `profit-sharing.service.cascada-
+      balance.spec`, `…combustible.spec`, `…reparto-pesos.spec` (golden
+      `libros-pesos.golden-0129.json` + identidad con el 0128),
+      `aircraft-balance.service.pesos.spec` (los dos renglones de la cascada
+      contra el golden 0.0.93 traen los 140 de la reserva), dashboards.
+      Orden de deploy: pyservices (compuerta: `/v1/version.pyservices.
+      commit`) ⇒ API ⇒ panel.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

@@ -195,8 +195,10 @@ const CAMBIOS_0098_INDIVIDUAL = [
   'ind.balance.utilidad_antes_usd: 3259.3 -> 3254.3',
   'ind.balance.combustible_usd: 156.86 -> 167.6',
   'ind.balance.permisos_usd: 26.14 -> 27.78',
-  'ind.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
-  'ind.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
+  // Las dos de la cascada traen además los 140 USD de la reserva de overhaul
+  // que resta EN la cascada desde el 9-nov-2026 (invariante 125).
+  'ind.balance.utilidad_despues_usd: 5562.46 -> 5405.08',
+  'ind.balance.utilidad_cobrada_usd: 4856.18 -> 4698.8',
   // 6-nov-2026 (invariante 121): a cada socio se le descuenta su reserva
   // (82.71 / 57.29 USD) de lo que recibe: 2,858.76 ⇒ 2,776.05 y 1,980.04 ⇒ 1,922.75.
   'ind.balance.socios.0.monto_usd: 2869.03 -> 2776.05',
@@ -231,8 +233,9 @@ const CAMBIOS_0098_GENERAL = [
   'gen.aviones.0.balance.utilidad_antes_usd: 3259.3 -> 3254.3',
   'gen.aviones.0.balance.combustible_usd: 156.86 -> 167.6',
   'gen.aviones.0.balance.permisos_usd: 26.14 -> 27.78',
-  'gen.aviones.0.balance.utilidad_despues_usd: 5562.46 -> 5545.08',
-  'gen.aviones.0.balance.utilidad_cobrada_usd: 4856.18 -> 4838.8',
+  // Con los 140 USD de la reserva de overhaul (invariante 125), como arriba.
+  'gen.aviones.0.balance.utilidad_despues_usd: 5562.46 -> 5405.08',
+  'gen.aviones.0.balance.utilidad_cobrada_usd: 4856.18 -> 4698.8',
   // 6-nov-2026 (invariante 121): netos de la reserva de cada socio.
   'gen.aviones.0.balance.socios.0.monto_usd: 2869.03 -> 2776.05',
   'gen.aviones.0.balance.socios.1.monto_usd: 1987.15 -> 1922.75',
@@ -325,8 +328,9 @@ const CAMBIOS_0124_GENERAL = [
 
 /**
  * Lo ADITIVO del 0.0.98 (bandera, reserva, ganancia antes de comisiones) y
- * del 0.0.128 (`utilidad_a_repartir_*` = cobrada − reserva, invariante 124;
- * sus números los prueba `aircraft-balance.service.reserva.spec`).
+ * la bandera del 0.0.129 (`reserva_overhaul_en_cascada`, invariante 125; la
+ * resta de la reserva en la cascada SÍ queda en las listas de cambios de
+ * arriba y sus números los prueba `aircraft-balance.service.reserva.spec`).
  */
 function quitar0098(p: Record<string, unknown> | undefined): void {
   if (!p) return;
@@ -334,11 +338,7 @@ function quitar0098(p: Record<string, unknown> | undefined): void {
   const b = p.balance as Record<string, unknown> | undefined;
   if (b)
     for (const k of Object.keys(b))
-      if (
-        k.startsWith('reserva_overhaul_') ||
-        k.startsWith('utilidad_a_repartir_')
-      )
-        delete b[k];
+      if (k.startsWith('reserva_overhaul_')) delete b[k];
   for (const v of (p.vuelos as Array<Record<string, unknown>>) ?? [])
     delete v.ganancia_antes_comisiones_usd;
 }
@@ -457,7 +457,8 @@ describe('Balance EN PESOS — la cascada del bloque `balance`', () => {
           b.gastos_indirectos_mxn! -
           b.refacciones_mxn! -
           b.otros_mxn! -
-          b.permisos_mxn! +
+          b.permisos_mxn! -
+          b.reserva_overhaul_mxn! +
           b.otros_ingresos_avion_mxn!,
       ),
     );
@@ -465,13 +466,19 @@ describe('Balance EN PESOS — la cascada del bloque `balance`', () => {
     expect(b.utilidad_cobrada_mxn).toBe(
       r2(b.utilidad_despues_mxn! - b.por_cobrar_mxn!),
     );
-    // Socios: % × la utilidad cobrada EN PESOS, menos su parte de la reserva
-    // de overhaul (a todos, invariante 121) = lo que se transfiere.
+    // Socios: % × la utilidad cobrada EN PESOS (ya neta de la reserva de
+    // overhaul, invariante 125) = lo que se transfiere; `utilidad_mxn` es su
+    // % de la cobrada ANTES de la reserva.
     for (const s of b.socios) {
-      expect(s.utilidad_mxn).toBe(
+      expect(s.monto_mxn).toBe(
         r2((s.porcentaje / 100) * b.utilidad_cobrada_mxn!),
       );
-      expect(s.monto_mxn).toBe(r2(s.utilidad_mxn! - s.reserva_mxn!));
+      expect(s.utilidad_mxn).toBe(
+        r2(
+          (s.porcentaje / 100) *
+            r2(b.utilidad_cobrada_mxn! + b.reserva_overhaul_mxn!),
+        ),
+      );
     }
   });
 

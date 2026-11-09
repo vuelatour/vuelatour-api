@@ -5720,6 +5720,75 @@ export class AircraftBalanceService {
       }
     }
 
+    // ===== RESERVA DE OVERHAUL DEL PERIODO (19-oct-2026, API 0.0.98,
+    // invariante 96): lo que el avión APORTA para el overhaul de sus motores
+    // en el periodo, con la MISMA aritmética del reparto (fuente única
+    // `common/reserva-overhaul.util`). En pesos, al T.C. oficial del cierre
+    // (día min(hasta, hoy Cancún)), el mismo del reparto. EXTERNOS no la
+    // lleva. LA RESERVA RESTA EN LA CASCADA, ANTES DEL TOTAL (9-nov-2026,
+    // API 0.0.129, invariante 125; pedido del cliente: «que quede antes del
+    // total», como en su Excel manual y en el Diseño Funcional §4.8):
+    // UTILIDAD DESPUÉS DE GASTOS y UTILIDAD COBRADA ya la descuentan y los
+    // socios reciben su % de la cobrada; `reserva_overhaul_en_cascada` es el
+    // DISCRIMINADOR para pyservices (fila «(−) RESERVA DE OVERHAUL» después
+    // de «(−) PERMISOS»). Historia: del 19-oct al 6-nov fue solo informativa
+    // (invariante 96); del 7 al 9-nov restó DESPUÉS de la utilidad cobrada
+    // (`utilidad_a_repartir_*`, invariante 124, retirada).
+    let reservaBalance: {
+      reserva_overhaul_usd: number;
+      reserva_overhaul_mxn: number | null;
+      reserva_overhaul_horas_hr: number;
+      reserva_overhaul_usd_hr: number;
+      reserva_overhaul_motores: number;
+      reserva_overhaul_tc: number | null;
+      reserva_overhaul_tc_dia: string | null;
+      reserva_overhaul_incompleta: boolean;
+      reserva_overhaul_en_cascada: true;
+    } | null = null;
+    if (!modoExternos && aircraftId) {
+      const tarifa = tarifaReservaOverhaul(reservasOverhaul, aircraftId);
+      const reservaUsd = reservaOverhaulPeriodoUsd(
+        horasVoladas,
+        tarifa.usd_por_hora,
+      );
+      const hoyReserva = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Cancun',
+      }).format(new Date());
+      const diaReserva = hasta < hoyReserva ? hasta : hoyReserva;
+      const detReserva =
+        reservaUsd === 0
+          ? null
+          : ((await this.tcOficialDeDias([diaReserva], memoTc)).get(
+              diaReserva,
+            ) ?? null);
+      reservaBalance = {
+        reserva_overhaul_usd: reservaUsd,
+        reserva_overhaul_mxn:
+          reservaUsd === 0
+            ? 0
+            : detReserva
+              ? round2(reservaUsd * detReserva.tc)
+              : null,
+        reserva_overhaul_horas_hr: round2(horasVoladas),
+        reserva_overhaul_usd_hr: tarifa.usd_por_hora,
+        reserva_overhaul_motores: tarifa.motores,
+        reserva_overhaul_tc: detReserva?.tc ?? null,
+        reserva_overhaul_tc_dia: detReserva?.fecha_dato ?? null,
+        reserva_overhaul_incompleta: reservaOverhaulIncompleta(
+          horasVoladas,
+          tarifa.usd_por_hora,
+        ),
+        reserva_overhaul_en_cascada: true,
+      };
+    }
+    // Lo que resta la cascada (0 sin reserva y en EXTERNOS). En pesos, null
+    // sin T.C. oficial: la cascada en pesos se propaga en null desde UTILIDAD
+    // DESPUÉS DE GASTOS, como con cualquier hoja sin pesos.
+    const reservaCascadaUsd = reservaBalance?.reserva_overhaul_usd ?? 0;
+    const reservaCascadaMxn: number | null = reservaBalance
+      ? reservaBalance.reserva_overhaul_mxn
+      : 0;
+
     // ===== Balance (todo USD; null se propaga si falta TC) =====
     // Refacciones (29-ago) restan como hoja propia: indirectos + refacciones
     // == los indirectos de antes — la utilidad NO cambia.
@@ -5742,7 +5811,8 @@ export class AircraftBalanceService {
             (hojaIndirectos.usd ?? 0) -
             (hojaRefacciones.usd ?? 0) -
             (hojaOtros.usd ?? 0) -
-            (hojaPermisos.usd ?? 0) +
+            (hojaPermisos.usd ?? 0) -
+            reservaCascadaUsd +
             (hojaOtrosIngresos.usd ?? 0),
         )
       : null;
@@ -5783,6 +5853,7 @@ export class AircraftBalanceService {
       refaccionesMxn != null &&
       otrosMxn != null &&
       permisosMxn != null &&
+      reservaCascadaMxn != null &&
       otrosIngresosAvionMxn != null
         ? round2(
             utilidadAntesMxn -
@@ -5790,7 +5861,8 @@ export class AircraftBalanceService {
               indirectosMxn -
               refaccionesMxn -
               otrosMxn -
-              permisosMxn +
+              permisosMxn -
+              reservaCascadaMxn +
               otrosIngresosAvionMxn,
           )
         : null;
@@ -5919,79 +5991,22 @@ export class AircraftBalanceService {
       for (const t of [num(e.taco_salida), num(e.taco_llegada)])
         if (t != null && t > maxTacoPeriodo) maxTacoPeriodo = t;
     }
-    // RESERVA DE OVERHAUL (19-oct-2026, API 0.0.98, invariante 96): lo que el
-    // avión DEBE APORTAR para el overhaul de sus motores en el periodo, con
-    // la MISMA aritmética del reparto (fuente única
-    // `common/reserva-overhaul.util`). En pesos, al T.C. oficial del cierre
-    // (día min(hasta, hoy Cancún)), el mismo del reparto. EXTERNOS no la
-    // lleva. LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124):
-    // `utilidad_a_repartir_*` = utilidad cobrada − reserva es la base del
-    // reparto a socios (pyservices la pinta como fila «(−) RESERVA DE
-    // OVERHAUL» + «UTILIDAD A REPARTIR» después de UTILIDAD COBRADA); las
-    // utilidades de arriba (después de gastos, cobrada) NO cambian.
-    let reservaBalance: {
-      reserva_overhaul_usd: number;
-      reserva_overhaul_mxn: number | null;
-      reserva_overhaul_horas_hr: number;
-      reserva_overhaul_usd_hr: number;
-      reserva_overhaul_motores: number;
-      reserva_overhaul_tc: number | null;
-      reserva_overhaul_tc_dia: string | null;
-      reserva_overhaul_incompleta: boolean;
-      utilidad_a_repartir_usd: number | null;
-      utilidad_a_repartir_mxn: number | null;
-    } | null = null;
-    if (!modoExternos && aircraftId) {
-      const tarifa = tarifaReservaOverhaul(reservasOverhaul, aircraftId);
-      const reservaUsd = reservaOverhaulPeriodoUsd(
-        horasVoladas,
-        tarifa.usd_por_hora,
-      );
-      const hoyReserva = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Cancun',
-      }).format(new Date());
-      const diaReserva = hasta < hoyReserva ? hasta : hoyReserva;
-      const detReserva =
-        reservaUsd === 0
-          ? null
-          : ((await this.tcOficialDeDias([diaReserva], memoTc)).get(
-              diaReserva,
-            ) ?? null);
-      const reservaMxnBalance =
-        reservaUsd === 0
-          ? 0
-          : detReserva
-            ? round2(reservaUsd * detReserva.tc)
-            : null;
-      reservaBalance = {
-        reserva_overhaul_usd: reservaUsd,
-        reserva_overhaul_mxn: reservaMxnBalance,
-        reserva_overhaul_horas_hr: round2(horasVoladas),
-        reserva_overhaul_usd_hr: tarifa.usd_por_hora,
-        reserva_overhaul_motores: tarifa.motores,
-        reserva_overhaul_tc: detReserva?.tc ?? null,
-        reserva_overhaul_tc_dia: detReserva?.fecha_dato ?? null,
-        reserva_overhaul_incompleta: reservaOverhaulIncompleta(
-          horasVoladas,
-          tarifa.usd_por_hora,
-        ),
-        // LA RESERVA SE RETIENE (invariante 124): la base del reparto. null
-        // si falta la utilidad cobrada (o la reserva en pesos sin T.C.).
-        utilidad_a_repartir_usd:
-          utilidadCobrada == null ? null : round2(utilidadCobrada - reservaUsd),
-        utilidad_a_repartir_mxn:
-          utilidadCobradaMxn == null || reservaMxnBalance == null
-            ? null
-            : round2(utilidadCobradaMxn - reservaMxnBalance),
-      };
-    }
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la MISMA
     // regla del reparto a socios — su parte (reserva × %) se INFORMA siempre
-    // (`reserva_*`, «cuánto debe guardar») y se le DESCUENTA de `monto_*`
-    // (a TODOS los socios desde el 6-nov-2026, invariante 121; antes solo a
-    // quien lo pidió con `descontar_reserva_overhaul`): `utilidad_*`
-    // conserva su parte de la utilidad cobrada ANTES de la reserva. Sin
-    // reserva (EXTERNOS, 0 horas): reserva 0 y nada cambia.
+    // (`reserva_*`, «cuánto aporta cada socio»). Desde el 9-nov-2026
+    // (invariante 125) la reserva ya restó EN la cascada: `monto_*` (su % de
+    // la utilidad cobrada, ya neta) NO vuelve a restarla, y `utilidad_*` es
+    // su % de la utilidad cobrada ANTES de la reserva (cobrada + reserva),
+    // como `reparto[].utilidad_*` del reparto: utilidad − reserva ≈ monto.
+    // Sin reserva (EXTERNOS, 0 horas): reserva 0 y utilidad = monto.
+    const cobradaAntesReservaUsd =
+      utilidadCobrada == null
+        ? null
+        : round2(utilidadCobrada + reservaCascadaUsd);
+    const cobradaAntesReservaMxn =
+      utilidadCobradaMxn == null || reservaCascadaMxn == null
+        ? null
+        : round2(utilidadCobradaMxn + reservaCascadaMxn);
     const sociosConReserva = socios.map((s) => {
       const pct = s.porcentaje;
       const reservaUsd = reservaBalance
@@ -6002,19 +6017,16 @@ export class AircraftBalanceService {
           ? null
           : round2((pct / 100) * reservaBalance.reserva_overhaul_mxn)
         : 0;
-      const descuenta = s.descuenta_reserva;
       return {
         ...s,
-        monto_usd:
-          s.monto_usd == null
+        utilidad_usd:
+          cobradaAntesReservaUsd == null
             ? null
-            : round2(s.monto_usd - (descuenta ? reservaUsd : 0)),
-        monto_mxn:
-          s.monto_mxn == null || (descuenta && reservaMxn == null)
+            : round2((pct / 100) * cobradaAntesReservaUsd),
+        utilidad_mxn:
+          cobradaAntesReservaMxn == null
             ? null
-            : round2(s.monto_mxn - (descuenta ? (reservaMxn ?? 0) : 0)),
-        utilidad_usd: s.monto_usd,
-        utilidad_mxn: s.monto_mxn,
+            : round2((pct / 100) * cobradaAntesReservaMxn),
         reserva_usd: reservaUsd,
         reserva_mxn: reservaMxn,
       };
@@ -6162,8 +6174,9 @@ export class AircraftBalanceService {
         utilidad_despues_usd: utilidadDespues,
         por_cobrar_usd: porCobrarUsdTotal,
         utilidad_cobrada_usd: utilidadCobrada,
-        // Con su parte de la reserva de overhaul y, si la descuentan, el
-        // monto neto (20-oct-2026, invariante 99); desde el 21-oct-2026
+        // Con su parte de la reserva de overhaul (20-oct-2026, invariante
+        // 99; desde el 9-nov-2026, invariante 125, la cascada ya la restó y
+        // `monto_*` es su % de la utilidad cobrada); desde el 21-oct-2026
         // (invariante 100) con lo entregado / por entregar por socio.
         socios: sociosPayload,
         // LA CASCADA EN PESOS (18-oct-2026, API 0.0.94, invariante 92),
@@ -6184,8 +6197,8 @@ export class AircraftBalanceService {
         por_cobrar_mxn: porCobrarMxnTotal,
         utilidad_cobrada_mxn: utilidadCobradaMxn,
         // RESERVA DE OVERHAUL (19-oct-2026, API 0.0.98, invariante 96;
-        // ADITIVA, nunca en EXTERNOS) y, desde el 7-nov-2026 (invariante
-        // 124), `utilidad_a_repartir_*` = utilidad cobrada − reserva.
+        // ADITIVA, nunca en EXTERNOS); desde el 9-nov-2026 (invariante 125)
+        // RESTA EN LA CASCADA y lo dice `reserva_overhaul_en_cascada`.
         ...(reservaBalance ?? {}),
         // ENTREGAS A SOCIOS DEL AVIÓN (21-oct-2026, invariante 100;
         // ADITIVAS, solo con la cuenta corriente disponible): Σ entregado y

@@ -40,14 +40,17 @@ import {
 } from '../profit-sharing/reparto-pesos.fixture-spec';
 
 /**
- * RESERVA DE OVERHAUL MARCADA EN EL BALANCE (19-oct-2026, API 0.0.98,
- * invariante 96). Decisión del cliente: «que solo aparezca marcado lo que se
- * tiene que reservar en el balance general y del avión sin hacer descuento
- * de nada». El bloque `balance` trae la aportación del periodo —horas
- * voladas × Σ USD/hr de los motores, la MISMA cuenta del reparto (fuente
- * única `common/reserva-overhaul.util`)— y en pesos al T.C. oficial del
- * cierre; NINGUNA utilidad del balance la resta. El reparto sigue
- * restándola (sin cambio).
+ * RESERVA DE OVERHAUL EN EL BALANCE: RESTA EN LA CASCADA, ANTES DEL TOTAL
+ * (9-nov-2026, API 0.0.129, invariante 125). Pedido del cliente: «que quede
+ * antes del total», como en su Excel manual y en el Diseño Funcional §4.8.
+ * El bloque `balance` trae la aportación del periodo —horas voladas × Σ
+ * USD/hr de los motores, la MISMA cuenta del reparto (fuente única
+ * `common/reserva-overhaul.util`)— y en pesos al T.C. oficial del cierre;
+ * UTILIDAD DESPUÉS DE GASTOS y UTILIDAD COBRADA ya la descuentan y cada
+ * socio recibe su % de la cobrada; `reserva_overhaul_en_cascada` es el
+ * discriminador para pyservices. Historia: del 19-oct al 6-nov (invariante
+ * 96) solo se informaba; del 7 al 9-nov (invariante 124) restaba DESPUÉS de
+ * la utilidad cobrada (`utilidad_a_repartir_*`, retirada).
  *
  * Mundo: el del reparto en pesos (XB-TST con 3.5 h voladas y reserva de 40
  * USD/hr; T.C. oficial del 30-sep = 18.6; XB-DOS sin vuelos ni reserva).
@@ -131,24 +134,36 @@ const LLAVES_RESERVA = [
   'reserva_overhaul_tc',
   'reserva_overhaul_tc_dia',
   'reserva_overhaul_incompleta',
-  // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124).
-  'utilidad_a_repartir_usd',
-  'utilidad_a_repartir_mxn',
+  // LA RESERVA RESTA EN LA CASCADA (9-nov-2026, API 0.0.129, invariante 125).
+  'reserva_overhaul_en_cascada',
 ];
 
-/** El bloque `balance` sin la reserva (todo lo demás debe quedar igual). */
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * El bloque `balance` sin la reserva ni lo que ella mueve (todo lo demás
+ * debe quedar igual): sus llaves, UTILIDAD DESPUÉS DE GASTOS y UTILIDAD
+ * COBRADA (la restan, invariante 125) y, por socio, su reserva, su
+ * utilidad, su monto y lo por entregar (salen de la cobrada).
+ */
 function sinReserva(b: BalanceAvionPayload['balance']) {
   const c = { ...b } as Record<string, unknown>;
-  for (const k of LLAVES_RESERVA) delete c[k];
-  // Invariante 99: la parte de la reserva de cada socio también es «reserva»;
-  // desde la 121 (se descuenta a TODOS) también lo que recibe cada socio
-  // (`monto_*`, `por_entregar_mxn`) y la suma por entregar del avión.
-  delete c.por_entregar_socios_mxn;
+  for (const k of [
+    ...LLAVES_RESERVA,
+    'utilidad_despues_usd',
+    'utilidad_despues_mxn',
+    'utilidad_cobrada_usd',
+    'utilidad_cobrada_mxn',
+    'por_entregar_socios_mxn',
+  ])
+    delete c[k];
   c.socios = (c.socios as Array<Record<string, unknown>>).map((s) => {
     const t = { ...s };
     for (const k of [
       'reserva_usd',
       'reserva_mxn',
+      'utilidad_usd',
+      'utilidad_mxn',
       'monto_usd',
       'monto_mxn',
       'por_entregar_mxn',
@@ -159,8 +174,8 @@ function sinReserva(b: BalanceAvionPayload['balance']) {
   return c;
 }
 
-describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
-  it('XB-TST: 3.5 h × 40 USD/hr = 140 USD × 18.6 (oficial del cierre) = 2,604 MXN — la MISMA reserva del reparto', async () => {
+describe('Balance — RESERVA DE OVERHAUL en la cascada, antes del total (invariante 125)', () => {
+  it('XB-TST: 3.5 h × 40 USD/hr = 140 USD × 18.6 (oficial del cierre) = 2,604 MXN — la MISMA reserva del reparto, con la bandera', async () => {
     const b = (await libro()).balance;
     expect(b).toMatchObject({
       reserva_overhaul_usd: 140,
@@ -171,41 +186,27 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
       reserva_overhaul_tc: 18.6,
       reserva_overhaul_tc_dia: '2026-09-30',
       reserva_overhaul_incompleta: false,
+      reserva_overhaul_en_cascada: true,
     });
-    // LA RESERVA SE RETIENE (invariante 124): la base del reparto a socios
-    // = utilidad cobrada − reserva, en las dos monedas.
-    expect(b.utilidad_a_repartir_usd).toBe(
-      Math.round((b.utilidad_cobrada_usd! - 140) * 100) / 100,
-    );
-    expect(b.utilidad_a_repartir_mxn).toBe(
-      Math.round((b.utilidad_cobrada_mxn! - 2604) * 100) / 100,
-    );
     const r = await reparto();
-    // Y es el saldo a repartir del reparto + los fijos prorrateados (la
-    // única resta que el balance no hace), como la utilidad cobrada.
-    expect(b.utilidad_a_repartir_usd).toBe(
-      Math.round(
-        (r.saldo_a_repartir_usd + r.gastos.otros_prorrateados_usd) * 100,
-      ) / 100,
-    );
     expect(b.reserva_overhaul_usd).toBe(r.reserva_overhaul_usd);
     expect(b.reserva_overhaul_mxn).toBe(r.reserva_overhaul_mxn);
     expect(b.reserva_overhaul_tc).toBe(r.detalle.reserva.tc);
+    expect(r.reserva_overhaul_en_cascada).toBe(true);
   });
 
-  it('REGLA B: el USD del balance convierte gasto por gasto como el reparto ⇒ utilidad cobrada USD = saldo del reparto + fijos prorrateados (la única resta que el balance NO hace; la reserva ya no resta en ninguno, invariante 99)', async () => {
+  it('RESTA EN LA CASCADA: utilidad cobrada USD = saldo del reparto + fijos prorrateados (los dos restan la reserva; lo único que el balance no resta son los fijos)', async () => {
     const b = (await libro()).balance;
     const r = await reparto();
     expect(b.utilidad_cobrada_usd).toBe(
-      Math.round(
-        (r.saldo_disponible_usd + r.gastos.otros_prorrateados_usd) * 100,
-      ) / 100,
+      r2(r.saldo_disponible_usd + r.gastos.otros_prorrateados_usd),
     );
-    // 4,838.80 = 4,488.80 + 350 en este mundo (la reserva de 140 se informa
-    // en los dos libros, por socio, y no resta en ninguno).
-    expect(b.utilidad_cobrada_usd).toBe(4838.8);
+    // 4,698.80 = 4,348.80 (saldo neto del reparto) + 350 en este mundo;
+    // antes de la reserva eran 4,838.80 = 4,488.80 + 350.
+    expect(b.utilidad_cobrada_usd).toBe(4698.8);
+    expect(r.saldo_disponible_usd).toBe(4348.8);
     expect(r.reserva_overhaul_usd).toBe(140);
-    // A TODOS se les descuenta (6-nov-2026, invariante 121).
+    // A TODOS se les descuenta su parte (6-nov-2026, invariante 121).
     expect(r.reparto.map((s) => [s.reserva_usd, s.descuenta_reserva])).toEqual([
       [57.29, true],
       [82.71, true],
@@ -216,38 +217,42 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
     ]);
   });
 
-  it('NO resta del avión: sin la tarifa de reserva, el bloque es el MISMO salvo las llaves de la reserva y lo que recibe cada socio (su utilidad − su reserva, invariante 121)', async () => {
+  it('con la tarifa vs sin ella: UTILIDAD DESPUÉS y COBRADA bajan EXACTAMENTE la reserva (USD y MXN), cada socio recibe su % de la cobrada ya neta y nada más se mueve', async () => {
     const con = (await libro()).balance;
     const m = mundoPesos();
     m.reserva_overhaul = [];
     const sin = (await libro(m)).balance;
     expect(sinReserva(con)).toEqual(sinReserva(sin));
-    // Utilidades cobradas idénticas; a cada socio se le descuenta SU parte.
-    expect(con.utilidad_cobrada_usd).toBe(sin.utilidad_cobrada_usd);
-    // Sin reserva, la base del reparto ES la utilidad cobrada.
-    expect(sin.utilidad_a_repartir_usd).toBe(sin.utilidad_cobrada_usd);
-    expect(sin.utilidad_a_repartir_mxn).toBe(sin.utilidad_cobrada_mxn);
-    expect(con.utilidad_a_repartir_usd).toBe(
-      Math.round(
-        (con.utilidad_cobrada_usd! - con.reserva_overhaul_usd!) * 100,
-      ) / 100,
-    );
+    expect(con.utilidad_despues_usd).toBe(r2(sin.utilidad_despues_usd! - 140));
+    expect(con.utilidad_cobrada_usd).toBe(r2(sin.utilidad_cobrada_usd! - 140));
+    expect(con.utilidad_despues_mxn).toBe(r2(sin.utilidad_despues_mxn! - 2604));
+    expect(con.utilidad_cobrada_mxn).toBe(r2(sin.utilidad_cobrada_mxn! - 2604));
     con.socios.forEach((s, i) => {
       const t = sin.socios[i];
+      const pct = s.porcentaje / 100;
+      // Lo que recibe: su % de la utilidad cobrada (ya neta), sin otra resta.
+      expect(s.monto_usd).toBe(r2(pct * con.utilidad_cobrada_usd!));
+      expect(s.monto_mxn).toBe(r2(pct * con.utilidad_cobrada_mxn!));
+      // Su parte ANTES de la reserva (cobrada + reserva): la misma de un
+      // avión sin reserva; utilidad − reserva ≈ monto (cada una redondea).
       expect(s.utilidad_usd).toBe(t.utilidad_usd);
-      expect(s.monto_usd).toBe(
-        Math.round((t.monto_usd! - s.reserva_usd!) * 100) / 100,
-      );
-      expect(s.monto_mxn).toBe(
-        Math.round((t.monto_mxn! - s.reserva_mxn!) * 100) / 100,
-      );
+      expect(s.utilidad_mxn).toBe(t.utilidad_mxn);
+      expect(
+        Math.abs(s.utilidad_usd! - s.reserva_usd! - s.monto_usd!),
+      ).toBeLessThanOrEqual(0.01);
+      expect(
+        Math.abs(s.utilidad_mxn! - s.reserva_mxn! - s.monto_mxn!),
+      ).toBeLessThanOrEqual(0.01);
+      // Sin reserva: utilidad = monto y reserva 0.
+      expect(t.utilidad_usd).toBe(t.monto_usd);
+      expect(t.reserva_usd).toBe(0);
     });
+    // Lo por entregar (sin entregas en este mundo) es lo que reciben.
     expect(con.por_entregar_socios_mxn).toBe(
-      Math.round(
-        (sin.por_entregar_socios_mxn! - con.reserva_overhaul_mxn!) * 100,
-      ) / 100,
+      r2(con.socios.reduce((acc, s) => acc + s.monto_mxn!, 0)),
     );
-    // Sin tarifa y con horas voladas: 0 y el aviso de «incompleta».
+    // Sin tarifa y con horas voladas: 0 y el aviso de «incompleta»; la
+    // bandera viaja igual (la cascada resta 0).
     expect(sin).toMatchObject({
       reserva_overhaul_usd: 0,
       reserva_overhaul_mxn: 0,
@@ -257,6 +262,7 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
       reserva_overhaul_tc: null,
       reserva_overhaul_tc_dia: null,
       reserva_overhaul_incompleta: true,
+      reserva_overhaul_en_cascada: true,
     });
   });
 
@@ -282,12 +288,13 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
     expect(keys[keys.length - 1]).toBe('otros_ingresos_avion_usd');
   });
 
-  it('general: cada avión trae SU reserva y la bandera `usd_por_gasto` viaja en la raíz y en cada libro; un avión sin vuelos ni tarifa (XB-DOS): 0, sin T.C.', async () => {
+  it('general: cada avión trae SU reserva y la bandera `usd_por_gasto` viaja en la raíz y en cada libro; un avión sin vuelos ni tarifa (XB-DOS): 0, sin T.C., con la bandera de la cascada', async () => {
     const g = await general();
     expect(g.usd_por_gasto).toBe(true);
     const tst = g.aviones.find((a) => a.matricula === 'XB-TST')!;
     expect(tst.balance.reserva_overhaul_usd).toBe(140);
     expect(tst.balance.reserva_overhaul_mxn).toBe(2604);
+    expect(tst.balance.reserva_overhaul_en_cascada).toBe(true);
     for (const a of g.aviones) expect(a.usd_por_gasto).toBe(true);
     const dos = await libro(mundoPesos(), AV2);
     expect(dos.usd_por_gasto).toBe(true);
@@ -297,6 +304,7 @@ describe('Balance — RESERVA DE OVERHAUL informativa (invariante 96)', () => {
       reserva_overhaul_horas_hr: 0,
       reserva_overhaul_tc: null,
       reserva_overhaul_incompleta: false,
+      reserva_overhaul_en_cascada: true,
     });
   });
 });

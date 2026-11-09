@@ -580,9 +580,6 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         'aviones.0.reparto.0.monto_mxn',
         'aviones.0.reparto.1.monto_mxn',
         'aviones.0.saldo_disponible_mxn',
-        // Invariante 124 (7-nov-2026): el saldo a repartir sigue al saldo.
-        'aviones.0.saldo_a_repartir_usd',
-        'aviones.0.saldo_a_repartir_mxn',
         // Invariante 99: la parte de cada socio ANTES de la reserva.
         'aviones.0.reparto.0.utilidad_usd',
         'aviones.0.reparto.0.utilidad_mxn',

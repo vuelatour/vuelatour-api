@@ -78,9 +78,12 @@ import {
  */
 
 // 7-nov-2026 (API 0.0.128, invariante 124): `saldo_a_repartir_*` (saldo −
-// reserva) en cada avión y en el payload ⇒ golden recapturado como 0128
-// (el 0125 se queda para el spec de identidad de la reserva retenida).
-const GOLDEN_ARCHIVO = 'libros-pesos.golden-0128.json';
+// reserva) en cada avión y en el payload ⇒ golden 0128. 9-nov-2026 (API
+// 0.0.129, invariante 125, LA RESERVA RESTA EN LA CASCADA, ANTES DEL TOTAL):
+// el saldo pasa a ser el que era el saldo a repartir, nace
+// `reserva_overhaul_en_cascada` y `saldo_a_repartir_*` se retira ⇒ golden
+// recapturado como 0129 (el 0128 se queda para el spec de identidad).
+const GOLDEN_ARCHIVO = 'libros-pesos.golden-0129.json';
 // Sin el archivo (primera recaptura con ACTUALIZAR_GOLDEN) el spec carga y
 // los tests del golden fallan solos.
 const GOLDEN = (
@@ -181,41 +184,52 @@ describe('Reparto a socios EN PESOS (invariante 92) — los dólares de siempre'
     ).toBe(JSON.stringify(GOLDEN.reparto_vacio));
   });
 
-  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.128', async () => {
+  it('GOLDEN: el payload del PDF/XLSX sin las llaves en pesos es BYTE A BYTE el del golden 0.0.129', async () => {
     expect(JSON.stringify(sinLlavesPesosPayload(await payload()))).toBe(
       JSON.stringify(GOLDEN.payload_oficial),
     );
   });
 
-  // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124): lo
-  // ÚNICO nuevo frente al 6-nov-2026 es `saldo_a_repartir_*` (saldo −
-  // reserva); ningún otro número ni llave se movió.
-  it('IDENTIDAD con el golden 0.0.125: sin `saldo_a_repartir_*` la respuesta y el payload son BYTE A BYTE los del 6-nov-2026', async () => {
-    const g0125 = JSON.parse(
+  // LA RESERVA RESTA EN LA CASCADA (9-nov-2026, API 0.0.129, invariante
+  // 125): frente al 7-nov-2026 lo ÚNICO que cambia es que el saldo pasa a
+  // ser el que entonces era `saldo_a_repartir_*` (saldo − reserva), nace la
+  // bandera `reserva_overhaul_en_cascada` y `saldo_a_repartir_*` se retira;
+  // ningún otro número ni llave se movió (los montos por socio, tampoco).
+  it('IDENTIDAD con el golden 0.0.128: el saldo de hoy es el «saldo a repartir» de entonces y todo lo demás es BYTE A BYTE', async () => {
+    const g0128 = JSON.parse(
       fs.readFileSync(
-        path.join(__dirname, 'libros-pesos.golden-0125.json'),
+        path.join(__dirname, 'libros-pesos.golden-0128.json'),
         'utf8',
       ),
     ) as Record<string, unknown>;
-    const sinSaldoARepartir = (r: unknown): unknown => {
+    // El golden 0128 reescrito como lo manda el 0.0.129.
+    const como0129 = (r: unknown): unknown => {
       const c = r as { aviones?: Array<Record<string, unknown>> };
       for (const a of c.aviones ?? []) {
+        if ('saldo_disponible_usd' in a)
+          a.saldo_disponible_usd = a.saldo_a_repartir_usd;
+        if ('saldo_usd' in a) a.saldo_usd = a.saldo_a_repartir_usd;
         delete a.saldo_a_repartir_usd;
         delete a.saldo_a_repartir_mxn;
       }
       return c;
     };
-    expect(
-      JSON.stringify(sinSaldoARepartir(sinLlavesPesos(await compute()))),
-    ).toBe(JSON.stringify(g0125.reparto_oficial));
+    const sinBandera = (r: unknown): unknown => {
+      const c = r as { aviones?: Array<Record<string, unknown>> };
+      for (const a of c.aviones ?? []) delete a.reserva_overhaul_en_cascada;
+      return c;
+    };
+    expect(JSON.stringify(sinBandera(sinLlavesPesos(await compute())))).toBe(
+      JSON.stringify(como0129(g0128.reparto_oficial)),
+    );
     expect(
       JSON.stringify(
-        sinSaldoARepartir(sinLlavesPesos(await compute(mundoPesos(), null))),
+        sinBandera(sinLlavesPesos(await compute(mundoPesos(), null))),
       ),
-    ).toBe(JSON.stringify(g0125.reparto_sin_oficial));
+    ).toBe(JSON.stringify(como0129(g0128.reparto_sin_oficial)));
     expect(
-      JSON.stringify(sinSaldoARepartir(sinLlavesPesosPayload(await payload()))),
-    ).toBe(JSON.stringify(g0125.payload_oficial));
+      JSON.stringify(sinBandera(sinLlavesPesosPayload(await payload()))),
+    ).toBe(JSON.stringify(como0129(g0128.payload_oficial)));
   });
 
   it('la respuesta lleva `reparto_en_pesos: true` en la raíz, también VACÍA (sin aviones activos)', async () => {
@@ -257,8 +271,8 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
     expect(a.afac_reservado_mxn).toBe(0);
     expect(a.afac_reservado_usd).toBe(0);
     // Saldo = cobrado − comisiones − directos − indirectos − permisos −
-    // otros − provisión AFAC + otros ingresos, todo en pesos. La RESERVA DE
-    // OVERHAUL YA NO RESTA (20-oct-2026, invariante 99: solo se informa).
+    // otros − provisión AFAC − RESERVA DE OVERHAUL + otros ingresos, todo en
+    // pesos (la reserva resta EN la cascada, 9-nov-2026, invariante 125).
     const saldo = r2(
       a.ingresos.cobrado_mxn -
         a.ingresos.comisiones_venta_mxn -
@@ -267,12 +281,13 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
         a.gastos.indirectos_mxn -
         a.gastos.permisos_mxn -
         a.gastos.otros_prorrateados_mxn -
-        a.afac_reservado_mxn +
+        a.afac_reservado_mxn -
+        a.reserva_overhaul_mxn +
         a.ingresos.otros_ingresos_avion_mxn,
     );
     expect(a.saldo_disponible_mxn).toBe(saldo);
-    // 81,784.80 (0.0.94) + 2,604 de reserva que ya no resta.
-    expect(a.saldo_disponible_mxn).toBe(84388.8);
+    // 81,784.80: los 84,388.80 de antes de la reserva − 2,604 de reserva.
+    expect(a.saldo_disponible_mxn).toBe(81784.8);
     expect(a.pesos_sin_tc_usd).toBe(0);
   });
 
@@ -365,7 +380,7 @@ describe('Reparto a socios EN PESOS — la cascada en pesos reales', () => {
 });
 
 describe('Reparto a socios EN PESOS — reparto por residuo mayor', () => {
-  it('40.92 / 59.08 sobre el saldo en pesos: Σ == saldo − reserva retenida al centavo y el centavo del residuo cae en el residuo mayor', async () => {
+  it('40.92 / 59.08 sobre el saldo en pesos ANTES de la reserva: Σ de lo que reciben == saldo (ya neto) al centavo y el centavo del residuo cae en el residuo mayor', async () => {
     const a = avion(await compute(), AV);
     // Utilidad: 8,438,880 ¢ × 0.4092 = 3,453,189.696 ⇒ piso 3,453,189 + el
     // centavo que falta (residuo mayor) = 34,531.90; × 0.5908 = 4,985,690.304
@@ -379,11 +394,11 @@ describe('Reparto a socios EN PESOS — reparto por residuo mayor', () => {
     ]);
     expect(a.reserva_retenida_mxn).toBe(2604);
     expect(r2(a.reparto.reduce((s, x) => s + x.monto_mxn, 0))).toBe(
-      r2(a.saldo_disponible_mxn - a.reserva_retenida_mxn),
+      a.saldo_disponible_mxn,
     );
   });
 
-  it('tres socios a 33.333 / 33.333 / 33.334 en varios saldos: Σ partes == saldo − reserva retenida SIEMPRE (en pesos y en dólares)', async () => {
+  it('tres socios a 33.333 / 33.333 / 33.334 en varios saldos: Σ de lo que reciben == saldo (ya neto) SIEMPRE (en pesos y en dólares)', async () => {
     for (const fijo of [7000, 7000.01, 12345.67, 99999.99]) {
       const m = mundoPesos();
       m.gasto = m.gasto.map((g) =>
@@ -400,13 +415,16 @@ describe('Reparto a socios EN PESOS — reparto por residuo mayor', () => {
         })),
       ];
       for (const a of (await compute(m)).aviones) {
-        // Lo que reciben + lo que VuelaTour retiene (la reserva de todos,
-        // invariante 121) = el saldo, al centavo.
+        // Lo que reciben = el saldo (ya neto de la reserva, invariante 125),
+        // al centavo; + lo que VuelaTour retiene = el saldo antes de ella.
         expect(r2(a.reparto.reduce((s, x) => s + x.monto_mxn, 0))).toBe(
-          r2(a.saldo_disponible_mxn - a.reserva_retenida_mxn),
+          a.saldo_disponible_mxn,
         );
         expect(r2(a.reparto.reduce((s, x) => s + x.monto_usd, 0))).toBe(
-          r2(a.saldo_disponible_usd - a.reserva_retenida_usd),
+          a.saldo_disponible_usd,
+        );
+        expect(r2(a.reparto.reduce((s, x) => s + x.utilidad_usd, 0))).toBe(
+          r2(a.saldo_disponible_usd + a.reserva_retenida_usd),
         );
       }
     }

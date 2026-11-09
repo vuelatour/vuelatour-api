@@ -206,13 +206,14 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
       monto_usd: 350,
       monto_mxn: 6737.5,
     });
-    // Saldo = 4,488.80 (sin AFAC) − 350; en pesos 84,388.80 − 6,737.50.
-    expect(a.saldo_disponible_usd).toBe(4138.8);
-    expect(a.saldo_disponible_mxn).toBe(77651.3);
+    // Saldo = 4,488.80 (sin AFAC ni reserva) − 350 − 140 de reserva de
+    // overhaul (invariante 125); en pesos 84,388.80 − 6,737.50 − 2,604.
+    expect(a.saldo_disponible_usd).toBe(3998.8);
+    expect(a.saldo_disponible_mxn).toBe(75047.3);
     expect(a.pesos_sin_tc_usd).toBe(0);
   });
 
-  it('3. la RESERVA no resta del saldo: por socio «lo que debe guardar», se le descuenta a TODOS (invariante 121) y VuelaTour la retiene; la bandera por socio ya no decide', async () => {
+  it('3. la RESERVA resta EN la cascada (invariante 125): por socio «lo que aporta», se le descuenta a TODOS (invariante 121) y VuelaTour la retiene; la bandera por socio ya no decide', async () => {
     const m = mundoPesos();
     const { a } = await avion(m);
     // 3.5 h × 40 = 140 USD × 18.6 = 2,604 MXN, repartida 40.92 / 59.08 por
@@ -243,25 +244,23 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     ]);
     expect(a.reserva_retenida_usd).toBe(140);
     expect(a.reserva_retenida_mxn).toBe(2604);
-    // El saldo del avión no cambia: lo retenido sale de la parte de cada socio.
-    expect(a.saldo_disponible_usd).toBe(4488.8);
-    // LA RESERVA SE RETIENE (7-nov-2026, invariante 124): lo que de hecho se
-    // reparte = saldo − reserva = Σ de lo que recibe cada socio, al centavo.
-    expect(a.saldo_a_repartir_usd).toBe(r2(4488.8 - a.reserva_overhaul_usd));
-    expect(a.saldo_a_repartir_mxn).toBe(
-      r2(a.saldo_disponible_mxn - a.reserva_overhaul_mxn),
-    );
+    // LA RESERVA RESTA EN LA CASCADA (9-nov-2026, invariante 125): el saldo
+    // del avión ya es neto (4,488.80 antes de la reserva − 140) y es Σ de lo
+    // que recibe cada socio, al centavo; la parte de cada socio
+    // (`utilidad_*`) sigue saliendo del saldo ANTES de la reserva.
+    expect(a.reserva_overhaul_en_cascada).toBe(true);
+    expect(a.saldo_disponible_usd).toBe(r2(4488.8 - a.reserva_overhaul_usd));
+    expect(a.saldo_disponible_usd).toBe(4348.8);
+    expect(a.saldo_disponible_mxn).toBe(81784.8);
     expect(r2(a.reparto.reduce((s, x) => s + x.monto_usd, 0))).toBe(
-      a.saldo_a_repartir_usd,
+      a.saldo_disponible_usd,
     );
     expect(r2(a.reparto.reduce((s, x) => s + x.monto_mxn, 0))).toBe(
-      a.saldo_a_repartir_mxn,
+      a.saldo_disponible_mxn,
     );
-    expect(
-      r2(
-        a.reparto.reduce((s, x) => s + x.monto_usd, 0) + a.reserva_retenida_usd,
-      ),
-    ).toBe(a.saldo_disponible_usd);
+    expect(r2(a.reparto.reduce((s, x) => s + x.utilidad_usd, 0))).toBe(
+      r2(a.saldo_disponible_usd + a.reserva_retenida_usd),
+    );
 
     // La bandera por socio (invariante 99) ya no decide: con true, false o
     // ausente el resultado es el MISMO.
@@ -316,9 +315,10 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(a.pesos_sin_tc_usd).toBe(r2(1280 + 140));
     expect(a.reserva_overhaul_mxn).toBe(0);
     // Sin oficial el saldo USD también cambia (GAS e ING-14 MXN sin T.C.
-    // quedan fuera de los dólares): 2,070.24 × 40.92 % = 847.14 − 57.29.
+    // quedan fuera de los dólares): 2,070.24 antes de la reserva − 140 =
+    // 1,930.24 (invariante 125); Hernán: 2,070.24 × 40.92 % = 847.14 − 57.29.
     const hernan = a.reparto.find((s) => s.socio_id === HERNAN)!;
-    expect(a.saldo_disponible_usd).toBe(2070.24);
+    expect(a.saldo_disponible_usd).toBe(1930.24);
     expect(hernan).toMatchObject({
       utilidad_usd: 847.14,
       reserva_usd: 57.29,
@@ -334,8 +334,9 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(b.balance.utilidad_cobrada_usd).toBe(
       r2(a.saldo_disponible_usd + a.gastos.otros_prorrateados_usd),
     );
-    // 4,488.80 = 4,138.80 + 350 con la provisión AFAC restada en los dos.
-    expect(b.balance.utilidad_cobrada_usd).toBe(4488.8);
+    // 4,348.80 = 3,998.80 + 350: la provisión AFAC y la reserva de overhaul
+    // restan en los dos libros (invariantes 99 y 125).
+    expect(b.balance.utilidad_cobrada_usd).toBe(4348.8);
     expect(b.totales.permiso_afac_mxn).toBe(a.afac_reservado_mxn);
     expect(b.totales.permiso_afac_mxn).toBe(6737.5);
   });

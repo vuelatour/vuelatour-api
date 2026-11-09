@@ -38,11 +38,10 @@ function avion(comisiones: number) {
       otros_prorrateados_usd: 25,
     },
     reserva_overhaul_usd: 10,
-    // `saldo_disponible_usd` = ANTES de la reserva; `saldo_a_repartir_usd` =
-    // después (LA RESERVA SE RETIENE, 7-nov-2026, invariante 124): el
-    // tablero suma la reserva en «Gastos» y usa el saldo a repartir.
-    saldo_disponible_usd: r2(1793.72 - comisiones - 100 - 50 - 0 - 25),
-    saldo_a_repartir_usd: r2(1793.72 - comisiones - 100 - 50 - 0 - 25 - 10),
+    // La reserva RESTA EN LA CASCADA (9-nov-2026, invariante 125): el saldo
+    // ya la descontó y el tablero la suma en «Gastos».
+    reserva_overhaul_en_cascada: true,
+    saldo_disponible_usd: r2(1793.72 - comisiones - 100 - 50 - 0 - 25 - 10),
   };
 }
 

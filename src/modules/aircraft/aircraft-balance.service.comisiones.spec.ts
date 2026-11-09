@@ -593,9 +593,6 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
         'balance.utilidad_antes_mxn',
         'balance.utilidad_cobrada_mxn',
         'balance.utilidad_despues_mxn',
-        // Invariante 124 (7-nov-2026): la base del reparto = cobrada − reserva.
-        'balance.utilidad_a_repartir_usd',
-        'balance.utilidad_a_repartir_mxn',
         'totales.cobrado_real_mxn',
         'totales.comision_banco_avion_mxn',
         'totales.comision_vendedor_prov_mxn',

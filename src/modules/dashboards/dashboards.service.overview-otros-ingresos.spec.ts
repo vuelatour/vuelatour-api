@@ -41,10 +41,10 @@ function avion(otros?: number) {
       otros_prorrateados_usd: 25,
     },
     reserva_overhaul_usd: 10,
-    // ANTES de la reserva y, con la reserva retenida (invariante 124), lo
-    // que el tablero lee como saldo.
-    saldo_disponible_usd: r2(1793.72 - 100 - 50 - 0 - 25 + (otros ?? 0)),
-    saldo_a_repartir_usd: r2(1793.72 - 100 - 50 - 0 - 25 - 10 + (otros ?? 0)),
+    // La reserva RESTA EN LA CASCADA (9-nov-2026, invariante 125): el saldo
+    // ya la descontó y el tablero la suma en «Gastos».
+    reserva_overhaul_en_cascada: true,
+    saldo_disponible_usd: r2(1793.72 - 100 - 50 - 0 - 25 - 10 + (otros ?? 0)),
   };
 }
 

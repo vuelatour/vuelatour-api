@@ -219,7 +219,7 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
     expect(a.gastos.indirectos_usd).toBe(100);
   });
 
-  it('2. «Utilidad antes de gastos» = cobrado − comisiones − directos − AFAC, y de ahí − combustible − indirectos − permisos − fijos + otros ingresos = saldo (USD y MXN, al centavo)', async () => {
+  it('2. «Utilidad antes de gastos» = cobrado − comisiones − directos − AFAC, y de ahí − combustible − indirectos − permisos − fijos − reserva de overhaul + otros ingresos = saldo (USD y MXN, al centavo)', async () => {
     const { r } = await avion(conAfac());
     for (const a of r.aviones) {
       expect(a.utilidad_antes_gastos_usd).toBe(
@@ -236,7 +236,8 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
             a.gastos.combustible_usd -
             a.gastos.indirectos_usd -
             a.gastos.permisos_usd -
-            a.gastos.otros_prorrateados_usd +
+            a.gastos.otros_prorrateados_usd -
+            a.reserva_overhaul_usd +
             a.ingresos.otros_ingresos_avion_usd,
         ),
       );
@@ -254,7 +255,8 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
             a.gastos.combustible_mxn -
             a.gastos.indirectos_mxn -
             a.gastos.permisos_mxn -
-            a.gastos.otros_prorrateados_mxn +
+            a.gastos.otros_prorrateados_mxn -
+            a.reserva_overhaul_mxn +
             a.ingresos.otros_ingresos_avion_mxn,
         ),
       );
@@ -284,9 +286,12 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
     };
     for (const a of c.aviones ?? []) {
       a.reserva_retenida_usd = 0;
-      // 0.0.128 (invariante 124): `saldo_a_repartir_*` no existía.
-      delete a.saldo_a_repartir_usd;
-      delete a.saldo_a_repartir_mxn;
+      // 0.0.129 (invariante 125): la reserva resta EN la cascada; en el
+      // 0.0.101 el saldo era ANTES de la reserva y no había bandera.
+      const reserva = (a.reserva_overhaul_usd as number | undefined) ?? 0;
+      for (const k of ['saldo_disponible_usd', 'saldo_usd'])
+        if (typeof a[k] === 'number') a[k] = r2(a[k] + reserva);
+      delete a.reserva_overhaul_en_cascada;
       for (const s of (a.reparto as Array<Record<string, unknown>>) ?? []) {
         s.monto_usd = s.utilidad_usd;
         s.descuenta_reserva = false;
@@ -304,6 +309,7 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
       aviones: Array<{
         gastos: { directos_usd: number; combustible_usd: number };
         saldo_disponible_usd: number;
+        reserva_overhaul_usd: number;
       }>;
     };
     const antes = GOLDEN_0101.reparto_oficial as {
@@ -317,7 +323,8 @@ describe('Reparto — COMBUSTIBLE APARTE DE LOS GASTOS DIRECTOS (invariante 104)
       expect(r2(a.gastos.directos_usd + a.gastos.combustible_usd)).toBe(
         antes.aviones[i].gastos.directos_usd,
       );
-      expect(a.saldo_disponible_usd).toBe(
+      // El saldo de hoy ya resta la reserva (invariante 125); el del 0101, no.
+      expect(r2(a.saldo_disponible_usd + a.reserva_overhaul_usd)).toBe(
         antes.aviones[i].saldo_disponible_usd,
       );
     });

@@ -311,8 +311,6 @@ const BALANCE_0074 = {
     utilidad_despues_usd: 4667.14,
     por_cobrar_usd: 706.28,
     utilidad_cobrada_usd: 3960.86,
-    // Invariante 124 (7-nov-2026): cobrada − reserva (0 en este mundo).
-    utilidad_a_repartir_usd: 3960.86,
     socios: socios([2812.21, 1148.65], [71, 29]),
   },
   'XB-DOS': {
@@ -325,8 +323,6 @@ const BALANCE_0074 = {
     utilidad_despues_usd: 3926.67,
     por_cobrar_usd: 0,
     utilidad_cobrada_usd: 3926.67,
-    // Invariante 124 (7-nov-2026): cobrada − reserva (0 en este mundo).
-    utilidad_a_repartir_usd: 3926.67,
     socios: socios([1963.34, 1963.34], [50, 50]),
   },
 } as const;
@@ -343,8 +339,6 @@ const BALANCE_ANTES = {
     utilidad_despues_usd: 4837.84,
     por_cobrar_usd: 706.28,
     utilidad_cobrada_usd: 4131.56,
-    // Invariante 124 (7-nov-2026): cobrada − reserva (0 en este mundo).
-    utilidad_a_repartir_usd: 4131.56,
     socios: socios([2933.41, 1198.15], [71, 29]),
   },
   'XB-DOS': {
@@ -357,8 +351,6 @@ const BALANCE_ANTES = {
     utilidad_despues_usd: 4160,
     por_cobrar_usd: 0,
     utilidad_cobrada_usd: 4160,
-    // Invariante 124 (7-nov-2026): cobrada − reserva (0 en este mundo).
-    utilidad_a_repartir_usd: 4160,
     socios: socios([2080, 2080], [50, 50]),
   },
 } as const;

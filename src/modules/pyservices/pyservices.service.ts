@@ -226,11 +226,13 @@ export interface RepartoAvionPayload {
   afac_tarifa_usd_hr?: number | null;
   reserva_retenida_usd?: number;
   reserva_retenida_mxn?: number;
-  /** LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
-   *  ADITIVOS): saldo − reserva de overhaul = lo que de hecho se reparte;
-   *  `saldo_*` queda como el saldo ANTES de la reserva. */
-  saldo_a_repartir_usd?: number;
-  saldo_a_repartir_mxn?: number;
+  /** LA RESERVA RESTA EN LA CASCADA, ANTES DEL TOTAL (9-nov-2026, API
+   *  0.0.129, invariante 125; ADITIVA): `saldo_*` ya descontó
+   *  `reserva_overhaul_*`; pyservices pinta la reserva como una resta más,
+   *  después de los fijos prorrateados y antes del saldo. Sin ella (API
+   *  previo) el saldo era ANTES de la reserva y la reserva solo se
+   *  informaba. */
+  reserva_overhaul_en_cascada?: boolean;
 }
 
 /**
@@ -1722,9 +1724,10 @@ export interface BalanceAvionBalancePayload {
    * RESERVA DE OVERHAUL INFORMATIVA (19-oct-2026, API 0.0.98, invariante
    * 96; ADITIVAS, nunca en EXTERNOS): lo que el avión debe aportar para el
    * overhaul de sus motores en el periodo (horas voladas × Σ USD/hr de sus
-   * motores, la MISMA cuenta del reparto). NO se resta de ninguna utilidad
-   * del balance: pyservices la pinta como bloque aparte. En pesos al T.C.
-   * oficial del cierre (null sin dato; 0 si la reserva es 0).
+   * motores, la MISMA cuenta del reparto). Desde el 9-nov-2026 (invariante
+   * 125) RESTA en la cascada (`reserva_overhaul_en_cascada`); del 19-oct al
+   * 6-nov solo se informaba en un bloque aparte. En pesos al T.C. oficial
+   * del cierre (null sin dato; 0 si la reserva es 0).
    */
   reserva_overhaul_usd?: number;
   reserva_overhaul_mxn?: number | null;
@@ -1735,12 +1738,12 @@ export interface BalanceAvionBalancePayload {
   reserva_overhaul_tc_dia?: string | null;
   /** Voló horas y el avión no tiene tarifa de reserva configurada. */
   reserva_overhaul_incompleta?: boolean;
-  /** LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
-   *  ADITIVOS): utilidad cobrada − reserva de overhaul = la base del
-   *  reparto a socios (pyservices: filas «(−) RESERVA DE OVERHAUL» y
-   *  «UTILIDAD A REPARTIR» tras UTILIDAD COBRADA). */
-  utilidad_a_repartir_usd?: number | null;
-  utilidad_a_repartir_mxn?: number | null;
+  /** LA RESERVA RESTA EN LA CASCADA, ANTES DEL TOTAL (9-nov-2026, API
+   *  0.0.129, invariante 125; ADITIVA): `utilidad_despues_*` y
+   *  `utilidad_cobrada_*` ya descontaron `reserva_overhaul_*` y los socios
+   *  reciben su % de la cobrada (pyservices: fila «(−) RESERVA DE OVERHAUL»
+   *  después de «(−) PERMISOS», antes de UTILIDAD DESPUÉS DE GASTOS). */
+  reserva_overhaul_en_cascada?: boolean;
   /**
    * ENTREGAS A SOCIOS (21-oct-2026, invariante 100; ADITIVAS, solo con la
    * cuenta corriente disponible, justo después de la reserva): Σ de

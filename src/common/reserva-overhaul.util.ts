@@ -8,22 +8,27 @@
  * `reserva_overhaul.monto_por_hora_usd` de sus motores (bimotor = 2 filas).
  * No es dinero retenido en ninguna cuenta ni un acumulado.
  *
- * Quién la usa, con ESTA misma aritmética (LA RESERVA SE RETIENE, 7-nov-2026,
- * API 0.0.128, invariante 124; pedido del cliente: «debe retenerse bien en
- * el balance por avión y general y verse en el reparto»):
- * - El reparto a socios: `saldo_disponible_*` es el saldo ANTES de la
- *   reserva, `saldo_a_repartir_*` = saldo − reserva es lo que se reparte y a
- *   cada socio se le retiene su parte (`reparto[].reserva_*`, a todos desde
- *   el 6-nov-2026, invariante 121).
- * - El Balance por avión y cada bloque del general: `utilidad_a_repartir_*`
- *   = utilidad cobrada − reserva (filas «(−) RESERVA DE OVERHAUL» y
- *   «UTILIDAD A REPARTIR» después de UTILIDAD COBRADA); los socios reciben
- *   su % de la utilidad cobrada menos su % de la reserva.
- * - El tablero (Estadísticas) la cuenta en «Gastos» y su saldo es el saldo a
- *   repartir.
+ * Quién la usa, con ESTA misma aritmética (LA RESERVA RESTA EN LA CASCADA,
+ * ANTES DEL TOTAL, 9-nov-2026, API 0.0.129, invariante 125; pedido del
+ * cliente: «que quede antes del total», como en su Excel manual y en el
+ * Diseño Funcional §4.8):
+ * - El reparto a socios: una resta más de la cascada (después de los fijos
+ *   prorrateados, antes de otros ingresos): `saldo_disponible_*` ya la
+ *   descontó; a cada socio se le retiene su parte (`reparto[].reserva_*`, a
+ *   todos desde el 6-nov-2026, invariante 121).
+ * - El Balance por avión y cada bloque del general: fila «(−) RESERVA DE
+ *   OVERHAUL» después de «(−) PERMISOS»; UTILIDAD DESPUÉS DE GASTOS y
+ *   UTILIDAD COBRADA ya la descuentan y los socios reciben su % de la
+ *   cobrada.
+ * - El tablero (Estadísticas) la cuenta en «Gastos»; su saldo es el del
+ *   reparto.
+ * El DISCRIMINADOR del contrato (panel y pyservices) es
+ * `reserva_overhaul_en_cascada: true`.
  * Historia: antes del 0.0.98 el reparto la multiplicaba inline y el balance
  * no la conocía; del 19-oct al 6-nov-2026 fue «informativa» en el balance y
- * por socio opcional en el reparto (invariantes 96 y 99).
+ * por socio opcional en el reparto (invariantes 96 y 99); del 7 al 9-nov
+ * restó DESPUÉS de la utilidad cobrada / del saldo (`utilidad_a_repartir_*`,
+ * `saldo_a_repartir_*`, invariante 124, retirada).
  */
 
 export interface ReservaOverhaulRow {

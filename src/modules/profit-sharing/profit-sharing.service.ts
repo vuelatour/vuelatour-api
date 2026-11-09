@@ -913,6 +913,11 @@ export class ProfitSharingService {
         permisos_usd: a.gastos.permisos_usd,
         otros_usd: a.gastos.otros_prorrateados_usd,
         reserva_overhaul_usd: a.reserva_overhaul_usd,
+        // LA RESERVA RESTA EN LA CASCADA (9-nov-2026, API 0.0.129, invariante
+        // 125; ADITIVA, opcional en pydantic): `saldo_*` ya la descontó.
+        // pyservices nuevo la pinta como una resta más antes del saldo; uno
+        // anterior la ignora.
+        reserva_overhaul_en_cascada: a.reserva_overhaul_en_cascada,
         saldo_usd: a.saldo_disponible_usd,
         // Advertencias de integridad: montos que NO pudieron entrar al balance.
         gastos_sin_tc_mxn: a.gastos.gastos_sin_tc_mxn,
@@ -1004,12 +1009,6 @@ export class ProfitSharingService {
         afac_tarifa_usd_hr: a.detalle.afac.tarifa_usd_hr,
         reserva_retenida_usd: a.reserva_retenida_usd,
         reserva_retenida_mxn: a.reserva_retenida_mxn,
-        // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
-        // ADITIVOS, opcionales en pydantic): el saldo que de hecho se reparte
-        // (saldo − reserva). pyservices nuevo pinta la reserva como resta de
-        // la cascada y «Saldo a repartir»; uno anterior los ignora.
-        saldo_a_repartir_usd: a.saldo_a_repartir_usd,
-        saldo_a_repartir_mxn: a.saldo_a_repartir_mxn,
         // CIERRE POR AVIÓN (23-oct-2026, invariante 105, ADITIVO): solo con
         // la migración por avión (`RepartoCierreAvion` de pyservices). Va
         // ANTES de las tres llaves que los specs fijan como las últimas.
@@ -1041,7 +1040,8 @@ export class ProfitSharingService {
       reparto_en_pesos: true as const,
       // ADITIVA (20-oct-2026, invariante 99): la cascada del balance —
       // provisión AFAC en la cascada y reserva de overhaul por socio (desde
-      // el 7-nov-2026, invariante 124, retenida: `saldo_a_repartir_*`).
+      // el 9-nov-2026, invariante 125, la reserva resta EN la cascada:
+      // `reserva_overhaul_en_cascada` en cada avión).
       reparto_como_balance: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real, en dos categorías —
@@ -3425,20 +3425,22 @@ export class ProfitSharingService {
     // LA CASCADA DEL BALANCE (20-oct-2026, invariante 99; decisión del
     // cliente: «que cuadren»): saldo = venta cobrada − comisiones − directos
     // (SIN combustible desde el 23-oct-2026, invariante 104) − combustible −
-    // indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC + otros
-    // ingresos. Es el saldo ANTES de la reserva de overhaul: la reserva se
-    // RETIENE (7-nov-2026, invariante 124) y lo que de hecho se reparte es
-    // `saldo_a_repartir_*` = saldo − reserva; a CADA socio se le descuenta
-    // SU parte de lo que recibe (a todos desde el 6-nov-2026, invariante
-    // 121; abajo).
+    // indirectos − permisos − fijos prorrateados − PROVISIÓN AFAC − RESERVA
+    // DE OVERHAUL + otros ingresos. LA RESERVA RESTA EN LA CASCADA, ANTES
+    // DEL TOTAL (9-nov-2026, invariante 125; pedido del cliente: «que quede
+    // antes del total», como en su Excel manual y en el Diseño Funcional
+    // §4.8): `saldo_disponible_*` ya es lo que se reparte. `saldoAntesReserva`
+    // solo sirve para la parte de cada socio (`reparto[].utilidad_*`, su
+    // parte ANTES de la reserva; menos su parte de la reserva = `monto_*`, a
+    // todos desde el 6-nov-2026, invariante 121; abajo).
     // «UTILIDAD ANTES DE GASTOS» (invariante 104): la línea del Excel del
     // cliente = venta cobrada − comisiones − directos − PROVISIÓN AFAC; de
-    // ahí, − combustible − indirectos − permisos − fijos + otros ingresos =
-    // saldo. Componentes ya redondeados: cuadra al centavo con lo publicado.
+    // ahí, − combustible − indirectos − permisos − fijos − reserva + otros
+    // ingresos = saldo. Componentes ya redondeados: cuadra al centavo.
     const utilidadAntesGastosR = round2(
       cobradoR - comisionesR - directosR - afacR,
     );
-    const saldo = round2(
+    const saldoAntesReserva = round2(
       cobradoR -
         comisionesR -
         directosR -
@@ -3449,6 +3451,7 @@ export class ProfitSharingService {
         afacR +
         otrosIngresosAvionR,
     );
+    const saldo = round2(saldoAntesReserva - reservaR);
 
     // ===== EN PESOS (18/19-oct-2026, API 0.0.94, invariante 92) =====
     // La MISMA cascada con los MISMOS componentes redondeados que se
@@ -3462,16 +3465,18 @@ export class ProfitSharingService {
     const permisosMxnR = round2(permisosMxn);
     const otrosMxnR = round2((ctx.otrosPorAvionMxn ?? 0) + fijoManualMxn);
     const reservaMxnR = tcReserva != null ? round2(reservaR * tcReserva) : 0;
-    // La reserva ya no entra al saldo: sus dólares sin T.C. solo dejan
-    // incompleta la PARTE de los socios que la descuentan (abajo).
+    // La reserva resta en la cascada (invariante 125): sin T.C. oficial del
+    // cierre sus dólares no llegan a pesos y el saldo en pesos queda
+    // incompleto por ese monto (`pesos_sin_tc_usd` lo avisa, una sola vez).
     const reservaSinPesos = tcReserva == null && reservaR > 0;
+    if (reservaSinPesos) pesosSinTcUsd += reservaR;
     const afacMxnR = round2(afacReservadoMxn);
     const otrosIngresosAvionMxnR = round2(otrosIngresosMxn);
     pesosSinTcUsd += ctx.otrosPorAvionSinPesosUsd ?? 0;
     const utilidadAntesGastosMxnR = round2(
       cobradoMxnR - comisionesMxnR - directosMxnR - afacMxnR,
     );
-    const saldoMxn = round2(
+    const saldoAntesReservaMxn = round2(
       cobradoMxnR -
         comisionesMxnR -
         directosMxnR -
@@ -3482,6 +3487,7 @@ export class ProfitSharingService {
         afacMxnR +
         otrosIngresosAvionMxnR,
     );
+    const saldoMxn = round2(saldoAntesReservaMxn - reservaMxnR);
 
     // Reparto por residuo mayor (en centavos): con porcentajes que suman 100,
     // la suma de las partes da EXACTO el saldo (antes 50/50 de 100.01 daba
@@ -3496,8 +3502,11 @@ export class ProfitSharingService {
     );
     const pcts = vigentes.map((s) => Number(s.porcentaje));
     const repartoPct = pcts.reduce((acc, p) => acc + p, 0);
-    const centsUsd = centavosPorResiduoMayor(pcts, saldo);
-    const centsMxn = centavosPorResiduoMayor(pcts, saldoMxn);
+    // Sobre el saldo ANTES de la reserva: la parte de cada socio
+    // (`utilidad_*`) menos su parte de la reserva (`reserva_*`) es lo que
+    // recibe (`monto_*`); Σ monto = saldo (ya neto) al centavo.
+    const centsUsd = centavosPorResiduoMayor(pcts, saldoAntesReserva);
+    const centsMxn = centavosPorResiduoMayor(pcts, saldoAntesReservaMxn);
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la parte
     // de cada socio (reserva × su %, residuo mayor) se INFORMA siempre —
     // «cuánto es lo que debe guardar cada socio»— y se le DESCUENTA de su
@@ -3519,7 +3528,6 @@ export class ProfitSharingService {
       if (descuenta) {
         reservaRetenidaUsd += reservaUsd;
         reservaRetenidaMxn += reservaMxn;
-        if (reservaSinPesos) pesosSinTcUsd += reservaUsd;
       }
       return {
         socio_id: s.socio_id,
@@ -3625,15 +3633,19 @@ export class ProfitSharingService {
         permisos_mxn: permisosMxnR,
         otros_prorrateados_mxn: otrosMxnR,
       },
-      // RESERVA DE OVERHAUL: se reparte por socio en `reparto[].reserva_*` y
-      // se le RETIENE a cada socio de lo que recibe (a TODOS desde el
-      // 6-nov-2026, invariante 121). `saldo_disponible_*` es el saldo ANTES
-      // de la reserva; `saldo_a_repartir_*` (abajo, invariante 124), después.
+      // RESERVA DE OVERHAUL: RESTA EN LA CASCADA, antes del total (9-nov-2026,
+      // invariante 125): `saldo_disponible_*` ya la descontó. Se reparte por
+      // socio en `reparto[].reserva_*` (su parte, la que deja de recibir; a
+      // TODOS desde el 6-nov-2026, invariante 121). `reserva_overhaul_en_
+      // cascada` es el DISCRIMINADOR del contrato (panel y pyservices): sin
+      // él (API previo, snapshots viejos) el saldo era ANTES de la reserva.
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
+      reserva_overhaul_en_cascada: true as const,
       // «UTILIDAD ANTES DE GASTOS» (23-oct-2026, invariante 104): la línea
       // del Excel = cobrado − comisiones − directos − AFAC; de ahí, −
-      // combustible − indirectos − permisos − fijos + otros ingresos = saldo.
+      // combustible − indirectos − permisos − fijos − reserva de overhaul +
+      // otros ingresos = saldo (a repartir).
       utilidad_antes_gastos_usd: utilidadAntesGastosR,
       utilidad_antes_gastos_mxn: utilidadAntesGastosMxnR,
       saldo_disponible_usd: saldo,
@@ -3651,15 +3663,6 @@ export class ProfitSharingService {
       afac_reservado_mxn: afacMxnR,
       reserva_retenida_usd: reservaRetenidaUsdR,
       reserva_retenida_mxn: reservaRetenidaMxnR,
-      // LA RESERVA SE RETIENE (7-nov-2026, API 0.0.128, invariante 124;
-      // ADITIVOS): lo que de hecho se reparte = saldo − reserva de overhaul.
-      // Σ `reparto[].monto_*` = esto al centavo cuando los porcentajes suman
-      // 100 y todos la descuentan (residuo mayor en las dos partes).
-      // `saldo_disponible_*` sigue siendo el saldo ANTES de la reserva. Sin
-      // T.C. oficial del cierre la reserva en pesos es 0 y los pesos quedan
-      // incompletos: `pesos_sin_tc_usd` lo avisa, como siempre.
-      saldo_a_repartir_usd: round2(saldo - reservaR),
-      saldo_a_repartir_mxn: round2(saldoMxn - reservaMxnR),
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
       // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
@@ -6345,8 +6348,6 @@ export class ProfitSharingService {
       saldo_mxn: 0,
       reserva_mxn: 0,
       reserva_retenida_mxn: 0,
-      // LA RESERVA SE RETIENE (7-nov-2026, invariante 124): saldo − reserva.
-      saldo_a_repartir_mxn: 0,
       entregado_mxn: 0,
       pesos_sin_tc_usd: 0,
       saldo_usd: 0,
@@ -6377,7 +6378,6 @@ export class ProfitSharingService {
         saldo_mxn: a.saldo_disponible_mxn,
         reserva_mxn: a.reserva_overhaul_mxn,
         reserva_retenida_mxn: a.reserva_retenida_mxn,
-        saldo_a_repartir_mxn: a.saldo_a_repartir_mxn,
         entregado_mxn: round2(
           entregasMes.reduce((acc, p) => acc + p.monto_mxn, 0),
         ),
@@ -6451,6 +6451,9 @@ export class ProfitSharingService {
       mes_actual: mesActual,
       reparto_en_pesos: true as const,
       reparto_como_balance: true as const,
+      // LA RESERVA RESTA EN LA CASCADA (9-nov-2026, API 0.0.129, invariante
+      // 125): `saldo_mxn` de cada mes y de los totales ya la descontó.
+      reserva_overhaul_en_cascada: true as const,
       meses: porMes,
       totales,
       socios: [...acumulado.entries()]
