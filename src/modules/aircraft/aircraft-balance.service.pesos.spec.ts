@@ -466,19 +466,20 @@ describe('Balance EN PESOS — la cascada del bloque `balance`', () => {
     expect(b.utilidad_cobrada_mxn).toBe(
       r2(b.utilidad_despues_mxn! - b.por_cobrar_mxn!),
     );
-    // Socios: % × la utilidad cobrada EN PESOS (ya neta de la reserva de
-    // overhaul, invariante 125) = lo que se transfiere; `utilidad_mxn` es su
-    // % de la cobrada ANTES de la reserva.
+    // Socios (invariante 125, API 0.0.130): `utilidad_mxn` = su % de la
+    // cobrada ANTES de la reserva, `reserva_mxn` su parte y `monto_mxn` =
+    // utilidad − reserva, exacto por renglón (lo que se transfiere).
     for (const s of b.socios) {
-      expect(s.monto_mxn).toBe(
-        r2((s.porcentaje / 100) * b.utilidad_cobrada_mxn!),
-      );
       expect(s.utilidad_mxn).toBe(
         r2(
           (s.porcentaje / 100) *
             r2(b.utilidad_cobrada_mxn! + b.reserva_overhaul_mxn!),
         ),
       );
+      expect(s.reserva_mxn).toBe(
+        r2((s.porcentaje / 100) * b.reserva_overhaul_mxn!),
+      );
+      expect(s.monto_mxn).toBe(r2(s.utilidad_mxn! - s.reserva_mxn!));
     }
   });
 

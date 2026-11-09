@@ -217,7 +217,7 @@ describe('Balance — RESERVA DE OVERHAUL en la cascada, antes del total (invari
     ]);
   });
 
-  it('con la tarifa vs sin ella: UTILIDAD DESPUÉS y COBRADA bajan EXACTAMENTE la reserva (USD y MXN), cada socio recibe su % de la cobrada ya neta y nada más se mueve', async () => {
+  it('con la tarifa vs sin ella: UTILIDAD DESPUÉS y COBRADA bajan EXACTAMENTE la reserva (USD y MXN), cada socio recibe su utilidad antes de la reserva menos su parte de la reserva y nada más se mueve', async () => {
     const con = (await libro()).balance;
     const m = mundoPesos();
     m.reserva_overhaul = [];
@@ -230,18 +230,19 @@ describe('Balance — RESERVA DE OVERHAUL en la cascada, antes del total (invari
     con.socios.forEach((s, i) => {
       const t = sin.socios[i];
       const pct = s.porcentaje / 100;
-      // Lo que recibe: su % de la utilidad cobrada (ya neta), sin otra resta.
-      expect(s.monto_usd).toBe(r2(pct * con.utilidad_cobrada_usd!));
-      expect(s.monto_mxn).toBe(r2(pct * con.utilidad_cobrada_mxn!));
       // Su parte ANTES de la reserva (cobrada + reserva): la misma de un
-      // avión sin reserva; utilidad − reserva ≈ monto (cada una redondea).
+      // avión sin reserva.
       expect(s.utilidad_usd).toBe(t.utilidad_usd);
       expect(s.utilidad_mxn).toBe(t.utilidad_mxn);
+      expect(s.utilidad_usd).toBe(
+        r2(pct * r2(con.utilidad_cobrada_usd! + con.reserva_overhaul_usd!)),
+      );
+      // Lo que recibe = utilidad − su parte de la reserva, EXACTO por
+      // renglón (API 0.0.130: es lo que el cliente lee en la tabla).
+      expect(s.monto_usd).toBe(r2(s.utilidad_usd! - s.reserva_usd!));
+      expect(s.monto_mxn).toBe(r2(s.utilidad_mxn! - s.reserva_mxn!));
       expect(
-        Math.abs(s.utilidad_usd! - s.reserva_usd! - s.monto_usd!),
-      ).toBeLessThanOrEqual(0.01);
-      expect(
-        Math.abs(s.utilidad_mxn! - s.reserva_mxn! - s.monto_mxn!),
+        Math.abs(s.monto_usd! - pct * con.utilidad_cobrada_usd!),
       ).toBeLessThanOrEqual(0.01);
       // Sin reserva: utilidad = monto y reserva 0.
       expect(t.utilidad_usd).toBe(t.monto_usd);

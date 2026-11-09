@@ -12883,13 +12883,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       refacciones − otros − permisos − RESERVA + otros ingresos (en pesos,
       `reserva_overhaul_mxn` null ⇒ la cascada en pesos se propaga en null
       desde ahí, como cualquier hoja sin pesos); `utilidad_cobrada_*` =
-      después − pendiente; `socios[].monto_*` = round2(% × cobrada) SIN otra
-      resta; `socios[].utilidad_*` = su % de la cobrada ANTES de la reserva
-      (cobrada + reserva, como en el reparto) y `reserva_*` su parte
-      (informativas; utilidad − reserva ≈ monto). pyservices: fila «(−)
-      RESERVA DE OVERHAUL» después de «(−) PERMISOS» y antes de «(+) OTROS
-      INGRESOS» / UTILIDAD DESPUÉS DE GASTOS; socio = ROUND(% × cobrada);
-      bloque final «ya restada en la cascada».
+      después − pendiente. **Socios (API 0.0.130, mismo día; el cliente:
+      «que sea claro en cada total lo que se les está descontando del total
+      de la utilidad»)**: tres cifras por renglón, `socios[].utilidad_*` =
+      su % de la cobrada ANTES de la reserva (cobrada + reserva, como en el
+      reparto), `reserva_*` = su % de la reserva y `monto_*` = utilidad −
+      reserva EXACTO por renglón (la fórmula de la celda; con reserva 0 es su
+      % de la cobrada). pyservices: fila «(−) RESERVA DE OVERHAUL» después de
+      «(−) PERMISOS» y antes de «(+) OTROS INGRESOS» / UTILIDAD DESPUÉS DE
+      GASTOS; tabla de socios SOCIO · % · UTILIDAD (antes de la reserva) ·
+      (−) RESERVA DE OVERHAUL · MONTO A RECIBIR; bloque final «RESERVA DE
+      OVERHAUL RETENIDA A LOS SOCIOS · ya restada en la cascada».
     - **Tablero**: `saldo_usd`/`saldo_disponible_usd` vuelven a
       `saldo_disponible_usd` (ya neto; la reserva va en «Gastos»: ingresos +
       otros − gastos == saldo). **Cierres/pre-cierre**: sin cambio de

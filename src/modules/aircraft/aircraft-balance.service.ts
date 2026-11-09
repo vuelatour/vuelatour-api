@@ -5901,6 +5901,8 @@ export class AircraftBalanceService {
       return {
         nombre: u?.nombre ?? 'Socio',
         porcentaje: pct,
+        // Provisional: abajo (`sociosConReserva`) queda como utilidad antes
+        // de la reserva − su parte de la reserva (API 0.0.130).
         monto_usd:
           utilidadCobrada != null
             ? round2((pct / 100) * utilidadCobrada)
@@ -5992,13 +5994,16 @@ export class AircraftBalanceService {
         if (t != null && t > maxTacoPeriodo) maxTacoPeriodo = t;
     }
     // RESERVA DE OVERHAUL POR SOCIO (20-oct-2026, invariante 99): la MISMA
-    // regla del reparto a socios — su parte (reserva × %) se INFORMA siempre
-    // (`reserva_*`, «cuánto aporta cada socio»). Desde el 9-nov-2026
-    // (invariante 125) la reserva ya restó EN la cascada: `monto_*` (su % de
-    // la utilidad cobrada, ya neta) NO vuelve a restarla, y `utilidad_*` es
-    // su % de la utilidad cobrada ANTES de la reserva (cobrada + reserva),
-    // como `reparto[].utilidad_*` del reparto: utilidad − reserva ≈ monto.
-    // Sin reserva (EXTERNOS, 0 horas): reserva 0 y utilidad = monto.
+    // regla del reparto a socios. Desde el 9-nov-2026 (invariante 125) la
+    // reserva ya restó EN la cascada; para que cada socio VEA lo que se le
+    // descuenta (pedido del cliente del mismo día, API 0.0.130: «que sea
+    // claro en cada total lo que se les está descontando»), la tabla de
+    // socios lleva tres cifras por renglón: `utilidad_*` = su % de la
+    // utilidad cobrada ANTES de la reserva (cobrada + reserva), `reserva_*`
+    // = su % de la reserva y `monto_*` = utilidad − reserva, EXACTO por
+    // renglón (es la fórmula de la celda de pyservices; Σ montos puede
+    // diferir un centavo de la cobrada, como en el reparto). Sin reserva
+    // (EXTERNOS, 0 horas): reserva 0 y monto = utilidad = su % de la cobrada.
     const cobradaAntesReservaUsd =
       utilidadCobrada == null
         ? null
@@ -6017,16 +6022,24 @@ export class AircraftBalanceService {
           ? null
           : round2((pct / 100) * reservaBalance.reserva_overhaul_mxn)
         : 0;
+      const utilidadUsd =
+        cobradaAntesReservaUsd == null
+          ? null
+          : round2((pct / 100) * cobradaAntesReservaUsd);
+      const utilidadMxn =
+        cobradaAntesReservaMxn == null
+          ? null
+          : round2((pct / 100) * cobradaAntesReservaMxn);
       return {
         ...s,
-        utilidad_usd:
-          cobradaAntesReservaUsd == null
+        monto_usd:
+          utilidadUsd == null ? null : round2(utilidadUsd - reservaUsd),
+        monto_mxn:
+          utilidadMxn == null || reservaMxn == null
             ? null
-            : round2((pct / 100) * cobradaAntesReservaUsd),
-        utilidad_mxn:
-          cobradaAntesReservaMxn == null
-            ? null
-            : round2((pct / 100) * cobradaAntesReservaMxn),
+            : round2(utilidadMxn - reservaMxn),
+        utilidad_usd: utilidadUsd,
+        utilidad_mxn: utilidadMxn,
         reserva_usd: reservaUsd,
         reserva_mxn: reservaMxn,
       };
