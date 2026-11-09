@@ -100,7 +100,10 @@ import {
   motivoConCobros,
   textoQuienPuedeEditar,
 } from './edicion-con-cobros.util';
-import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
+import {
+  fetchNombresUsuarios,
+  nombreDeRelacionUsuario,
+} from '../../common/registrado-por.util';
 import { normalizarTc } from '../../common/tc.util';
 import { parseBusquedaClave } from '../../common/clave-cliente.util';
 import {
@@ -2323,7 +2326,20 @@ export class QuotesService implements ConfirmadorCotizacion {
     return seguimiento ? { ...conClave, ...seguimiento } : conClave;
   }
 
-  async findVersions(vueloId: string) {
+  /**
+   * Historial de versiones de la cotización. QUIÉN HIZO CADA VERSIÓN
+   * (9-nov-2026, API 0.0.132; pedido de la oficina: «pueden poner quién hace
+   * cada versión»): `creado_por_nombre` ADITIVO, resuelto de
+   * `cotizacion_version_history.created_by` (siempre se guardó) en UNA
+   * consulta por respuesta con la fuente única `fetchNombresUsuarios`
+   * (usuario borrado, sin nombre o lectura fallida ⇒ null; nunca un uuid ni
+   * un nombre inventado). El resto de cada fila queda idéntico.
+   */
+  async findVersions(
+    vueloId: string,
+  ): Promise<
+    Array<Record<string, unknown> & { creado_por_nombre: string | null }>
+  > {
     await this.findById(vueloId);
     const { data, error } = await this.supabase.service
       .from('cotizacion_version_history')
@@ -2331,7 +2347,18 @@ export class QuotesService implements ConfirmadorCotizacion {
       .eq('vuelo_id', vueloId)
       .order('version', { ascending: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    const filas = (data ?? []) as Array<Record<string, unknown>>;
+    const nombres = await fetchNombresUsuarios(
+      this.supabase.service,
+      filas.map((f) =>
+        typeof f.created_by === 'string' ? f.created_by : null,
+      ),
+    );
+    return filas.map((f) => ({
+      ...f,
+      creado_por_nombre:
+        (typeof f.created_by === 'string' && nombres.get(f.created_by)) || null,
+    }));
   }
 
   /**

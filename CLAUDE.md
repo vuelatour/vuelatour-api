@@ -12940,6 +12940,18 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       snapshot.
     - Spec: `aircraft.service.reserva-overhaul-sync.spec`.
 
+127. **QUIÉN HIZO CADA VERSIÓN DE LA COTIZACIÓN (9-nov-2026, API 0.0.132,
+    SIN migración).** Pedido de la oficina sobre el «Historial de versiones»
+    del cotizador: «pueden poner quién hace cada versión». El dato siempre
+    estuvo (`cotizacion_version_history.created_by`, las 619 versiones de
+    prod lo traen y resuelven a un usuario con nombre); nadie lo traducía.
+    `QuotesService.findVersions` (`GET /v1/quotes/:id/versions`) añade
+    `creado_por_nombre` (ADITIVO) con `fetchNombresUsuarios` de
+    `common/registrado-por.util`: UNA consulta por respuesta, y null si el
+    usuario ya no existe, no tiene nombre o la lectura falla (el historial
+    nunca se cae por un nombre). El panel pinta «por <nombre>» junto a la
+    fecha de cada versión. Spec: `quotes.service.versiones-autor.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
