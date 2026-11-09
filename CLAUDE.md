@@ -12913,6 +12913,33 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Orden de deploy: pyservices (compuerta: `/v1/version.pyservices.
       commit`) ⇒ API ⇒ panel.
 
+126. **LA FICHA DEL AVIÓN MANDA EN LA RESERVA DE OVERHAUL (9-nov-2026, API
+    0.0.131, SIN migración).** Pregunta de Ale (Dirección) el mismo día:
+    «en la edición del avión dice 200 dólares, pero el balance sigue
+    multiplicando las horas por 400». Había DOS lugares sin conexión:
+    `aeronave.reserva_overhaul_hr_usd` (el campo «Reserva overhaul USD/hr»
+    de la ficha, que la oficina edita; N621TX lo tenía en 200 desde el
+    20-oct) y `reserva_overhaul.monto_por_hora_usd` (una fila por motor,
+    seedeada a mano en mayo/julio; lo ÚNICO que leen el balance y el reparto
+    vía `common/reserva-overhaul.util`), así que el cambio de la oficina
+    nunca llegó a los números.
+    - `AircraftService.sincronizarReservaOverhaul(aeronaveId, usdHr)` corre
+      en `create` y en `update` cuando el DTO trae `reserva_overhaul_hr_usd`:
+      con tarifa > 0, upsert de UNA fila por motor del avión (`onConflict:
+      aeronave_id,motor_id`; conserva `horas_acumuladas` y notas) y retira
+      las filas sin motor para no sumar de más; sin motores, actualiza las
+      filas que haya o inserta una sin motor. La tarifa de la ficha es POR
+      MOTOR (Seneca: 55 × 2). Vacía o 0 ⇒ la tabla no se toca (su check es
+      `> 0`): quitar una reserva es decisión aparte.
+    - El dato de prod se alineó a mano por MCP el 9-nov-2026 (N621TX: 400 ⇒
+      200, con nota en la fila). Hueco anotado: N4142R (Seneca, 2 motores)
+      solo tiene UNA fila de 55 y la ficha vacía; N58BT no tiene fila ni
+      ficha (sale «reserva incompleta»); XB-ANU ficha vacía con fila de 55.
+    - La reserva se calcula EN VIVO con la tarifa vigente: cambiarla mueve
+      todo mes no cerrado (octubre incluido); los cierres conservan su
+      snapshot.
+    - Spec: `aircraft.service.reserva-overhaul-sync.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

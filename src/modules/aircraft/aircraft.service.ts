@@ -1970,6 +1970,13 @@ export class AircraftService {
         throw new BadRequestException('matricula already exists');
       throw new Error(error.message);
     }
+    // LA FICHA MANDA (9-nov-2026, API 0.0.131, invariante 126): la tarifa de
+    // reserva de overhaul de la ficha baja a la tabla por motor que leen el
+    // balance y el reparto.
+    await this.sincronizarReservaOverhaul(
+      (data as { id: string }).id,
+      rest.reserva_overhaul_hr_usd,
+    );
     if (servicio_etapas !== undefined) {
       return this.update(
         (data as { id: string }).id,
@@ -2027,7 +2034,93 @@ export class AircraftService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Aeronave ${id} not found`);
+    // LA FICHA MANDA (9-nov-2026, API 0.0.131, invariante 126).
+    if (rest.reserva_overhaul_hr_usd !== undefined) {
+      await this.sincronizarReservaOverhaul(id, rest.reserva_overhaul_hr_usd);
+    }
     return data;
+  }
+
+  /**
+   * LA FICHA MANDA EN LA RESERVA DE OVERHAUL (9-nov-2026, API 0.0.131,
+   * invariante 126). Pregunta de Ale: «en la edición del avión dice 200
+   * dólares, pero el balance sigue multiplicando las horas por 400». Había
+   * DOS lugares: `aeronave.reserva_overhaul_hr_usd` (lo que edita la oficina
+   * en la ficha, «Reserva overhaul USD/hr») y `reserva_overhaul.
+   * monto_por_hora_usd` (una fila por motor: lo que leen el balance y el
+   * reparto vía `common/reserva-overhaul.util`), y nada los unía. Desde hoy,
+   * al guardar la ficha con tarifa, CADA motor del avión queda con esa
+   * tarifa (upsert por `(aeronave_id, motor_id)`; `horas_acumuladas` y
+   * notas se conservan) y las filas sin motor (alta previa a los motores)
+   * se retiran para no sumar de más; sin motores dados de alta, una sola
+   * fila sin motor (o se actualizan las que haya). La tarifa de la ficha es
+   * POR MOTOR: el Seneca lleva 55 × 2 motores, como la nota de la tabla.
+   * Vacía o 0 ⇒ no se toca la tabla (su check exige > 0): quitar una reserva
+   * sigue siendo decisión aparte.
+   */
+  private async sincronizarReservaOverhaul(
+    aeronaveId: string,
+    usdHr: number | null | undefined,
+  ): Promise<void> {
+    const tarifa = Number(usdHr);
+    if (usdHr == null || !Number.isFinite(tarifa) || tarifa <= 0) return;
+    const [motores, filas] = await Promise.all([
+      this.supabase.service
+        .from('motor')
+        .select('id')
+        .eq('aeronave_id', aeronaveId),
+      this.supabase.service
+        .from('reserva_overhaul')
+        .select('id, motor_id')
+        .eq('aeronave_id', aeronaveId),
+    ]);
+    if (motores.error) throw new Error(motores.error.message);
+    if (filas.error) throw new Error(filas.error.message);
+    const idsMotor = ((motores.data ?? []) as Array<{ id: string }>).map(
+      (m) => m.id,
+    );
+    const existentes = (filas.data ?? []) as Array<{
+      id: string;
+      motor_id: string | null;
+    }>;
+    const ahora = new Date().toISOString();
+    const tabla = () => this.supabase.service.from('reserva_overhaul');
+    if (idsMotor.length > 0) {
+      const { error } = await tabla().upsert(
+        idsMotor.map((motor_id) => ({
+          aeronave_id: aeronaveId,
+          motor_id,
+          monto_por_hora_usd: tarifa,
+          updated_at: ahora,
+        })),
+        { onConflict: 'aeronave_id,motor_id' },
+      );
+      if (error) throw new Error(error.message);
+      const huerfanas = existentes
+        .filter((f) => f.motor_id == null || !idsMotor.includes(f.motor_id))
+        .map((f) => f.id);
+      if (huerfanas.length > 0) {
+        const { error: eBorrar } = await tabla().delete().in('id', huerfanas);
+        if (eBorrar) throw new Error(eBorrar.message);
+      }
+      return;
+    }
+    if (existentes.length > 0) {
+      const { error } = await tabla()
+        .update({ monto_por_hora_usd: tarifa, updated_at: ahora })
+        .in(
+          'id',
+          existentes.map((f) => f.id),
+        );
+      if (error) throw new Error(error.message);
+      return;
+    }
+    const { error } = await tabla().insert({
+      aeronave_id: aeronaveId,
+      motor_id: null,
+      monto_por_hora_usd: tarifa,
+    });
+    if (error) throw new Error(error.message);
   }
 
   async softDelete(id: string, updatedBy: string) {
