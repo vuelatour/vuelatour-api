@@ -122,7 +122,23 @@ declare
   v_trg integer;
   v_rechazo boolean;
   v_hist jsonb;
+  v_antes integer;
 begin
+  -- T0: «ningún número cambia al aplicar» depende de que NO haya horas
+  -- voladas antes del 01/01/2026 (la fecha de la copia «desde siempre»): un
+  -- vuelo anterior se quedaría sin tarifa y su reserva bajaría a $0.
+  select count(distinct v.id) into v_antes
+    from public.vuelo v
+    join public.escala e on e.vuelo_id = v.id
+   where v.fecha_vuelo < timestamptz '2026-01-01 00:00:00-05'
+     and v.estado::text <> 'CANCELADO'
+     and e.cancelada_at is null
+     and e.taco_salida is not null
+     and e.taco_llegada is not null;
+  if v_antes > 0 then
+    raise exception 'DRYRUN T0: % vuelo(s) con horas voladas antes del 01/01/2026: la tarifa copiada «desde siempre» no los cubre y su reserva cambiaría. NO aplicar: avisar.', v_antes;
+  end if;
+
   -- T1: la copia «desde siempre» — una tarifa por avión con tarifa en
   -- reserva_overhaul, y por motor × motores = la suma de sus filas.
   select count(distinct aeronave_id) into v_n_legado from public.reserva_overhaul;
@@ -229,7 +245,7 @@ begin
     raise exception 'DRYRUN T6: RLS % · trigger %', v_rls, v_trg;
   end if;
 
-  raise exception 'DRYRUN_OK: % tarifas copiadas «desde siempre», alta, corrección, baja y candados correctos (todo revertido)', v_n_copiadas;
+  raise exception 'DRYRUN_OK: % tarifas copiadas «desde siempre», sin vuelos anteriores al 01/01/2026, alta, corrección, baja y candados correctos (todo revertido)', v_n_copiadas;
 end $t$;
 
 rollback;
