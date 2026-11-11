@@ -493,6 +493,37 @@ describe('Reserva de overhaul con vigencia — la tarifa que llega con la ficha 
     expect(vivas(m.tablas)).toEqual([['2026-11-01', 55, 2]]);
     expect(m.tablas.reserva_overhaul_vigencia[0].historial).toEqual([]);
     expect(m.avisos.n).toBe(0);
+    // Y la ficha NO se queda en 0: sigue diciendo la tarifa que vale hoy.
+    expect(m.tablas.aeronave[0].reserva_overhaul_hr_usd).toBe(55);
+  });
+
+  it('lo que puede rechazar va ANTES de escribir la ficha: una fecha que no existe ⇒ 400 sin tocar nada', async () => {
+    const m = mundo({
+      vigencias: [{ vigente_desde: '2026-01-01', usd_hr_por_motor: 55 }],
+    });
+    expect(
+      await errorDe(
+        m.service.update(
+          AV,
+          { reserva_overhaul_hr_usd: 60, reserva_overhaul_desde: '2026-02-30' },
+          ALE,
+        ),
+      ),
+    ).toMatchObject({ status: 400, code: 'RESERVA_FECHA_INVALIDA' });
+    m.baja();
+    expect(m.tablas.aeronave[0].reserva_overhaul_hr_usd).toBeNull();
+    expect(vivas(m.tablas)).toEqual([['2026-01-01', 55, 2]]);
+  });
+
+  it('la tarifa de la ficha con más de 2 decimales se guarda a centavos (como su columna)', async () => {
+    const m = mundo();
+    await m.service.update(
+      AV,
+      { reserva_overhaul_hr_usd: 55.126, reserva_overhaul_desde: '2026-11-01' },
+      ALE,
+    );
+    m.baja();
+    expect(vivas(m.tablas)).toEqual([['2026-11-01', 55.13, 2]]);
   });
 });
 

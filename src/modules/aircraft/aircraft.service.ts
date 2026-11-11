@@ -12,12 +12,16 @@ import {
 import { reservaVigenciaDisponible } from '../../common/reserva-overhaul.lector';
 import {
   COLS_RESERVA_VIGENCIA,
+  MENSAJE_RESERVA_FECHA_INVALIDA,
+  MENSAJE_RESERVA_TARIFA_INVALIDA,
   MENSAJE_RESERVA_UNICA_TARIFA,
   MENSAJE_RESERVA_VIGENCIA_NO_DISPONIBLE,
   MENSAJE_RESERVA_VIGENCIA_NO_EXISTE,
   MIGRACION_RESERVA_VIGENCIA,
   RESERVA_DESDE_SIEMPRE,
+  RESERVA_TARIFA_MAX_USD_HR,
   TABLA_RESERVA_VIGENCIA,
+  esDiaReal,
   validarVigenciaReserva,
   vigenciasParaFicha,
   type ReservaVigenciaFila,
@@ -1982,7 +1986,10 @@ export class AircraftService {
   async create(dto: CreateAeronaveDto, createdBy: string) {
     // `reserva_overhaul_desde` no es columna de `aeronave` (invariante 130).
     const { servicio_etapas, reserva_overhaul_desde, ...rest } = dto;
-    await this.assertReservaDesdeGuardable(reserva_overhaul_desde);
+    await this.assertReservaDesdeGuardable(
+      reserva_overhaul_desde,
+      rest.reserva_overhaul_hr_usd,
+    );
     const fila: Record<string, unknown> = { ...rest };
     await this.prepararCombustible(fila, 'alta');
     const { data, error } = await this.supabase.service
@@ -2018,7 +2025,10 @@ export class AircraftService {
     if (Object.keys(dto).length === 0) return this.findById(id);
     // `reserva_overhaul_desde` no es columna de `aeronave` (invariante 130).
     const { servicio_etapas, reserva_overhaul_desde, ...rest } = dto;
-    await this.assertReservaDesdeGuardable(reserva_overhaul_desde);
+    await this.assertReservaDesdeGuardable(
+      reserva_overhaul_desde,
+      rest.reserva_overhaul_hr_usd,
+    );
     if (
       reserva_overhaul_desde !== undefined &&
       Object.keys(rest).length === 0 &&
@@ -2102,10 +2112,29 @@ export class AircraftService {
    */
   private async assertReservaDesdeGuardable(
     desde: string | undefined,
+    usdHr?: number | null,
   ): Promise<void> {
-    if (desde === undefined) return;
-    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
-      throw this.reservaVigenciaNoDisponible();
+    // TODO lo que puede rechazar va ANTES de escribir la ficha: un 400/503
+    // después del UPDATE dejaría la ficha guardada y la tarifa no.
+    const conVigencias = await reservaVigenciaDisponible(this.supabase.service);
+    if (desde !== undefined) {
+      if (!conVigencias) throw this.reservaVigenciaNoDisponible();
+      if (!esDiaReal(desde)) {
+        throw new BadRequestException({
+          message: MENSAJE_RESERVA_FECHA_INVALIDA,
+          error: 'RESERVA_FECHA_INVALIDA',
+        });
+      }
+    }
+    if (
+      conVigencias &&
+      typeof usdHr === 'number' &&
+      usdHr > RESERVA_TARIFA_MAX_USD_HR
+    ) {
+      throw new BadRequestException({
+        message: MENSAJE_RESERVA_TARIFA_INVALIDA,
+        error: 'RESERVA_TARIFA_INVALIDA',
+      });
     }
   }
 
@@ -2326,34 +2355,44 @@ export class AircraftService {
       return;
     }
     const tarifa = Number(usdHr);
-    if (usdHr == null || !Number.isFinite(tarifa) || tarifa < 0) return;
-    if (tarifa === 0 && desde === undefined) return;
-    let fecha = desde;
-    if (fecha === undefined) {
-      const hoy = this.hoyCancun();
-      const vigente = (await this.filasVigenciaReserva(aeronaveId)).find(
-        (f) => String(f.vigente_desde).slice(0, 10) <= hoy,
+    const conTarifa =
+      usdHr != null &&
+      Number.isFinite(tarifa) &&
+      tarifa >= 0 &&
+      !(tarifa === 0 && desde === undefined);
+    let cambio = false;
+    if (conTarifa) {
+      let fecha = desde;
+      if (fecha === undefined) {
+        const hoy = this.hoyCancun();
+        const vigente = (await this.filasVigenciaReserva(aeronaveId)).find(
+          (f) => String(f.vigente_desde).slice(0, 10) <= hoy,
+        );
+        fecha = vigente
+          ? String(vigente.vigente_desde).slice(0, 10)
+          : RESERVA_DESDE_SIEMPRE;
+      }
+      // La ficha admite más decimales (su columna redondea a centavos): la
+      // tarifa de la vigencia va a centavos, igual.
+      const v = validarVigenciaReserva({
+        vigente_desde: fecha,
+        usd_hr_por_motor: Math.round(tarifa * 100) / 100,
+      });
+      if (!v.ok) {
+        throw new BadRequestException({ message: v.mensaje, error: v.codigo });
+      }
+      cambio = await this.escribirVigenciaReserva(
+        aeronaveId,
+        {
+          vigente_desde: v.vigente_desde,
+          usd_hr_por_motor: v.usd_hr_por_motor,
+          motores: null,
+        },
+        actorId,
       );
-      fecha = vigente
-        ? String(vigente.vigente_desde).slice(0, 10)
-        : RESERVA_DESDE_SIEMPRE;
     }
-    const v = validarVigenciaReserva({
-      vigente_desde: fecha,
-      usd_hr_por_motor: tarifa,
-    });
-    if (!v.ok) {
-      throw new BadRequestException({ message: v.mensaje, error: v.codigo });
-    }
-    const cambio = await this.escribirVigenciaReserva(
-      aeronaveId,
-      {
-        vigente_desde: v.vigente_desde,
-        usd_hr_por_motor: v.usd_hr_por_motor,
-        motores: null,
-      },
-      actorId,
-    );
+    // La ficha queda SIEMPRE con la tarifa que vale hoy (aunque el formulario
+    // la haya vaciado o mandado 0 sin fecha: eso no quita ninguna tarifa).
     await this.alinearReservaVigente(aeronaveId, actorId);
     if (cambio) avisarCambioUtilidadesSocios();
   }
