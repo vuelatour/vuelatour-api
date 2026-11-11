@@ -2,11 +2,28 @@ import { cierreMesDisponible } from '../../common/cierre-mes-disponible.util';
 import { colPeriodoContable } from '../../common/filtro-periodo-contable.util';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { reservaVigenciaDisponible } from '../../common/reserva-overhaul.lector';
+import {
+  COLS_RESERVA_VIGENCIA,
+  MENSAJE_RESERVA_UNICA_TARIFA,
+  MENSAJE_RESERVA_VIGENCIA_NO_DISPONIBLE,
+  MENSAJE_RESERVA_VIGENCIA_NO_EXISTE,
+  MIGRACION_RESERVA_VIGENCIA,
+  RESERVA_DESDE_SIEMPRE,
+  TABLA_RESERVA_VIGENCIA,
+  validarVigenciaReserva,
+  vigenciasParaFicha,
+  type ReservaVigenciaFila,
+  type VigenciaReserva,
+} from '../../common/reserva-overhaul.util';
+import { avisarCambioUtilidadesSocios } from '../../common/utilidades-socios-bus';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import { esAdministracion, finanzasParaRol } from '../../common/roles.util';
 import type { Rol } from '../../common/types/auth.types';
@@ -1483,6 +1500,11 @@ export class AircraftService {
       id,
     );
 
+    // RESERVA CON VIGENCIA (10-nov-2026, API 0.0.135, invariante 130;
+    // ADITIVO): las tarifas con su «a partir de» para la ficha. Best-effort:
+    // un fallo de esta lectura no tumba la ficha (`disponible:false`).
+    const reservaVigencias = await this.vigenciasReservaDeFicha(id);
+
     return {
       ...aeronave,
       airworthiness: aptitud ?? { apto: true, razones: [] },
@@ -1490,6 +1512,7 @@ export class AircraftService {
       propellers,
       owners: ownersRes.data ?? [],
       overhaul_reserves: overhaulReserves,
+      reserva_overhaul_vigencias: reservaVigencias,
       imagenes: imagenesRes.data ?? [],
       seguros: segurosRes.data ?? [],
       discrepancias: discrepanciasRes.data ?? [],
@@ -1957,7 +1980,9 @@ export class AircraftService {
   }
 
   async create(dto: CreateAeronaveDto, createdBy: string) {
-    const { servicio_etapas, ...rest } = dto;
+    // `reserva_overhaul_desde` no es columna de `aeronave` (invariante 130).
+    const { servicio_etapas, reserva_overhaul_desde, ...rest } = dto;
+    await this.assertReservaDesdeGuardable(reserva_overhaul_desde);
     const fila: Record<string, unknown> = { ...rest };
     await this.prepararCombustible(fila, 'alta');
     const { data, error } = await this.supabase.service
@@ -1971,11 +1996,13 @@ export class AircraftService {
       throw new Error(error.message);
     }
     // LA FICHA MANDA (9-nov-2026, API 0.0.131, invariante 126): la tarifa de
-    // reserva de overhaul de la ficha baja a la tabla por motor que leen el
-    // balance y el reparto.
-    await this.sincronizarReservaOverhaul(
+    // reserva de overhaul de la ficha baja a las tablas que leen el balance
+    // y el reparto (con vigencia desde el 10-nov-2026, invariante 130).
+    await this.aplicarReservaDeFicha(
       (data as { id: string }).id,
       rest.reserva_overhaul_hr_usd,
+      reserva_overhaul_desde,
+      createdBy,
     );
     if (servicio_etapas !== undefined) {
       return this.update(
@@ -1989,7 +2016,17 @@ export class AircraftService {
 
   async update(id: string, dto: UpdateAeronaveDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
-    const { servicio_etapas, ...rest } = dto;
+    // `reserva_overhaul_desde` no es columna de `aeronave` (invariante 130).
+    const { servicio_etapas, reserva_overhaul_desde, ...rest } = dto;
+    await this.assertReservaDesdeGuardable(reserva_overhaul_desde);
+    if (
+      reserva_overhaul_desde !== undefined &&
+      Object.keys(rest).length === 0 &&
+      servicio_etapas === undefined
+    ) {
+      // Solo llegó la fecha, sin tarifa: no hay nada que guardar.
+      return this.findById(id);
+    }
     const patch: Record<string, unknown> = { ...rest, updated_by: updatedBy };
     await this.prepararCombustible(patch, 'edicion');
     // Programa de servicio: las etapas (con tareas) son la fuente de verdad y
@@ -2034,11 +2071,384 @@ export class AircraftService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Aeronave ${id} not found`);
-    // LA FICHA MANDA (9-nov-2026, API 0.0.131, invariante 126).
+    // LA FICHA MANDA (9-nov-2026, API 0.0.131, invariante 126), con vigencia
+    // desde el 10-nov-2026 (invariante 130).
     if (rest.reserva_overhaul_hr_usd !== undefined) {
-      await this.sincronizarReservaOverhaul(id, rest.reserva_overhaul_hr_usd);
+      await this.aplicarReservaDeFicha(
+        id,
+        rest.reserva_overhaul_hr_usd,
+        reserva_overhaul_desde,
+        updatedBy,
+      );
     }
     return data;
+  }
+
+  // ============ RESERVA DE OVERHAUL CON VIGENCIA (invariante 130) ============
+
+  /**
+   * RESERVA DE OVERHAUL CON VIGENCIA — «a partir de» (10-nov-2026, API
+   * 0.0.135, invariante 130). Pedido del cliente: «que pudiéramos ponerle
+   * desde cuándo entra en vigor esa reserva de overhaul… que dijera ahí "a
+   * partir de" y la fecha a partir de cuándo quiere que afecte». La tarifa
+   * de la ficha se aplicaba EN VIVO a todo mes sin cierre formal: capturarla
+   * movía septiembre y octubre, ya entregados a los socios sin reserva.
+   *
+   * Cada tarifa vive en `reserva_overhaul_vigencia` con su `vigente_desde`;
+   * el balance y el reparto multiplican las horas de cada vuelo por la
+   * tarifa vigente el día del vuelo (`common/reserva-overhaul.util`). Una
+   * tarifa que se corrige guarda la anterior en `historial` y una que se
+   * elimina queda con `deleted_at` (nada se borra: se sabe quién y cuándo).
+   */
+  private async assertReservaDesdeGuardable(
+    desde: string | undefined,
+  ): Promise<void> {
+    if (desde === undefined) return;
+    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+      throw this.reservaVigenciaNoDisponible();
+    }
+  }
+
+  private reservaVigenciaNoDisponible(): ServiceUnavailableException {
+    return new ServiceUnavailableException({
+      message: MENSAJE_RESERVA_VIGENCIA_NO_DISPONIBLE,
+      error: 'MIGRACION_PENDIENTE',
+      details: { migracion: MIGRACION_RESERVA_VIGENCIA },
+    });
+  }
+
+  /** Tarifas VIVAS de un avión (la más reciente primero). */
+  private async filasVigenciaReserva(
+    aeronaveId: string,
+  ): Promise<ReservaVigenciaFila[]> {
+    const { data, error } = await this.supabase.service
+      .from(TABLA_RESERVA_VIGENCIA)
+      .select(COLS_RESERVA_VIGENCIA)
+      .eq('aeronave_id', aeronaveId)
+      .is('deleted_at', null)
+      .order('vigente_desde', { ascending: false });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /** Lo que la ficha pinta (nunca lanza: `disponible:false` si no se pudo). */
+  private async vigenciasReservaDeFicha(
+    aeronaveId: string,
+  ): Promise<{ disponible: boolean; vigencias: VigenciaReserva[] }> {
+    try {
+      if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+        return { disponible: false, vigencias: [] };
+      }
+      return {
+        disponible: true,
+        vigencias: vigenciasParaFicha(
+          await this.filasVigenciaReserva(aeronaveId),
+          this.hoyCancun(),
+        ),
+      };
+    } catch (e) {
+      this.logger.warn(
+        `Tarifas de la reserva de overhaul de ${aeronaveId}: no se pudieron leer (${e instanceof Error ? e.message : String(e)})`,
+      );
+      return { disponible: false, vigencias: [] };
+    }
+  }
+
+  /** `GET /v1/aircraft/:id/reserva-overhaul/vigencias`. */
+  async listarVigenciasReserva(
+    aeronaveId: string,
+  ): Promise<{ disponible: boolean; vigencias: VigenciaReserva[] }> {
+    await this.findById(aeronaveId);
+    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+      return { disponible: false, vigencias: [] };
+    }
+    return {
+      disponible: true,
+      vigencias: vigenciasParaFicha(
+        await this.filasVigenciaReserva(aeronaveId),
+        this.hoyCancun(),
+      ),
+    };
+  }
+
+  /** Motores que aportan a la reserva: los dados de alta; si no, la ficha. */
+  private async motoresParaReserva(aeronaveId: string): Promise<number> {
+    const [motores, avion] = await Promise.all([
+      this.supabase.service
+        .from('motor')
+        .select('id')
+        .eq('aeronave_id', aeronaveId),
+      this.supabase.service
+        .from('aeronave')
+        .select('num_motores')
+        .eq('id', aeronaveId)
+        .maybeSingle(),
+    ]);
+    if (motores.error) throw new Error(motores.error.message);
+    const dados = Array.isArray(motores.data) ? motores.data.length : 0;
+    if (dados > 0) return dados;
+    const ficha = Number(
+      (avion.data as { num_motores?: unknown } | null)?.num_motores,
+    );
+    return Number.isInteger(ficha) && ficha >= 1 ? ficha : 1;
+  }
+
+  /**
+   * Crea la tarifa de ese día o CORRIGE la que ya existe (misma fecha): la
+   * tarifa anterior queda en `historial` con quién y cuándo la cambió.
+   * Devuelve si escribió algo (misma tarifa ⇒ nada).
+   */
+  private async escribirVigenciaReserva(
+    aeronaveId: string,
+    v: {
+      vigente_desde: string;
+      usd_hr_por_motor: number;
+      motores: number | null;
+      /** undefined = no tocar las notas de una tarifa que ya existe. */
+      notas?: string | null;
+    },
+    actorId: string,
+  ): Promise<boolean> {
+    const sb = this.supabase.service;
+    const ahora = new Date().toISOString();
+    const vivas = await this.filasVigenciaReserva(aeronaveId);
+    const actual = vivas.find(
+      (f) => String(f.vigente_desde).slice(0, 10) === v.vigente_desde,
+    );
+    if (actual) {
+      const tarifaAntes = Number(actual.usd_hr_por_motor);
+      const motoresAntes = Number(actual.motores);
+      const motores = v.motores ?? motoresAntes;
+      const cambiaNotas =
+        v.notas !== undefined && (v.notas ?? null) !== (actual.notas ?? null);
+      if (
+        tarifaAntes === v.usd_hr_por_motor &&
+        motoresAntes === motores &&
+        !cambiaNotas
+      ) {
+        return false;
+      }
+      const previo: unknown[] = Array.isArray(actual.historial)
+        ? (actual.historial as unknown[])
+        : [];
+      const historial = [
+        ...previo,
+        {
+          usd_hr_por_motor: tarifaAntes,
+          motores: motoresAntes,
+          notas: actual.notas ?? null,
+          hasta: ahora,
+          cambio_por: actorId,
+        },
+      ];
+      const { error } = await sb
+        .from(TABLA_RESERVA_VIGENCIA)
+        .update({
+          usd_hr_por_motor: v.usd_hr_por_motor,
+          motores,
+          ...(v.notas !== undefined ? { notas: v.notas } : {}),
+          historial,
+          updated_by: actorId,
+          updated_at: ahora,
+        })
+        .eq('id', actual.id)
+        .is('deleted_at', null);
+      if (error) throw new Error(error.message);
+      this.logger.log(
+        `Reserva de overhaul de ${aeronaveId}: tarifa desde ${v.vigente_desde} corregida ${tarifaAntes} × ${motoresAntes} ⇒ ${v.usd_hr_por_motor} × ${motores} USD/hr por ${actorId}`,
+      );
+      return true;
+    }
+    const motores = v.motores ?? (await this.motoresParaReserva(aeronaveId));
+    const { error } = await sb.from(TABLA_RESERVA_VIGENCIA).insert({
+      aeronave_id: aeronaveId,
+      vigente_desde: v.vigente_desde,
+      usd_hr_por_motor: v.usd_hr_por_motor,
+      motores,
+      notas: v.notas ?? null,
+      created_by: actorId,
+      updated_by: actorId,
+    });
+    if (error) {
+      // Carrera: otra persona creó la tarifa de ese día entre la lectura y
+      // el alta ⇒ se corrige esa.
+      if (error.code === '23505') {
+        return this.escribirVigenciaReserva(aeronaveId, v, actorId);
+      }
+      throw new Error(error.message);
+    }
+    this.logger.log(
+      `Reserva de overhaul de ${aeronaveId}: tarifa nueva ${v.usd_hr_por_motor} × ${motores} USD/hr a partir del ${v.vigente_desde} por ${actorId}`,
+    );
+    return true;
+  }
+
+  /**
+   * Tras cualquier cambio de tarifas: la ficha (`reserva_overhaul_hr_usd`)
+   * queda con la tarifa por motor que vale HOY (null si todavía no empieza
+   * ninguna) y la tabla legada por motor con esa misma tarifa — así un API
+   * anterior (o la tabla nueva vacía) sigue viendo la tarifa vigente.
+   */
+  private async alinearReservaVigente(
+    aeronaveId: string,
+    actorId: string,
+  ): Promise<void> {
+    const vigencias = vigenciasParaFicha(
+      await this.filasVigenciaReserva(aeronaveId),
+      this.hoyCancun(),
+    );
+    const hoy = vigencias.find((v) => v.vigente_hoy) ?? null;
+    const tarifa = hoy ? hoy.usd_hr_por_motor : null;
+    const { error } = await this.supabase.service
+      .from('aeronave')
+      .update({ reserva_overhaul_hr_usd: tarifa, updated_by: actorId })
+      .eq('id', aeronaveId);
+    if (error) throw new Error(error.message);
+    await this.sincronizarReservaOverhaul(aeronaveId, tarifa);
+  }
+
+  /**
+   * La tarifa que llega con la FICHA (`reserva_overhaul_hr_usd` +
+   * `reserva_overhaul_desde`). Sin la migración: solo la tabla por motor,
+   * como siempre. Con ella: la tarifa de ese día; sin «a partir de» corrige
+   * la que vale HOY (la que la ficha enseña) o, si el avión no tiene
+   * ninguna vigente, la crea «desde siempre» (lo que hacía la ficha de
+   * antes). Vacía = no se toca; 0 solo con fecha (= sin reserva desde ahí).
+   */
+  private async aplicarReservaDeFicha(
+    aeronaveId: string,
+    usdHr: number | null | undefined,
+    desde: string | undefined,
+    actorId: string,
+  ): Promise<void> {
+    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+      await this.sincronizarReservaOverhaul(aeronaveId, usdHr);
+      return;
+    }
+    const tarifa = Number(usdHr);
+    if (usdHr == null || !Number.isFinite(tarifa) || tarifa < 0) return;
+    if (tarifa === 0 && desde === undefined) return;
+    let fecha = desde;
+    if (fecha === undefined) {
+      const hoy = this.hoyCancun();
+      const vigente = (await this.filasVigenciaReserva(aeronaveId)).find(
+        (f) => String(f.vigente_desde).slice(0, 10) <= hoy,
+      );
+      fecha = vigente
+        ? String(vigente.vigente_desde).slice(0, 10)
+        : RESERVA_DESDE_SIEMPRE;
+    }
+    const v = validarVigenciaReserva({
+      vigente_desde: fecha,
+      usd_hr_por_motor: tarifa,
+    });
+    if (!v.ok) {
+      throw new BadRequestException({ message: v.mensaje, error: v.codigo });
+    }
+    const cambio = await this.escribirVigenciaReserva(
+      aeronaveId,
+      {
+        vigente_desde: v.vigente_desde,
+        usd_hr_por_motor: v.usd_hr_por_motor,
+        motores: null,
+      },
+      actorId,
+    );
+    await this.alinearReservaVigente(aeronaveId, actorId);
+    if (cambio) avisarCambioUtilidadesSocios();
+  }
+
+  /**
+   * `PUT /v1/aircraft/:id/reserva-overhaul/vigencias`: la tarifa «a partir
+   * de» un día (misma fecha = corregirla). Responde las tarifas del avión.
+   */
+  async guardarVigenciaReserva(
+    aeronaveId: string,
+    dto: {
+      vigente_desde: string;
+      usd_hr_por_motor: number;
+      motores?: number;
+      notas?: string;
+    },
+    actorId: string,
+  ): Promise<{ disponible: boolean; vigencias: VigenciaReserva[] }> {
+    await this.findById(aeronaveId);
+    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+      throw this.reservaVigenciaNoDisponible();
+    }
+    const v = validarVigenciaReserva(dto);
+    if (!v.ok) {
+      throw new BadRequestException({ message: v.mensaje, error: v.codigo });
+    }
+    const cambio = await this.escribirVigenciaReserva(
+      aeronaveId,
+      {
+        vigente_desde: v.vigente_desde,
+        usd_hr_por_motor: v.usd_hr_por_motor,
+        motores: v.motores,
+        ...(dto.notas !== undefined ? { notas: v.notas } : {}),
+      },
+      actorId,
+    );
+    await this.alinearReservaVigente(aeronaveId, actorId);
+    if (cambio) avisarCambioUtilidadesSocios();
+    return this.listarVigenciasReserva(aeronaveId);
+  }
+
+  /**
+   * `DELETE /v1/aircraft/:id/reserva-overhaul/vigencias/:vigenciaId`: baja
+   * (soft delete: queda quién y cuándo) de UNA tarifa. La única tarifa del
+   * avión no se elimina (409 `RESERVA_UNICA_TARIFA`): para dejarlo sin
+   * reserva se captura en 0. El panel CONFIRMA antes (regla del cliente).
+   */
+  async eliminarVigenciaReserva(
+    aeronaveId: string,
+    vigenciaId: string,
+    actorId: string,
+  ): Promise<{ disponible: boolean; vigencias: VigenciaReserva[] }> {
+    await this.findById(aeronaveId);
+    if (!(await reservaVigenciaDisponible(this.supabase.service))) {
+      throw this.reservaVigenciaNoDisponible();
+    }
+    const vivas = await this.filasVigenciaReserva(aeronaveId);
+    const fila = vivas.find((f) => f.id === vigenciaId);
+    if (!fila) {
+      throw new NotFoundException({
+        message: MENSAJE_RESERVA_VIGENCIA_NO_EXISTE,
+        error: 'RESERVA_VIGENCIA_NO_EXISTE',
+        details: { vigencia_id: vigenciaId },
+      });
+    }
+    if (vivas.length <= 1) {
+      throw new ConflictException({
+        message: MENSAJE_RESERVA_UNICA_TARIFA,
+        error: 'RESERVA_UNICA_TARIFA',
+        details: { vigencia_id: vigenciaId },
+      });
+    }
+    const ahora = new Date().toISOString();
+    const { data, error } = await this.supabase.service
+      .from(TABLA_RESERVA_VIGENCIA)
+      .update({ deleted_at: ahora, deleted_by: actorId, updated_by: actorId })
+      .eq('id', vigenciaId)
+      .eq('aeronave_id', aeronaveId)
+      .is('deleted_at', null)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: MENSAJE_RESERVA_VIGENCIA_NO_EXISTE,
+        error: 'RESERVA_VIGENCIA_NO_EXISTE',
+        details: { vigencia_id: vigenciaId },
+      });
+    }
+    this.logger.log(
+      `Reserva de overhaul de ${aeronaveId}: tarifa ${String(fila.usd_hr_por_motor)} × ${String(fila.motores)} USD/hr a partir del ${String(fila.vigente_desde).slice(0, 10)} ELIMINADA por ${actorId}`,
+    );
+    await this.alinearReservaVigente(aeronaveId, actorId);
+    avisarCambioUtilidadesSocios();
+    return this.listarVigenciasReserva(aeronaveId);
   }
 
   /**

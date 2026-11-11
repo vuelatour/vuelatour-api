@@ -12937,7 +12937,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ficha (sale «reserva incompleta»); XB-ANU ficha vacía con fila de 55.
     - La reserva se calcula EN VIVO con la tarifa vigente: cambiarla mueve
       todo mes no cerrado (octubre incluido); los cierres conservan su
-      snapshot.
+      snapshot. **Desde el 10-nov-2026 (invariante 130) la tarifa tiene «a
+      partir de»**: una tarifa nueva ya no toca lo volado antes de su fecha.
     - Spec: `aircraft.service.reserva-overhaul-sync.spec`.
 
 127. **QUIÉN HIZO CADA VERSIÓN DE LA COTIZACIÓN (9-nov-2026, API 0.0.132,
@@ -13057,6 +13058,93 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       general, un avión, no vigente, filtro de meses, `ambitoDeEntrega`) y
       `reparto-pago.service.por-avion.spec` (alta y corrección contra la BD
       en memoria).
+
+130. **LA RESERVA DE OVERHAUL TIENE VIGENCIA — «A PARTIR DE» (10-nov-2026,
+    API 0.0.135, migración `20261110000001`).** Pedido del cliente con la
+    captura del campo «Reserva overhaul USD/hr (por motor)» de la ficha: «que
+    pudiéramos ponerle desde cuándo entra en vigor esa reserva de overhaul,
+    porque nomás aparece el monto… que dijera ahí "a partir de" y la fecha a
+    partir de cuándo quiere que afecte». La tarifa era UNA por avión y se
+    aplicaba EN VIVO a todo mes sin cierre formal (invariante 126):
+    capturarla movía septiembre y octubre, ya entregados a los socios SIN
+    reserva; la oficina llegó a poner 0.01 USD/hr para «apagarla» hacia
+    atrás (el Excel del N4142R de septiembre decía «41.50 h × 2 motores ×
+    0.01 USD/hr = 0.83 USD»).
+    - **Tabla `reserva_overhaul_vigencia`** (una fila por avión y fecha):
+      `vigente_desde` (date), `usd_hr_por_motor` (≥ 0; 0 = «sin reserva desde
+      ese día»), `motores` (1–8), `notas`, `historial` (jsonb: cada
+      corrección guarda la tarifa anterior con quién y cuándo), sellos
+      `created_/updated_/deleted_` SIN FK a propósito. Baja = `deleted_at`
+      (**todo lector filtra `deleted_at is null`**); índice único parcial de
+      tarifas VIVAS `(aeronave_id, vigente_desde)`. RLS sin políticas. El
+      backfill copia la tarifa de HOY de cada avión como «desde siempre»
+      (`RESERVA_DESDE_SIEMPRE` = 2026-01-01) y se verifica contra la suma de
+      `reserva_overhaul`: **aplicar la migración no mueve ningún libro**.
+    - **Cálculo — fuente única `common/reserva-overhaul.util`**
+      (`reservaOverhaulDelPeriodo`, PURO): las horas de cada vuelo se
+      multiplican por la tarifa vigente el DÍA DEL VUELO (día Cancún de
+      `fecha_vuelo`, el mismo eje con que las horas entran a un periodo:
+      `tarifaReservaEnDia` = la de mayor `vigente_desde` ≤ día; antes de la
+      primera, sin reserva). Un tramo por tarifa: `round2(round2(horas) ×
+      Σ USD/hr)`; total = Σ tramos. **Con UNA tarifa para todo el periodo es
+      byte a byte la cuenta de siempre** (usa el acumulado `horasTotal` que
+      ya sumaban los libros: el orden de la suma de flotantes no puede mover
+      un centavo). `incompleta` = voló y el avión no tiene NINGUNA tarifa;
+      volar antes del «a partir de» es deliberado y NO es un pendiente.
+    - **Lector único `common/reserva-overhaul.lector#leerTarifasReserva`**
+      (reparto, balance por avión y general): tabla nueva presente Y CON
+      FILAS ⇒ ella manda (un avión sin vigencias no reserva aunque conserve
+      filas legadas); tabla ausente **o vacía** ⇒ la legada `reserva_overhaul`
+      como UNA tarifa «desde siempre» por avión (`tarifasDeLegado`). Sonda
+      `reservaVigenciaDisponible` (patrón `columnaOpcional` con
+      `tambienTabla`): el 0.0.135 es desplegable ANTES de la migración.
+    - **Contrato ADITIVO, solo cuando el avión tiene tarifas con fecha**
+      (`con_vigencia`; con la legada, payloads byte a byte): reparto
+      `detalle.reserva.tramos [{vigente_desde, usd_por_hora, motores,
+      horas_hr, usd}]`, `horas_sin_tarifa_hr`, `primera_vigencia`; balance
+      `reserva_overhaul_tramos`, `reserva_overhaul_horas_sin_tarifa_hr`,
+      `reserva_overhaul_primera_vigencia` (pyservices redacta con ellos
+      «Cómo se calcula»; sin ellos, el renglón de siempre).
+      `reserva_overhaul_usd_hr` / `_motores` = la tarifa del ÚLTIMO tramo con
+      horas (sin horas con tarifa, la vigente al cierre del periodo).
+    - **Escritura (`AircraftService`, mismos roles que editar la ficha)**:
+      `GET /v1/aircraft/:id/reserva-overhaul/vigencias` ⇒ `{disponible,
+      vigencias [{id, vigente_desde, usd_hr_por_motor, motores,
+      usd_por_hora, notas, updated_at, vigente_hoy, futura}]}` (la más
+      reciente primero); `PUT …/vigencias {vigente_desde, usd_hr_por_motor,
+      motores?, notas?}` (la MISMA fecha CORRIGE esa tarifa y guarda la
+      anterior en `historial`; otra fecha crea una nueva; `motores` default =
+      motores dados de alta, si no `aeronave.num_motores`; 400
+      `RESERVA_FECHA_INVALIDA` / `RESERVA_TARIFA_INVALIDA` /
+      `RESERVA_MOTORES_INVALIDOS` / `RESERVA_NOTAS_INVALIDAS`); `DELETE
+      …/vigencias/:vigenciaId` (soft delete; **la ÚNICA tarifa del avión no
+      se elimina: 409 `RESERVA_UNICA_TARIFA`** — así la tabla nunca queda
+      vacía «a mano»; 404 `RESERVA_VIGENCIA_NO_EXISTE`). Sin la migración:
+      lecturas `disponible:false`, escrituras **503 `MIGRACION_PENDIENTE`**.
+      El snapshot de la ficha gana `reserva_overhaul_vigencias {disponible,
+      vigencias}` (best-effort).
+    - **La ficha de siempre** (`PATCH /aircraft/:id` con
+      `reserva_overhaul_hr_usd`): gana `reserva_overhaul_desde` (NO es
+      columna de `aeronave`: se destructura; sin la migración ⇒ 503 ANTES de
+      escribir). Sin fecha (panel anterior) corrige la tarifa que vale HOY
+      —nunca una futura— o, si no hay ninguna vigente, la crea «desde
+      siempre»; vacía = no se toca; 0 solo con fecha. Guardar la misma
+      tarifa no escribe nada. Tras cualquier cambio `alinearReservaVigente`
+      deja `aeronave.reserva_overhaul_hr_usd` y la tabla legada por motor con
+      la tarifa que vale HOY (rollback a un API previo sin sorpresas).
+    - **La cuenta de los socios se entera en el acto**:
+      `common/utilidades-socios-bus` (`avisarCambioUtilidadesSocios` ⇒
+      `ProfitSharingService` olvida la memoria de 10 min de los meses
+      cerrados). Sin eso el Balance mostraba la tarifa nueva y la cuenta la
+      vieja hasta 10 min (el cliente: «solo afecta al mes en curso»).
+    - Los meses con cierre formal conservan su snapshot (invariante 89).
+    - Orden: pyservices ⇒ API 0.0.135 ⇒ panel; la migración (paquete en
+      `docs/sql-aplicar-10-nov-2026-reserva-overhaul-vigencia/`) puede ir
+      antes o después. Specs: `common/reserva-overhaul.util.spec`,
+      `aircraft/reserva-vigencia.libros.spec` (balance ≡ reparto con
+      vigencias, mundo del reparto en pesos),
+      `aircraft.service.reserva-vigencia.spec` (escritura) y
+      `aircraft.service.reserva-overhaul-sync.spec` (camino sin migración).
 
 ## Convenciones NestJS
 

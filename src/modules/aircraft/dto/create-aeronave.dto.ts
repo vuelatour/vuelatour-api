@@ -124,6 +124,23 @@ export class CreateAeronaveDto {
   @Min(0)
   reserva_overhaul_hr_usd?: number;
 
+  /**
+   * «A PARTIR DE» de la tarifa de la reserva (10-nov-2026, API 0.0.135,
+   * invariante 130): el día desde el que vale `reserva_overhaul_hr_usd`. NO
+   * es una columna de `aeronave`: crea o corrige la tarifa de esa fecha en
+   * `reserva_overhaul_vigencia`. Sin él, la tarifa corrige la que vale hoy
+   * (comportamiento de siempre). Sin la migración ⇒ 503.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Día desde el que vale la reserva de overhaul (YYYY-MM-DD). Vacío = corrige la tarifa vigente.',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'reserva_overhaul_desde debe tener el formato AAAA-MM-DD',
+  })
+  reserva_overhaul_desde?: string;
+
   @ApiPropertyOptional({
     description:
       'Aportación AFAC (USD por hora cobrada) por volar con matrícula extranjera. Vacío = no aplica. La usa el Balance por avión.',

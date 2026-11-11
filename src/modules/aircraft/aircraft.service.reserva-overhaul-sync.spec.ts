@@ -5,6 +5,15 @@ jest.mock('../expirations/expirations.service', () => ({
 jest.mock('../pyservices/pyservices.service', () => ({
   PyservicesService: class {},
 }));
+// Este spec es el camino SIN la migración de las vigencias (10-nov-2026,
+// invariante 130): solo existe la tabla por motor, como el 9-nov. El camino
+// con «a partir de» vive en `aircraft.service.reserva-vigencia.spec.ts`.
+jest.mock('../../common/reserva-overhaul.lector', () => ({
+  ...jest.requireActual<Record<string, unknown>>(
+    '../../common/reserva-overhaul.lector',
+  ),
+  reservaVigenciaDisponible: jest.fn(() => Promise.resolve(false)),
+}));
 
 import { AircraftService } from './aircraft.service';
 import type { SupabaseService } from '../supabase/supabase.service';

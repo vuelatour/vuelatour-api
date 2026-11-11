@@ -11,6 +11,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   StreamableFile,
 } from '@nestjs/common';
@@ -28,6 +29,7 @@ import { BalanceAvionQuery } from './dto/balance-avion.query';
 import { BalanceGeneralQuery } from './dto/balance-general.query';
 import { BitacoraTacoQuery } from './dto/bitacora-taco.query';
 import { CreateAeronaveDto } from './dto/create-aeronave.dto';
+import { GuardarReservaVigenciaDto } from './dto/reserva-vigencia.dto';
 import { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import { UpdateAeronaveDto } from './dto/update-aeronave.dto';
 import {
@@ -446,6 +448,51 @@ export class AircraftController {
   @ApiOperation({ summary: 'Overhaul reserves per engine for this aircraft' })
   listReserves(@Param('id', ParseUUIDPipe) id: string) {
     return this.aircraft.listOverhaulReserves(id);
+  }
+
+  // RESERVA DE OVERHAUL CON VIGENCIA — «a partir de» (10-nov-2026, API
+  // 0.0.135, invariante 130). Mismos roles que editar la ficha.
+
+  @Get(':id/reserva-overhaul/vigencias')
+  @ApiOperation({
+    summary:
+      'Tarifas de la reserva de overhaul del avión con su «a partir de» (la más reciente primero)',
+  })
+  listReservaVigencias(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.listarVigenciasReserva(id);
+  }
+
+  @Put(':id/reserva-overhaul/vigencias')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Guarda la tarifa de la reserva de overhaul «a partir de» un día (misma fecha = corregirla) (ADMIN)',
+  })
+  saveReservaVigencia(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: GuardarReservaVigenciaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.guardarVigenciaReserva(id, dto, current.userId);
+  }
+
+  @Delete(':id/reserva-overhaul/vigencias/:vigenciaId')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Elimina UNA tarifa de la reserva de overhaul (la única del avión no se elimina) (ADMIN)',
+  })
+  deleteReservaVigencia(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('vigenciaId', ParseUUIDPipe) vigenciaId: string,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.eliminarVigenciaReserva(
+      id,
+      vigenciaId,
+      current.userId,
+    );
   }
 
   // ============ Imagenes ============

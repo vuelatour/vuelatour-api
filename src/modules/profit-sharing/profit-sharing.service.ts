@@ -52,10 +52,11 @@ import {
 import { cobrosEnUsd, retieneCobros } from '../../common/cobros-usd.util';
 import {
   descuentaReservaSocio,
-  reservaOverhaulIncompleta,
-  reservaOverhaulPeriodoUsd,
-  tarifaReservaOverhaul,
+  reservaOverhaulDelPeriodo,
+  type TarifaReservaVigente,
 } from '../../common/reserva-overhaul.util';
+import { leerTarifasReserva } from '../../common/reserva-overhaul.lector';
+import { alCambiarUtilidadesSocios } from '../../common/utilidades-socios-bus';
 import {
   gastoRestaEnColumnasDelVuelo,
   pagoOperadorExternoEnGastos,
@@ -746,12 +747,6 @@ interface SocioRow {
    */
   descontar_reserva_overhaul?: boolean | null;
 }
-interface ReservaRow {
-  aeronave_id: string;
-  monto_por_hora_usd: string;
-  horas_acumuladas: string;
-}
-
 /**
  * Items del pre-cierre de la CUENTA CORRIENTE DE LOS SOCIOS
  * (`socios_por_entregar` y `socios_adelantados`, invariante 38 v2): lo
@@ -853,6 +848,15 @@ export class ProfitSharingService {
    */
   private readonly utilidadesMes = new UtilidadesMensualesSocios(
     (mes, enCurso) => this.utilidadMesSocios(mes, enCurso),
+  );
+
+  /**
+   * La tarifa de la reserva de overhaul cambió (ficha del avión, invariante
+   * 130): los meses memoizados ya no valen. Sin esto la cuenta de los socios
+   * tardaba hasta 10 min en ver lo que el Balance ya mostraba.
+   */
+  private readonly bajaAvisoUtilidades = alCambiarUtilidadesSocios(() =>
+    this.utilidadesMes.olvidar(),
   );
 
   /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
@@ -1357,6 +1361,17 @@ export class ProfitSharingService {
       [...vuelos, ...vuelosHoras].map((v) => [v.id, v.aeronave_id]),
     );
     const horasPorAvion = new Map<string, number>();
+    // RESERVA CON VIGENCIA (10-nov-2026, invariante 130): las mismas horas
+    // por avión y DÍA del vuelo (día Cancún de `fecha_vuelo`, el eje con
+    // que las horas entran al periodo): cada día se multiplica por la
+    // tarifa vigente ESE día. `horasPorAvion` sigue siendo el acumulado.
+    const horasPorAvionDia = new Map<string, Map<string, number>>();
+    const diaDeVueloHoras = new Map<string, string>(
+      [...vuelos, ...vuelosHoras].map((v) => [
+        v.id,
+        diaCancun(v.fecha_vuelo) ?? q.hasta,
+      ]),
+    );
     const escalasPorVuelo = new Map<string, EscalaHorasRow[]>();
     // Mapa escala → avión (crudo; la herencia la aplica `avionDelGasto`).
     // Incluye tramos cancelados: un gasto ligado a un tramo cancelado sigue
@@ -1381,6 +1396,10 @@ export class ProfitSharingService {
       const avionId = e.aeronave_id ?? vueloAvion.get(e.vuelo_id) ?? null;
       if (!avionId) continue;
       horasPorAvion.set(avionId, (horasPorAvion.get(avionId) ?? 0) + h);
+      const dia = diaDeVueloHoras.get(e.vuelo_id) ?? q.hasta;
+      const porDia = horasPorAvionDia.get(avionId) ?? new Map<string, number>();
+      porDia.set(dia, (porDia.get(dia) ?? 0) + h);
+      horasPorAvionDia.set(avionId, porDia);
     }
 
     // REGLA B (cliente, 28-ago-2026): participación de cada avión en la VENTA
@@ -1508,6 +1527,7 @@ export class ProfitSharingService {
         vuelos,
         cobrosPorVuelo,
         horasPorAvion,
+        horasPorAvionDia,
         participacionPorVuelo,
         escalaPorId,
         escalasPorVuelo,
@@ -2287,6 +2307,13 @@ export class ProfitSharingService {
       vuelos: VueloRow[];
       cobrosPorVuelo: Map<string, CobroRow[]>;
       horasPorAvion: Map<string, number>;
+      /**
+       * Las mismas horas por avión y DÍA del vuelo (invariante 130): la
+       * tarifa de la reserva vale «a partir de» una fecha. Opcional (specs
+       * que llaman `computeAvion` directo): sin él todas las horas cuentan
+       * al cierre del periodo.
+       */
+      horasPorAvionDia?: Map<string, Map<string, number>>;
       /** Regla B: participación de cada avión en la venta de cada vuelo. */
       participacionPorVuelo: Map<string, ParticipacionAeronave>;
       /** escala.id → avión crudo del tramo (herencia en `avionDelGasto`). */
@@ -2301,7 +2328,8 @@ export class ProfitSharingService {
       clientes: Map<string, string>;
       gastos: GastoRow[];
       socios: SocioRow[];
-      reservas: ReservaRow[];
+      /** Tarifas de la reserva de overhaul con su vigencia (invariante 130). */
+      reservas: TarifaReservaVigente[];
       nombres: Map<string, string>;
       otrosPorAvion: number;
       periodo: ProfitSharingQuery;
@@ -3289,19 +3317,25 @@ export class ProfitSharingService {
     // FUENTE ÚNICA `common/reserva-overhaul.util` (19-oct-2026, API 0.0.98,
     // invariante 96): la MISMA aritmética que la fila «(−) RESERVA DE
     // OVERHAUL» del balance por avión y del general.
+    // CON VIGENCIA (10-nov-2026, API 0.0.135, invariante 130): las horas de
+    // cada día por la tarifa vigente ESE día («a partir de»); con una sola
+    // tarifa para todo el periodo es, byte a byte, la cuenta de siempre.
     const horasPeriodo = round2(ctx.horasPorAvion.get(a.id) ?? 0);
-    const tarifaReserva = tarifaReservaOverhaul(
-      ctx.reservas,
-      a.id,
-    ).usd_por_hora;
-    const reservaOverhaul = reservaOverhaulPeriodoUsd(
-      horasPeriodo,
-      tarifaReserva,
-    );
-    const reservaIncompleta = reservaOverhaulIncompleta(
-      horasPeriodo,
-      tarifaReserva,
-    );
+    const reservaPeriodo = reservaOverhaulDelPeriodo({
+      tarifas: ctx.reservas,
+      aeronaveId: a.id,
+      horasPorDia:
+        ctx.horasPorAvionDia?.get(a.id) ??
+        (horasPeriodo > 0 ? [[ctx.periodo.hasta, horasPeriodo] as const] : []),
+      horasTotal: horasPeriodo,
+      hasta: ctx.periodo.hasta,
+    });
+    const tarifaReserva = reservaPeriodo.usd_por_hora;
+    const reservaOverhaul = reservaPeriodo.usd;
+    const reservaIncompleta = reservaPeriodo.incompleta;
+    // ADITIVO (invariante 130): solo viaja cuando la tarifa tiene vigencia
+    // (tabla nueva) — con la legada el contrato es el de siempre.
+    const reservaConVigencia = reservaPeriodo.con_vigencia;
     // EN PESOS (0.0.94, invariante 92): la reserva publicada (USD) × el T.C.
     // oficial del cierre del periodo; sin él, sus dólares no llegan a pesos.
     const tcReserva = ctx.tcReserva ?? null;
@@ -3691,6 +3725,17 @@ export class ProfitSharingService {
           // oficial del cierre del periodo con que se pasó (null = sin dato).
           monto_mxn: reservaMxnR,
           tc: tcReserva,
+          // ADITIVOS (10-nov-2026, API 0.0.135, invariante 130; solo con
+          // tarifas con vigencia): las horas partidas por tarifa («a partir
+          // de»), las voladas ANTES de la primera (sin reserva) y el día en
+          // que esa primera empieza.
+          ...(reservaConVigencia
+            ? {
+                tramos: reservaPeriodo.tramos,
+                horas_sin_tarifa_hr: reservaPeriodo.horas_sin_tarifa_hr,
+                primera_vigencia: reservaPeriodo.primera_vigencia,
+              }
+            : {}),
         },
         // PROVISIÓN AFAC (20-oct-2026, invariante 99): tarifa de la ficha
         // del avión × horas COBRADAS del periodo (la parte de este avión).
@@ -6815,12 +6860,13 @@ export class ProfitSharingService {
     return data ?? [];
   }
 
-  private async fetchReservas(): Promise<ReservaRow[]> {
-    const { data, error } = await this.supabase.service
-      .from('reserva_overhaul')
-      .select('aeronave_id, monto_por_hora_usd, horas_acumuladas');
-    if (error) throw new Error(error.message);
-    return data ?? [];
+  /**
+   * Tarifas de la reserva de overhaul con su vigencia (invariante 130):
+   * lector ÚNICO (`reserva_overhaul_vigencia`; sin la migración, la legada
+   * `reserva_overhaul` «desde siempre»).
+   */
+  private async fetchReservas(): Promise<TarifaReservaVigente[]> {
+    return (await leerTarifasReserva(this.supabase.service)).tarifas;
   }
 
   /** cliente.id → nombre (detalle.vuelos y detalle de vuelos del PDF/XLSX). */

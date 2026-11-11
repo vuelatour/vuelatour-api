@@ -1738,6 +1738,23 @@ export interface BalanceAvionBalancePayload {
   reserva_overhaul_tc_dia?: string | null;
   /** Voló horas y el avión no tiene tarifa de reserva configurada. */
   reserva_overhaul_incompleta?: boolean;
+  /**
+   * RESERVA CON VIGENCIA — «a partir de» (10-nov-2026, API 0.0.135,
+   * invariante 130; ADITIVAS, solo cuando el avión tiene tarifas con
+   * fecha): las horas del periodo partidas por tarifa (`usd_por_hora` = Σ
+   * de los motores), las voladas ANTES de la primera tarifa (no generan
+   * reserva) y el día en que esa primera empieza. Con ellas pyservices
+   * redacta «Cómo se calcula» por tramo; sin ellas, el renglón de siempre.
+   */
+  reserva_overhaul_tramos?: Array<{
+    vigente_desde: string | null;
+    usd_por_hora: number;
+    motores: number;
+    horas_hr: number;
+    usd: number;
+  }>;
+  reserva_overhaul_horas_sin_tarifa_hr?: number;
+  reserva_overhaul_primera_vigencia?: string | null;
   /** LA RESERVA RESTA EN LA CASCADA, ANTES DEL TOTAL (9-nov-2026, API
    *  0.0.129, invariante 125; ADITIVA): `utilidad_despues_*` y
    *  `utilidad_cobrada_*` ya descontaron `reserva_overhaul_*` y los socios

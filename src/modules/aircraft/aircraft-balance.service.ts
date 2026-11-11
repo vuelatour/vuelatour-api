@@ -91,11 +91,11 @@ import {
 } from '../profit-sharing/reparto-pago.util';
 import {
   descuentaReservaSocio,
-  reservaOverhaulIncompleta,
-  reservaOverhaulPeriodoUsd,
-  tarifaReservaOverhaul,
-  type ReservaOverhaulRow,
+  reservaOverhaulDelPeriodo,
+  type TarifaReservaVigente,
+  type TramoReservaOverhaul,
 } from '../../common/reserva-overhaul.util';
+import { leerTarifasReserva } from '../../common/reserva-overhaul.lector';
 import { pendienteCobro } from '../../common/semaforo-cobro.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
@@ -2496,17 +2496,18 @@ export class AircraftBalanceService {
     // `common/reserva-overhaul.util` (19-oct-2026, API 0.0.98, invariante
     // 96): el balance solo la MUESTRA como bloque informativo (no la resta);
     // el reparto a socios la descuenta con la misma aritmética.
-    let reservasOverhaul: ReservaOverhaulRow[] = [];
+    // CON VIGENCIA (10-nov-2026, API 0.0.135, invariante 130): lector ÚNICO
+    // (`reserva_overhaul_vigencia`; sin la migración, la legada «desde
+    // siempre»), el mismo del reparto.
+    let tarifasReserva: TarifaReservaVigente[] = [];
     if (!modoExternos && aircraftId) {
-      const { data: reservasRows, error: reservasErr } = await sb
-        .from('reserva_overhaul')
-        .select('aeronave_id, monto_por_hora_usd')
-        .eq('aeronave_id', aircraftId);
-      if (reservasErr)
+      try {
+        tarifasReserva = (await leerTarifasReserva(sb, aircraftId)).tarifas;
+      } catch (e) {
         throw new Error(
-          `Balance ${matricula}: fallo al leer la reserva de overhaul: ${reservasErr.message}`,
+          `Balance ${matricula}: fallo al leer la reserva de overhaul: ${e instanceof Error ? e.message : String(e)}`,
         );
-      reservasOverhaul = reservasRows ?? [];
+      }
     }
     // Prefijo de los pendientes a nivel libro ("Avión XB-PEV: …" /
     // "Externos: …").
@@ -5744,13 +5745,39 @@ export class AircraftBalanceService {
       reserva_overhaul_tc_dia: string | null;
       reserva_overhaul_incompleta: boolean;
       reserva_overhaul_en_cascada: true;
+      /**
+       * ADITIVOS (10-nov-2026, API 0.0.135, invariante 130; solo con
+       * tarifas con vigencia): las horas partidas por tarifa («a partir
+       * de»), las voladas ANTES de la primera (sin reserva) y el día en que
+       * esa primera empieza.
+       */
+      reserva_overhaul_tramos?: TramoReservaOverhaul[];
+      reserva_overhaul_horas_sin_tarifa_hr?: number;
+      reserva_overhaul_primera_vigencia?: string | null;
     } | null = null;
     if (!modoExternos && aircraftId) {
-      const tarifa = tarifaReservaOverhaul(reservasOverhaul, aircraftId);
-      const reservaUsd = reservaOverhaulPeriodoUsd(
-        horasVoladas,
-        tarifa.usd_por_hora,
-      );
+      // Las horas de cada fila por la tarifa vigente el DÍA del vuelo; con
+      // una sola tarifa para todo el periodo es la cuenta de siempre.
+      const horasPorDia = new Map<string, number>();
+      for (const r of filasVuelo) {
+        const h = r.tiempo_vuelo;
+        if (h == null || !(h > 0)) continue;
+        const dia = r.fecha ?? hasta;
+        horasPorDia.set(dia, (horasPorDia.get(dia) ?? 0) + h);
+      }
+      const reservaPeriodo = reservaOverhaulDelPeriodo({
+        tarifas: tarifasReserva,
+        aeronaveId: aircraftId,
+        horasPorDia,
+        horasTotal: horasVoladas,
+        hasta,
+      });
+      const tarifa = {
+        usd_por_hora: reservaPeriodo.usd_por_hora,
+        motores: reservaPeriodo.motores,
+      };
+      const reservaUsd = reservaPeriodo.usd;
+      const reservaConVigencia = reservaPeriodo.con_vigencia;
       const hoyReserva = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'America/Cancun',
       }).format(new Date());
@@ -5774,11 +5801,17 @@ export class AircraftBalanceService {
         reserva_overhaul_motores: tarifa.motores,
         reserva_overhaul_tc: detReserva?.tc ?? null,
         reserva_overhaul_tc_dia: detReserva?.fecha_dato ?? null,
-        reserva_overhaul_incompleta: reservaOverhaulIncompleta(
-          horasVoladas,
-          tarifa.usd_por_hora,
-        ),
+        reserva_overhaul_incompleta: reservaPeriodo.incompleta,
         reserva_overhaul_en_cascada: true,
+        ...(reservaConVigencia
+          ? {
+              reserva_overhaul_tramos: reservaPeriodo.tramos,
+              reserva_overhaul_horas_sin_tarifa_hr:
+                reservaPeriodo.horas_sin_tarifa_hr,
+              reserva_overhaul_primera_vigencia:
+                reservaPeriodo.primera_vigencia,
+            }
+          : {}),
       };
     }
     // Lo que resta la cascada (0 sin reserva y en EXTERNOS). En pesos, null
