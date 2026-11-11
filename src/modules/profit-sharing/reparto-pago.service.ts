@@ -33,6 +33,7 @@ import {
 import {
   MENSAJE_RANGO_FECHAS_INVALIDO,
   MENSAJE_SOCIO_SOLO_SU_CUENTA,
+  ambitoDeEntrega,
   excedeSaldo,
   excedeSaldoEnOrdenDeCaptura,
   mensajeExcedeSaldo,
@@ -69,6 +70,7 @@ import {
   tcDePago,
   validarDineroPago,
   validarFechaPago,
+  type AeronaveCorta,
   type PagoSocio,
   type RepartoPagoRow,
 } from './reparto-pago.util';
@@ -110,6 +112,17 @@ interface DetalleExceso {
   monto_mxn: number;
   exceso_mxn: number;
   saldo_despues_mxn: number;
+  /**
+   * ADITIVO (10-nov-2026, API 0.0.134, invariante 129): el avión contra
+   * cuyo saldo se midió la entrega (cuenta con dos o más aviones); null =
+   * contra toda la cuenta, como siempre.
+   */
+  aeronave: AeronaveCorta | null;
+  /**
+   * ADITIVO (invariante 129): de lo adelantado «a cuenta general», lo que
+   * ya se le descontó a ese avión (0 si no aplica).
+   */
+  adelantado_general_mxn: number;
 }
 
 function pagoNoExiste(id: string): NotFoundException {
@@ -340,7 +353,10 @@ export class RepartoPagoService {
 
   private excede(d: DetalleExceso): ConflictException {
     return new ConflictException({
-      message: mensajeExcedeSaldo(d),
+      message: mensajeExcedeSaldo({
+        ...d,
+        matricula: d.aeronave?.matricula ?? null,
+      }),
       error: 'PAGO_EXCEDE_SALDO',
       details: d,
     });
@@ -431,8 +447,15 @@ export class RepartoPagoService {
     });
     // Meses CERRADOS: el mes en curso todavía se mueve (ver invariante 38).
     // EN PESOS (invariante 99): el candado compara pesos con pesos.
-    const porEntregar = ctx.fila.por_entregar_cerrado_mxn;
-    const enCurso = ctx.fila.mes_en_curso_mxn;
+    // SALDO POR AVIÓN (10-nov-2026, invariante 129): en una cuenta con dos o
+    // más aviones la entrega de un avión se mide contra el saldo de ESE
+    // avión (`ambitoDeEntrega`); sin avión, contra toda la cuenta.
+    const ambito = ambitoDeEntrega({
+      fila: ctx.fila,
+      aeronaveId: dto.aeronave_id ?? null,
+    });
+    const porEntregar = ambito.por_entregar_cerrado_mxn;
+    const enCurso = ambito.mes_en_curso_mxn;
     const ex = excedeSaldo({
       por_entregar_mxn: porEntregar,
       monto_mxn: dinero.monto_mxn,
@@ -449,6 +472,8 @@ export class RepartoPagoService {
         monto_mxn: dinero.monto_mxn,
         exceso_mxn: ex.exceso_mxn,
         saldo_despues_mxn: ex.saldo_despues_mxn,
+        aeronave: ambito.aeronave,
+        adelantado_general_mxn: ambito.adelantado_general_mxn,
       });
     }
 
@@ -488,19 +513,22 @@ export class RepartoPagoService {
     }
     const row: RepartoPagoRow = data;
     if (dto.aceptar_exceso !== true) {
-      // Saldo inicial + generado en meses cerrados (todo menos entregas).
+      // Saldo inicial + generado en meses cerrados (todo menos entregas);
+      // por avión (invariante 129): lo generado por ESE avión menos lo ya
+      // adelantado a cuenta general (todo menos SUS entregas).
       const disponible =
-        Math.round((porEntregar + ctx.fila.entregado_mxn) * 100) / 100;
+        Math.round((porEntregar + ambito.entregado_mxn) * 100) / 100;
       const perdio = await this.perdioCarreraDeAlta(
         row,
         disponible,
         enCurso,
         actor,
+        ambito,
       );
       if (perdio) throw this.excede(perdio);
     }
     this.logger.log(
-      `Entrega a socio ${row.id}: socio ${row.socio_id}, ${row.monto} ${row.moneda} (${row.monto_mxn} MXN), por entregar antes ${porEntregar} MXN (meses cerrados; mes en curso ${enCurso} MXN), por ${actor.userId}${ex.excede ? ' — ADELANTO (aceptado)' : ''}`,
+      `Entrega a socio ${row.id}: socio ${row.socio_id}, ${row.monto} ${row.moneda} (${row.monto_mxn} MXN), por entregar antes ${porEntregar} MXN (${ambito.aeronave ? `saldo de ${ambito.aeronave.matricula}; ` : ''}meses cerrados; mes en curso ${enCurso} MXN), por ${actor.userId}${ex.excede ? ' — ADELANTO (aceptado)' : ''}`,
     );
     const despues = await this.despues(dto.socio_id, ctx.utilidades);
     return { pago: await this.pagoDe(despues, row.id), cuenta: despues.fila };
@@ -534,11 +562,22 @@ export class RepartoPagoService {
     disponibleMxn: number,
     mesEnCursoMxn: number,
     actor: ActorPagos,
+    /** Contra qué se midió (invariante 129): un avión o toda la cuenta. */
+    ambito: {
+      aeronave: AeronaveCorta | null;
+      adelantado_general_mxn: number;
+    } = { aeronave: null, adelantado_general_mxn: 0 },
   ): Promise<DetalleExceso | null> {
     let r: ReturnType<typeof excedeSaldoEnOrdenDeCaptura>;
     try {
-      const vivos = await this.lector.entregasVivas({ socio_id: row.socio_id });
-      if (vivos === SIN_MIGRACION) return null;
+      const todas = await this.lector.entregasVivas({ socio_id: row.socio_id });
+      if (todas === SIN_MIGRACION) return null;
+      // Por avión (invariante 129): solo compiten las entregas de ESE avión
+      // (las de sus otros aviones tienen su propio saldo).
+      const avionId = ambito.aeronave?.id ?? null;
+      const vivos = avionId
+        ? todas.filter((p) => p.aeronave_id === avionId)
+        : todas;
       // EN PESOS (invariante 99): `monto_mxn` de cada entrega viva.
       const enPesos = (p: RepartoPagoRow) => ({
         id: p.id,
@@ -587,6 +626,8 @@ export class RepartoPagoService {
       exceso_mxn: r.exceso_mxn,
       saldo_despues_mxn:
         Math.round((r.por_entregar_antes_mxn - monto) * 100) / 100,
+      aeronave: ambito.aeronave,
+      adelantado_general_mxn: ambito.adelantado_general_mxn,
     };
   }
 
@@ -722,10 +763,22 @@ export class RepartoPagoService {
       aeronaveId: dto.aeronave_id,
     });
     // Lo por entregar de meses cerrados SIN esta entrega (la cuenta ya la
-    // descontó).
-    const sinEsta =
-      Math.round((ctx.fila.por_entregar_cerrado_mxn + montoMxnActual) * 100) /
-      100;
+    // descontó). SALDO POR AVIÓN (invariante 129): contra el avión que le
+    // QUEDA a la entrega tras la corrección (el del DTO; si no viene, el
+    // que ya tenía) en una cuenta con dos o más aviones.
+    const aeronaveDespues =
+      dto.aeronave_id === undefined
+        ? (actual.aeronave_id ?? null)
+        : (dto.aeronave_id ?? null);
+    const ambito = ambitoDeEntrega({
+      fila: ctx.fila,
+      aeronaveId: aeronaveDespues,
+      sinEntrega: {
+        aeronave_id: actual.aeronave_id ?? null,
+        monto_mxn: montoMxnActual,
+      },
+    });
+    const sinEsta = ambito.por_entregar_cerrado_mxn;
     if (sube && dto.aceptar_exceso !== true) {
       const ex = excedeSaldo({
         por_entregar_mxn: sinEsta,
@@ -734,10 +787,12 @@ export class RepartoPagoService {
       if (ex.excede) {
         throw this.excede({
           por_entregar_mxn: sinEsta,
-          mes_en_curso_mxn: ctx.fila.mes_en_curso_mxn,
+          mes_en_curso_mxn: ambito.mes_en_curso_mxn,
           monto_mxn: dinero.monto_mxn,
           exceso_mxn: ex.exceso_mxn,
           saldo_despues_mxn: ex.saldo_despues_mxn,
+          aeronave: ambito.aeronave,
+          adelantado_general_mxn: ambito.adelantado_general_mxn,
         });
       }
     }

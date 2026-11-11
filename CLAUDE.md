@@ -12998,6 +12998,66 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `correo-confirmacion.util.spec`, `quotes-correo.service.spec`,
       `quotes.service.confirmar.spec` (confirmar no envía).
 
+129. **EL SALDO DE LA CUENTA DEL SOCIO SE LLEVA POR AVIÓN (10-nov-2026, API
+    0.0.134, SIN migración).** Reclamo del cliente con la captura de la
+    cuenta de Mauricio Roque (N4142R 69 % y XB-ANU 70 %): «está mezclado
+    todos los aviones que tenga un socio en su cuenta; debería ser, dentro de
+    la cuenta del socio, un balance para cada avión, porque las entregas son
+    por avión… lo mete todo en la misma licuadora porque es el mismo dueño».
+    El saldo corrido ÚNICO restaba la pérdida de octubre del XB-ANU
+    (−$3,862.60) del saldo contra el que se veía la entrega del N4142R: en
+    pantalla −$4,066.62 donde el N4142R solo iba −$204.02, y el candado pedía
+    confirmar un «adelanto» al entregar EXACTAMENTE la utilidad del avión.
+    - **No hay dinero nuevo**: los MISMOS movimientos de `movimientosDeCuenta`
+      se reparten en secciones (`seccionesPorAvion`, PURO en
+      `reparto-cuenta.util`), cada una con su saldo corrido en centavos: una
+      por AVIÓN (sus utilidades + las entregas «corresponde a» ese avión) y
+      «a cuenta general» (`aeronave: null`: el saldo inicial —no tiene avión—
+      y las entregas SIN avión; solo existe si mueve dinero; va al final).
+      **Σ de las secciones == la cuenta completa, al centavo**: los totales
+      del socio, el resumen y el pre-cierre NO cambian.
+    - Contrato ADITIVO: `GET socios` ⇒ cada renglón gana `por_avion:
+      SaldoAvionCuenta[]` (`aeronave {id, matricula} | null`, `porcentaje`,
+      `generado_mxn`, `mes_en_curso_mxn`, `entregado_mxn`,
+      `por_entregar_mxn`, `por_entregar_cerrado_mxn`, `estado`) y
+      `cuenta_por_avion`; `GET socios/:id/estado-cuenta` ⇒ `por_avion:
+      SeccionAvionCuenta[]` (lo mismo + `saldo_anterior_mxn`, `movimientos`
+      con `saldo_mxn` = saldo DE ESE AVIÓN —con filtro de meses abre con su
+      SALDO_ANTERIOR— y `rango`) y `cuenta_por_avion`. La lista mezclada
+      `movimientos` de siempre sigue viajando igual.
+    - **`cuenta_por_avion`** = DOS o más aviones (`cuentaSeLlevaPorAvion`):
+      los vigentes del socio (aunque no tengan movimientos) ∪ los que traen
+      movimientos; un avión en el que el socio YA NO está y sin movimientos
+      no hace sección. Con UN avión la cuenta se ve y se mide como siempre.
+    - **El candado del ADELANTO mide el ámbito de la entrega**
+      (`ambitoDeEntrega`): en una cuenta por avión, la entrega que
+      «corresponde a» un avión se mide contra `por_entregar_cerrado_mxn` de
+      ESE avión (el resultado de sus otros aviones ni suma ni resta) MENOS lo
+      ya adelantado «a cuenta general» (sección general en negativo: dinero
+      que el socio ya tiene y no se ha atribuido a ningún avión; un saldo
+      general a favor NO se le suma). Sin avión, o en una cuenta de un solo
+      avión: toda la cuenta, como siempre. Aplica al alta, a la corrección
+      (`sinEntrega`: el ámbito sin esa entrega, viva en ese avión, en otro o
+      en la general; se mide contra el avión que le QUEDA) y a la carrera de
+      altas (compiten solo las entregas de ese avión). `saldo_snapshot_mxn`
+      guarda el número del ámbito. El 409 `PAGO_EXCEDE_SALDO` nombra el avión
+      («…por entregar de N4142R ($X)… el saldo de N4142R quedará a favor…»)
+      y `details` gana `aeronave {id, matricula} | null` y
+      `adelantado_general_mxn` (ADITIVOS).
+    - **Pendientes anotados** (no se pidieron): el pre-cierre
+      (`socios_por_entregar` / `socios_adelantados`) sigue por socio NETO (un
+      avión con pérdida puede tapar lo por entregar de otro); el saldo
+      inicial es de la cuenta, no de un avión; corregir SOLO el avión de una
+      entrega (sin subir el monto) no vuelve a medir el candado; `estado`
+      de una sección con pérdida y sin entregas dice ADELANTADO (el panel la
+      rotula «Pérdida acumulada»).
+    - Specs: `reparto-cuenta.por-avion.spec` (los números de la captura:
+      mezclado −4,066.62 / 14,936.11; por avión 232,547.75 → −5,717.78 →
+      103,410.02 → −204.02 → 18,798.71 y XB-ANU −3,862.60; Σ == totales;
+      general, un avión, no vigente, filtro de meses, `ambitoDeEntrega`) y
+      `reparto-pago.service.por-avion.spec` (alta y corrección contra la BD
+      en memoria).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

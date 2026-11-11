@@ -135,6 +135,9 @@ describe('RepartoPagoService.crear', () => {
         monto_mxn: 70000,
         exceso_mxn: 68604.06,
         saldo_despues_mxn: -68604.06,
+        // ADITIVOS (invariante 129): cuenta de UN avión ⇒ toda la cuenta.
+        aeronave: null,
+        adelantado_general_mxn: 0,
       },
     });
     expect(tablas.reparto_pago).toHaveLength(0);
@@ -216,6 +219,8 @@ describe('RepartoPagoService.crear', () => {
         monto_mxn: 1895.94,
         exceso_mxn: 500,
         saldo_despues_mxn: -500,
+        aeronave: null,
+        adelantado_general_mxn: 0,
       },
     });
     expect(pos.tablas.reparto_pago).toHaveLength(0);

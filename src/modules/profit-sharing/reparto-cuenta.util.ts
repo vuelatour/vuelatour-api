@@ -200,12 +200,18 @@ export function mensajeExcedeSaldo(d: {
   exceso_mxn: number;
   /** Utilidad del mes EN CURSO (todavía se mueve): no cuenta en el candado. */
   mes_en_curso_mxn?: number | null;
+  /**
+   * SALDO POR AVIÓN (invariante 129): la entrega se midió contra el saldo de
+   * ESTE avión (cuenta con dos o más aviones). Sin ella, contra toda la cuenta.
+   */
+  matricula?: string | null;
 }): string {
   const curso =
     d.mes_en_curso_mxn != null && centavos(d.mes_en_curso_mxn) !== 0
       ? `, sin contar el mes en curso: ${mxn(d.mes_en_curso_mxn)}`
       : '';
-  return `Esta entrega de ${mxn(d.monto_mxn)} supera lo que hay por entregar (${mxn(d.por_entregar_mxn)}${curso}). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por ${mxn(d.exceso_mxn)}. ¿Registrar?`;
+  const avion = d.matricula?.trim() || null;
+  return `Esta entrega de ${mxn(d.monto_mxn)} supera lo que hay por entregar${avion ? ` de ${avion}` : ''} (${mxn(d.por_entregar_mxn)}${curso}). Se registrará como ADELANTO y el saldo${avion ? ` de ${avion}` : ''} quedará a favor de VuelaTour por ${mxn(d.exceso_mxn)}. ¿Registrar?`;
 }
 
 // ===================================================================
@@ -1101,6 +1107,308 @@ export function totalesDeMovimientos(
 }
 
 // ===================================================================
+// Saldo POR AVIÓN (10-nov-2026, API 0.0.134, invariante 129)
+// ===================================================================
+
+/**
+ * SALDO POR AVIÓN DENTRO DE LA CUENTA DEL SOCIO. Reclamo del cliente
+ * (10-nov-2026, cuenta de Mauricio Roque: N4142R 69 % y XB-ANU 70 %): «está
+ * mezclado todos los aviones que tenga un socio en su cuenta; debería ser,
+ * dentro de la cuenta del socio, un balance para cada avión, porque las
+ * entregas son por avión… lo mete todo en la misma licuadora porque es el
+ * mismo dueño». El saldo corrido único restaba la pérdida del XB-ANU
+ * (−$3,862.60) del saldo contra el que se veía la entrega del N4142R.
+ *
+ * Aquí NO se calcula dinero nuevo: los MISMOS movimientos de
+ * `movimientosDeCuenta` se reparten en secciones y cada una lleva su propio
+ * saldo corrido (centavos):
+ *  - una por AVIÓN: sus utilidades y las entregas «corresponde a» ese avión;
+ *  - «a cuenta general» (`aeronave: null`): el saldo inicial (no tiene
+ *    avión) y las entregas SIN avión. Solo existe si el saldo inicial ≠ $0 o
+ *    hay alguna entrega sin avión.
+ * Σ de las secciones == la cuenta completa, al centavo (generado, en curso,
+ * entregado y por entregar): los totales del socio NO cambian.
+ */
+export interface SaldoAvionCuenta {
+  /** El avión; null = «a cuenta general» (saldo inicial y entregas sin avión). */
+  aeronave: AeronaveCorta | null;
+  /** % del socio en el avión (null en la general o si no está en sus aviones). */
+  porcentaje: number | null;
+  /** Σ utilidades de ESE avión desde el arranque (incluye el mes en curso). */
+  generado_mxn: number;
+  /** Parte de `generado_mxn` del mes EN CURSO (todavía se mueve). */
+  mes_en_curso_mxn: number;
+  /** Σ entregas vivas «corresponde a» ese avión (la general: las sin avión). */
+  entregado_mxn: number;
+  /** Saldo de ESE avión: generado − entregado (la general: saldo inicial − entregas sin avión). */
+  por_entregar_mxn: number;
+  /** El mismo saldo SIN el mes en curso (contra él se decide un adelanto). */
+  por_entregar_cerrado_mxn: number;
+  estado: EstadoCuentaSocio;
+}
+
+/** La sección de un avión en el estado de cuenta: su saldo y SUS movimientos. */
+export interface SeccionAvionCuenta extends SaldoAvionCuenta {
+  /** Saldo de ESE avión al cierre del mes anterior a `desde`. */
+  saldo_anterior_mxn: number;
+  /** Sus movimientos del rango; `saldo_mxn` = saldo corrido DE ESE AVIÓN. */
+  movimientos: MovimientoCuenta[];
+  /** Solo lo que cae en [desde, hasta]. */
+  rango: {
+    generado_mxn: number;
+    entregado_mxn: number;
+    saldo_final_mxn: number;
+  };
+}
+
+const CLAVE_SECCION_GENERAL = '';
+
+/**
+ * Los movimientos de TODA la cuenta (`movimientosDeCuenta`, en orden)
+ * repartidos por avión, cada sección con su saldo corrido. Orden: los
+ * aviones del socio (como vienen en `aviones`: vigentes primero, por
+ * matrícula; un avión VIGENTE aparece aunque no tenga movimientos; uno en el
+ * que ya no es socio, solo si los tiene), luego aviones que solo salen en
+ * movimientos (por matrícula) y al final «a cuenta general».
+ * Con `desde`/`hasta` (meses) cada sección colapsa lo anterior en su
+ * SALDO_ANTERIOR y no lista lo posterior; sus totales son SIEMPRE los de
+ * toda la cuenta, como los del socio.
+ */
+export function seccionesPorAvion(e: {
+  movimientos: ReadonlyArray<MovimientoCuenta>;
+  aviones: ReadonlyArray<AvionDeSocio>;
+  desde?: string;
+  hasta?: string;
+}): SeccionAvionCuenta[] {
+  type Acc = {
+    aeronave: AeronaveCorta | null;
+    porcentaje: number | null;
+    movs: MovimientoCuenta[];
+    saldo: number;
+    /** 0 = avión del socio, 1 = avión solo de movimientos, 2 = general. */
+    rango: number;
+    /** Sin movimientos solo se lista si el socio sigue en el avión. */
+    vigente: boolean;
+  };
+  const porClave = new Map<string, Acc>();
+  for (const a of e.aviones) {
+    if (porClave.has(a.id)) continue;
+    porClave.set(a.id, {
+      aeronave: { id: a.id, matricula: a.matricula },
+      porcentaje: a.porcentaje,
+      movs: [],
+      saldo: 0,
+      rango: 0,
+      vigente: a.vigente,
+    });
+  }
+  for (const m of e.movimientos) {
+    const clave = m.aeronave?.id ?? CLAVE_SECCION_GENERAL;
+    let s = porClave.get(clave);
+    if (!s) {
+      s = {
+        aeronave: m.aeronave
+          ? { id: m.aeronave.id, matricula: m.aeronave.matricula }
+          : null,
+        porcentaje: null,
+        movs: [],
+        saldo: 0,
+        rango: m.aeronave ? 1 : 2,
+        vigente: false,
+      };
+      porClave.set(clave, s);
+    }
+    s.saldo += centavos(m.cargo_mxn) - centavos(m.abono_mxn);
+    s.movs.push({ ...m, saldo_mxn: s.saldo / 100 });
+  }
+  // Un avión en el que el socio YA NO está y sin movimientos en la cuenta no
+  // hace sección (ni convierte la cuenta en «por avión»).
+  for (const [clave, s] of porClave) {
+    if (s.aeronave && !s.vigente && s.movs.length === 0) porClave.delete(clave);
+  }
+  // «A cuenta general» solo si mueve dinero: saldo inicial ≠ $0 o alguna
+  // entrega sin avión (el renglón «saldo inicial $0» no hace sección).
+  const general = porClave.get(CLAVE_SECCION_GENERAL);
+  if (
+    general &&
+    !general.movs.some(
+      (m) => centavos(m.cargo_mxn) !== 0 || centavos(m.abono_mxn) !== 0,
+    )
+  ) {
+    porClave.delete(CLAVE_SECCION_GENERAL);
+  }
+  const orden = [...porClave.values()].sort(
+    (a, b) =>
+      a.rango - b.rango ||
+      // Los del socio conservan el orden de `aviones` (sort estable).
+      (a.rango === 1
+        ? (a.aeronave?.matricula ?? '').localeCompare(
+            b.aeronave?.matricula ?? '',
+            'es',
+          ) || (a.aeronave?.id ?? '').localeCompare(b.aeronave?.id ?? '')
+        : 0),
+  );
+  const desdeDia = e.desde ? `${e.desde}-01` : null;
+  const hastaDia = e.hasta ? ultimoDiaDeMes(e.hasta) : null;
+  return orden.map((s) => {
+    const antes = desdeDia ? s.movs.filter((m) => m.fecha < desdeDia) : [];
+    const dentro = s.movs.filter(
+      (m) =>
+        (desdeDia == null || m.fecha >= desdeDia) &&
+        (hastaDia == null || m.fecha <= hastaDia),
+    );
+    const saldoAnterior = antes.length ? antes[antes.length - 1].saldo_mxn : 0;
+    const movimientos: MovimientoCuenta[] = [];
+    if (antes.length > 0 && e.desde && desdeDia) {
+      movimientos.push({
+        fecha: desdeDia,
+        tipo: 'SALDO_ANTERIOR',
+        concepto: conceptoSaldoAnterior(mesAnterior(e.desde)),
+        mes: mesAnterior(e.desde),
+        aeronave: s.aeronave,
+        porcentaje: null,
+        cargo_mxn: 0,
+        abono_mxn: 0,
+        saldo_mxn: saldoAnterior,
+        en_curso: false,
+        pago: null,
+      });
+    }
+    movimientos.push(...dentro);
+    let genR = 0;
+    let entR = 0;
+    for (const m of dentro) {
+      if (m.tipo === 'UTILIDAD') genR += centavos(m.cargo_mxn);
+      if (m.tipo === 'ENTREGA') entR += centavos(m.abono_mxn);
+    }
+    const t = totalesDeMovimientos(s.movs);
+    return {
+      aeronave: s.aeronave,
+      porcentaje: s.porcentaje,
+      generado_mxn: t.generado_mxn,
+      mes_en_curso_mxn: t.mes_en_curso_mxn,
+      entregado_mxn: t.entregado_mxn,
+      por_entregar_mxn: t.por_entregar_mxn,
+      por_entregar_cerrado_mxn: t.por_entregar_cerrado_mxn,
+      estado: t.estado,
+      saldo_anterior_mxn: saldoAnterior,
+      movimientos,
+      rango: {
+        generado_mxn: genR / 100,
+        entregado_mxn: entR / 100,
+        saldo_final_mxn: movimientos.length
+          ? movimientos[movimientos.length - 1].saldo_mxn
+          : saldoAnterior,
+      },
+    };
+  });
+}
+
+/** Las secciones sin sus movimientos (el resumen de `GET /socios`). */
+export function saldosPorAvion(
+  secciones: ReadonlyArray<SeccionAvionCuenta>,
+): SaldoAvionCuenta[] {
+  return secciones.map((s) => ({
+    aeronave: s.aeronave,
+    porcentaje: s.porcentaje,
+    generado_mxn: s.generado_mxn,
+    mes_en_curso_mxn: s.mes_en_curso_mxn,
+    entregado_mxn: s.entregado_mxn,
+    por_entregar_mxn: s.por_entregar_mxn,
+    por_entregar_cerrado_mxn: s.por_entregar_cerrado_mxn,
+    estado: s.estado,
+  }));
+}
+
+/**
+ * ¿La cuenta se lleva POR AVIÓN? Sí con DOS o más aviones (los del socio ∪
+ * los de sus movimientos). Con uno solo no hay nada que separar: la cuenta
+ * se ve y se mide como siempre.
+ */
+export function cuentaSeLlevaPorAvion(
+  saldos: ReadonlyArray<Pick<SaldoAvionCuenta, 'aeronave'>>,
+): boolean {
+  return saldos.filter((s) => s.aeronave != null).length >= 2;
+}
+
+/** Contra qué se mide una entrega (el candado del ADELANTO). */
+export interface AmbitoEntrega {
+  /** El avión contra el que se mide; null = toda la cuenta. */
+  aeronave: AeronaveCorta | null;
+  /** Lo por entregar de MESES CERRADOS en ese ámbito. */
+  por_entregar_cerrado_mxn: number;
+  /** Lo que lleva el mes en curso en ese ámbito (no cuenta). */
+  mes_en_curso_mxn: number;
+  /** Σ entregas vivas que ya descuentan en ese ámbito (carrera de altas). */
+  entregado_mxn: number;
+  /** De lo adelantado «a cuenta general», lo que ya se descontó aquí (≥ 0). */
+  adelantado_general_mxn: number;
+}
+
+/**
+ * ÁMBITO DE UNA ENTREGA (invariante 129). En una cuenta con DOS o más
+ * aviones, la entrega que «corresponde a» un avión se mide contra el saldo
+ * de ESE avión (meses cerrados): el resultado de sus otros aviones no le
+ * suma ni le resta. Lo ya adelantado «a cuenta general» (sección general en
+ * negativo: entregas sin avión o saldo inicial ya adelantado) SÍ se le
+ * descuenta — es dinero que el socio ya tiene y todavía no se le ha
+ * atribuido a ningún avión —; un saldo general a favor NO se le suma (se
+ * entrega «a cuenta general»). Sin avión, o en una cuenta de un solo avión,
+ * el ámbito es TODA la cuenta, como siempre.
+ * `sinEntrega` (corrección): el ámbito como si esa entrega no existiera (la
+ * cuenta ya la descontó, del avión o de la general donde vive hoy).
+ */
+export function ambitoDeEntrega(e: {
+  fila: Pick<
+    FilaCuentaSocio,
+    | 'por_entregar_cerrado_mxn'
+    | 'mes_en_curso_mxn'
+    | 'entregado_mxn'
+    | 'por_avion'
+    | 'cuenta_por_avion'
+  >;
+  aeronaveId: string | null | undefined;
+  sinEntrega?: { aeronave_id: string | null; monto_mxn: number };
+}): AmbitoEntrega {
+  const quitada = e.sinEntrega ? centavos(e.sinEntrega.monto_mxn) : 0;
+  const seccion =
+    e.fila.cuenta_por_avion && e.aeronaveId
+      ? e.fila.por_avion.find((s) => s.aeronave?.id === e.aeronaveId)
+      : undefined;
+  if (!seccion) {
+    return {
+      aeronave: null,
+      por_entregar_cerrado_mxn:
+        (centavos(e.fila.por_entregar_cerrado_mxn) + quitada) / 100,
+      mes_en_curso_mxn: e.fila.mes_en_curso_mxn,
+      entregado_mxn: (centavos(e.fila.entregado_mxn) - quitada) / 100,
+      adelantado_general_mxn: 0,
+    };
+  }
+  const viveAqui =
+    e.sinEntrega != null && e.sinEntrega.aeronave_id === e.aeronaveId;
+  const viveEnGeneral =
+    e.sinEntrega != null && e.sinEntrega.aeronave_id == null;
+  const general = e.fila.por_avion.find((s) => s.aeronave == null);
+  const generalC =
+    (general ? centavos(general.por_entregar_mxn) : 0) +
+    (viveEnGeneral ? quitada : 0);
+  const adelantadoC = generalC < 0 ? -generalC : 0;
+  return {
+    aeronave: seccion.aeronave,
+    por_entregar_cerrado_mxn:
+      (centavos(seccion.por_entregar_cerrado_mxn) +
+        (viveAqui ? quitada : 0) -
+        adelantadoC) /
+      100,
+    mes_en_curso_mxn: seccion.mes_en_curso_mxn,
+    entregado_mxn:
+      (centavos(seccion.entregado_mxn) - (viveAqui ? quitada : 0)) / 100,
+    adelantado_general_mxn: adelantadoC / 100,
+  };
+}
+
+// ===================================================================
 // Resumen (GET /socios)
 // ===================================================================
 
@@ -1134,6 +1442,17 @@ export interface FilaCuentaSocio {
   aviones: AvionDeSocio[];
   /** ADITIVO: avisos de la cuenta (texto listo). */
   avisos: string[];
+  /**
+   * ADITIVO (10-nov-2026, API 0.0.134, invariante 129): el saldo de la
+   * cuenta POR AVIÓN (y «a cuenta general» si hay saldo inicial o entregas
+   * sin avión). Σ == los totales de arriba, al centavo.
+   */
+  por_avion: SaldoAvionCuenta[];
+  /**
+   * ADITIVO (invariante 129): true = la cuenta tiene DOS o más aviones y se
+   * lleva por avión (cada entrega se mide contra el saldo de su avión).
+   */
+  cuenta_por_avion: boolean;
 }
 
 /** La entrega más reciente (fecha y, el mismo día, la capturada al final). */
@@ -1173,13 +1492,16 @@ export function filaCuentaSocio(e: {
   const pagos = e.pagos.filter(
     (p) => p.socio_id === e.base.socio.id && p.deleted_at == null,
   );
-  const t = totalesDeMovimientos(
-    movimientosDeCuenta({
-      socioId: e.base.socio.id,
-      cuenta: e.base.cuenta,
-      utilidades: e.utilidades,
-      pagos,
-    }),
+  const movimientos = movimientosDeCuenta({
+    socioId: e.base.socio.id,
+    cuenta: e.base.cuenta,
+    utilidades: e.utilidades,
+    pagos,
+  });
+  const t = totalesDeMovimientos(movimientos);
+  // SALDO POR AVIÓN (invariante 129): los mismos movimientos, por avión.
+  const porAvion = saldosPorAvion(
+    seccionesPorAvion({ movimientos, aviones: e.base.aviones }),
   );
   return {
     socio: e.base.socio,
@@ -1199,6 +1521,8 @@ export function filaCuentaSocio(e: {
       socioId: e.base.socio.id,
       utilidades: e.utilidades,
     }),
+    por_avion: porAvion,
+    cuenta_por_avion: cuentaSeLlevaPorAvion(porAvion),
   };
 }
 
@@ -1274,6 +1598,14 @@ export interface EstadoCuentaSocioDatos {
     saldo_final_mxn: number;
   };
   avisos: string[];
+  /**
+   * ADITIVO (10-nov-2026, API 0.0.134, invariante 129): la MISMA cuenta
+   * separada por avión — cada sección con su saldo corrido, sus movimientos
+   * del rango y sus totales de hoy. Σ de las secciones == `totales`.
+   */
+  por_avion: SeccionAvionCuenta[];
+  /** ADITIVO (invariante 129): la cuenta tiene DOS o más aviones. */
+  cuenta_por_avion: boolean;
 }
 
 /**
@@ -1349,6 +1681,13 @@ export function armarEstadoCuenta(e: {
     if (m.tipo === 'UTILIDAD') genR += centavos(m.cargo_mxn);
     if (m.tipo === 'ENTREGA') entR += centavos(m.abono_mxn);
   }
+  // SALDO POR AVIÓN (invariante 129): la misma cuenta, separada por avión.
+  const porAvion = seccionesPorAvion({
+    movimientos: todos,
+    aviones: e.base.aviones,
+    desde: e.desde,
+    hasta: e.hasta,
+  });
   return {
     socio: e.base.socio,
     cuenta: e.base.cuenta,
@@ -1373,6 +1712,8 @@ export function armarEstadoCuenta(e: {
       socioId: e.base.socio.id,
       utilidades: e.utilidades,
     }),
+    por_avion: porAvion,
+    cuenta_por_avion: cuentaSeLlevaPorAvion(porAvion),
   };
 }
 
