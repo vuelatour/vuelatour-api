@@ -146,6 +146,7 @@ import {
   avionDelGasto,
   avionQueReporta,
   factorDe,
+  horasCobradasDeAvion,
   participacionPorAeronave,
   repartirUsd,
   type ParticipacionAeronave,
@@ -2739,16 +2740,21 @@ export class ProfitSharingService {
       if (pendienteAvionMxn != null) pendienteMxn += pendienteAvionMxn;
       // ---- PROVISIÓN AFAC del vuelo (20-oct-2026, invariante 99) ----
       // D = parte de este avión de las horas COBRADAS del viaje (un
-      // cancelado no cobra horas), con el MISMO reparto por residuo mayor
-      // que el dinero (`parte`); X = tarifa × z × D en pesos y tarifa × D en
-      // dólares — byte a byte las fórmulas de la fila del balance. z =
-      // promedio de `tc_gasto` de los gastos MXN del vuelo sin el pago al
-      // vendedor; sin ninguno, el K del vuelo (capturado ?? oficial).
+      // cancelado no cobra horas): `horasCobradasDeAvion`, la MISMA regla de
+      // la fila del balance — vuelo de un solo avión, las horas TAL CUAL
+      // (2 h 20 min = 2.33333333); multi-avión, el reparto por residuo mayor.
+      // Hasta el 0.0.135 pasaban SIEMPRE por `parte` (`repartirUsd`, que
+      // trabaja en centavos) y quedaban redondeadas a 2 decimales antes de
+      // multiplicar: la provisión AFAC del reparto difería de la del balance
+      // unos pesos por vuelo (invariante 131). X = tarifa × z × D en pesos y
+      // tarifa × D en dólares — byte a byte las fórmulas de la fila del
+      // balance. z = promedio de `tc_gasto` de los gastos MXN del vuelo sin
+      // el pago al vendedor; sin ninguno, el K del vuelo (capturado ??
+      // oficial).
       const horasCobrablesVuelo = esCancelado
         ? 0
         : (pos(v.tiempo_cobrable_hr) ?? 0);
-      const horasAvion =
-        horasCobrablesVuelo > 0 ? parte(horasCobrablesVuelo) : 0;
+      const horasAvion = horasCobradasDeAvion(horasCobrablesVuelo, part, a.id);
       const tcsZ = (ctx.gastosPorVuelo?.get(v.id) ?? [])
         .filter(
           (g) => g.moneda === 'MXN' && !categoriaEsPagoVendedor(g.categoria),

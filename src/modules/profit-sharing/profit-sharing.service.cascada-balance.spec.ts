@@ -341,6 +341,39 @@ describe('Reparto — LA CASCADA DEL BALANCE (invariante 99)', () => {
     expect(b.totales.permiso_afac_mxn).toBe(6737.5);
   });
 
+  it('4b. HORAS COBRADAS con decimales (2 h 20 min = 2.33333333): la provisión AFAC del reparto multiplica las horas COMPLETAS, como el balance (invariante 131)', async () => {
+    // Caso real (N4142R, sep-2026, tarifa AFAC 100 USD/hr): la cuenta del
+    // socio quedaba 7.13 MXN arriba del «MONTO A RECIBIR» del Excel porque
+    // el reparto redondeaba las horas a 2 decimales antes de multiplicar
+    // (2.33333333 → 2.33) y el balance no.
+    const m = conAfac();
+    m.vuelo = m.vuelo.map((v) =>
+      v.id === V3 ? { ...v, tiempo_cobrable_hr: 2.33333333 } : v,
+    );
+    const { a } = await avion(m);
+    const b = await libro(m);
+    const v502 = a.detalle.vuelos.find((v) => v.id === V3)!;
+    // 100 × 18.25 × 2.33333333 = 4,258.33 (con 2.33 serían 4,252.25) y
+    // 100 × 2.33333333 = 233.33 USD (con 2.33 serían 233.00). Las horas se
+    // PUBLICAN a 2 decimales (presentación), se multiplican completas.
+    expect(v502).toMatchObject({
+      horas_cobradas_avion_hr: 2.33,
+      afac_reservado_avion_usd: 233.33,
+      afac_reservado_avion_mxn: 4258.33,
+      tc_costos: 18.25,
+    });
+    expect(a.afac_reservado_mxn).toBe(8258.33);
+    // La MISMA provisión en los dos libros…
+    expect(b.totales.permiso_afac_mxn).toBe(a.afac_reservado_mxn);
+    // …y la identidad, en dólares y EN PESOS (lo que se le entrega al socio).
+    expect(b.balance.utilidad_cobrada_usd).toBe(
+      r2(a.saldo_disponible_usd + a.gastos.otros_prorrateados_usd),
+    );
+    expect(b.balance.utilidad_cobrada_mxn).toBe(
+      r2(a.saldo_disponible_mxn + a.gastos.otros_prorrateados_mxn),
+    );
+  });
+
   it('5. PESOS PRIMERO también en el reparto: un cobro MXN con T.C. del día distinto al K de la cotización cuenta al K', async () => {
     const m = mundoPesos();
     // #501: K 20; el cobro de 20,000 MXN tecleado a 19 (antes: 1,052.63 USD).

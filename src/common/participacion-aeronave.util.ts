@@ -238,6 +238,38 @@ export function repartirUsd(
 }
 
 /**
+ * HORAS COBRADAS de la parte de un avión (11-nov-2026, API 0.0.136,
+ * invariante 131): el factor de la PROVISIÓN AFAC en el reparto
+ * (`afac_reservado_*` = tarifa × z × horas), con la MISMA regla que la fila
+ * del balance (`parteAvion` de `aircraft-balance.service`, columna T).
+ *
+ * Vuelo de UN solo avión: las horas TAL CUAL, con todos sus decimales (las
+ * horas pactadas llevan 8 desde el 22-sep-2026, invariante 22: 2 h 20 min =
+ * 2.33333333), o 0 si el avión no participa. MULTI-AVIÓN: el reparto por
+ * residuo mayor de siempre (`repartirUsd`: Σ partes == horas del vuelo a 2
+ * decimales), como el balance.
+ *
+ * Por qué existe: el reparto pasaba las horas por `repartirUsd` también en
+ * los vuelos de un solo avión, y `repartirUsd` trabaja en CENTAVOS — las
+ * horas quedaban redondeadas a 2 decimales (2.33333333 → 2.33) antes de
+ * multiplicar, mientras el balance multiplicaba con las horas completas. En
+ * N4142R de sep-2026 (tarifa AFAC 100 USD/hr) eso dejaba la cuenta del socio
+ * 7.13 MXN arriba del «MONTO A RECIBIR» del Excel (#192 +5.77, #242 +0.92,
+ * #254 −5.65, #301 −5.66, #322 −5.72 a nivel avión). Horas NO son dinero:
+ * jamás por `repartirUsd` salvo para repartirlas entre aviones.
+ */
+export function horasCobradasDeAvion(
+  horas: number,
+  p: ParticipacionAeronave | null | undefined,
+  aeronaveId: string | null | undefined,
+): number {
+  if (!(horas > 0) || !aeronaveId) return 0;
+  if (!p) return horas;
+  if (!p.multi_avion) return factorDe(p, aeronaveId) > 0 ? horas : 0;
+  return repartirUsd(horas, p).get(aeronaveId) ?? 0;
+}
+
+/**
  * Parte de ESTA FILA (un avión) de un monto COBRADO del vuelo — FUENTE ÚNICA
  * del balance por avión y del Libro Dinero (verificación 28-ago-2026).
  *

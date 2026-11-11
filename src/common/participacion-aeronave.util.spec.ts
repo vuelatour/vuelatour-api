@@ -1,6 +1,7 @@
 import {
   avionDelGasto,
   factorDe,
+  horasCobradasDeAvion,
   parteFilaDeCobro,
   participacionPorAeronave,
   repartirUsd,
@@ -242,6 +243,43 @@ describe('avionDelGasto', () => {
       avionDelGasto({ escala_id: null, aeronave_id: null }, escalas, A),
     ).toBe(A);
     expect(avionDelGasto({}, escalas, null)).toBeNull();
+  });
+});
+
+describe('horasCobradasDeAvion (invariante 131)', () => {
+  const unico = participacionPorAeronave({ aeronave_id: A }, [
+    { orden: 1, aeronave_id: A },
+    { orden: 2, aeronave_id: null },
+  ]);
+  const multi = participacionPorAeronave({ aeronave_id: A }, [
+    { orden: 1, aeronave_id: A },
+    { orden: 2, aeronave_id: B },
+  ]);
+
+  it('un solo avión: las horas TAL CUAL, con todos sus decimales (jamás redondeadas a 2)', () => {
+    // 2 h 20 min pactadas (invariante 22) y los casos reales de N4142R.
+    expect(horasCobradasDeAvion(2.33333333, unico, A)).toBe(2.33333333);
+    expect(horasCobradasDeAvion(3.1667, unico, A)).toBe(3.1667);
+    expect(horasCobradasDeAvion(0.78947368, unico, A)).toBe(0.78947368);
+    // `repartirUsd` (centavos) las habría dejado en 2.33 / 3.17 / 0.79.
+    expect(repartirUsd(2.33333333, unico).get(A)).toBe(2.33);
+  });
+
+  it('un avión que no participa, horas en 0 o negativas y avión sin id: 0', () => {
+    expect(horasCobradasDeAvion(2.5, unico, B)).toBe(0);
+    expect(horasCobradasDeAvion(0, unico, A)).toBe(0);
+    expect(horasCobradasDeAvion(-1, unico, A)).toBe(0);
+    expect(horasCobradasDeAvion(2.5, unico, null)).toBe(0);
+  });
+
+  it('multi-avión: el reparto por residuo mayor de siempre (Σ partes == horas del vuelo a 2 decimales)', () => {
+    expect(horasCobradasDeAvion(2.33333333, multi, A)).toBe(1.17);
+    expect(horasCobradasDeAvion(2.33333333, multi, B)).toBe(1.16);
+    expect(horasCobradasDeAvion(2.33333333, multi, C)).toBe(0);
+  });
+
+  it('sin participación (libro sin reparto): las horas tal cual', () => {
+    expect(horasCobradasDeAvion(1.25, null, A)).toBe(1.25);
   });
 });
 

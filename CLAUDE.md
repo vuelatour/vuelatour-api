@@ -13145,6 +13145,55 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vigencias, mundo del reparto en pesos),
       `aircraft.service.reserva-vigencia.spec` (escritura) y
       `aircraft.service.reserva-overhaul-sync.spec` (camino sin migración).
+    - **Migración `20261110000001` APLICADA en prod el 11-nov-2026** (por
+      MCP, tras el dry-run `DRYRUN_OK: 7 tarifas copiadas…`; postcheck con
+      `cuadra = true` en los 7 aviones con tarifa; N58BT sigue sin tarifa).
+
+131. **LAS HORAS COBRADAS DE LA PROVISIÓN AFAC SE MULTIPLICAN COMPLETAS — EL
+     REPARTO YA NO LAS REDONDEA A 2 DECIMALES (11-nov-2026, API 0.0.136, SIN
+     migración).** Pedido del cliente (10-nov-2026): «en pago a socios… no
+     coincidía con el reporte que arroja el tipo Excel… debería de estar
+     exactamente el mismo número».
+     - **Diagnóstico con el código REAL y los datos REALES de prod** (N4142R,
+       sep-2026, Mauricio Roque 69 %): Excel «MONTO A RECIBIR (MXN)»
+       232,735.99; la cuenta del socio daba 232,743.12 — **7.13 MXN de más**.
+       Causa: `computeAvion` pasaba las horas cobradas por `parte`
+       (`repartirUsd`), que trabaja en CENTAVOS: quedaban redondeadas a 2
+       decimales ANTES de multiplicar (2 h 20 min = 2.33333333 → 2.33), y la
+       fila del balance (`parteAvion`) las multiplica completas en los
+       vuelos de un solo avión. Con la tarifa AFAC de 100 USD/hr: #192
+       +5.77, #242 +0.92, #254 −5.65, #301 −5.66, #322 −5.72 ⇒ −10.34 MXN de
+       provisión en el avión ⇒ +7.13 para el socio. Solo afecta a aviones
+       con «Aportación AFAC» y vuelos con horas de más de 2 decimales (las
+       pactadas en h:mm llevan 8 desde el 22-sep-2026, invariante 22).
+     - **Regla**: fuente única `common/participacion-aeronave.util#
+       horasCobradasDeAvion(horas, part, aeronaveId)` — vuelo de UN avión,
+       las horas TAL CUAL (0 si no participa); MULTI-AVIÓN, el reparto por
+       residuo mayor de siempre (como el balance). `afac_reservado_*` =
+       tarifa × z × ESAS horas. Las horas se siguen PUBLICANDO a 2 decimales
+       (`horas_cobradas_avion_hr`, `detalle.afac.horas_cobradas_hr`): es
+       presentación. **Horas NO son dinero: jamás por `repartirUsd` salvo
+       para repartirlas entre aviones.** El balance NO cambió (es el número
+       con el que se le paga al socio).
+     - **Lo que el diagnóstico descartó** (para no repetirlo): no eran los
+       «Fijos prorrateados» (en sep-2026 no hay ningún gasto FIJO), ni los
+       cobros en dólares, ni los vuelos en $0 o cancelados con gastos, ni las
+       extensiones de horario, ni las refacciones de bodega en USD. Los
+       ~1,200 MXN de la captura del 10-nov eran la memoria de 10 min de la
+       cuenta tras cambiar la tarifa de la reserva (ya corregida con el bus
+       del invariante 130).
+     - **Queda una diferencia posible de 1 centavo por socio** (no se tocó:
+       es decisión de diseño): el balance redondea la parte de CADA socio por
+       separado (`round2(% × utilidad)`, la fórmula visible del Excel) y el
+       reparto reparte por residuo mayor (Σ partes == saldo exacto). Cuando
+       los redondeos sueltos no suman el total, un socio queda con 1 ¢ de
+       diferencia entre los dos documentos. Unificarlo cambia las fórmulas
+       del Excel o el invariante «Σ == saldo» del reparto: pendiente de
+       decisión.
+     - Specs: `participacion-aeronave.util.spec` («horasCobradasDeAvion») y
+       `profit-sharing.service.cascada-balance.spec` (caso 4b: falla con el
+       redondeo viejo — 4,252.25 en vez de 4,258.33 — y exige la identidad
+       también EN PESOS).
 
 ## Convenciones NestJS
 
