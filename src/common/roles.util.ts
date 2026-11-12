@@ -20,6 +20,9 @@ import { Rol } from './types/auth.types';
  *    un usuario de Dirección.
  *  - Reportes y Conciliación siguen como estaban para Administración
  *    (decisión del dueño: «de momento pueden ver todo de aquí»).
+ *  - NÓMINA POR PERSONA (12-nov-2026, invariante 132): Dirección puede
+ *    abrirle el módulo de Nómina a alguien de Administración desde
+ *    Configuración («Acceso a Nómina»). Reglas más abajo.
  *
  * PURO (sin Nest): `roles.util.spec.ts` congela la matriz.
  */
@@ -77,6 +80,85 @@ export function rolVedaCategoria(
 export const CODIGO_CATEGORIA_SOLO_DIRECCION = 'CATEGORIA_SOLO_DIRECCION';
 export const MENSAJE_CATEGORIA_SOLO_DIRECCION =
   'La nómina y los gastos personales los lleva Dirección.';
+
+// ===== Acceso a Nómina POR PERSONA (12-nov-2026, invariante 132) =====
+//
+// Pedido de Dirección: «poder habilitar o deshabilitar a algunos usuarios el
+// módulo de nómina … le acaban de autorizar el acceso a Mary, pero no sé si
+// es para siempre o temporal, mejor poder controlarlo desde configuración».
+// Dirección elige en Configuración → «Acceso a Nómina» a quién de
+// ADMINISTRACIÓN le abre el módulo (lista `acceso_nomina`,
+// `ConfiguracionService`). Lo demás de la invariante 122 no se mueve: los
+// gastos personales, Estadísticas, Ingresos, Reparto y Pagos a socios siguen
+// siendo solo de Dirección.
+
+/** La ÚNICA categoría que Dirección puede abrirle a alguien de Administración. */
+export const CATEGORIA_NOMINA = 'NOMINA';
+
+/**
+ * Roles que entran al módulo de Nómina POR SU ROL (los de siempre; espejo de
+ * `ROLES_NOMINA` del panel). Administración NO está: de ella entra solo quien
+ * Dirección ponga en la lista.
+ */
+export const ROLES_NOMINA_POR_ROL: readonly Rol[] = [
+  Rol.DIRECCION,
+  Rol.COORDINADOR,
+  Rol.FACTURACION,
+];
+
+export function rolEntraANomina(rol: RolLike): boolean {
+  return (ROLES_NOMINA_POR_ROL as readonly string[]).includes(rol ?? '');
+}
+
+/** A quién se le puede DAR el acceso por persona: solo a Administración. */
+export function rolAdmiteAccesoNomina(rol: RolLike): boolean {
+  return esAdministracion(rol);
+}
+
+/**
+ * ¿Entra al módulo de Nómina? Por su rol, o Administración con el acceso que
+ * le dio Dirección (`enLista`). Es lo que publica `/me.permisos.nomina`. Un
+ * id en la lista con otro rol (piloto, socio…) NO entra: la lista solo abre
+ * la puerta que la invariante 122 le cerró a Administración.
+ */
+export function entraANomina(rol: RolLike, enLista: boolean): boolean {
+  return rolEntraANomina(rol) || (rolAdmiteAccesoNomina(rol) && enLista);
+}
+
+/**
+ * ¿La categoría le queda VEDADA a este usuario? Igual que `rolVedaCategoria`
+ * salvo NOMINA para alguien de Administración con el acceso por persona (los
+ * gastos personales NUNCA se abren). `tieneAccesoNomina` se consulta SOLO
+ * cuando hace falta (Administración + NOMINA): ninguna otra petición paga
+ * esa lectura.
+ */
+export async function categoriaVedadaAUsuario(
+  rol: RolLike,
+  categoria: string | null | undefined,
+  tieneAccesoNomina: () => Promise<boolean>,
+): Promise<boolean> {
+  if (!rolVedaCategoria(rol, categoria)) return false;
+  if (categoria !== CATEGORIA_NOMINA) return true;
+  return !(await tieneAccesoNomina());
+}
+
+/** A Administración SIN el acceso: se le dice a quién pedírselo y dónde. */
+export const MENSAJE_NOMINA_SIN_ACCESO =
+  'La nómina la lleva Dirección. Si te toca llevarla, pídele a Dirección que te dé acceso en Configuración («Acceso a Nómina»).';
+
+/** Texto del 403 `CATEGORIA_SOLO_DIRECCION` según la categoría vedada. */
+export function mensajeCategoriaVedada(
+  categoria: string | null | undefined,
+): string {
+  return categoria === CATEGORIA_NOMINA
+    ? MENSAJE_NOMINA_SIN_ACCESO
+    : MENSAJE_CATEGORIA_SOLO_DIRECCION;
+}
+
+export const CODIGO_SOLO_DIRECCION_ACCESO_NOMINA =
+  'SOLO_DIRECCION_ACCESO_NOMINA';
+export const MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA =
+  'Solo Dirección puede cambiar quién entra a Nómina.';
 
 // ===== Caja chica de Dirección =====
 

@@ -98,6 +98,37 @@ export class EditoresCotizacionCobradaDto {
 }
 
 /**
+ * `PUT /v1/config/acceso-nomina` (12-nov-2026, invariante 132): a quién de
+ * Administración le da Dirección el acceso al módulo de Nómina. `[]` es
+ * válido (nadie de Administración entra). `version` = el sello que devolvió
+ * el GET (`null` si nunca se había guardado): si la lista cambió después, el
+ * service responde 409 `ACCESO_NOMINA_CAMBIO`. Omitirla = sin esa
+ * comprobación.
+ */
+export class AccesoNominaDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Usuarios ACTIVOS de Administración (rol ADMIN) con acceso a Nómina. Máximo 50. Vacío = nadie de Administración entra.',
+  })
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsUUID('all', { each: true })
+  usuario_ids!: string[];
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description:
+      'Sello de la lista que vio la pantalla (campo `version` del GET; null = nunca guardada). Si ya no es el vigente ⇒ 409 ACCESO_NOMINA_CAMBIO.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  version?: string | null;
+}
+
+/**
  * `PUT /v1/config/ia-modelo` (2-oct-2026): modelo de IA de las lecturas.
  * `modelo` es OBLIGATORIO y puede ser `null` (= volver al del servidor). La
  * FORMA del id (`^claude-[a-z0-9.-]{3,80}$`) la valida el service para

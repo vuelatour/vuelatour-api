@@ -16,6 +16,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  AccesoNominaDto,
   EditoresCotizacionCobradaDto,
   IaSaldoDto,
   IaUsoQuery,
@@ -152,6 +153,39 @@ export class ConfiguracionController {
     return this.config.setEditoresCotizacionCobrada(
       dto.usuario_ids,
       current.userId,
+    );
+  }
+
+  // Acceso a Nómina por PERSONA (12-nov-2026, invariante 132): a quién de
+  // Administración le abre Dirección el módulo de Nómina. Literales ANTES de
+  // ':clave'. Administración lee (ve quién entra); SOLO Dirección cambia.
+  @Get('acceso-nomina')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Quién de Administración entra al módulo de Nómina: { usuario_ids, usuarios: {id, nombre}[], candidatos (Administración ACTIVA: los que acepta el PUT), por_rol (oficina activa que ya entra por su rol: Dirección, Coordinación, Facturación), puede_modificar (quien consulta es de Dirección), version (sello para el PUT), actualizado_at, actualizado_por_nombre }. Sin la fila (nunca guardada) la lista es vacía.',
+  })
+  accesoNomina(@CurrentUser() current: AuthenticatedUser) {
+    return this.config.accesoNomina({
+      userId: current.userId,
+      rol: current.rol,
+    });
+  }
+
+  @Put('acceso-nomina')
+  @Roles(Rol.DIRECCION)
+  @ApiOperation({
+    summary:
+      'Guarda quién de Administración entra a Nómina ({ usuario_ids, version? }). SOLO Dirección (403; el service repite el candado con SOLO_DIRECCION_ACCESO_NOMINA). Solo usuarios ACTIVOS de Administración (400 USUARIOS_INVALIDOS con los ids). [] = nadie de Administración. `version` = el sello del GET: si la lista cambió después ⇒ 409 ACCESO_NOMINA_CAMBIO. Aplica al instante: /me.permisos.nomina y los candados de Gastos (categoría NOMINA y reparto-iguales). Responde lo mismo que el GET.',
+  })
+  setAccesoNomina(
+    @Body() dto: AccesoNominaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.config.setAccesoNomina(
+      dto.usuario_ids,
+      { userId: current.userId, rol: current.rol },
+      dto.version,
     );
   }
 

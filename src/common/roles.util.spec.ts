@@ -1,21 +1,31 @@
 import { Rol } from './types/auth.types';
 import {
   CATEGORIAS_SOLO_DIRECCION,
+  CATEGORIA_NOMINA,
   CODIGO_CAJA_SOLO_DIRECCION,
   CODIGO_CATEGORIA_SOLO_DIRECCION,
+  CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
   CODIGO_SOLO_DIRECCION_USUARIOS,
   MENSAJE_CAJA_SOLO_DIRECCION,
   MENSAJE_CATEGORIA_SOLO_DIRECCION,
+  MENSAJE_NOMINA_SIN_ACCESO,
+  MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
   MENSAJE_SOLO_DIRECCION_ASIGNA,
   MENSAJE_SOLO_DIRECCION_EDITA,
+  ROLES_NOMINA_POR_ROL,
   actorPuedeAsignarRol,
   actorPuedeTocarUsuario,
   categoriaSoloDireccion,
+  categoriaVedadaAUsuario,
+  entraANomina,
   esAdminODireccion,
   esAdministracion,
   esDireccion,
   finanzasParaRol,
   fondoEsDeDireccion,
+  mensajeCategoriaVedada,
+  rolAdmiteAccesoNomina,
+  rolEntraANomina,
   rolVeFondo,
   rolVedaCategoria,
   rolesDestinatarios,
@@ -77,6 +87,101 @@ describe('roles.util — Dirección y Administración', () => {
       expect(CODIGO_CATEGORIA_SOLO_DIRECCION).toBe('CATEGORIA_SOLO_DIRECCION');
       expect(MENSAJE_CATEGORIA_SOLO_DIRECCION).toBe(
         'La nómina y los gastos personales los lleva Dirección.',
+      );
+    });
+  });
+
+  describe('acceso a Nómina por PERSONA (12-nov-2026, invariante 132)', () => {
+    const TODOS = Object.values(Rol);
+    const si = () => Promise.resolve(true);
+    const no = () => Promise.resolve(false);
+
+    it('por su rol entran Dirección, Coordinación y Facturación (los de siempre); Administración NO', () => {
+      expect([...ROLES_NOMINA_POR_ROL]).toEqual([
+        Rol.DIRECCION,
+        Rol.COORDINADOR,
+        Rol.FACTURACION,
+      ]);
+      expect(TODOS.filter((r) => rolEntraANomina(r))).toEqual([
+        Rol.DIRECCION,
+        Rol.COORDINADOR,
+        Rol.FACTURACION,
+      ]);
+      for (const r of [null, undefined, '', 'OTRO']) {
+        expect(rolEntraANomina(r)).toBe(false);
+      }
+    });
+
+    it('el acceso por persona solo se le puede dar a Administración', () => {
+      expect(TODOS.filter((r) => rolAdmiteAccesoNomina(r))).toEqual([
+        Rol.ADMIN,
+      ]);
+    });
+
+    it('entraANomina: por rol siempre; Administración solo si está en la lista; un id en la lista con otro rol NO entra', () => {
+      for (const r of ROLES_NOMINA_POR_ROL) {
+        expect(entraANomina(r, false)).toBe(true);
+        expect(entraANomina(r, true)).toBe(true);
+      }
+      expect(entraANomina(Rol.ADMIN, true)).toBe(true);
+      expect(entraANomina(Rol.ADMIN, false)).toBe(false);
+      for (const r of [
+        Rol.ANALISTA,
+        Rol.PILOTO,
+        Rol.SOCIO,
+        Rol.MECANICO,
+        Rol.VISITANTE,
+        null,
+        undefined,
+      ]) {
+        expect(entraANomina(r, true)).toBe(false);
+      }
+    });
+
+    it('la NÓMINA se le abre a Administración con el acceso; los gastos personales NUNCA', async () => {
+      expect(CATEGORIA_NOMINA).toBe('NOMINA');
+      expect(await categoriaVedadaAUsuario('ADMIN', 'NOMINA', no)).toBe(true);
+      expect(await categoriaVedadaAUsuario('ADMIN', 'NOMINA', si)).toBe(false);
+      expect(await categoriaVedadaAUsuario('ADMIN', 'PERSONAL_DUENO', si)).toBe(
+        true,
+      );
+      expect(await categoriaVedadaAUsuario('ADMIN', 'PERSONAL_DUENO', no)).toBe(
+        true,
+      );
+    });
+
+    it('la lista se consulta SOLO para Administración + NOMINA (nadie más paga esa lectura)', async () => {
+      const lista = jest.fn().mockResolvedValue(true);
+      for (const cat of ['GAS', 'OTRO', 'PERSONAL_DUENO', null, undefined]) {
+        await categoriaVedadaAUsuario('ADMIN', cat, lista);
+      }
+      for (const r of TODOS.filter((x) => x !== Rol.ADMIN)) {
+        expect(await categoriaVedadaAUsuario(r, 'NOMINA', lista)).toBe(false);
+        expect(await categoriaVedadaAUsuario(r, 'PERSONAL_DUENO', lista)).toBe(
+          false,
+        );
+      }
+      expect(lista).not.toHaveBeenCalled();
+      await categoriaVedadaAUsuario('ADMIN', 'NOMINA', lista);
+      expect(lista).toHaveBeenCalledTimes(1);
+    });
+
+    it('textos: a quien le falta el acceso se le dice a quién pedírselo y dónde; el código no cambia', () => {
+      expect(mensajeCategoriaVedada('NOMINA')).toBe(MENSAJE_NOMINA_SIN_ACCESO);
+      expect(MENSAJE_NOMINA_SIN_ACCESO).toBe(
+        'La nómina la lleva Dirección. Si te toca llevarla, pídele a Dirección que te dé acceso en Configuración («Acceso a Nómina»).',
+      );
+      expect(mensajeCategoriaVedada('PERSONAL_DUENO')).toBe(
+        MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      );
+      expect(mensajeCategoriaVedada(undefined)).toBe(
+        MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      );
+      expect(CODIGO_SOLO_DIRECCION_ACCESO_NOMINA).toBe(
+        'SOLO_DIRECCION_ACCESO_NOMINA',
+      );
+      expect(MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA).toBe(
+        'Solo Dirección puede cambiar quién entra a Nómina.',
       );
     });
   });

@@ -31,6 +31,14 @@ import {
   valorJsonDeModelo,
   type ModeloIaCatalogo,
 } from '../../common/ia-modelo.util';
+import {
+  CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
+  MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
+  entraANomina,
+  esDireccion,
+  rolAdmiteAccesoNomina,
+  rolEntraANomina,
+} from '../../common/roles.util';
 
 const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
 
@@ -218,6 +226,28 @@ export const CONFIG_EDITORES_COTIZACION_COBRADA = 'editores_cotizacion_cobrada';
 export const CONFIG_IA_MODELO = 'ia_modelo';
 
 /**
+ * ACCESO A NÓMINA POR PERSONA (12-nov-2026, API 0.0.137, invariante 132, SIN
+ * migración: la fila se crea en el primer PUT). Pedido de Dirección: «poder
+ * habilitar o deshabilitar a algunos usuarios el módulo de nómina … le
+ * acaban de autorizar el acceso a Mary, pero no sé si es para siempre o
+ * temporal, mejor poder controlarlo desde configuración». `valor_json` =
+ * arreglo de uuids de usuarios de ADMINISTRACIÓN (rol ADMIN) a los que
+ * Dirección les abre el módulo de Nómina: listar y exportar la categoría
+ * NOMINA, registrar y editar sus pagos y repartirlos en partes iguales. Solo
+ * Dirección cambia la lista (403 `SOLO_DIRECCION_ACCESO_NOMINA`), puede
+ * quedar vacía (nadie de Administración entra: como el 0.0.136) y solo
+ * admite Administración ACTIVA (400 `USUARIOS_INVALIDOS`). Sin la fila la
+ * lista es vacía. Los gastos personales y los demás módulos de Dirección NO
+ * se abren con esto. Igual que las otras listas: se EXCLUYE de `GET
+ * /v1/config` y `PATCH :clave` la rechaza; se edita en su propia ruta.
+ */
+export const CONFIG_ACCESO_NOMINA = 'acceso_nomina';
+
+/** Descripción fija de la fila (solo se escribe al nacer). */
+const DESCRIPCION_CONFIG_ACCESO_NOMINA =
+  'Usuarios de Administración a los que Dirección les dio acceso al módulo de Nómina (permiso por persona). Dirección, Coordinación y Facturación entran por su rol. Solo Dirección cambia esta lista.';
+
+/**
  * Claves con SECCIÓN PROPIA (`valor_json`): su `activa` no significa nada,
  * así que no salen en el listado general de banderas (el panel pinta cada
  * fila como switch) y `PATCH :clave` las rechaza. Cada una tiene su sección y
@@ -228,6 +258,7 @@ const CLAVES_SECCION_PROPIA: Record<string, string> = {
     'Esta configuración se edita en Responsables de facturación.',
   [CONFIG_EDITORES_COTIZACION_COBRADA]:
     'Esta configuración se edita en «Editan cotizaciones cobradas».',
+  [CONFIG_ACCESO_NOMINA]: 'Esta configuración se edita en «Acceso a Nómina».',
   [CONFIG_IA_MODELO]:
     'Esta configuración se edita en Créditos de IA → Modelo de IA.',
   [CONFIG_FECHA_INICIO_OFICIAL]:
@@ -309,6 +340,45 @@ export interface ModeloIaConfig {
 export interface PermisosUsuario {
   /** Puede revisar una cotización con cobros registrados. */
   editar_cotizacion_cobrada: boolean;
+  /**
+   * Entra al módulo de Nómina (12-nov-2026, invariante 132): por su rol
+   * (Dirección, Coordinación, Facturación) o, siendo de Administración,
+   * porque Dirección le dio el acceso en Configuración.
+   */
+  nomina: boolean;
+}
+
+/** `GET|PUT /v1/config/acceso-nomina` (invariante 132). */
+export interface AccesoNomina {
+  /** Ids guardados en la lista (orden guardado). */
+  usuario_ids: string[];
+  /** Los ids que resuelven a un usuario, con su nombre. */
+  usuarios: UsuarioNombre[];
+  /**
+   * Administración ACTIVA: a quién se le puede dar el acceso (los mismos que
+   * acepta el PUT). El panel pinta un switch por candidato.
+   */
+  candidatos: Array<UsuarioNombre & { rol: string }>;
+  /** Oficina ACTIVA que ya entra por su rol (informativo: no se apaga aquí). */
+  por_rol: Array<UsuarioNombre & { rol: string }>;
+  /** ¿Quien consulta puede cambiar la lista? (= es de Dirección). */
+  puede_modificar: boolean;
+  /**
+   * Sello de la lista para el PUT (`version`): si alguien la cambió después
+   * de que se pintó la pantalla, el guardado responde 409
+   * `ACCESO_NOMINA_CAMBIO` en vez de pisar ese cambio. `null` = nunca se ha
+   * guardado.
+   */
+  version: string | null;
+  /** Último cambio (null = nunca se ha guardado) y quién lo hizo. */
+  actualizado_at: string | null;
+  actualizado_por_nombre: string | null;
+}
+
+/** Quien llama a una regla que depende de la persona Y de su rol. */
+export interface ActorConfiguracion {
+  userId: string;
+  rol: string | null | undefined;
 }
 
 const UUID_RE =
@@ -354,8 +424,9 @@ export class ConfiguracionService {
 
   async list() {
     // Las claves con SECCIÓN PROPIA (responsables de facturación, editores
-    // de cotizaciones cobradas, modelo de IA) no salen aquí: su `activa` no
-    // significa nada y el panel pinta cada fila como switch.
+    // de cotizaciones cobradas, acceso a Nómina, modelo de IA) no salen
+    // aquí: su `activa` no significa nada y el panel pinta cada fila como
+    // switch.
     let q = this.supabase.service.from('configuracion_sistema').select(COLS);
     for (const clave of Object.keys(CLAVES_SECCION_PROPIA)) {
       q = q.neq('clave', clave);
@@ -772,7 +843,9 @@ export class ConfiguracionService {
   /**
    * Permisos por PERSONA de `/me` (ADITIVO). `editar_cotizacion_cobrada`
    * exige estar en la lista Y un rol que pueda revisar cotizaciones
-   * (`ROLES_REVISAN_COTIZACION`). Best-effort: nunca tumba `/me`.
+   * (`ROLES_REVISAN_COTIZACION`). `nomina` (invariante 132) = entra al
+   * módulo de Nómina, por su rol o por el acceso que le dio Dirección.
+   * Best-effort: nunca tumba `/me` (una lista ilegible ⇒ sin el permiso).
    */
   async permisosDe(
     userId: string | null | undefined,
@@ -781,10 +854,11 @@ export class ConfiguracionService {
     const rolRevisa = (ROLES_REVISAN_COTIZACION as readonly string[]).includes(
       rol ?? '',
     );
-    return {
-      editar_cotizacion_cobrada:
-        rolRevisa && (await this.puedeEditarCotizacionCobrada(userId)),
-    };
+    const [editarCobrada, nomina] = await Promise.all([
+      rolRevisa ? this.puedeEditarCotizacionCobrada(userId) : false,
+      this.entraANomina(userId, rol),
+    ]);
+    return { editar_cotizacion_cobrada: editarCobrada, nomina };
   }
 
   /**
@@ -937,6 +1011,226 @@ export class ConfiguracionService {
       });
     }
     return this.editoresCotizacionCobrada(userId);
+  }
+
+  // ============== ACCESO A NÓMINA POR PERSONA (12-nov-2026) ==============
+
+  /**
+   * ¿Dirección le dio a este usuario el acceso a Nómina? (lista
+   * `acceso_nomina`, invariante 132). Solo dice si está EN LA LISTA: quién
+   * entra de verdad lo decide `entraANomina` (la lista solo cuenta para
+   * Administración). Falla CERRADO: si la lista no se puede leer responde
+   * `false` (la nómina sigue vedada) y deja un `warn`. `usarCache: false` en
+   * los candados de Gastos (una baja aplica al instante); `/me` usa el caché
+   * de 60 s.
+   */
+  async tieneAccesoNomina(
+    userId: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    if (!userId) return false;
+    try {
+      const ids = await this.leerIdsLista(
+        CONFIG_ACCESO_NOMINA,
+        opts.usarCache ?? true,
+      );
+      return ids.includes(userId);
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo leer ${CONFIG_ACCESO_NOMINA}: ${e instanceof Error ? e.message : String(e)}. Sin acceso a Nómina por persona (falla cerrado).`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * ¿Entra al módulo de Nómina? Por su rol (sin leer nada) o, siendo de
+   * Administración, por la lista. Los demás roles no leen la lista: `/me` de
+   * un piloto no paga esa consulta.
+   */
+  async entraANomina(
+    userId: string | null | undefined,
+    rol: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    if (rolEntraANomina(rol)) return true;
+    if (!rolAdmiteAccesoNomina(rol)) return false;
+    return entraANomina(rol, await this.tieneAccesoNomina(userId, opts));
+  }
+
+  /**
+   * Fila `acceso_nomina` tal cual (sin caché). `null` = nunca se ha
+   * guardado. Lanza si la consulta falla.
+   */
+  private async leerFilaAccesoNomina(): Promise<{
+    ids: string[];
+    updated_at: string | null;
+    updated_by: string | null;
+  } | null> {
+    const { data, error } = await this.supabase.service
+      .from('configuracion_sistema')
+      .select('clave, valor_json, updated_at, updated_by')
+      .eq('clave', CONFIG_ACCESO_NOMINA)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const fila = data as Record<string, unknown>;
+    return {
+      ids: ConfiguracionService.idsValidos(fila.valor_json),
+      updated_at: typeof fila.updated_at === 'string' ? fila.updated_at : null,
+      updated_by: typeof fila.updated_by === 'string' ? fila.updated_by : null,
+    };
+  }
+
+  /**
+   * ¿El sello que vio la pantalla es el de la fila? Compara el INSTANTE, no
+   * el texto («…Z» y «…+00:00» son el mismo momento). `null` = sin fila.
+   */
+  private static mismoSello(
+    visto: string | null,
+    actual: string | null,
+  ): boolean {
+    if (visto === null || actual === null) return visto === actual;
+    if (visto === actual) return true;
+    const a = Date.parse(visto);
+    const b = Date.parse(actual);
+    return Number.isFinite(a) && Number.isFinite(b) && a === b;
+  }
+
+  /** `GET /v1/config/acceso-nomina` (Administración lee; Dirección cambia). */
+  async accesoNomina(actor: ActorConfiguracion): Promise<AccesoNomina> {
+    const fila = await this.leerFilaAccesoNomina();
+    const ids = fila?.ids ?? [];
+    // Lo recién leído es lo más nuevo: `/me` lo toma sin esperar los 60 s.
+    this.cacheListas.set(CONFIG_ACCESO_NOMINA, { ids, at: Date.now() });
+    const porNombrar = [
+      ...new Set([...ids, ...(fila?.updated_by ? [fila.updated_by] : [])]),
+    ];
+    const [oficina, resueltos] = await Promise.all([
+      this.usuariosOficina(),
+      porNombrar.length > 0
+        ? this.supabase.service
+            .from('usuario')
+            .select('id, nombre')
+            .in('id', porNombrar)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (resueltos.error) throw new Error(resueltos.error.message);
+    const nombrePorId = new Map(
+      ((resueltos.data ?? []) as Array<Record<string, unknown>>).map((u) => [
+        u.id as string,
+        ((u.nombre as string | null) ?? '').trim() || 'Sin nombre',
+      ]),
+    );
+    const ficha = (u: UsuarioOficina) => ({
+      id: u.id,
+      nombre: u.nombre,
+      rol: u.rol,
+    });
+    return {
+      usuario_ids: ids,
+      usuarios: ids
+        .filter((id) => nombrePorId.has(id))
+        .map((id) => ({ id, nombre: nombrePorId.get(id) as string })),
+      candidatos: oficina
+        .filter((u) => rolAdmiteAccesoNomina(u.rol))
+        .map(ficha),
+      por_rol: oficina.filter((u) => rolEntraANomina(u.rol)).map(ficha),
+      puede_modificar: esDireccion(actor.rol),
+      version: fila?.updated_at ?? null,
+      actualizado_at: fila?.updated_at ?? null,
+      actualizado_por_nombre: fila?.updated_by
+        ? (nombrePorId.get(fila.updated_by) ?? null)
+        : null,
+    };
+  }
+
+  /**
+   * `PUT /v1/config/acceso-nomina` ({ usuario_ids, version? }). En este
+   * orden: (1) solo Dirección ⇒ 403 `SOLO_DIRECCION_ACCESO_NOMINA` (la ruta
+   * ya lo exige con `@Roles`; aquí se repite para que el candado no dependa
+   * de un decorador); (2) solo Administración ACTIVA ⇒ 400
+   * `USUARIOS_INVALIDOS` con los ids que no lo son (Dirección, Coordinación
+   * y Facturación entran por su rol: no van en la lista); (3) `version` = el
+   * sello que vio la pantalla: si la lista cambió después ⇒ 409
+   * `ACCESO_NOMINA_CAMBIO` — sin esto, guardar desde una pantalla vieja le
+   * DEVOLVERÍA el acceso a alguien a quien otro de Dirección se lo acaba de
+   * quitar. `[]` es válido: nadie de Administración entra. SIN migración: la
+   * fila nace aquí (insert; si otro guardado la creó a la vez ⇒ 409) y
+   * después se actualiza con CAS sobre `updated_at`.
+   */
+  async setAccesoNomina(
+    usuarioIds: string[],
+    actor: ActorConfiguracion,
+    version?: string | null,
+  ): Promise<AccesoNomina> {
+    if (!esDireccion(actor.rol)) {
+      throw new ForbiddenException({
+        message: MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
+        error: CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
+      });
+    }
+    const ids = [...new Set(usuarioIds)];
+    const candidatos = new Set(
+      (await this.usuariosOficina())
+        .filter((u) => rolAdmiteAccesoNomina(u.rol))
+        .map((u) => u.id),
+    );
+    const invalidos = ids.filter((id) => !candidatos.has(id));
+    if (invalidos.length > 0) {
+      throw new BadRequestException({
+        message:
+          'Solo se le puede dar acceso a Nómina a usuarios ACTIVOS de Administración (Dirección, Coordinación y Facturación ya entran por su rol).',
+        error: 'USUARIOS_INVALIDOS',
+        details: { ids: invalidos },
+      });
+    }
+    const fila = await this.leerFilaAccesoNomina();
+    const cambio = () =>
+      new ConflictException({
+        message:
+          'Alguien más cambió quién entra a Nómina mientras lo editabas. Recarga y vuelve a intentar.',
+        error: 'ACCESO_NOMINA_CAMBIO',
+      });
+    if (
+      version !== undefined &&
+      !ConfiguracionService.mismoSello(version, fila?.updated_at ?? null)
+    ) {
+      throw cambio();
+    }
+    const escritura = {
+      valor_json: ids,
+      updated_at: new Date().toISOString(),
+      updated_by: actor.userId,
+    };
+    if (fila) {
+      let q = this.supabase.service
+        .from('configuracion_sistema')
+        .update(escritura)
+        .eq('clave', CONFIG_ACCESO_NOMINA);
+      // CAS: solo si nadie la cambió desde que se leyó arriba.
+      if (fila.updated_at) q = q.eq('updated_at', fila.updated_at);
+      const { data, error } = await q.select('clave');
+      if (error) throw new Error(error.message);
+      this.cacheListas.delete(CONFIG_ACCESO_NOMINA);
+      if (!data || data.length === 0) throw cambio();
+    } else {
+      const { error } = await this.supabase.service
+        .from('configuracion_sistema')
+        .insert({
+          clave: CONFIG_ACCESO_NOMINA,
+          activa: true,
+          descripcion: DESCRIPCION_CONFIG_ACCESO_NOMINA,
+          ...escritura,
+        });
+      this.cacheListas.delete(CONFIG_ACCESO_NOMINA);
+      if (error) {
+        // Otro guardado creó la fila a la vez (llave primaria `clave`).
+        if ((error as { code?: string }).code === '23505') throw cambio();
+        throw new Error(error.message);
+      }
+    }
+    return this.accesoNomina(actor);
   }
 
   // ===================== MODELO DE IA (2-oct-2026) =====================

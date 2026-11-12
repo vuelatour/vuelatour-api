@@ -12767,7 +12767,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     `expenses.controller.categoria-direccion.spec`. BD: enum `rol_usuario` +
     'DIRECCION', la política `usuario_admin_select_all` y
     `es_oficina_documentos()` incluyen DIRECCION; Ale y Pablo pasaron a
-    DIRECCION por email.
+    DIRECCION por email. **Desde el 12-nov-2026 la NÓMINA se le puede abrir
+    a alguien de Administración POR PERSONA (invariante 132)**: `reparto-
+    iguales` vuelve a nombrar a ADMIN en su `@Roles` (con veto en el handler)
+    y el 403 de NOMINA cambia de texto; lo demás de esta invariante sigue.
 
 123. **LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (6-nov-2026, API
     0.0.127, SIN migración).** Pedido de Pablo (audios): «en Gastos habría que
@@ -13194,6 +13197,71 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        `profit-sharing.service.cascada-balance.spec` (caso 4b: falla con el
        redondeo viejo — 4,252.25 en vez de 4,258.33 — y exige la identidad
        también EN PESOS).
+
+132. **ACCESO A NÓMINA POR PERSONA — DIRECCIÓN LE ABRE EL MÓDULO A QUIEN ELIJA
+     DE ADMINISTRACIÓN (12-nov-2026, API 0.0.137, SIN migración).** Pedido de
+     Dirección: «necesito otro componente para que los usuarios con rol de
+     dirección puedan habilitar o deshabilitar a algunos usuarios el módulo
+     de nómina, porque por ejemplo ahorita le acaban de autorizar el acceso a
+     Mary, pero no sé si es para siempre o temporal, mejor poder controlarlo
+     desde configuración». En prod toda la oficina es ADMIN (5 personas) o
+     DIRECCION (3): no hay nadie de COORDINADOR ni FACTURACION, así que con
+     la invariante 122 la nómina solo la veía Dirección. Es un permiso POR
+     PERSONA (como el 12, cotizaciones cobradas), no un rol nuevo.
+     - **Lista `acceso_nomina`** (`configuracion_sistema.valor_json`, arreglo
+       de uuids; `CONFIG_ACCESO_NOMINA`). SIN migración: la fila nace en el
+       primer PUT (insert; como `ia_modelo`). Sin fila = lista vacía = nadie
+       de Administración entra = el 0.0.136. Tiene sección propia: fuera de
+       `GET /v1/config` y `PATCH :clave` la rechaza (`CLAVES_SECCION_PROPIA`).
+     - **Quién entra** (fuente única `common/roles.util.ts`, PURO + spec):
+       `rolEntraANomina` = DIRECCION, COORDINADOR, FACTURACION por su rol
+       (los de siempre, sin leer nada); `rolAdmiteAccesoNomina` = solo ADMIN;
+       `entraANomina(rol, enLista)`. Un id en la lista con OTRO rol (piloto,
+       socio, o alguien que dejó de ser ADMIN) NO entra: la lista solo abre
+       la puerta que la 122 le cerró a Administración.
+     - **Qué abre**: SOLO la categoría NOMINA — `GET /expenses?categoria=
+       NOMINA`, `GET /expenses/export?categoria=NOMINA`, alta y edición de un
+       gasto NOMINA (`crearGastoInterno`, `update`) y `POST
+       /expenses/reparto-iguales` (su `@Roles` ahora nombra a ADMIN, pero el
+       handler veta a quien no tiene el acceso ANTES de tocar el servicio).
+       **PERSONAL_DUENO nunca se abre**, ni Estadísticas, Ingresos, Reparto o
+       Pagos a socios. `categoriaVedadaAUsuario(rol, categoria, tieneAcceso)`
+       consulta la lista SOLO para ADMIN + NOMINA (callback perezoso: ninguna
+       otra petición paga esa lectura) y `mensajeCategoriaVedada` da el
+       texto: el 403 conserva el código `CATEGORIA_SOLO_DIRECCION`; para
+       NOMINA el mensaje ahora dice a quién pedírselo y dónde
+       (`MENSAJE_NOMINA_SIN_ACCESO`); para gastos personales, el de siempre.
+     - **Caché**: los candados de Gastos leen la lista SIN caché
+       (`ExpensesService.tieneAccesoNomina` → `usarCache: false`): quitar el
+       acceso aplica al instante. `/me` (`permisos.nomina`, ADITIVO) usa el
+       caché de 60 s; el PUT y el GET lo refrescan en este proceso. Lista
+       ilegible ⇒ falla CERRADO (sin acceso, `warn`); `/me` nunca revienta.
+     - **Rutas**: `GET /v1/config/acceso-nomina` (`@Roles(ADMIN)`:
+       Administración ve quién entra) ⇒ `{ usuario_ids, usuarios, candidatos
+       (Administración ACTIVA, no externos), por_rol (oficina activa que ya
+       entra por su rol), puede_modificar (= es DIRECCION), version,
+       actualizado_at, actualizado_por_nombre }`. `PUT` (`@Roles(DIRECCION)`
+       + el service repite el candado: 403 `SOLO_DIRECCION_ACCESO_NOMINA`)
+       con `{ usuario_ids, version? }`: solo Administración ACTIVA (400
+       `USUARIOS_INVALIDOS` con los ids); `[]` es válido. **`version` = el
+       sello (`updated_at`) que vio la pantalla**: si la lista cambió después
+       ⇒ 409 `ACCESO_NOMINA_CAMBIO` — sin eso, guardar desde una pantalla
+       vieja le DEVOLVÍA el acceso a quien otro de Dirección se lo acababa de
+       quitar. El sello se compara por INSTANTE («Z» = «+00:00»); la
+       escritura va con CAS sobre `updated_at` (o insert con 23505 ⇒ 409).
+     - **Costuras que NO cambian** (las de la 122): `GET /expenses` sin
+       categoría y `GET /expenses/:id` siguen sin vetar la nómina por fila;
+       `PUT :id/reparto` de un gasto NOMINA lo conserva Administración.
+     - Panel: Configuración → «Acceso a Nómina» (switch por persona,
+       confirmación con nombre) y `permisos.nomina` abre el menú y la
+       pantalla. La app no cambia (su alta de NOMINA pasa por el mismo veto).
+     - Specs: `roles.util.spec` (bloque «acceso a Nómina por PERSONA»),
+       `configuracion.acceso-nomina.spec` (lista, caché, CAS, sello),
+       `configuracion.controller.acceso-nomina.spec` (roles y DTO por HTTP),
+       `expenses.controller.categoria-direccion.spec`,
+       `expenses.controller.reparto-iguales.spec`,
+       `expenses.service.acceso-nomina.spec` (alta y edición) y
+       `direccion-modulos.spec` (matriz de `@Roles`).
 
 ## Convenciones NestJS
 

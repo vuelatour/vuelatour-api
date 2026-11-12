@@ -271,9 +271,9 @@ import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
 import {
   CODIGO_CATEGORIA_SOLO_DIRECCION,
-  MENSAJE_CATEGORIA_SOLO_DIRECCION,
+  categoriaVedadaAUsuario,
   esAdminODireccion,
-  rolVedaCategoria,
+  mensajeCategoriaVedada,
 } from '../../common/roles.util';
 import { normalizarTc } from '../../common/tc.util';
 import {
@@ -2582,14 +2582,32 @@ export class ExpensesService {
     return data ? conEstadoPago(data, hoyCancun()) : null;
   }
 
-  /** Nómina y gastos personales son solo de Dirección (invariante 122). */
-  private vetarCategoriaSoloDireccion(
+  /**
+   * ACCESO A NÓMINA POR PERSONA (12-nov-2026, invariante 132): ¿Dirección le
+   * dio a este usuario el acceso a Nómina en Configuración? SIN caché: los
+   * candados de Gastos leen la lista vigente (una baja aplica al instante).
+   * Falla CERRADO (lista ilegible ⇒ false). Lo usa también el controller.
+   */
+  tieneAccesoNomina(userId: string | null | undefined): Promise<boolean> {
+    return this.configuracion.tieneAccesoNomina(userId, { usarCache: false });
+  }
+
+  /**
+   * Nómina y gastos personales son solo de Dirección (invariante 122), salvo
+   * la NÓMINA para quien de Administración tenga el acceso por persona
+   * (invariante 132). La lista se consulta solo para Administración + NOMINA.
+   */
+  private async vetarCategoriaSoloDireccion(
     rol: Rol | undefined,
+    userId: string | null | undefined,
     categoria: string | null | undefined,
-  ): void {
-    if (!rolVedaCategoria(rol, categoria)) return;
+  ): Promise<void> {
+    const vedada = await categoriaVedadaAUsuario(rol, categoria, () =>
+      this.tieneAccesoNomina(userId),
+    );
+    if (!vedada) return;
     throw new ForbiddenException({
-      message: MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      message: mensajeCategoriaVedada(categoria),
       error: CODIGO_CATEGORIA_SOLO_DIRECCION,
     });
   }
@@ -2816,8 +2834,9 @@ export class ExpensesService {
       );
     }
     // SOLO DIRECCIÓN (6-nov-2026, invariante 122): Administración no registra
-    // nómina ni gastos personales (sus módulos no los ve).
-    this.vetarCategoriaSoloDireccion(rol, dto.categoria);
+    // nómina ni gastos personales (sus módulos no los ve), salvo la nómina
+    // con el acceso por persona que da Dirección (invariante 132).
+    await this.vetarCategoriaSoloDireccion(rol, userId, dto.categoria);
     // NOMINA (29-ago): espejo de INDIRECTO — sin vuelo (avión opcional).
     if (dto.categoria === CategoriaGasto.NOMINA && dto.vuelo_id) {
       throw new BadRequestException(
@@ -4960,7 +4979,12 @@ export class ExpensesService {
     // gastos personales (ni mueve un gasto hacia esas categorías). Se decide
     // con la categoría del PATCH o la de la fila vigente cuando ya se leyó
     // (`necesitaActual`); no se agrega una lectura solo para esto.
-    this.vetarCategoriaSoloDireccion(rol, dto.categoria ?? actual?.categoria);
+    // La NÓMINA sí, con el acceso por persona que da Dirección (132).
+    await this.vetarCategoriaSoloDireccion(
+      rol,
+      userId,
+      dto.categoria ?? actual?.categoria,
+    );
     await this.validarPagoAfacPatch(dto, rol, actual);
     // «Pago al operador externo» (invariante 110): eco igual ⇒ fuera del
     // DTO; cambio ⇒ oficina y, al marcar, vuelo externo + categoría (403 /

@@ -15,6 +15,13 @@ jest.mock('./aircraft/aircraft.service', () => ({ AircraftService: class {} }));
 jest.mock('./aircraft/aircraft-balance.service', () => ({
   AircraftBalanceService: class {},
 }));
+jest.mock('./configuracion/configuracion.service', () => ({
+  ConfiguracionService: class {},
+}));
+jest.mock('./ia-uso/ia-uso.service', () => ({ IaUsoService: class {} }));
+jest.mock('./pyservices/pyservices.service', () => ({
+  PyservicesService: class {},
+}));
 jest.mock('./dashboards/dashboards.service', () => ({
   DashboardsService: class {},
 }));
@@ -43,6 +50,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { Rol } from '../common/types/auth.types';
 import { AircraftController } from './aircraft/aircraft.controller';
+import { ConfiguracionController } from './configuracion/configuracion.controller';
 import { DashboardsController } from './dashboards/dashboards.controller';
 import { ExpensesController } from './expenses/expenses.controller';
 import {
@@ -216,9 +224,10 @@ describe('Módulos SOLO de Dirección: ADMIN salió de sus @Roles', () => {
     );
   });
 
-  it('Nómina: el reparto en partes iguales es de Dirección (el masivo de Otros gastos no cambia)', () => {
+  it('Nómina: el reparto en partes iguales es de Dirección, Coordinación y Facturación; Administración pasa el @Roles solo para el acceso por persona (invariante 132: sin él, 403 en el handler); el masivo de Otros gastos no cambia', () => {
     expect(roles(ExpensesController, 'repartoIguales')).toEqual([
       Rol.DIRECCION,
+      Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,
     ]);
@@ -226,6 +235,13 @@ describe('Módulos SOLO de Dirección: ADMIN salió de sus @Roles', () => {
       Rol.ADMIN,
       Rol.COORDINADOR,
       Rol.FACTURACION,
+    ]);
+  });
+
+  it('Acceso a Nómina por persona (invariante 132): Administración lee la lista; SOLO Dirección la cambia', () => {
+    expect(roles(ConfiguracionController, 'accesoNomina')).toEqual([Rol.ADMIN]);
+    expect(roles(ConfiguracionController, 'setAccesoNomina')).toEqual([
+      Rol.DIRECCION,
     ]);
   });
 

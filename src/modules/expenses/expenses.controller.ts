@@ -21,8 +21,8 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import {
   CODIGO_CATEGORIA_SOLO_DIRECCION,
-  MENSAJE_CATEGORIA_SOLO_DIRECCION,
-  rolVedaCategoria,
+  categoriaVedadaAUsuario,
+  mensajeCategoriaVedada,
 } from '../../common/roles.util';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
@@ -72,7 +72,7 @@ export class ExpensesController {
   })
   async list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
-    this.vetarCategoriaSoloDireccion(c.rol, filters.categoria);
+    await this.vetarCategoriaSoloDireccion(c, filters.categoria);
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
     // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
     // mecánico, además, solo combustible (GAS) — no ve el resto de gastos.
@@ -107,14 +107,21 @@ export class ExpensesController {
   /**
    * NÓMINA Y GASTOS PERSONALES SOLO DE DIRECCIÓN (6-nov-2026, invariante
    * 122): Administración (ADMIN) no lista ni exporta esas categorías.
+   * ACCESO A NÓMINA POR PERSONA (12-nov-2026, invariante 132): la NÓMINA sí
+   * se le abre a quien de Administración tenga el acceso que da Dirección en
+   * Configuración (los gastos personales, nunca). La lista se consulta SOLO
+   * para Administración + NOMINA y sin caché: una baja aplica al instante.
    */
-  private vetarCategoriaSoloDireccion(
-    rol: Rol | undefined,
+  private async vetarCategoriaSoloDireccion(
+    c: AuthenticatedUser,
     categoria: string | null | undefined,
-  ): void {
-    if (!rolVedaCategoria(rol, categoria)) return;
+  ): Promise<void> {
+    const vedada = await categoriaVedadaAUsuario(c.rol, categoria, () =>
+      this.expenses.tieneAccesoNomina(c.userId),
+    );
+    if (!vedada) return;
     throw new ForbiddenException({
-      message: MENSAJE_CATEGORIA_SOLO_DIRECCION,
+      message: mensajeCategoriaVedada(categoria),
       error: CODIGO_CATEGORIA_SOLO_DIRECCION,
     });
   }
@@ -160,7 +167,7 @@ export class ExpensesController {
     @Query() q: ListGastosQuery,
     @CurrentUser() c: AuthenticatedUser,
   ): Promise<StreamableFile> {
-    this.vetarCategoriaSoloDireccion(c.rol, q.categoria);
+    await this.vetarCategoriaSoloDireccion(c, q.categoria);
     const buffer = await this.expenses.listXlsx(q, {
       detalleBanco: puedeVerDetalleBanco(c.rol),
     });
@@ -384,17 +391,22 @@ export class ExpensesController {
   // masivo.
 
   @Post('reparto-iguales')
-  // Solo Dirección (invariante 122): es el reparto de la NÓMINA.
-  @Roles(Rol.DIRECCION, Rol.COORDINADOR, Rol.FACTURACION)
+  // Es el reparto de la NÓMINA (invariante 122): Dirección, Coordinación y
+  // Facturación por su rol. Administración pasa el `@Roles` desde el
+  // 12-nov-2026 (invariante 132), pero SOLO quien tenga el acceso a Nómina
+  // que da Dirección: sin él, 403 `CATEGORIA_SOLO_DIRECCION` antes de tocar
+  // el servicio.
+  @Roles(Rol.DIRECCION, Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
       'Reparte cada pago en PARTES IGUALES (centavos enteros, Σ == monto, el residuo rota entre aviones a lo largo del lote) entre los aviones ACTIVOS elegidos; aeronave_ids [] quita el reparto; simular: true no escribe. Errores por pago (GASTO_NO_EXISTE, CATEGORIA_NO_REPARTIBLE, GASTO_CON_VUELO, MONTO_MUY_CHICO, MES_CERRADO, ERROR) sin tumbar el lote; 400 AERONAVE_INACTIVA antes de tocar nada.',
   })
-  repartoIguales(
+  async repartoIguales(
     @Body() dto: RepartoIgualesDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.vetarCategoriaSoloDireccion(c, CategoriaGasto.NOMINA);
     return this.expenses.putRepartoIguales(dto, c.userId);
   }
 
