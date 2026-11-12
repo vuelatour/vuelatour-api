@@ -255,6 +255,7 @@ describe('ConfiguracionService — acceso a Nómina por persona', () => {
     expect(await svc.permisosDe(MARY, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: false,
+      gastos_personales: false,
     });
     // Quien entra por su rol no depende de la lista.
     expect(await svc.entraANomina(ALE, 'DIRECCION')).toBe(true);
@@ -295,13 +296,17 @@ describe('ConfiguracionService — acceso a Nómina por persona', () => {
 
   it('permisosDe (/me): `nomina` por rol o por la lista, junto al permiso de cotizaciones cobradas', async () => {
     const { svc } = armar({ fila: fila([MARY]) });
+    // `gastos_personales` (invariante 133) es OTRA lista: el acceso a Nómina
+    // no lo enciende.
     expect(await svc.permisosDe(MARY, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: true,
+      gastos_personales: false,
     });
     expect(await svc.permisosDe(VILLALOBOS, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: false,
+      gastos_personales: false,
     });
     expect((await svc.permisosDe(ALE, 'DIRECCION')).nomina).toBe(true);
     expect((await svc.permisosDe(FACTU, 'FACTURACION')).nomina).toBe(true);

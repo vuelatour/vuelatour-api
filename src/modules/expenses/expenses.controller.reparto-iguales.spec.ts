@@ -54,8 +54,11 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     findById: jest.fn(),
     list: jest.fn(),
     listXlsx: jest.fn(),
-    /** Acceso a Nómina por persona (invariante 132): por defecto, nadie. */
-    tieneAccesoNomina: jest.fn(),
+    /**
+     * Acceso por persona (invariantes 132 y 133): por defecto, nadie. El
+     * reparto es de la NÓMINA: solo cuenta el acceso de esa categoría.
+     */
+    tieneAccesoACategoria: jest.fn(),
   };
   const http = (): Servidor => app.getHttpServer() as Servidor;
   const ruta = '/v1/expenses/reparto-iguales';
@@ -102,7 +105,7 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     svc.putRepartoIguales.mockResolvedValue(RESPUESTA);
     svc.list.mockResolvedValue({ data: [], count: 0, limit: 50, offset: 0 });
     svc.listXlsx.mockResolvedValue(Buffer.from('xlsx'));
-    svc.tieneAccesoNomina.mockResolvedValue(false);
+    svc.tieneAccesoACategoria.mockResolvedValue(false);
   });
 
   it('DIRECCION, COORDINADOR y FACTURACION ⇒ 200 (no 201) con la respuesta del servicio, que recibe (dto, usuario)', async () => {
@@ -115,7 +118,7 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
     }
     expect(svc.findById).not.toHaveBeenCalled();
     // Entran por su rol: la lista del acceso por persona ni se consulta.
-    expect(svc.tieneAccesoNomina).not.toHaveBeenCalled();
+    expect(svc.tieneAccesoACategoria).not.toHaveBeenCalled();
   }, 20_000);
 
   it('ANALISTA, SOCIO, PILOTO, MECANICO y VISITANTE ⇒ 403 por rol, sin llamar al servicio', async () => {
@@ -132,7 +135,7 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
       expect((res.body as CuerpoError).code).toBe('FORBIDDEN');
     }
     expect(svc.putRepartoIguales).not.toHaveBeenCalled();
-    expect(svc.tieneAccesoNomina).not.toHaveBeenCalled();
+    expect(svc.tieneAccesoACategoria).not.toHaveBeenCalled();
   }, 20_000);
 
   it('ADMIN (Administración): sin el acceso a Nómina ⇒ 403 CATEGORIA_SOLO_DIRECCION sin llamar al servicio; con el acceso que da Dirección (invariante 132) ⇒ 200', async () => {
@@ -144,9 +147,20 @@ describe('POST /v1/expenses/reparto-iguales — nómina en partes iguales', () =
       'Acceso a Nómina',
     );
     expect(svc.putRepartoIguales).not.toHaveBeenCalled();
-    expect(svc.tieneAccesoNomina).toHaveBeenCalledWith('u-1');
+    // Se pregunta por el acceso de la NÓMINA (no por el de gastos personales).
+    expect(svc.tieneAccesoACategoria).toHaveBeenCalledWith('u-1', 'NOMINA');
 
-    svc.tieneAccesoNomina.mockResolvedValue(true);
+    // Con SOLO el acceso a Gastos personales (invariante 133) tampoco pasa.
+    svc.tieneAccesoACategoria.mockImplementation((_u: string, cat: string) =>
+      Promise.resolve(cat === 'PERSONAL_DUENO'),
+    );
+    const soloPersonales = await request(http()).post(ruta).send(CUERPO);
+    expect(soloPersonales.status).toBe(403);
+    expect(svc.putRepartoIguales).not.toHaveBeenCalled();
+
+    svc.tieneAccesoACategoria.mockImplementation((_u: string, cat: string) =>
+      Promise.resolve(cat === 'NOMINA'),
+    );
     const con = await request(http()).post(ruta).send(CUERPO);
     expect(con.status).toBe(200);
     expect(con.body).toEqual(RESPUESTA);

@@ -228,6 +228,7 @@ describe('ConfiguracionService — editores de cotizaciones cobradas', () => {
     expect(await svc.permisosDe(ALE, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: false,
+      gastos_personales: false,
     });
     expect(await svc.editoresCotizacionCobradaNombres()).toEqual([]);
   });
@@ -241,24 +242,29 @@ describe('ConfiguracionService — editores de cotizaciones cobradas', () => {
 
   it('permisosDe (/me): exige estar en la lista Y un rol que revise cotizaciones', async () => {
     const { svc } = armar({ editores: [ALE, MARY] });
-    // `nomina` (invariante 132) va aparte: Administración sin el acceso por
-    // persona ⇒ false; Coordinación y Facturación entran por su rol.
+    // `nomina` (invariante 132) y `gastos_personales` (133) van aparte:
+    // Administración sin el acceso por persona ⇒ false; a Nómina entran por
+    // su rol Coordinación y Facturación; a Gastos personales, Coordinación.
     expect(await svc.permisosDe(ALE, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: true,
       nomina: false,
+      gastos_personales: false,
     });
     expect(await svc.permisosDe(VILLALOBOS, 'ADMIN')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: false,
+      gastos_personales: false,
     });
     // En la lista pero con un rol que no revisa (no podría de todos modos).
     expect(await svc.permisosDe(MARY, 'FACTURACION')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: true,
+      gastos_personales: false,
     });
     expect(await svc.permisosDe(ALE, 'COORDINADOR')).toEqual({
       editar_cotizacion_cobrada: true,
       nomina: true,
+      gastos_personales: true,
     });
   });
 
@@ -281,6 +287,7 @@ describe('ConfiguracionService — editores de cotizaciones cobradas', () => {
     expect(await svc.permisosDe(FACTU, 'FACTURACION')).toEqual({
       editar_cotizacion_cobrada: false,
       nomina: true,
+      gastos_personales: false,
     });
   });
 

@@ -107,17 +107,19 @@ export class ExpensesController {
   /**
    * NÓMINA Y GASTOS PERSONALES SOLO DE DIRECCIÓN (6-nov-2026, invariante
    * 122): Administración (ADMIN) no lista ni exporta esas categorías.
-   * ACCESO A NÓMINA POR PERSONA (12-nov-2026, invariante 132): la NÓMINA sí
-   * se le abre a quien de Administración tenga el acceso que da Dirección en
-   * Configuración (los gastos personales, nunca). La lista se consulta SOLO
-   * para Administración + NOMINA y sin caché: una baja aplica al instante.
+   * ACCESO POR PERSONA (12-nov-2026, invariantes 132 y 133): cada una se le
+   * abre a quien de Administración tenga el acceso que da Dirección en
+   * Configuración PARA ESA categoría («Acceso a Nómina» / «Acceso a Gastos
+   * personales»: dos listas, una no da la otra). La lista se consulta SOLO
+   * para Administración + esa categoría y sin caché: una baja aplica al
+   * instante.
    */
   private async vetarCategoriaSoloDireccion(
     c: AuthenticatedUser,
     categoria: string | null | undefined,
   ): Promise<void> {
-    const vedada = await categoriaVedadaAUsuario(c.rol, categoria, () =>
-      this.expenses.tieneAccesoNomina(c.userId),
+    const vedada = await categoriaVedadaAUsuario(c.rol, categoria, (cat) =>
+      this.expenses.tieneAccesoACategoria(c.userId, cat),
     );
     if (!vedada) return;
     throw new ForbiddenException({

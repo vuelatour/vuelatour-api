@@ -245,6 +245,15 @@ describe('Módulos SOLO de Dirección: ADMIN salió de sus @Roles', () => {
     ]);
   });
 
+  it('Acceso a Gastos personales por persona (invariante 133): Administración lee la lista; SOLO Dirección la cambia', () => {
+    expect(roles(ConfiguracionController, 'accesoGastosPersonales')).toEqual([
+      Rol.ADMIN,
+    ]);
+    expect(roles(ConfiguracionController, 'setAccesoGastosPersonales')).toEqual(
+      [Rol.DIRECCION],
+    );
+  });
+
   it('lo que Administración conserva no se tocó: métricas del avión (solo gastos), usuarios, balances', () => {
     expect(roles(AircraftController, 'metrics')).toEqual([
       Rol.ADMIN,

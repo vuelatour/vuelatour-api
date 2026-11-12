@@ -20,9 +20,11 @@ import { Rol } from './types/auth.types';
  *    un usuario de Dirección.
  *  - Reportes y Conciliación siguen como estaban para Administración
  *    (decisión del dueño: «de momento pueden ver todo de aquí»).
- *  - NÓMINA POR PERSONA (12-nov-2026, invariante 132): Dirección puede
- *    abrirle el módulo de Nómina a alguien de Administración desde
- *    Configuración («Acceso a Nómina»). Reglas más abajo.
+ *  - NÓMINA Y GASTOS PERSONALES POR PERSONA (12-nov-2026, invariantes 132 y
+ *    133): Dirección puede abrirle el módulo de Nómina y/o el de Gastos
+ *    personales a alguien de Administración desde Configuración («Acceso a
+ *    Nómina», «Acceso a Gastos personales»). Dos listas independientes.
+ *    Reglas más abajo.
  *
  * PURO (sin Nest): `roles.util.spec.ts` congela la matriz.
  */
@@ -81,19 +83,43 @@ export const CODIGO_CATEGORIA_SOLO_DIRECCION = 'CATEGORIA_SOLO_DIRECCION';
 export const MENSAJE_CATEGORIA_SOLO_DIRECCION =
   'La nómina y los gastos personales los lleva Dirección.';
 
-// ===== Acceso a Nómina POR PERSONA (12-nov-2026, invariante 132) =====
+// ===== Acceso POR PERSONA a Nómina y a Gastos personales =====
+// (12-nov-2026: invariante 132, Nómina; invariante 133, Gastos personales)
 //
-// Pedido de Dirección: «poder habilitar o deshabilitar a algunos usuarios el
-// módulo de nómina … le acaban de autorizar el acceso a Mary, pero no sé si
-// es para siempre o temporal, mejor poder controlarlo desde configuración».
-// Dirección elige en Configuración → «Acceso a Nómina» a quién de
-// ADMINISTRACIÓN le abre el módulo (lista `acceso_nomina`,
-// `ConfiguracionService`). Lo demás de la invariante 122 no se mueve: los
-// gastos personales, Estadísticas, Ingresos, Reparto y Pagos a socios siguen
-// siendo solo de Dirección.
+// Pedidos de Dirección, el mismo día y sobre Configuración: «poder habilitar
+// o deshabilitar a algunos usuarios el módulo de nómina … le acaban de
+// autorizar el acceso a Mary, pero no sé si es para siempre o temporal, mejor
+// poder controlarlo desde configuración» y, con esa tarjeta ya en uso, «y
+// venga otro para gastos personales». Dirección elige en Configuración a
+// quién de ADMINISTRACIÓN le abre cada módulo. Son DOS listas independientes
+// (`acceso_nomina` y `acceso_gastos_personales`, `ConfiguracionService`):
+// tener un acceso NO da el otro. Lo demás de la invariante 122 no se mueve:
+// Estadísticas, Ingresos, Reparto y Pagos a socios siguen siendo solo de
+// Dirección.
 
-/** La ÚNICA categoría que Dirección puede abrirle a alguien de Administración. */
 export const CATEGORIA_NOMINA = 'NOMINA';
+export const CATEGORIA_GASTOS_PERSONALES = 'PERSONAL_DUENO';
+
+/**
+ * Las categorías que Dirección puede abrirle POR PERSONA a alguien de
+ * Administración, cada una con SU lista. Una categoría «solo de Dirección»
+ * que no esté aquí no se abre con ningún acceso.
+ */
+export const CATEGORIAS_CON_ACCESO_POR_PERSONA = [
+  CATEGORIA_NOMINA,
+  CATEGORIA_GASTOS_PERSONALES,
+] as const;
+
+export type CategoriaConAccesoPorPersona =
+  (typeof CATEGORIAS_CON_ACCESO_POR_PERSONA)[number];
+
+export function categoriaAdmiteAccesoPorPersona(
+  categoria: string | null | undefined,
+): categoria is CategoriaConAccesoPorPersona {
+  return (CATEGORIAS_CON_ACCESO_POR_PERSONA as readonly string[]).includes(
+    categoria ?? '',
+  );
+}
 
 /**
  * Roles que entran al módulo de Nómina POR SU ROL (los de siempre; espejo de
@@ -106,59 +132,122 @@ export const ROLES_NOMINA_POR_ROL: readonly Rol[] = [
   Rol.FACTURACION,
 ];
 
-export function rolEntraANomina(rol: RolLike): boolean {
-  return (ROLES_NOMINA_POR_ROL as readonly string[]).includes(rol ?? '');
+/**
+ * Roles que entran al módulo de Gastos personales POR SU ROL (espejo de
+ * `ROLES_GASTOS_PERSONALES` del panel): Dirección y la coordinación que los
+ * captura. Facturación nunca tuvo ese módulo. Administración NO está: de
+ * ella entra solo quien Dirección ponga en la lista.
+ */
+export const ROLES_GASTOS_PERSONALES_POR_ROL: readonly Rol[] = [
+  Rol.DIRECCION,
+  Rol.COORDINADOR,
+];
+
+const ROLES_POR_ROL_DE_MODULO: Record<
+  CategoriaConAccesoPorPersona,
+  readonly Rol[]
+> = {
+  NOMINA: ROLES_NOMINA_POR_ROL,
+  PERSONAL_DUENO: ROLES_GASTOS_PERSONALES_POR_ROL,
+};
+
+/** ¿El rol entra al módulo de esa categoría POR SU ROL (sin lista)? */
+export function rolEntraAModulo(
+  categoria: CategoriaConAccesoPorPersona,
+  rol: RolLike,
+): boolean {
+  return (ROLES_POR_ROL_DE_MODULO[categoria] as readonly string[]).includes(
+    rol ?? '',
+  );
 }
 
-/** A quién se le puede DAR el acceso por persona: solo a Administración. */
-export function rolAdmiteAccesoNomina(rol: RolLike): boolean {
+export function rolEntraANomina(rol: RolLike): boolean {
+  return rolEntraAModulo(CATEGORIA_NOMINA, rol);
+}
+
+export function rolEntraAGastosPersonales(rol: RolLike): boolean {
+  return rolEntraAModulo(CATEGORIA_GASTOS_PERSONALES, rol);
+}
+
+/** A quién se le puede DAR un acceso por persona: solo a Administración. */
+export function rolAdmiteAccesoPorPersona(rol: RolLike): boolean {
   return esAdministracion(rol);
 }
 
 /**
- * ¿Entra al módulo de Nómina? Por su rol, o Administración con el acceso que
- * le dio Dirección (`enLista`). Es lo que publica `/me.permisos.nomina`. Un
- * id en la lista con otro rol (piloto, socio…) NO entra: la lista solo abre
- * la puerta que la invariante 122 le cerró a Administración.
+ * ¿Entra al módulo de esa categoría? Por su rol, o Administración con el
+ * acceso que le dio Dirección (`enLista` = está en la lista de ESE módulo).
+ * Un id en la lista con otro rol (piloto, socio…) NO entra: la lista solo
+ * abre la puerta que la invariante 122 le cerró a Administración.
  */
+export function entraAModulo(
+  categoria: CategoriaConAccesoPorPersona,
+  rol: RolLike,
+  enLista: boolean,
+): boolean {
+  return (
+    rolEntraAModulo(categoria, rol) ||
+    (rolAdmiteAccesoPorPersona(rol) && enLista)
+  );
+}
+
+/** Lo que publica `/me.permisos.nomina`. */
 export function entraANomina(rol: RolLike, enLista: boolean): boolean {
-  return rolEntraANomina(rol) || (rolAdmiteAccesoNomina(rol) && enLista);
+  return entraAModulo(CATEGORIA_NOMINA, rol, enLista);
+}
+
+/** Lo que publica `/me.permisos.gastos_personales`. */
+export function entraAGastosPersonales(
+  rol: RolLike,
+  enLista: boolean,
+): boolean {
+  return entraAModulo(CATEGORIA_GASTOS_PERSONALES, rol, enLista);
 }
 
 /**
  * ¿La categoría le queda VEDADA a este usuario? Igual que `rolVedaCategoria`
- * salvo NOMINA para alguien de Administración con el acceso por persona (los
- * gastos personales NUNCA se abren). `tieneAccesoNomina` se consulta SOLO
- * cuando hace falta (Administración + NOMINA): ninguna otra petición paga
- * esa lectura.
+ * salvo que alguien de Administración tenga el acceso por persona de ESA
+ * categoría: cada una tiene su lista, así que el acceso a Nómina no abre los
+ * gastos personales ni al revés. `tieneAcceso(categoria)` se consulta SOLO
+ * cuando hace falta (Administración + una categoría con acceso por persona):
+ * ninguna otra petición paga esa lectura. Quien lo implemente DEBE contestar
+ * con la lista de la categoría que recibe.
  */
 export async function categoriaVedadaAUsuario(
   rol: RolLike,
   categoria: string | null | undefined,
-  tieneAccesoNomina: () => Promise<boolean>,
+  tieneAcceso: (categoria: CategoriaConAccesoPorPersona) => Promise<boolean>,
 ): Promise<boolean> {
   if (!rolVedaCategoria(rol, categoria)) return false;
-  if (categoria !== CATEGORIA_NOMINA) return true;
-  return !(await tieneAccesoNomina());
+  if (!categoriaAdmiteAccesoPorPersona(categoria)) return true;
+  return !(await tieneAcceso(categoria));
 }
 
 /** A Administración SIN el acceso: se le dice a quién pedírselo y dónde. */
 export const MENSAJE_NOMINA_SIN_ACCESO =
   'La nómina la lleva Dirección. Si te toca llevarla, pídele a Dirección que te dé acceso en Configuración («Acceso a Nómina»).';
+export const MENSAJE_GASTOS_PERSONALES_SIN_ACCESO =
+  'Los gastos personales los lleva Dirección. Si te toca llevarlos, pídele a Dirección que te dé acceso en Configuración («Acceso a Gastos personales»).';
 
 /** Texto del 403 `CATEGORIA_SOLO_DIRECCION` según la categoría vedada. */
 export function mensajeCategoriaVedada(
   categoria: string | null | undefined,
 ): string {
-  return categoria === CATEGORIA_NOMINA
-    ? MENSAJE_NOMINA_SIN_ACCESO
-    : MENSAJE_CATEGORIA_SOLO_DIRECCION;
+  if (categoria === CATEGORIA_NOMINA) return MENSAJE_NOMINA_SIN_ACCESO;
+  if (categoria === CATEGORIA_GASTOS_PERSONALES) {
+    return MENSAJE_GASTOS_PERSONALES_SIN_ACCESO;
+  }
+  return MENSAJE_CATEGORIA_SOLO_DIRECCION;
 }
 
 export const CODIGO_SOLO_DIRECCION_ACCESO_NOMINA =
   'SOLO_DIRECCION_ACCESO_NOMINA';
 export const MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA =
   'Solo Dirección puede cambiar quién entra a Nómina.';
+export const CODIGO_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES =
+  'SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES';
+export const MENSAJE_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES =
+  'Solo Dirección puede cambiar quién entra a Gastos personales.';
 
 // ===== Caja chica de Dirección =====
 

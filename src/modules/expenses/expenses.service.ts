@@ -270,10 +270,13 @@ import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
 import {
+  CATEGORIA_GASTOS_PERSONALES,
+  CATEGORIA_NOMINA,
   CODIGO_CATEGORIA_SOLO_DIRECCION,
   categoriaVedadaAUsuario,
   esAdminODireccion,
   mensajeCategoriaVedada,
+  type CategoriaConAccesoPorPersona,
 } from '../../common/roles.util';
 import { normalizarTc } from '../../common/tc.util';
 import {
@@ -2583,27 +2586,50 @@ export class ExpensesService {
   }
 
   /**
-   * ACCESO A NÓMINA POR PERSONA (12-nov-2026, invariante 132): ¿Dirección le
-   * dio a este usuario el acceso a Nómina en Configuración? SIN caché: los
-   * candados de Gastos leen la lista vigente (una baja aplica al instante).
-   * Falla CERRADO (lista ilegible ⇒ false). Lo usa también el controller.
+   * ACCESO POR PERSONA (12-nov-2026, invariantes 132 y 133): ¿Dirección le
+   * dio a este usuario, en Configuración, el acceso al módulo de ESA
+   * categoría? Cada categoría lee SU lista (`acceso_nomina` /
+   * `acceso_gastos_personales`): el acceso a Nómina no contesta por los
+   * gastos personales ni al revés. SIN caché: los candados de Gastos leen la
+   * lista vigente (una baja aplica al instante). Falla CERRADO (lista
+   * ilegible o categoría sin lista ⇒ false). Lo usa también el controller.
    */
-  tieneAccesoNomina(userId: string | null | undefined): Promise<boolean> {
-    return this.configuracion.tieneAccesoNomina(userId, { usarCache: false });
+  tieneAccesoACategoria(
+    userId: string | null | undefined,
+    categoria: CategoriaConAccesoPorPersona,
+  ): Promise<boolean> {
+    switch (categoria) {
+      case CATEGORIA_NOMINA:
+        return this.configuracion.tieneAccesoNomina(userId, {
+          usarCache: false,
+        });
+      case CATEGORIA_GASTOS_PERSONALES:
+        return this.configuracion.tieneAccesoGastosPersonales(userId, {
+          usarCache: false,
+        });
+      default: {
+        // Una categoría nueva con acceso por persona debe tener su lista
+        // aquí: sin ella no compila y, si aun así llegara, no entra nadie.
+        const sinLista: never = categoria;
+        void sinLista;
+        return Promise.resolve(false);
+      }
+    }
   }
 
   /**
    * Nómina y gastos personales son solo de Dirección (invariante 122), salvo
-   * la NÓMINA para quien de Administración tenga el acceso por persona
-   * (invariante 132). La lista se consulta solo para Administración + NOMINA.
+   * para quien de Administración tenga el acceso por persona de ESA
+   * categoría (invariantes 132 y 133). La lista se consulta solo para
+   * Administración + esa categoría.
    */
   private async vetarCategoriaSoloDireccion(
     rol: Rol | undefined,
     userId: string | null | undefined,
     categoria: string | null | undefined,
   ): Promise<void> {
-    const vedada = await categoriaVedadaAUsuario(rol, categoria, () =>
-      this.tieneAccesoNomina(userId),
+    const vedada = await categoriaVedadaAUsuario(rol, categoria, (cat) =>
+      this.tieneAccesoACategoria(userId, cat),
     );
     if (!vedada) return;
     throw new ForbiddenException({
@@ -2834,8 +2860,9 @@ export class ExpensesService {
       );
     }
     // SOLO DIRECCIÓN (6-nov-2026, invariante 122): Administración no registra
-    // nómina ni gastos personales (sus módulos no los ve), salvo la nómina
-    // con el acceso por persona que da Dirección (invariante 132).
+    // nómina ni gastos personales (sus módulos no los ve), salvo con el
+    // acceso por persona que da Dirección para ESA categoría (invariantes
+    // 132, nómina, y 133, gastos personales).
     await this.vetarCategoriaSoloDireccion(rol, userId, dto.categoria);
     // NOMINA (29-ago): espejo de INDIRECTO — sin vuelo (avión opcional).
     if (dto.categoria === CategoriaGasto.NOMINA && dto.vuelo_id) {
@@ -4979,7 +5006,8 @@ export class ExpensesService {
     // gastos personales (ni mueve un gasto hacia esas categorías). Se decide
     // con la categoría del PATCH o la de la fila vigente cuando ya se leyó
     // (`necesitaActual`); no se agrega una lectura solo para esto.
-    // La NÓMINA sí, con el acceso por persona que da Dirección (132).
+    // Sí con el acceso por persona que da Dirección para ESA categoría
+    // (132, nómina; 133, gastos personales).
     await this.vetarCategoriaSoloDireccion(
       rol,
       userId,

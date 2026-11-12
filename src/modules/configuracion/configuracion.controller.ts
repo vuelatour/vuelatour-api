@@ -16,6 +16,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  AccesoGastosPersonalesDto,
   AccesoNominaDto,
   EditoresCotizacionCobradaDto,
   IaSaldoDto,
@@ -183,6 +184,40 @@ export class ConfiguracionController {
     @CurrentUser() current: AuthenticatedUser,
   ) {
     return this.config.setAccesoNomina(
+      dto.usuario_ids,
+      { userId: current.userId, rol: current.rol },
+      dto.version,
+    );
+  }
+
+  // Acceso a Gastos personales por PERSONA (12-nov-2026, invariante 133): a
+  // quién de Administración le abre Dirección el módulo de Gastos
+  // personales. Mismo contrato que «Acceso a Nómina», OTRA lista. Literales
+  // ANTES de ':clave'. Administración lee; SOLO Dirección cambia.
+  @Get('acceso-gastos-personales')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Quién de Administración entra al módulo de Gastos personales: { usuario_ids, usuarios: {id, nombre}[], candidatos (Administración ACTIVA: los que acepta el PUT), por_rol (oficina activa que ya entra por su rol: Dirección, Coordinación), puede_modificar (quien consulta es de Dirección), version (sello para el PUT), actualizado_at, actualizado_por_nombre }. Sin la fila (nunca guardada) la lista es vacía.',
+  })
+  accesoGastosPersonales(@CurrentUser() current: AuthenticatedUser) {
+    return this.config.accesoGastosPersonales({
+      userId: current.userId,
+      rol: current.rol,
+    });
+  }
+
+  @Put('acceso-gastos-personales')
+  @Roles(Rol.DIRECCION)
+  @ApiOperation({
+    summary:
+      'Guarda quién de Administración entra a Gastos personales ({ usuario_ids, version? }). SOLO Dirección (403; el service repite el candado con SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES). Solo usuarios ACTIVOS de Administración (400 USUARIOS_INVALIDOS con los ids). [] = nadie de Administración. `version` = el sello del GET: si la lista cambió después ⇒ 409 ACCESO_GASTOS_PERSONALES_CAMBIO. Aplica al instante: /me.permisos.gastos_personales y los candados de Gastos (categoría PERSONAL_DUENO). No abre la Nómina (esa es otra lista). Responde lo mismo que el GET.',
+  })
+  setAccesoGastosPersonales(
+    @Body() dto: AccesoGastosPersonalesDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.config.setAccesoGastosPersonales(
       dto.usuario_ids,
       { userId: current.userId, rol: current.rol },
       dto.version,

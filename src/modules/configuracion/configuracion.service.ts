@@ -32,12 +32,18 @@ import {
   type ModeloIaCatalogo,
 } from '../../common/ia-modelo.util';
 import {
+  CATEGORIA_GASTOS_PERSONALES,
+  CATEGORIA_NOMINA,
+  CODIGO_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES,
   CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
+  MENSAJE_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES,
   MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
-  entraANomina,
+  categoriaAdmiteAccesoPorPersona,
+  entraAModulo,
   esDireccion,
-  rolAdmiteAccesoNomina,
-  rolEntraANomina,
+  rolAdmiteAccesoPorPersona,
+  rolEntraAModulo,
+  type CategoriaConAccesoPorPersona,
 } from '../../common/roles.util';
 
 const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
@@ -243,9 +249,72 @@ export const CONFIG_IA_MODELO = 'ia_modelo';
  */
 export const CONFIG_ACCESO_NOMINA = 'acceso_nomina';
 
+/**
+ * ACCESO A GASTOS PERSONALES POR PERSONA (12-nov-2026, API 0.0.138,
+ * invariante 133, SIN migración: la fila se crea en el primer PUT). Pedido
+ * de Dirección al ver la tarjeta «Acceso a Nómina»: «y venga otro para
+ * gastos personales». MISMA mecánica que `acceso_nomina` (una sola
+ * implementación: `LISTAS_ACCESO_POR_PERSONA`), OTRA lista: `valor_json` =
+ * arreglo de uuids de usuarios de ADMINISTRACIÓN a los que Dirección les
+ * abre el módulo de Gastos personales (listar y exportar la categoría
+ * PERSONAL_DUENO, registrar y editar esos gastos). Las dos listas son
+ * independientes: tener una no da la otra. Sin la fila la lista es vacía
+ * (nadie de Administración entra: como el 0.0.137).
+ */
+export const CONFIG_ACCESO_GASTOS_PERSONALES = 'acceso_gastos_personales';
+
 /** Descripción fija de la fila (solo se escribe al nacer). */
 const DESCRIPCION_CONFIG_ACCESO_NOMINA =
   'Usuarios de Administración a los que Dirección les dio acceso al módulo de Nómina (permiso por persona). Dirección, Coordinación y Facturación entran por su rol. Solo Dirección cambia esta lista.';
+const DESCRIPCION_CONFIG_ACCESO_GASTOS_PERSONALES =
+  'Usuarios de Administración a los que Dirección les dio acceso al módulo de Gastos personales (permiso por persona). Dirección y Coordinación entran por su rol. Solo Dirección cambia esta lista.';
+
+/** Lo ÚNICO que cambia de una lista de acceso por persona a otra. */
+interface ListaAccesoPorPersona {
+  /** Clave de la fila en `configuracion_sistema`. */
+  clave: string;
+  /** Descripción fija de la fila (solo se escribe al nacer). */
+  descripcion: string;
+  /** Nombre del módulo en los textos: «Nómina», «Gastos personales». */
+  modulo: string;
+  /** Quiénes entran por su rol (texto del 400 `USUARIOS_INVALIDOS`). */
+  entranPorRol: string;
+  /** 403 del PUT a quien no es de Dirección. */
+  codigoSoloDireccion: string;
+  mensajeSoloDireccion: string;
+  /** 409: pantalla vieja o dos guardados a la vez. */
+  codigoCambio: string;
+}
+
+/**
+ * LISTAS DE ACCESO POR PERSONA (invariantes 132 y 133): una fila de
+ * `configuracion_sistema` por módulo, con la MISMA lectura, el mismo GET y
+ * el mismo PUT. Un módulo nuevo es un renglón aquí (+ su categoría en
+ * `CATEGORIAS_CON_ACCESO_POR_PERSONA` y sus rutas), nunca otra copia.
+ */
+const LISTAS_ACCESO_POR_PERSONA: Record<
+  CategoriaConAccesoPorPersona,
+  ListaAccesoPorPersona
+> = {
+  NOMINA: {
+    clave: CONFIG_ACCESO_NOMINA,
+    descripcion: DESCRIPCION_CONFIG_ACCESO_NOMINA,
+    modulo: 'Nómina',
+    entranPorRol: 'Dirección, Coordinación y Facturación',
+    codigoSoloDireccion: CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
+    mensajeSoloDireccion: MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
+    codigoCambio: 'ACCESO_NOMINA_CAMBIO',
+  },
+  PERSONAL_DUENO: {
+    clave: CONFIG_ACCESO_GASTOS_PERSONALES,
+    descripcion: DESCRIPCION_CONFIG_ACCESO_GASTOS_PERSONALES,
+    modulo: 'Gastos personales',
+    entranPorRol: 'Dirección y Coordinación',
+    codigoSoloDireccion: CODIGO_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES,
+    mensajeSoloDireccion: MENSAJE_SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES,
+    codigoCambio: 'ACCESO_GASTOS_PERSONALES_CAMBIO',
+  },
+};
 
 /**
  * Claves con SECCIÓN PROPIA (`valor_json`): su `activa` no significa nada,
@@ -259,6 +328,8 @@ const CLAVES_SECCION_PROPIA: Record<string, string> = {
   [CONFIG_EDITORES_COTIZACION_COBRADA]:
     'Esta configuración se edita en «Editan cotizaciones cobradas».',
   [CONFIG_ACCESO_NOMINA]: 'Esta configuración se edita en «Acceso a Nómina».',
+  [CONFIG_ACCESO_GASTOS_PERSONALES]:
+    'Esta configuración se edita en «Acceso a Gastos personales».',
   [CONFIG_IA_MODELO]:
     'Esta configuración se edita en Créditos de IA → Modelo de IA.',
   [CONFIG_FECHA_INICIO_OFICIAL]:
@@ -346,10 +417,19 @@ export interface PermisosUsuario {
    * porque Dirección le dio el acceso en Configuración.
    */
   nomina: boolean;
+  /**
+   * Entra al módulo de Gastos personales (12-nov-2026, invariante 133): por
+   * su rol (Dirección, Coordinación) o, siendo de Administración, porque
+   * Dirección le dio el acceso en Configuración.
+   */
+  gastos_personales: boolean;
 }
 
-/** `GET|PUT /v1/config/acceso-nomina` (invariante 132). */
-export interface AccesoNomina {
+/**
+ * `GET|PUT /v1/config/acceso-nomina` (invariante 132) y `GET|PUT
+ * /v1/config/acceso-gastos-personales` (invariante 133): la misma forma.
+ */
+export interface AccesoPorPersona {
   /** Ids guardados en la lista (orden guardado). */
   usuario_ids: string[];
   /** Los ids que resuelven a un usuario, con su nombre. */
@@ -366,14 +446,17 @@ export interface AccesoNomina {
   /**
    * Sello de la lista para el PUT (`version`): si alguien la cambió después
    * de que se pintó la pantalla, el guardado responde 409
-   * `ACCESO_NOMINA_CAMBIO` en vez de pisar ese cambio. `null` = nunca se ha
-   * guardado.
+   * (`ACCESO_NOMINA_CAMBIO` / `ACCESO_GASTOS_PERSONALES_CAMBIO`) en vez de
+   * pisar ese cambio. `null` = nunca se ha guardado.
    */
   version: string | null;
   /** Último cambio (null = nunca se ha guardado) y quién lo hizo. */
   actualizado_at: string | null;
   actualizado_por_nombre: string | null;
 }
+
+export type AccesoNomina = AccesoPorPersona;
+export type AccesoGastosPersonales = AccesoPorPersona;
 
 /** Quien llama a una regla que depende de la persona Y de su rol. */
 export interface ActorConfiguracion {
@@ -424,9 +507,9 @@ export class ConfiguracionService {
 
   async list() {
     // Las claves con SECCIÓN PROPIA (responsables de facturación, editores
-    // de cotizaciones cobradas, acceso a Nómina, modelo de IA) no salen
-    // aquí: su `activa` no significa nada y el panel pinta cada fila como
-    // switch.
+    // de cotizaciones cobradas, acceso a Nómina, acceso a Gastos personales,
+    // modelo de IA) no salen aquí: su `activa` no significa nada y el panel
+    // pinta cada fila como switch.
     let q = this.supabase.service.from('configuracion_sistema').select(COLS);
     for (const clave of Object.keys(CLAVES_SECCION_PROPIA)) {
       q = q.neq('clave', clave);
@@ -843,8 +926,9 @@ export class ConfiguracionService {
   /**
    * Permisos por PERSONA de `/me` (ADITIVO). `editar_cotizacion_cobrada`
    * exige estar en la lista Y un rol que pueda revisar cotizaciones
-   * (`ROLES_REVISAN_COTIZACION`). `nomina` (invariante 132) = entra al
-   * módulo de Nómina, por su rol o por el acceso que le dio Dirección.
+   * (`ROLES_REVISAN_COTIZACION`). `nomina` (invariante 132) y
+   * `gastos_personales` (invariante 133) = entra a ese módulo, por su rol o
+   * por el acceso que le dio Dirección (cada uno con su lista).
    * Best-effort: nunca tumba `/me` (una lista ilegible ⇒ sin el permiso).
    */
   async permisosDe(
@@ -854,11 +938,16 @@ export class ConfiguracionService {
     const rolRevisa = (ROLES_REVISAN_COTIZACION as readonly string[]).includes(
       rol ?? '',
     );
-    const [editarCobrada, nomina] = await Promise.all([
+    const [editarCobrada, nomina, gastosPersonales] = await Promise.all([
       rolRevisa ? this.puedeEditarCotizacionCobrada(userId) : false,
       this.entraANomina(userId, rol),
+      this.entraAGastosPersonales(userId, rol),
     ]);
-    return { editar_cotizacion_cobrada: editarCobrada, nomina };
+    return {
+      editar_cotizacion_cobrada: editarCobrada,
+      nomina,
+      gastos_personales: gastosPersonales,
+    };
   }
 
   /**
@@ -1013,56 +1102,101 @@ export class ConfiguracionService {
     return this.editoresCotizacionCobrada(userId);
   }
 
-  // ============== ACCESO A NÓMINA POR PERSONA (12-nov-2026) ==============
+  // ===== ACCESO POR PERSONA: NÓMINA (132) Y GASTOS PERSONALES (133) =====
+  //
+  // UNA sola implementación para las dos listas (`LISTAS_ACCESO_POR_PERSONA`).
+  // Los métodos con nombre (`…Nomina`, `…GastosPersonales`) solo eligen la
+  // lista: así nadie puede contestar por un módulo con la lista del otro.
 
   /**
-   * ¿Dirección le dio a este usuario el acceso a Nómina? (lista
-   * `acceso_nomina`, invariante 132). Solo dice si está EN LA LISTA: quién
-   * entra de verdad lo decide `entraANomina` (la lista solo cuenta para
-   * Administración). Falla CERRADO: si la lista no se puede leer responde
-   * `false` (la nómina sigue vedada) y deja un `warn`. `usarCache: false` en
-   * los candados de Gastos (una baja aplica al instante); `/me` usa el caché
-   * de 60 s.
+   * ¿Dirección le dio a este usuario el acceso al módulo de esa categoría?
+   * Solo dice si está EN LA LISTA de ese módulo: quién entra de verdad lo
+   * decide `entraAModulo` (la lista solo cuenta para Administración). Falla
+   * CERRADO: si la lista no se puede leer responde `false` (el módulo sigue
+   * vedado) y deja un `warn`. `usarCache: false` en los candados de Gastos
+   * (una baja aplica al instante); `/me` usa el caché de 60 s.
    */
-  async tieneAccesoNomina(
+  private async tieneAccesoPorPersona(
+    categoria: CategoriaConAccesoPorPersona,
     userId: string | null | undefined,
     opts: { usarCache?: boolean } = {},
   ): Promise<boolean> {
-    if (!userId) return false;
+    if (!userId || !categoriaAdmiteAccesoPorPersona(categoria)) return false;
+    const lista = LISTAS_ACCESO_POR_PERSONA[categoria];
     try {
-      const ids = await this.leerIdsLista(
-        CONFIG_ACCESO_NOMINA,
-        opts.usarCache ?? true,
-      );
+      const ids = await this.leerIdsLista(lista.clave, opts.usarCache ?? true);
       return ids.includes(userId);
     } catch (e) {
       this.logger.warn(
-        `No se pudo leer ${CONFIG_ACCESO_NOMINA}: ${e instanceof Error ? e.message : String(e)}. Sin acceso a Nómina por persona (falla cerrado).`,
+        `No se pudo leer ${lista.clave}: ${e instanceof Error ? e.message : String(e)}. Sin acceso a ${lista.modulo} por persona (falla cerrado).`,
       );
       return false;
     }
   }
 
+  /** ¿Está en la lista `acceso_nomina`? (invariante 132). */
+  tieneAccesoNomina(
+    userId: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    return this.tieneAccesoPorPersona(CATEGORIA_NOMINA, userId, opts);
+  }
+
+  /** ¿Está en la lista `acceso_gastos_personales`? (invariante 133). */
+  tieneAccesoGastosPersonales(
+    userId: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    return this.tieneAccesoPorPersona(
+      CATEGORIA_GASTOS_PERSONALES,
+      userId,
+      opts,
+    );
+  }
+
   /**
-   * ¿Entra al módulo de Nómina? Por su rol (sin leer nada) o, siendo de
-   * Administración, por la lista. Los demás roles no leen la lista: `/me` de
-   * un piloto no paga esa consulta.
+   * ¿Entra al módulo de esa categoría? Por su rol (sin leer nada) o, siendo
+   * de Administración, por la lista de ESE módulo. Los demás roles no leen
+   * la lista: `/me` de un piloto no paga esa consulta.
    */
-  async entraANomina(
+  private async entraAModuloDe(
+    categoria: CategoriaConAccesoPorPersona,
     userId: string | null | undefined,
     rol: string | null | undefined,
     opts: { usarCache?: boolean } = {},
   ): Promise<boolean> {
-    if (rolEntraANomina(rol)) return true;
-    if (!rolAdmiteAccesoNomina(rol)) return false;
-    return entraANomina(rol, await this.tieneAccesoNomina(userId, opts));
+    if (rolEntraAModulo(categoria, rol)) return true;
+    if (!rolAdmiteAccesoPorPersona(rol)) return false;
+    return entraAModulo(
+      categoria,
+      rol,
+      await this.tieneAccesoPorPersona(categoria, userId, opts),
+    );
+  }
+
+  /** ¿Entra al módulo de Nómina? (`/me.permisos.nomina`). */
+  entraANomina(
+    userId: string | null | undefined,
+    rol: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    return this.entraAModuloDe(CATEGORIA_NOMINA, userId, rol, opts);
+  }
+
+  /** ¿Entra al módulo de Gastos personales? (`/me.permisos.gastos_personales`). */
+  entraAGastosPersonales(
+    userId: string | null | undefined,
+    rol: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    return this.entraAModuloDe(CATEGORIA_GASTOS_PERSONALES, userId, rol, opts);
   }
 
   /**
-   * Fila `acceso_nomina` tal cual (sin caché). `null` = nunca se ha
+   * Fila de una lista de acceso tal cual (sin caché). `null` = nunca se ha
    * guardado. Lanza si la consulta falla.
    */
-  private async leerFilaAccesoNomina(): Promise<{
+  private async leerFilaAcceso(clave: string): Promise<{
     ids: string[];
     updated_at: string | null;
     updated_by: string | null;
@@ -1070,7 +1204,7 @@ export class ConfiguracionService {
     const { data, error } = await this.supabase.service
       .from('configuracion_sistema')
       .select('clave, valor_json, updated_at, updated_by')
-      .eq('clave', CONFIG_ACCESO_NOMINA)
+      .eq('clave', clave)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
@@ -1097,12 +1231,16 @@ export class ConfiguracionService {
     return Number.isFinite(a) && Number.isFinite(b) && a === b;
   }
 
-  /** `GET /v1/config/acceso-nomina` (Administración lee; Dirección cambia). */
-  async accesoNomina(actor: ActorConfiguracion): Promise<AccesoNomina> {
-    const fila = await this.leerFilaAccesoNomina();
+  /** GET de una lista de acceso (Administración lee; Dirección cambia). */
+  private async accesoPorPersona(
+    categoria: CategoriaConAccesoPorPersona,
+    actor: ActorConfiguracion,
+  ): Promise<AccesoPorPersona> {
+    const lista = LISTAS_ACCESO_POR_PERSONA[categoria];
+    const fila = await this.leerFilaAcceso(lista.clave);
     const ids = fila?.ids ?? [];
     // Lo recién leído es lo más nuevo: `/me` lo toma sin esperar los 60 s.
-    this.cacheListas.set(CONFIG_ACCESO_NOMINA, { ids, at: Date.now() });
+    this.cacheListas.set(lista.clave, { ids, at: Date.now() });
     const porNombrar = [
       ...new Set([...ids, ...(fila?.updated_by ? [fila.updated_by] : [])]),
     ];
@@ -1133,9 +1271,11 @@ export class ConfiguracionService {
         .filter((id) => nombrePorId.has(id))
         .map((id) => ({ id, nombre: nombrePorId.get(id) as string })),
       candidatos: oficina
-        .filter((u) => rolAdmiteAccesoNomina(u.rol))
+        .filter((u) => rolAdmiteAccesoPorPersona(u.rol))
         .map(ficha),
-      por_rol: oficina.filter((u) => rolEntraANomina(u.rol)).map(ficha),
+      por_rol: oficina
+        .filter((u) => rolEntraAModulo(categoria, u.rol))
+        .map(ficha),
       puede_modificar: esDireccion(actor.rol),
       version: fila?.updated_at ?? null,
       actualizado_at: fila?.updated_at ?? null,
@@ -1145,52 +1285,65 @@ export class ConfiguracionService {
     };
   }
 
+  /** `GET /v1/config/acceso-nomina` (invariante 132). */
+  accesoNomina(actor: ActorConfiguracion): Promise<AccesoNomina> {
+    return this.accesoPorPersona(CATEGORIA_NOMINA, actor);
+  }
+
+  /** `GET /v1/config/acceso-gastos-personales` (invariante 133). */
+  accesoGastosPersonales(
+    actor: ActorConfiguracion,
+  ): Promise<AccesoGastosPersonales> {
+    return this.accesoPorPersona(CATEGORIA_GASTOS_PERSONALES, actor);
+  }
+
   /**
-   * `PUT /v1/config/acceso-nomina` ({ usuario_ids, version? }). En este
-   * orden: (1) solo Dirección ⇒ 403 `SOLO_DIRECCION_ACCESO_NOMINA` (la ruta
-   * ya lo exige con `@Roles`; aquí se repite para que el candado no dependa
-   * de un decorador); (2) solo Administración ACTIVA ⇒ 400
-   * `USUARIOS_INVALIDOS` con los ids que no lo son (Dirección, Coordinación
-   * y Facturación entran por su rol: no van en la lista); (3) `version` = el
-   * sello que vio la pantalla: si la lista cambió después ⇒ 409
-   * `ACCESO_NOMINA_CAMBIO` — sin esto, guardar desde una pantalla vieja le
-   * DEVOLVERÍA el acceso a alguien a quien otro de Dirección se lo acaba de
-   * quitar. `[]` es válido: nadie de Administración entra. SIN migración: la
-   * fila nace aquí (insert; si otro guardado la creó a la vez ⇒ 409) y
-   * después se actualiza con CAS sobre `updated_at`.
+   * PUT de una lista de acceso ({ usuario_ids, version? }). En este orden:
+   * (1) solo Dirección ⇒ 403 (`SOLO_DIRECCION_ACCESO_NOMINA` /
+   * `SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES`; la ruta ya lo exige con
+   * `@Roles`, aquí se repite para que el candado no dependa de un
+   * decorador); (2) solo Administración ACTIVA ⇒ 400 `USUARIOS_INVALIDOS`
+   * con los ids que no lo son (quien entra por su rol no va en la lista);
+   * (3) `version` = el sello que vio la pantalla: si la lista cambió después
+   * ⇒ 409 (`ACCESO_NOMINA_CAMBIO` / `ACCESO_GASTOS_PERSONALES_CAMBIO`) — sin
+   * esto, guardar desde una pantalla vieja le DEVOLVERÍA el acceso a alguien
+   * a quien otro de Dirección se lo acaba de quitar. `[]` es válido: nadie
+   * de Administración entra. SIN migración: la fila nace aquí (insert; si
+   * otro guardado la creó a la vez ⇒ 409) y después se actualiza con CAS
+   * sobre `updated_at`.
    */
-  async setAccesoNomina(
+  private async setAccesoPorPersona(
+    categoria: CategoriaConAccesoPorPersona,
     usuarioIds: string[],
     actor: ActorConfiguracion,
     version?: string | null,
-  ): Promise<AccesoNomina> {
+  ): Promise<AccesoPorPersona> {
+    const lista = LISTAS_ACCESO_POR_PERSONA[categoria];
     if (!esDireccion(actor.rol)) {
       throw new ForbiddenException({
-        message: MENSAJE_SOLO_DIRECCION_ACCESO_NOMINA,
-        error: CODIGO_SOLO_DIRECCION_ACCESO_NOMINA,
+        message: lista.mensajeSoloDireccion,
+        error: lista.codigoSoloDireccion,
       });
     }
     const ids = [...new Set(usuarioIds)];
     const candidatos = new Set(
       (await this.usuariosOficina())
-        .filter((u) => rolAdmiteAccesoNomina(u.rol))
+        .filter((u) => rolAdmiteAccesoPorPersona(u.rol))
         .map((u) => u.id),
     );
     const invalidos = ids.filter((id) => !candidatos.has(id));
     if (invalidos.length > 0) {
       throw new BadRequestException({
-        message:
-          'Solo se le puede dar acceso a Nómina a usuarios ACTIVOS de Administración (Dirección, Coordinación y Facturación ya entran por su rol).',
+        message: `Solo se le puede dar acceso a ${lista.modulo} a usuarios ACTIVOS de Administración (${lista.entranPorRol} ya entran por su rol).`,
         error: 'USUARIOS_INVALIDOS',
         details: { ids: invalidos },
       });
     }
-    const fila = await this.leerFilaAccesoNomina();
+    const fila = await this.leerFilaAcceso(lista.clave);
     const cambio = () =>
       new ConflictException({
-        message:
-          'Alguien más cambió quién entra a Nómina mientras lo editabas. Recarga y vuelve a intentar.',
-        error: 'ACCESO_NOMINA_CAMBIO',
+        message: `Alguien más cambió quién entra a ${lista.modulo} mientras lo editabas. Recarga y vuelve a intentar.`,
+        error: lista.codigoCambio,
       });
     if (
       version !== undefined &&
@@ -1207,30 +1360,58 @@ export class ConfiguracionService {
       let q = this.supabase.service
         .from('configuracion_sistema')
         .update(escritura)
-        .eq('clave', CONFIG_ACCESO_NOMINA);
+        .eq('clave', lista.clave);
       // CAS: solo si nadie la cambió desde que se leyó arriba.
       if (fila.updated_at) q = q.eq('updated_at', fila.updated_at);
       const { data, error } = await q.select('clave');
       if (error) throw new Error(error.message);
-      this.cacheListas.delete(CONFIG_ACCESO_NOMINA);
+      this.cacheListas.delete(lista.clave);
       if (!data || data.length === 0) throw cambio();
     } else {
       const { error } = await this.supabase.service
         .from('configuracion_sistema')
         .insert({
-          clave: CONFIG_ACCESO_NOMINA,
+          clave: lista.clave,
           activa: true,
-          descripcion: DESCRIPCION_CONFIG_ACCESO_NOMINA,
+          descripcion: lista.descripcion,
           ...escritura,
         });
-      this.cacheListas.delete(CONFIG_ACCESO_NOMINA);
+      this.cacheListas.delete(lista.clave);
       if (error) {
         // Otro guardado creó la fila a la vez (llave primaria `clave`).
         if ((error as { code?: string }).code === '23505') throw cambio();
         throw new Error(error.message);
       }
     }
-    return this.accesoNomina(actor);
+    return this.accesoPorPersona(categoria, actor);
+  }
+
+  /** `PUT /v1/config/acceso-nomina` (invariante 132). */
+  setAccesoNomina(
+    usuarioIds: string[],
+    actor: ActorConfiguracion,
+    version?: string | null,
+  ): Promise<AccesoNomina> {
+    return this.setAccesoPorPersona(
+      CATEGORIA_NOMINA,
+      usuarioIds,
+      actor,
+      version,
+    );
+  }
+
+  /** `PUT /v1/config/acceso-gastos-personales` (invariante 133). */
+  setAccesoGastosPersonales(
+    usuarioIds: string[],
+    actor: ActorConfiguracion,
+    version?: string | null,
+  ): Promise<AccesoGastosPersonales> {
+    return this.setAccesoPorPersona(
+      CATEGORIA_GASTOS_PERSONALES,
+      usuarioIds,
+      actor,
+      version,
+    );
   }
 
   // ===================== MODELO DE IA (2-oct-2026) =====================

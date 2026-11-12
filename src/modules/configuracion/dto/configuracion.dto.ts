@@ -98,18 +98,18 @@ export class EditoresCotizacionCobradaDto {
 }
 
 /**
- * `PUT /v1/config/acceso-nomina` (12-nov-2026, invariante 132): a quién de
- * Administración le da Dirección el acceso al módulo de Nómina. `[]` es
- * válido (nadie de Administración entra). `version` = el sello que devolvió
- * el GET (`null` si nunca se había guardado): si la lista cambió después, el
- * service responde 409 `ACCESO_NOMINA_CAMBIO`. Omitirla = sin esa
- * comprobación.
+ * Cuerpo de las listas de ACCESO POR PERSONA (12-nov-2026): a quién de
+ * Administración le da Dirección el acceso a un módulo. `[]` es válido
+ * (nadie de Administración entra). `version` = el sello que devolvió el GET
+ * (`null` si nunca se había guardado): si la lista cambió después, el
+ * service responde 409 (`ACCESO_NOMINA_CAMBIO` /
+ * `ACCESO_GASTOS_PERSONALES_CAMBIO`). Omitirla = sin esa comprobación.
  */
-export class AccesoNominaDto {
+export class AccesoPorPersonaDto {
   @ApiProperty({
     type: [String],
     description:
-      'Usuarios ACTIVOS de Administración (rol ADMIN) con acceso a Nómina. Máximo 50. Vacío = nadie de Administración entra.',
+      'Usuarios ACTIVOS de Administración (rol ADMIN) con el acceso. Máximo 50. Vacío = nadie de Administración entra.',
   })
   @IsArray()
   @ArrayMaxSize(50)
@@ -120,13 +120,22 @@ export class AccesoNominaDto {
     type: String,
     nullable: true,
     description:
-      'Sello de la lista que vio la pantalla (campo `version` del GET; null = nunca guardada). Si ya no es el vigente ⇒ 409 ACCESO_NOMINA_CAMBIO.',
+      'Sello de la lista que vio la pantalla (campo `version` del GET; null = nunca guardada). Si ya no es el vigente ⇒ 409.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(64)
   version?: string | null;
 }
+
+/** `PUT /v1/config/acceso-nomina` (invariante 132): el módulo de Nómina. */
+export class AccesoNominaDto extends AccesoPorPersonaDto {}
+
+/**
+ * `PUT /v1/config/acceso-gastos-personales` (invariante 133): el módulo de
+ * Gastos personales.
+ */
+export class AccesoGastosPersonalesDto extends AccesoPorPersonaDto {}
 
 /**
  * `PUT /v1/config/ia-modelo` (2-oct-2026): modelo de IA de las lecturas.

@@ -12771,6 +12771,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     a alguien de Administración POR PERSONA (invariante 132)**: `reparto-
     iguales` vuelve a nombrar a ADMIN en su `@Roles` (con veto en el handler)
     y el 403 de NOMINA cambia de texto; lo demás de esta invariante sigue.
+    **Y los GASTOS PERSONALES también, con su propia lista (invariante
+    133)**: el 403 de PERSONAL_DUENO dice a quién pedirle ese acceso.
 
 123. **LAS REFACCIONES VIVEN EN COMPRAS DE LA TIENDA (6-nov-2026, API
     0.0.127, SIN migración).** Pedido de Pablo (audios): «en Gastos habría que
@@ -13215,8 +13217,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        `GET /v1/config` y `PATCH :clave` la rechaza (`CLAVES_SECCION_PROPIA`).
      - **Quién entra** (fuente única `common/roles.util.ts`, PURO + spec):
        `rolEntraANomina` = DIRECCION, COORDINADOR, FACTURACION por su rol
-       (los de siempre, sin leer nada); `rolAdmiteAccesoNomina` = solo ADMIN;
-       `entraANomina(rol, enLista)`. Un id en la lista con OTRO rol (piloto,
+       (los de siempre, sin leer nada); `rolAdmiteAccesoPorPersona` = solo
+       ADMIN; `entraANomina(rol, enLista)`. Un id en la lista con OTRO rol (piloto,
        socio, o alguien que dejó de ser ADMIN) NO entra: la lista solo abre
        la puerta que la 122 le cerró a Administración.
      - **Qué abre**: SOLO la categoría NOMINA — `GET /expenses?categoria=
@@ -13224,15 +13226,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        gasto NOMINA (`crearGastoInterno`, `update`) y `POST
        /expenses/reparto-iguales` (su `@Roles` ahora nombra a ADMIN, pero el
        handler veta a quien no tiene el acceso ANTES de tocar el servicio).
-       **PERSONAL_DUENO nunca se abre**, ni Estadísticas, Ingresos, Reparto o
-       Pagos a socios. `categoriaVedadaAUsuario(rol, categoria, tieneAcceso)`
-       consulta la lista SOLO para ADMIN + NOMINA (callback perezoso: ninguna
-       otra petición paga esa lectura) y `mensajeCategoriaVedada` da el
-       texto: el 403 conserva el código `CATEGORIA_SOLO_DIRECCION`; para
-       NOMINA el mensaje ahora dice a quién pedírselo y dónde
-       (`MENSAJE_NOMINA_SIN_ACCESO`); para gastos personales, el de siempre.
+       **Esta lista NO abre PERSONAL_DUENO** (desde la invariante 133 los
+       gastos personales tienen SU lista, independiente), ni Estadísticas,
+       Ingresos, Reparto o Pagos a socios.
+       `categoriaVedadaAUsuario(rol, categoria, tieneAcceso)` consulta la
+       lista SOLO para ADMIN + una categoría con acceso por persona y le
+       pregunta por ESA categoría (callback perezoso: ninguna otra petición
+       paga esa lectura) y `mensajeCategoriaVedada` da el texto: el 403
+       conserva el código `CATEGORIA_SOLO_DIRECCION`; para NOMINA el mensaje
+       dice a quién pedírselo y dónde (`MENSAJE_NOMINA_SIN_ACCESO`).
      - **Caché**: los candados de Gastos leen la lista SIN caché
-       (`ExpensesService.tieneAccesoNomina` → `usarCache: false`): quitar el
+       (`ExpensesService.tieneAccesoACategoria` → `usarCache: false`): quitar el
        acceso aplica al instante. `/me` (`permisos.nomina`, ADITIVO) usa el
        caché de 60 s; el PUT y el GET lo refrescan en este proceso. Lista
        ilegible ⇒ falla CERRADO (sin acceso, `warn`); `/me` nunca revienta.
@@ -13255,13 +13259,89 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
      - Panel: Configuración → «Acceso a Nómina» (switch por persona,
        confirmación con nombre) y `permisos.nomina` abre el menú y la
        pantalla. La app no cambia (su alta de NOMINA pasa por el mismo veto).
-     - Specs: `roles.util.spec` (bloque «acceso a Nómina por PERSONA»),
-       `configuracion.acceso-nomina.spec` (lista, caché, CAS, sello),
-       `configuracion.controller.acceso-nomina.spec` (roles y DTO por HTTP),
-       `expenses.controller.categoria-direccion.spec`,
-       `expenses.controller.reparto-iguales.spec`,
-       `expenses.service.acceso-nomina.spec` (alta y edición) y
+     - Specs: `roles.util.spec` (bloque «acceso por PERSONA a Nómina y a
+       Gastos personales»), `configuracion.acceso-nomina.spec` (lista, caché,
+       CAS, sello), `configuracion.controller.acceso-por-persona.spec` (roles
+       y DTO por HTTP, las dos rutas), `expenses.controller.categoria-
+       direccion.spec`, `expenses.controller.reparto-iguales.spec`,
+       `expenses.service.acceso-por-persona.spec` (alta y edición) y
        `direccion-modulos.spec` (matriz de `@Roles`).
+
+133. **ACCESO A GASTOS PERSONALES POR PERSONA — LA MISMA PIEZA DE LA 132, CON
+     OTRA LISTA (12-nov-2026, API 0.0.138, SIN migración).** Pedido de
+     Dirección (Diego) con la captura de la tarjeta «Acceso a Nómina» ya en
+     uso (Mary encendida): «y venga otro para gastos personales por favor».
+     Mismo problema que la nómina: en prod la oficina es ADMIN (5) o
+     DIRECCION (3) y no hay nadie de COORDINADOR, así que con la invariante
+     122 los gastos personales del dueño solo los veía Dirección.
+     - **UNA implementación, DOS listas.** No se copió la 132: se
+       generalizó. `common/roles.util.ts`: `CATEGORIAS_CON_ACCESO_POR_PERSONA`
+       = [NOMINA, PERSONAL_DUENO] (`CategoriaConAccesoPorPersona`),
+       `rolEntraAModulo(categoria, rol)`, `entraAModulo(categoria, rol,
+       enLista)`, `rolAdmiteAccesoPorPersona` (solo ADMIN) y los envoltorios
+       con nombre (`rolEntraANomina` / `rolEntraAGastosPersonales`,
+       `entraANomina` / `entraAGastosPersonales`). `ConfiguracionService`:
+       tabla `LISTAS_ACCESO_POR_PERSONA` (clave, descripción, nombre del
+       módulo, quién entra por rol, códigos) y los privados
+       `tieneAccesoPorPersona`, `entraAModuloDe`, `leerFilaAcceso`,
+       `accesoPorPersona`, `setAccesoPorPersona`; los públicos
+       (`tieneAccesoNomina` / `tieneAccesoGastosPersonales`, `accesoNomina` /
+       `accesoGastosPersonales`, `setAccesoNomina` /
+       `setAccesoGastosPersonales`) solo eligen la lista. **Un tercer módulo
+       es un renglón en esa tabla + su categoría + sus rutas, nunca otra
+       copia.**
+     - **Lista `acceso_gastos_personales`** (`CONFIG_ACCESO_GASTOS_PERSONALES`,
+       `configuracion_sistema.valor_json`, arreglo de uuids). SIN migración:
+       la fila nace en el primer PUT. Sin fila = lista vacía = nadie de
+       Administración entra = el 0.0.137. Sección propia
+       (`CLAVES_SECCION_PROPIA`).
+     - **LAS DOS LISTAS SON INDEPENDIENTES** (lo que más importa de esta
+       invariante): estar en `acceso_nomina` no da los gastos personales ni al
+       revés; guardar una no toca la fila ni el sello de la otra (un guardado
+       de Nómina no provoca un 409 en la pantalla de gastos personales).
+       `categoriaVedadaAUsuario` le pasa la categoría al callback y
+       `ExpensesService.tieneAccesoACategoria(userId, categoria)` despacha
+       con un `switch` EXHAUSTIVO (una categoría nueva sin su lista no
+       compila y, si llegara, responde `false`). Nadie debe contestar por una
+       categoría con la lista de la otra: los specs de servicio y de
+       controlador lo prueban en los dos sentidos.
+     - **Quién entra por su rol**: `ROLES_GASTOS_PERSONALES_POR_ROL` =
+       DIRECCION y COORDINADOR (espejo de `ROLES_GASTOS_PERSONALES` del
+       panel). **FACTURACION no** (lleva la nómina, nunca tuvo los gastos
+       personales): ni por rol ni estando en la lista (la lista solo le abre
+       la puerta a ADMIN). `/me.permisos.gastos_personales` (ADITIVO) = eso.
+       OJO: el VETO del API sigue siendo solo para ADMIN (`rolVedaCategoria`);
+       que Facturación pueda listar `?categoria=PERSONAL_DUENO` por URL es la
+       costura de siempre de la 122, no cambió.
+     - **Qué abre**: SOLO la categoría PERSONAL_DUENO — `GET
+       /expenses?categoria=PERSONAL_DUENO`, `GET /expenses/export?categoria=
+       PERSONAL_DUENO`, alta y edición de un gasto personal (y mover un gasto
+       a esa categoría). Sus reglas de siempre siguen (sin vuelo, avión ni
+       escala: 400). No abre la nómina (`reparto-iguales` sigue pidiendo el
+       acceso a NOMINA), ni Estadísticas, Ingresos, Reparto o Pagos a socios.
+       El 403 conserva `CATEGORIA_SOLO_DIRECCION` y su mensaje ahora dice a
+       quién pedírselo y dónde (`MENSAJE_GASTOS_PERSONALES_SIN_ACCESO`);
+       `MENSAJE_CATEGORIA_SOLO_DIRECCION` queda solo para una categoría sin
+       acceso por persona.
+     - **Rutas** (mismo contrato que la 132, mismo DTO base
+       `AccesoPorPersonaDto`): `GET /v1/config/acceso-gastos-personales`
+       (`@Roles(ADMIN)`) ⇒ `{ usuario_ids, usuarios, candidatos
+       (Administración ACTIVA), por_rol (Dirección y Coordinación activas),
+       puede_modificar, version, actualizado_at, actualizado_por_nombre }`.
+       `PUT` (`@Roles(DIRECCION)` + el service: 403
+       `SOLO_DIRECCION_ACCESO_GASTOS_PERSONALES`) con `{ usuario_ids,
+       version? }`: 400 `USUARIOS_INVALIDOS`, `[]` válido, 409
+       `ACCESO_GASTOS_PERSONALES_CAMBIO` (pantalla vieja, CAS o insert
+       perdido). Caché y falla CERRADA, idénticos a la 132.
+     - Panel: Configuración → «Acceso a Gastos personales» (debajo de «Acceso
+       a Nómina») y `permisos.gastos_personales` abre el menú y la pantalla.
+       La app no cambia (su alta de PERSONAL_DUENO pasa por el mismo veto).
+     - Specs: `roles.util.spec` (mismo bloque), `configuracion.acceso-gastos-
+       personales.spec` (PostgREST falso con las DOS filas: independencia,
+       caché, CAS, sello), `configuracion.controller.acceso-por-persona.spec`
+       (los mismos casos HTTP contra las dos rutas, y que cada ruta llama a
+       SU método), `expenses.controller.categoria-direccion.spec`,
+       `expenses.service.acceso-por-persona.spec` y `direccion-modulos.spec`.
 
 ## Convenciones NestJS
 
