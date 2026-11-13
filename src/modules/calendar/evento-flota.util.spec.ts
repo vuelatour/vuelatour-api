@@ -1,14 +1,18 @@
 import {
+  TITULO_EVENTO_AHORA_PARA_TODOS,
   aEventoMe,
   avisoEventoBase,
   cambiosRelevantes,
   claveRecordatorio90,
   claveVispera,
   cuerpoEvento,
+  cuerpoEventoAhoraParaTodos,
   diaSiguienteCancun,
   enVentanaRecordatorio90,
+  eventoEsParaTodos,
   eventoFlotaCols,
   fechaHoraCancunCorta,
+  filtroEventosDeUsuario,
   horaCancun,
   isoAlMinuto,
   mapEventoRow,
@@ -167,10 +171,91 @@ describe('mapEventoRow / aEventoMe', () => {
         'fecha_fin',
         'id',
         'notas',
+        'para_todos',
         'responsable_id',
         'titulo',
         'updated_at',
       ].sort(),
+    );
+    // Con responsable NO es para todos.
+    expect(interno.para_todos).toBe(false);
+    expect(publico.para_todos).toBe(false);
+  });
+});
+
+/**
+ * EVENTO SIN RESPONSABLE = PARA TODOS (12-nov-2026, invariante 134). Pedido
+ * de Dirección: «que al momento de poner "sin responsable" le apareciera a
+ * todos en su calendario más bien, en la app y en web».
+ */
+describe('evento para todos (invariante 134)', () => {
+  const fila = (responsable_id: string | null) => ({
+    id: 'e1',
+    titulo: 'Jorge Cortes Avionico IJP',
+    fecha: '2026-11-17T13:00:00Z',
+    fecha_fin: null,
+    aeronave_id: null,
+    responsable_id,
+    notas: null,
+    created_at: '2026-11-12T12:59:00Z',
+    updated_at: '2026-11-12T12:59:00Z',
+  });
+
+  it('sin responsable es de todos; con responsable, de esa persona', () => {
+    expect(eventoEsParaTodos({ responsable_id: null })).toBe(true);
+    expect(eventoEsParaTodos({ responsable_id: undefined })).toBe(true);
+    expect(eventoEsParaTodos({})).toBe(true);
+    expect(eventoEsParaTodos({ responsable_id: 'u1' })).toBe(false);
+  });
+
+  it('`para_todos` viaja en la fila y en el shape público, SIEMPRE derivado del responsable', () => {
+    const deTodos = mapEventoRow(fila(null));
+    expect(deTodos.para_todos).toBe(true);
+    expect(aEventoMe(deTodos)).toMatchObject({
+      para_todos: true,
+      responsable_id: null,
+    });
+    const deLuis = mapEventoRow(fila('luis'));
+    expect(deLuis.para_todos).toBe(false);
+    // Un valor viejo copiado en el objeto no manda: manda el responsable.
+    expect(
+      aEventoMe({ ...deTodos, responsable_id: 'luis', para_todos: true })
+        .para_todos,
+    ).toBe(false);
+    expect(
+      aEventoMe({ ...deLuis, responsable_id: null, para_todos: false })
+        .para_todos,
+    ).toBe(true);
+  });
+
+  it('filtro del calendario de un usuario: él o nadie; solo un uuid entra al texto del filtro', () => {
+    const id = 'c4d0633d-a5e9-4764-8e54-03c7fb00f3b7';
+    expect(filtroEventosDeUsuario(id)).toBe(
+      `responsable_id.eq.${id},responsable_id.is.null`,
+    );
+    expect(filtroEventosDeUsuario(id.toUpperCase())).toBe(
+      `responsable_id.eq.${id.toUpperCase()},responsable_id.is.null`,
+    );
+    for (const raro of [
+      '',
+      'luis',
+      'x,responsable_id.not.is.null',
+      `${id},estado.eq.ACTIVO`,
+      `${id})`,
+    ]) {
+      expect(filtroEventosDeUsuario(raro)).toBe('responsable_id.is.null');
+    }
+  });
+
+  it('a quien deja de ser el responsable porque pasó a ser de todos se le dice eso (no «Ya no te toca»)', () => {
+    expect(TITULO_EVENTO_AHORA_PARA_TODOS).toBe('Evento actualizado');
+    expect(
+      cuerpoEventoAhoraParaTodos({
+        ...EVENTO,
+        responsable_id: null,
+      }),
+    ).toBe(
+      'Ahora es para todos (ya no eres el responsable): jue 03/09/2026, 09:45 · Llenar Bitácora · XA-VGV · Está en la oficina ⚠️',
     );
   });
 });

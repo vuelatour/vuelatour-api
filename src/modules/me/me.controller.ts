@@ -247,14 +247,15 @@ export class MeController {
   @Get('eventos')
   @ApiOperation({
     summary:
-      'Eventos NO-vuelo donde el usuario actual es RESPONSABLE (citas: lavado, trámite, "llenar bitácora"…). Rango en días Cancún ?desde&hasta (default hoy-7 → hoy+90); una fila por evento, sin expandir por día. Siempre filtra por el usuario autenticado; VISITANTE recibe [].',
+      'Eventos NO-vuelo del CALENDARIO del usuario actual (citas: lavado, trámite, "llenar bitácora"…): los que tiene como RESPONSABLE más los PARA TODOS = sin responsable (12-nov-2026, invariante 134; cada fila trae `para_todos`). Rango en días Cancún ?desde&hasta (default hoy-7 → hoy+90); una fila por evento, sin expandir por día. Siempre filtra por el usuario autenticado; VISITANTE recibe [] (tampoco los de todos).',
   })
   misEventos(
     @CurrentUser() current: AuthenticatedUser,
     @Query() query: MisEventosQuery,
   ) {
+    // VISITANTE no ve la operación: ni citas propias ni eventos para todos.
     if (current.rol === Rol.VISITANTE) return [];
-    return this.calendar.listEventosDeResponsable(
+    return this.calendar.listEventosDeUsuario(
       current.userId,
       query.desde,
       query.hasta,

@@ -298,6 +298,11 @@ export class AlertsService {
   // alerta_emitida, patrón avisarTacoVencido: consultar ANTES, marcar
   // DESPUÉS de notifyUser === true, tolerar 23505. Multi-día: solo la fecha
   // de inicio. Selección de ventana en helpers puros (evento-flota.util).
+  //
+  // SOLO eventos CON responsable. Un evento sin responsable es PARA TODOS
+  // (12-nov-2026, invariante 134): le aparece a cada quien en su calendario
+  // (y la app le pone su recordatorio LOCAL), pero el servidor no le manda
+  // recordatorio a toda la plantilla.
 
   private eventoRecordatoriosEnCurso = false;
 

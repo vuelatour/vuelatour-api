@@ -7,10 +7,36 @@
  * persistía sin hora ni avión, el piloto no tenía dispositivo push, su app
  * no leía eventos y nadie en la oficina se enteró. Todo lo que aquí se
  * formatea lleva SIEMPRE hora Cancún, matrícula y notas cuando existen.
+ *
+ * EVENTO SIN RESPONSABLE = PARA TODOS (12-nov-2026, API 0.0.139, invariante
+ * 134): ver `eventoEsParaTodos`.
  */
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 
-/** Shape público de un evento para su responsable (contrato /me/eventos). */
+/**
+ * EVENTO «PARA TODOS» (12-nov-2026, invariante 134, SIN migración). Pedido
+ * de Dirección con la captura de «Agendar evento (no vuelo)» de la app
+ * («Jorge Cortes Avionico IJP», Sin responsable): «que se le pueda poner
+ * como responsable "Todos", o que al momento de poner "sin responsable" le
+ * apareciera a todos en su calendario más bien, en la app y en web».
+ *
+ * La regla es UNA: un evento **sin responsable** es de todos — le aparece en
+ * su calendario (`GET /v1/me/eventos`: inicio y Mis vuelos de la app) a
+ * cualquiera que inicia sesión, salvo VISITANTE (que no ve la operación; los
+ * pilotos externos no inician sesión). **Con responsable** es solo de esa
+ * persona (y de la oficina, que ve todo en el calendario de flota). Hasta el
+ * 0.0.138 un evento sin responsable lo veía solo la oficina.
+ *
+ * No es un dato nuevo: se DERIVA de `responsable_id`. `para_todos` viaja
+ * (ADITIVO) para que panel y app lo pinten sin repetir la regla.
+ */
+export function eventoEsParaTodos(ev: {
+  responsable_id?: string | null;
+}): boolean {
+  return (ev.responsable_id ?? null) === null;
+}
+
+/** Shape público de un evento para quien lo ve en su calendario (/me/eventos). */
 export interface EventoMe {
   id: string;
   titulo: string;
@@ -21,7 +47,13 @@ export interface EventoMe {
   aeronave_matricula: string | null;
   aeronave_color: string | null;
   notas: string | null;
+  /** `null` = sin responsable = PARA TODOS (invariante 134). */
   responsable_id: string | null;
+  /**
+   * ADITIVO (12-nov-2026, invariante 134): `true` = evento sin responsable,
+   * le aparece a todos en su calendario; `false` = es de su responsable.
+   */
+  para_todos: boolean;
   creado_por_nombre: string | null;
   created_at: string;
   updated_at: string;
@@ -100,6 +132,7 @@ export function mapEventoRow(row: EventoFlotaRow): EventoInterno {
     aeronave_color: aero?.color_calendario ?? null,
     notas: row.notas ?? null,
     responsable_id: row.responsable_id ?? null,
+    para_todos: eventoEsParaTodos(row),
     creado_por_nombre: creador?.nombre ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -122,6 +155,8 @@ export function aEventoMe(ev: EventoInterno): EventoMe {
     aeronave_color: ev.aeronave_color,
     notas: ev.notas,
     responsable_id: ev.responsable_id,
+    // Se deriva SIEMPRE del responsable (nunca se copia un valor viejo).
+    para_todos: eventoEsParaTodos(ev),
     creado_por_nombre: ev.creado_por_nombre,
     created_at: ev.created_at,
     updated_at: ev.updated_at,
@@ -201,6 +236,33 @@ export function cuerpoEvento(ev: EventoParaAviso, encabezado?: string): string {
     encabezado ?? fechaHoraCancunCorta(ev.fecha),
     ...segmentosEvento(ev),
   ].join(' · ');
+}
+
+/**
+ * Aviso a quien DEJA de ser el responsable porque el evento pasó a ser PARA
+ * TODOS (invariante 134): el evento sigue en su calendario, así que no es
+ * una cancelación («Ya no te toca» sería falso). Va como
+ * `evento_actualizado`, con los datos VIGENTES del evento.
+ */
+export const TITULO_EVENTO_AHORA_PARA_TODOS = 'Evento actualizado';
+export function cuerpoEventoAhoraParaTodos(ev: EventoParaAviso): string {
+  return `Ahora es para todos (ya no eres el responsable): ${cuerpoEvento(ev)}`;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Filtro PostgREST (`.or(...)`) de los eventos del CALENDARIO de un usuario
+ * (invariante 134): los suyos (`responsable_id = él`) MÁS los de todos
+ * (`responsable_id is null`). El id se interpola en un texto de filtro, así
+ * que solo entra si es un uuid: con cualquier otra cosa quedan únicamente
+ * los de todos (un id que no es uuid no es responsable de nada).
+ */
+export function filtroEventosDeUsuario(usuarioId: string): string {
+  return UUID_RE.test(usuarioId)
+    ? `responsable_id.eq.${usuarioId},responsable_id.is.null`
+    : 'responsable_id.is.null';
 }
 
 /** `data` + `link` comunes a los 4 tipos de aviso de evento. */

@@ -38,11 +38,14 @@ import {
   vueloSinAsignar,
 } from './colores-calendario.util';
 import {
+  TITULO_EVENTO_AHORA_PARA_TODOS,
   aEventoMe,
   avisoEventoBase,
   cambiosRelevantes,
   cuerpoEvento,
+  cuerpoEventoAhoraParaTodos,
   eventoFlotaCols,
+  filtroEventosDeUsuario,
   horaCancun,
   mapEventoRow,
   rangoMisEventos,
@@ -725,8 +728,11 @@ export class CalendarService {
     // FIX 3-sep-2026 (incidente "Llenar Bitácora"): con piloto_id los eventos
     // se OMITÍAN por completo y la vista por piloto no mostraba lo que le
     // tocaba. Ahora se filtran por responsable, con el mismo cap de -40 días
-    // y la misma expansión multi-día.
-    if (q.piloto_id) eq = eq.eq('responsable_id', q.piloto_id);
+    // y la misma expansión multi-día. Desde el 12-nov-2026 (invariante 134)
+    // la vista de un piloto trae también los eventos PARA TODOS (sin
+    // responsable): es lo que él ve en su calendario. Varios `.or()` se
+    // combinan con AND (el de arriba es el de las fechas).
+    if (q.piloto_id) eq = eq.or(filtroEventosDeUsuario(q.piloto_id));
     const { data: eventosFlota, error: evErr } = q.solo_externos
       ? { data: [], error: null }
       : await eq;
@@ -777,9 +783,12 @@ export class CalendarService {
           aeronave_matricula: matricula,
           piloto_id: ev.responsable_id,
           piloto_nombre: ev.responsable_nombre,
+          // ADITIVO (12-nov-2026, invariante 134): sin responsable = PARA
+          // TODOS (le aparece a cada quien en su calendario).
+          para_todos: ev.para_todos,
           client_request_id: ev.client_request_id,
-          // null = sin responsable; 0 = el responsable NO tiene la app
-          // registrada (la oficina debe avisarle por otro medio).
+          // null = sin responsable (para todos); 0 = el responsable NO tiene
+          // la app registrada (la oficina debe avisarle por otro medio).
           responsable_push_dispositivos: ev.responsable_id
             ? (conteoPush.get(ev.responsable_id) ?? 0)
             : null,
@@ -904,6 +913,13 @@ export class CalendarService {
   // matrícula y notas, link a /me/eventos?dia=…, y POST/PATCH devuelven el
   // resultado de entrega (`aviso`) para que la oficina confirme por otro
   // medio cuando el responsable no tiene la app registrada.
+  //
+  // EVENTO SIN RESPONSABLE = PARA TODOS (12-nov-2026, invariante 134): le
+  // aparece a cada quien en su calendario (`GET /me/eventos`), pero NO se
+  // manda aviso a nadie (ni al agendar, ni al editar, ni al quitar, ni los
+  // recordatorios de alerts.service): `aviso` es null. Los avisos siguen
+  // siendo del RESPONSABLE; un aviso a toda la plantilla por cada lavado o
+  // trámite haría que se silencien los que sí importan.
 
   /** Fila completa (embeds incluidos) o null. */
   private async cargarEvento(id: string): Promise<EventoInterno | null> {
@@ -1169,15 +1185,28 @@ export class CalendarService {
 
     let aviso: AvisoEvento | null = null;
     if (prev.responsable_id !== next.responsable_id) {
-      // El anterior deja de tenerlo en su agenda: se le avisa con los datos
-      // que él conocía (fecha/avión previos).
       if (prev.responsable_id && prev.responsable_id !== userId) {
-        void this.notifications.notifyUser(prev.responsable_id, {
-          tipo: 'evento_cancelado',
-          titulo: 'Evento cancelado',
-          cuerpo: `Ya no te toca: ${cuerpoEvento(prev)}`,
-          ...avisoEventoBase(prev),
-        });
+        void this.notifications.notifyUser(
+          prev.responsable_id,
+          next.para_todos
+            ? {
+                // Pasó a ser PARA TODOS (invariante 134): sigue en su
+                // calendario, así que no es una cancelación. Datos VIGENTES.
+                tipo: 'evento_actualizado',
+                titulo: TITULO_EVENTO_AHORA_PARA_TODOS,
+                cuerpo: cuerpoEventoAhoraParaTodos(next),
+                ...avisoEventoBase(next),
+              }
+            : {
+                // Otro es el responsable: el anterior deja de tenerlo en su
+                // agenda; se le avisa con los datos que él conocía
+                // (fecha/avión previos).
+                tipo: 'evento_cancelado',
+                titulo: 'Evento cancelado',
+                cuerpo: `Ya no te toca: ${cuerpoEvento(prev)}`,
+                ...avisoEventoBase(prev),
+              },
+        );
       }
       aviso = await this.avisarResponsable(next, userId, 'evento_asignado');
     } else if (next.responsable_id && next.responsable_id !== userId) {
@@ -1220,11 +1249,13 @@ export class CalendarService {
   }
 
   /**
-   * Eventos donde el usuario es RESPONSABLE (GET /v1/me/eventos): una fila
-   * por evento (sin expandir por día). Solapamiento de
-   * [fecha, coalesce(fecha_fin, fecha)] con el rango en cortes Cancún.
+   * Eventos del CALENDARIO de un usuario (GET /v1/me/eventos): los que tiene
+   * como RESPONSABLE más los PARA TODOS (sin responsable, invariante 134;
+   * cada fila dice cuál es con `para_todos`). Una fila por evento (sin
+   * expandir por día). Solapamiento de [fecha, coalesce(fecha_fin, fecha)]
+   * con el rango en cortes Cancún.
    */
-  async listEventosDeResponsable(
+  async listEventosDeUsuario(
     usuarioId: string,
     desde?: string,
     hasta?: string,
@@ -1243,10 +1274,16 @@ export class CalendarService {
         'hasta debe ser igual o posterior a desde.',
       );
     }
-    return this.eventosDeResponsableEntre(usuarioId, r.desdeTs, r.hastaTs);
+    return this.eventosDeUsuarioEntre(usuarioId, r.desdeTs, r.hastaTs, {
+      conParaTodos: true,
+    });
   }
 
-  /** Expediente del piloto: eventos de hoy → +`dias` días (máx `max`). */
+  /**
+   * Expediente del piloto: eventos de hoy → +`dias` días (máx `max`). SOLO
+   * los que tiene ASIGNADOS (es su carga de trabajo): los eventos para todos
+   * no entran aquí (están en el calendario, y llenarían el tope de `max`).
+   */
   async eventosProximosDe(
     usuarioId: string,
     dias = 60,
@@ -1254,27 +1291,36 @@ export class CalendarService {
   ): Promise<EventoMe[]> {
     const hoy = hoyCancun();
     const r = rangoMisEventos(hoy, sumarDias(hoy, dias), hoy);
-    return this.eventosDeResponsableEntre(usuarioId, r.desdeTs, r.hastaTs, max);
+    return this.eventosDeUsuarioEntre(usuarioId, r.desdeTs, r.hastaTs, {
+      conParaTodos: false,
+      limit: max,
+    });
   }
 
-  private async eventosDeResponsableEntre(
+  private async eventosDeUsuarioEntre(
     usuarioId: string,
     desdeTs: string,
     hastaTs: string,
-    limit?: number,
+    opts: { conParaTodos: boolean; limit?: number },
   ): Promise<EventoMe[]> {
     // Mismo instante en Z para el `.or()` (PostgREST lo parsea sin ruido).
     const desdeIso = new Date(desdeTs).toISOString();
-    let q = this.supabase.service
+    const base = this.supabase.service
       .from('evento_flota')
-      .select(await this.eventoCols())
-      .eq('responsable_id', usuarioId)
+      .select(await this.eventoCols());
+    let q = (
+      opts.conParaTodos
+        ? // Lo suyo + lo de todos (invariante 134). Este `.or()` y el de las
+          // fechas se combinan con AND.
+          base.or(filtroEventosDeUsuario(usuarioId))
+        : base.eq('responsable_id', usuarioId)
+    )
       .lte('fecha', hastaTs)
       .or(
         `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha.gte.${desdeIso})`,
       )
       .order('fecha', { ascending: true });
-    if (limit) q = q.limit(limit);
+    if (opts.limit) q = q.limit(opts.limit);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     return ((data ?? []) as unknown as EventoFlotaRow[])

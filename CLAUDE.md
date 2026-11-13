@@ -13343,6 +13343,70 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        SU método), `expenses.controller.categoria-direccion.spec`,
        `expenses.service.acceso-por-persona.spec` y `direccion-modulos.spec`.
 
+134. **EVENTO SIN RESPONSABLE = PARA TODOS (12-nov-2026, API 0.0.139, SIN
+     migración).** Pedido de Dirección (Diego) con la captura de «Agendar
+     evento (no vuelo)» de la app («Jorge Cortes Avionico IJP», mar 17/11
+     08:00, Sin responsable): «estaba pensando que al momento de subir
+     eventos que no son vuelos, se le pueda poner como responsable "Todos", o
+     que al momento de poner "sin responsable" le apareciera a todos en su
+     calendario más bien, en la app y en web». Hasta el 0.0.138 un
+     `evento_flota` sin responsable lo veía SOLO la oficina (calendario de
+     flota): pilotos y mecánico no se enteraban de la visita del aviónico.
+     - **La regla es UNA** (se eligió la segunda opción del pedido, «más
+       bien»: sin opción nueva ni columna nueva): **sin responsable ⇒ de
+       todos; con responsable ⇒ de esa persona** (y de la oficina, que ve
+       todo en el calendario de flota). Fuente única PURA
+       `calendar/evento-flota.util.ts#eventoEsParaTodos` (= `responsable_id`
+       null). `para_todos: boolean` viaja ADITIVO en `EventoMe` (`GET
+       /me/eventos`, respuestas de POST/PATCH `calendar/eventos`, el
+       `details.actual` del 409 `CONFLICTO_VERSION`) y en cada entrada
+       `tipo_evento: 'evento'` de `GET /calendar`; SIEMPRE se deriva (nunca se
+       copia un valor viejo). No hay dato nuevo en la BD.
+     - **Quiénes son «todos»**: cualquiera que inicia sesión, menos VISITANTE
+       (`GET /me/eventos` le responde `[]` sin consultar: no ve la operación).
+       Los pilotos externos no inician sesión (`auth-token.service`). Los
+       roles de oficina y SOCIO ya los veían en `GET /calendar`: los que
+       GANAN visibilidad son PILOTO y MECANICO.
+     - **Dónde aparece**: `GET /v1/me/eventos` =
+       `CalendarService.listEventosDeUsuario` (antes
+       `listEventosDeResponsable`) = lo suyo + lo de todos, UNA consulta:
+       `.or(filtroEventosDeUsuario(id))` (`responsable_id.eq.<id>,
+       responsable_id.is.null`; solo un uuid entra al texto del filtro) Y el
+       `.or()` de las fechas — varios `.or()` se combinan con AND, como en
+       `flights.service`. Mismo rango (hoy−7 → hoy+90, cortes Cancún). La app
+       YA INSTALADA los pinta sin actualizarse (lee ese endpoint: inicio, Mis
+       vuelos y su recordatorio LOCAL de 60 min). `GET /calendar?piloto_id=`
+       (la vista de un piloto) trae también los de todos. **El expediente del
+       piloto (`eventosProximosDe`) sigue siendo SOLO lo asignado** (es su
+       carga de trabajo; los de todos llenarían el tope de 10).
+     - **Un evento para todos NO avisa a nadie** (decisión: los avisos son
+       del RESPONSABLE; un push a toda la plantilla por cada lavado o trámite
+       haría que silencien los que sí importan): ni al agendar (`aviso:
+       null`), ni al editar, ni al quitar, ni los recordatorios del servidor
+       (`alerts.service`: víspera 18:00 y 90 min siguen con `.not(
+       'responsable_id', 'is', null)`). Si el cliente pide aviso a todos, va
+       AQUÍ (`avisarResponsable` / `eventosConResponsableEntre`), con dedupe.
+     - **Cambios de responsable** (`updateEvento`): X → nadie ⇒ el evento
+       pasa a ser de todos y SIGUE en el calendario de X, así que X recibe
+       `evento_actualizado` «Ahora es para todos (ya no eres el responsable):
+       …» con los datos vigentes (`cuerpoEventoAhoraParaTodos`), NO
+       `evento_cancelado` «Ya no te toca» (sería falso); nadie → X ⇒
+       `evento_asignado` a X y los demás dejan de verlo sin aviso; X → Y, como
+       siempre.
+     - **Lo que se pierde a propósito**: ya no existe el evento «solo de la
+       oficina» sin responsable. Para algo que no es de todos se le pone
+       responsable. Si el cliente lo pide de vuelta es una columna nueva
+       (`solo_oficina`), nunca reinterpretar otra vez el null.
+     - Google Calendar no cambia (ese calendario ya era compartido).
+     - Panel y app: la opción «Sin responsable» pasó a llamarse «Todos (sin
+       responsable)» y los textos dicen quién lo verá. La app nueva distingue
+       «Para todos» de «Cita» (tuya); la instalada los muestra como cita.
+     - Specs: `evento-flota.util.spec` (bloque «evento para todos») y
+       `calendar.service.eventos-para-todos.spec` (PostgREST falso que
+       FILTRA: quién ve qué en `/me/eventos`, expediente, vista por piloto,
+       cero avisos en los de todos, «Ahora es para todos», y el cableado de
+       `alerts.service` y `me.controller`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -13390,7 +13454,10 @@ recordatorio_evento`. Links `/flights/<id>` redirigen al vuelo en la app;
   GET `/calendar` expone `responsable_push_dispositivos` y con `piloto_id`
   filtra eventos por responsable (antes los omitía). El responsable los
   lee en `GET /me/eventos` (una fila por evento, solapamiento
-  [fecha, coalesce(fecha_fin, fecha)] en cortes Cancún). Cambiar de
+  [fecha, coalesce(fecha_fin, fecha)] en cortes Cancún). **Desde el
+  12-nov-2026 un evento SIN responsable es PARA TODOS (invariante 134)**:
+  sale en `/me/eventos` de cada quien y en la vista por piloto, sin avisos.
+  Cambiar de
   responsable avisa al nuevo (`evento_asignado`) y al anterior
   (`evento_cancelado`); única exclusión de auto-aviso: actor = responsable.
 - **Espejo a GOOGLE CALENDAR (sistema → Google, UNIDIRECCIONAL; pedido del

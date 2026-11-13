@@ -48,7 +48,7 @@ export class CalendarController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Agenda un evento NO-vuelo (lavado, trámite, visita) que sale en el calendario de flota. Devuelve el evento + `aviso` {responsable_id, nombre, notificado, push_dispositivos, plataformas} | null (null sin responsable o si quien agenda es el responsable): push_dispositivos = 0 ⇒ al responsable NO le llegará push, avísale por otro medio.',
+      'Agenda un evento NO-vuelo (lavado, trámite, visita) que sale en el calendario de flota. CON responsable: es de esa persona (lo ve en su app y recibe aviso). SIN responsable = PARA TODOS (12-nov-2026, invariante 134): le aparece a cada quien en su calendario (GET /me/eventos) y NO se manda aviso a nadie. Devuelve el evento (+ `para_todos`) + `aviso` {responsable_id, nombre, notificado, push_dispositivos, plataformas} | null (null sin responsable o si quien agenda es el responsable): push_dispositivos = 0 ⇒ al responsable NO le llegará push, avísale por otro medio.',
   })
   createEvento(
     @Body() dto: CreateEventoFlotaDto,
@@ -61,7 +61,7 @@ export class CalendarController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Edita un evento NO-vuelo (id del evento, no el id compuesto por día del calendario). Nuevo responsable → evento_asignado al nuevo y evento_cancelado al anterior; mismo responsable con cambios → evento_actualizado. Devuelve el evento + `aviso` como el POST.',
+      'Edita un evento NO-vuelo (id del evento, no el id compuesto por día del calendario). Nuevo responsable → evento_asignado al nuevo y evento_cancelado al anterior; mismo responsable con cambios → evento_actualizado. Quitar al responsable (responsable_id: null) lo vuelve PARA TODOS (invariante 134): el anterior recibe evento_actualizado «Ahora es para todos» (sigue en su calendario) y nadie más recibe aviso. Devuelve el evento (+ `para_todos`) + `aviso` como el POST.',
   })
   updateEvento(
     @Param('id', ParseUUIDPipe) id: string,
