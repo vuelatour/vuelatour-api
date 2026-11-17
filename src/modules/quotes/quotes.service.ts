@@ -20,6 +20,7 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
 import { VueloSeguimientoService } from '../flights/vuelo-seguimiento.service';
@@ -77,6 +78,16 @@ import {
   type TramoCotizado,
   type TramosBase,
 } from './tramos-cotizados.util';
+// «Pasar estos tramos al vuelo» (17-nov-2026, invariante 136, caso #478): la
+// regla PURA de cuándo se puede y qué se dice; la escritura es
+// `replaceEscalas`, el mismo de siempre.
+import {
+  MENSAJE_TRAMOS_AL_VUELO,
+  avisoHoraDeSalidaDistinta,
+  avisoTripulacionTramosAlVuelo,
+  evaluarTramosAlVuelo,
+  selloTramosAlVuelo,
+} from './tramos-al-vuelo.util';
 // FUENTE ÚNICA del costo por tramo (22-sep-2026): la comparte el PDF interno
 // (`quotes-pdf-interno.util`). El panel NUNCA recalcula `tiempo × tarifa`,
 // `tramos_ajuste_usd` ni el motivo del ajuste.
@@ -3609,6 +3620,206 @@ export class QuotesService implements ConfirmadorCotizacion {
       // ADITIVO (26-sep-2026): la versión se guardó con cobros registrados
       // gracias al permiso especial `editores_cotizacion_cobrada`.
       edicion_con_cobros: conCobros != null,
+    };
+  }
+
+  /**
+   * «PASAR ESTOS TRAMOS AL VUELO» (17-nov-2026, invariante 136, caso #478).
+   *
+   * Un vuelo que nace como RESERVA con su propio tramo queda con
+   * `itinerario_operativo = true`: la cotización solo precia y
+   * `replaceEscalas` no toca sus escalas (invariante 6). Cuando la oficina
+   * cotiza después la ruta completa, el vuelo se queda con el tramo de la
+   * reserva. Esta es la ÚNICA puerta para decir «la ruta de la cotización ES
+   * la del vuelo»: NUNCA automática, siempre a pedido de la oficina.
+   *
+   * Qué hace, en este orden:
+   *  1. Candados (`evaluarTramosAlVuelo`, puro): no cancelado, no volado (ni
+   *     un tacómetro), no combinado, no de grupo y con tramos cotizados ⇒ si
+   *     no, 409 con `code` estable y NADA escrito.
+   *  2. Baja la bandera `itinerario_operativo` con CAS (dos clics a la vez:
+   *     el segundo responde 409 `VUELO_YA_SIGUE_COTIZACION`).
+   *  3. Escribe los tramos del SNAPSHOT vigente con `replaceEscalas` — el
+   *     mismo UPSERT por `orden` de siempre, sin `cotizados` (se escribe
+   *     todo: ruta, pasajeros, ferry, pernocta y la hora de cada tramo).
+   *     Los tramos del vuelo que sobren se borran (no tienen tacómetro: lo
+   *     garantizó el candado). Si la escritura falla, la bandera REGRESA a
+   *     true para que el botón se pueda volver a pulsar (el UPSERT es
+   *     idempotente) y se responde 503 `TRAMOS_NO_ESCRITOS`.
+   *  4. Re-deriva los permisos de pista, sella `notas_internas` (quién y
+   *     cuándo) y manda UN aviso a la tripulación con la ruta completa.
+   *
+   * NO toca el precio, el snapshot ni la versión de la cotización: no es una
+   * revisión. Desde aquí el vuelo es un vuelo cotizado normal (invariante
+   * 24: guardar la cotización escribe solo lo que la oficina cambió).
+   */
+  async pasarTramosAlVuelo(vueloId: string, userId: string) {
+    const sb = this.supabase.service;
+    const { data: vueloData, error } = await sb
+      .from('vuelo')
+      .select(
+        'id, folio, estado, itinerario_operativo, calculo_snapshot, cotizacion_version, fecha_vuelo, fecha_traslado_final, combinado_con_id, grupo_id, notas_internas',
+      )
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!vueloData) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    const v = vueloData as Record<string, unknown>;
+    const folio = v.folio as number;
+    const { data: escalasData, error: escErr } = await sb
+      .from('escala')
+      .select(
+        'id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, cancelada_at, solo_operativa, piloto_id',
+      )
+      .eq('vuelo_id', vueloId);
+    if (escErr) throw new Error(`Failed to read escalas: ${escErr.message}`);
+    const escalas = (escalasData ?? []) as Array<Record<string, unknown>>;
+
+    const ev = evaluarTramosAlVuelo({
+      estado: v.estado,
+      itinerario_operativo: v.itinerario_operativo,
+      calculo_snapshot: v.calculo_snapshot,
+      combinado_con_id: v.combinado_con_id,
+      grupo_id: v.grupo_id,
+      escalas,
+    });
+    if (!ev.ok) {
+      throw new ConflictException({ message: ev.message, error: ev.code });
+    }
+
+    // Tramos del cliente que van a SOBRAR y traen piloto EXPLÍCITO: tras el
+    // borrado ya no están en la tripulación vigente y nadie más les avisa
+    // (el aviso consolidado de `replaceEscalas` va silenciado: aquí sale UNO
+    // con la ruta completa).
+    const sobrantesConPiloto = escalas.filter(
+      (e) =>
+        e.solo_operativa !== true &&
+        e.cancelada_at == null &&
+        Number(e.orden) > ev.tramos.length &&
+        typeof e.piloto_id === 'string',
+    );
+
+    // CAS: solo baja la bandera si sigue arriba (dos clics a la vez).
+    const { data: flip, error: flipErr } = await sb
+      .from('vuelo')
+      .update({ itinerario_operativo: false, updated_by: userId })
+      .eq('id', vueloId)
+      .eq('itinerario_operativo', true)
+      .select('id')
+      .maybeSingle();
+    if (flipErr) throw new Error(flipErr.message);
+    if (!flip) {
+      throw new ConflictException({
+        message: MENSAJE_TRAMOS_AL_VUELO.VUELO_YA_SIGUE_COTIZACION,
+        error: 'VUELO_YA_SIGUE_COTIZACION',
+      });
+    }
+
+    let avisos: string[];
+    try {
+      avisos = await this.replaceEscalas(
+        vueloId,
+        ev.tramos,
+        userId,
+        {
+          inicio: (v.fecha_vuelo as string | null) ?? null,
+          fin: (v.fecha_traslado_final as string | null) ?? null,
+        },
+        // Sin `cotizados`: se escribe TODO (lo vivo era otra ruta, no hay
+        // captura del piloto que respetar: ningún tramo tiene tacómetro).
+        { cotizados: null, confiarEnDto: true, silenciarTripulacion: true },
+      );
+    } catch (err) {
+      const tecnico = err instanceof Error ? err.message : String(err);
+      // La bandera REGRESA: con ella abajo el botón respondería «ya sigue la
+      // cotización» y el vuelo se quedaría con los tramos a medias sin salida.
+      const { error: backErr } = await sb
+        .from('vuelo')
+        .update({ itinerario_operativo: true, updated_by: userId })
+        .eq('id', vueloId);
+      this.logger.error(
+        `pasarTramosAlVuelo #${folio}: la escritura de tramos falló (${tecnico})${backErr ? ` y la bandera NO se pudo regresar (${backErr.message})` : '; la bandera regresó a ruta operativa'}.`,
+      );
+      throw new ServiceUnavailableException({
+        message: `No se pudieron pasar todos los tramos al vuelo #${folio}. Vuelve a pulsar «Pasar estos tramos al vuelo»: se puede repetir sin duplicar nada.`,
+        error: 'TRAMOS_NO_ESCRITOS',
+        details: { tecnico },
+      });
+    }
+
+    // La ruta nueva puede ganar o perder una pista con permiso.
+    await this.airports.refreshPermisosDeVuelo(vueloId);
+
+    const horaDistinta = avisoHoraDeSalidaDistinta(
+      v.fecha_vuelo,
+      ev.tramos[0]?.fecha_salida_plan ?? null,
+    );
+    if (horaDistinta) avisos.push(horaDistinta);
+
+    // Sello de auditoría (quién y cuándo). Best-effort: los tramos ya están.
+    try {
+      const nombres = await fetchNombresUsuarios(sb, [userId]);
+      const sello = selloTramosAlVuelo({
+        cuandoIso: new Date().toISOString(),
+        quien: nombres.get(userId) ?? null,
+        version:
+          v.cotizacion_version != null ? Number(v.cotizacion_version) : null,
+        antes: ev.rutaVuelo,
+        ahora: ev.rutaCotizada,
+      });
+      const notas = ((v.notas_internas as string | null) ?? '').trim();
+      const { error: selloErr } = await sb
+        .from('vuelo')
+        .update({
+          notas_internas: notas ? `${notas}\n${sello}` : sello,
+          updated_by: userId,
+        })
+        .eq('id', vueloId);
+      if (selloErr) throw new Error(selloErr.message);
+    } catch (err) {
+      this.logger.warn(
+        `pasarTramosAlVuelo #${folio}: el sello de notas_internas no se escribió: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // UN aviso a la tripulación con la ruta completa (best-effort).
+    try {
+      const vueloVivo = await this.findById(vueloId);
+      void this.notificarTripulacion(
+        vueloVivo,
+        avisoTripulacionTramosAlVuelo({
+          folio,
+          antes: ev.rutaVuelo,
+          ahora: ev.rutaCotizada,
+        }),
+      );
+      for (const s of sobrantesConPiloto) {
+        void this.notifications.notifyUser(s.piloto_id as string, {
+          tipo: 'alerta_sistema',
+          titulo: `Tramo eliminado · vuelo #${folio}`,
+          cuerpo: `El tramo ${rutaTxt(s)} que tenías asignado se eliminó: el vuelo tomó los tramos de la cotización.`,
+          data: { vuelo_id: vueloId, folio },
+          link: `/flights/${vueloId}`,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `pasarTramosAlVuelo #${folio}: el aviso a la tripulación falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Calendario: los triggers de `escala` ya encolaron cada tramo; esto
+    // mueve además el evento del vuelo si ya estaba sincronizado.
+    void this.calendar.syncFlight(vueloId);
+
+    return {
+      ok: true as const,
+      vuelo_id: vueloId,
+      folio,
+      tramos: ev.tramos.length,
+      ruta: ev.rutaCotizada,
+      ruta_anterior: ev.rutaVuelo,
+      avisos,
     };
   }
 

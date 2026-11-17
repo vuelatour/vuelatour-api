@@ -13555,6 +13555,73 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        los INFO de siempre: RLS sin políticas, llaves de auditoría sin índice
        e índices nuevos aún sin uso).
 
+136. **«PASAR ESTOS TRAMOS AL VUELO»: LA ÚNICA PUERTA PARA QUE LA RUTA DE LA
+     COTIZACIÓN SEA LA DEL VUELO (17-nov-2026, API 0.0.141, caso #478).**
+     Reporte de la oficina con las capturas de la cotización y del vuelo #478
+     (Hernan Garza, 18-nov): «no salen los demás tramos y no se actualiza a lo
+     que acabo de poner en la cotización». El vuelo nació el 23-oct como
+     RESERVA con su propio tramo (CUN → MHL, 0 pasajeros): una reserva con
+     itinerario queda con `itinerario_operativo = true`
+     (`flights.service#createReserva`) y ahí la cotización solo precia —
+     `replaceEscalas` hace early-return (invariante 6). La oficina cotizó
+     después la ruta completa (CUN → CTM → MHL → CTM → CUN, v3, $6,156.83) y
+     el vuelo siguió con UN tramo. No había NINGÚN camino para bajar la
+     bandera (ningún DTO la acepta) y la banda azul del cotizador solo
+     ofrecía el sentido contrario («Cotizar con estos tramos»).
+     - **`POST /v1/quotes/:id/tramos-al-vuelo`** (ADMIN/COORDINADOR, 200):
+       `QuotesService.pasarTramosAlVuelo`. Regla PURA en
+       `quotes/tramos-al-vuelo.util.ts` (`evaluarTramosAlVuelo`, con spec
+       sobre los datos REALES del #478): candados → 409 con `code` estable y
+       NADA escrito: `VUELO_YA_SIGUE_COTIZACION`, `VUELO_CANCELADO`,
+       `VUELO_YA_VOLO` (fuente única `estadoVueloVolado`: EN_VUELO,
+       COMPLETADO o algún tramo VIVO con tacómetro), `VUELO_COMBINADO`,
+       `VUELO_DE_GRUPO`, `SIN_TRAMOS_COTIZADOS`.
+     - **NUNCA es automático.** La cotización no toca la operación
+       (invariantes 6, 14 y 24) y hay vuelos donde las dos rutas son distintas
+       A PROPÓSITO (el avión sale de otra base, ferries, combinados): medido
+       en prod el 17-nov, 271 vuelos con ruta operativa, 197 cotizados y 28
+       con ruta cotizada distinta, casi todos deliberados. Solo corre cuando
+       la oficina pulsa el botón y confirma.
+     - **Qué escribe, en este orden**: (1) baja `itinerario_operativo` con
+       CAS (`.eq('itinerario_operativo', true)`: dos clics a la vez ⇒ el
+       segundo 409); (2) los tramos de `calculo_snapshot.ruta.escalas` con
+       el MISMO `replaceEscalas` de la revisión —UPSERT por `orden`, SIN
+       `cotizados` (se escribe todo: ruta, millas, pasajeros, ferry, pernocta
+       y la hora de cada tramo), los sobrantes se borran (no tienen
+       tacómetro: lo garantizó el candado) y los tramos nuevos nacen sin
+       piloto ni avión propios (heredan los del vuelo)—; (3)
+       `refreshPermisosDeVuelo`; (4) sello en `notas_internas` («[Tramos de
+       la cotización al vuelo] DD/MM/AAAA HH:mm · quién: …; antes tenía …»);
+       (5) UN aviso a la tripulación con la ruta completa (el consolidado de
+       `replaceEscalas` va silenciado) + aviso directo al piloto EXPLÍCITO de
+       un tramo que se borró. **No hay un segundo escritor de tramos.**
+     - **NO es una revisión**: no toca precio, `calculo_snapshot` ni
+       `cotizacion_version`, y no inserta en `cotizacion_version_history`
+       (el spec congela que el UPDATE de `vuelo` solo lleve
+       `itinerario_operativo`, `notas_internas` y `updated_by`). Desde ahí el
+       vuelo es un cotizado NORMAL: guardar la cotización escribe solo lo que
+       la oficina cambió (invariante 24).
+     - **Si la escritura de tramos falla**, la bandera REGRESA a true y se
+       responde 503 `TRAMOS_NO_ESCRITOS`: con la bandera abajo el botón diría
+       «ya sigue la cotización» y el vuelo quedaría a medias sin salida. El
+       UPSERT es idempotente: se puede repetir.
+     - **La hora**: se escribe la de cada tramo cotizado; la cabecera
+       (`vuelo.fecha_vuelo`) NO se toca. Si el tramo 1 trae hora propia y no
+       es la del vuelo (#478: 08:00 vs 10:00), `avisos[]` lo dice
+       (`avisoHoraDeSalidaDistinta`) y la oficina decide.
+     - **Lo que NO se arregló porque no estaba roto**: los horarios por
+       tramo capturados en la cotización de un vuelo operativo SÍ se guardan
+       (`calculo_snapshot.ruta.escalas[].fecha_salida_plan`) y el panel los
+       rehidrata; la columna FECHA de «Tramos cotizados» es `pdf_fecha` (la
+       fecha que ve el CLIENTE en el PDF), que en un vuelo operativo no tiene
+       dónde vivir (la escala viva es otra ruta) hasta usar este botón.
+     - Specs: `tramos-al-vuelo.util.spec.ts` (candados y su orden, textos,
+       normalización del snapshot, hora Cancún) y el bloque «pasarTramosAlVuelo»
+       de `quotes.service.tramos.spec.ts` (el arnés ganó un modo VIVO: #478
+       de punta a punta, tramo 1 actualizado en su lugar, precio intacto,
+       cada candado sin escrituras, sobrante con piloto, falla con la bandera
+       de regreso, segundo clic, roles de la ruta).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

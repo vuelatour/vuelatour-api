@@ -12,6 +12,9 @@ jest.mock('../notifications/email.service', () => ({
 }));
 
 import { QuotesService } from './quotes.service';
+import { QuotesController } from './quotes.controller';
+import { ROLES_KEY } from '../../common/decorators/roles.decorator';
+import { Rol } from '../../common/types/auth.types';
 import { MetodoPago, TipoTarifa, TipoVuelo } from './dto/calculate-quote.dto';
 import type { ReviseQuoteDto } from './dto/revise-quote.dto';
 import type { AircraftService } from '../aircraft/aircraft.service';
@@ -194,12 +197,38 @@ function vueloRow(extra: Row = {}): Row {
 interface Mundo {
   vuelo?: Row;
   escalas?: Row[];
+  /**
+   * Mundo VIVO (17-nov-2026, «Pasar estos tramos al vuelo»): las escrituras
+   * SÍ cambian `vuelo` y `escalas`, y el CAS por `itinerario_operativo` se
+   * respeta. Apagado (default) el arnés solo REGISTRA, como siempre.
+   */
+  vivo?: boolean;
 }
 
 function armar(m: Mundo = {}) {
   const log: Op[] = [];
   const vuelo = m.vuelo ?? vueloRow();
   const escalas = m.escalas ?? [escalaViva(1), escalaViva(2)];
+  /** Mundo VIVO: una escritura de `escala` cambia la lista. */
+  const aplicarEscala = (op: Op) => {
+    const id = op.filtros.find((f) => f[0] === 'eq' && f[1] === 'id')?.[2];
+    if (op.tipo === 'update') {
+      const fila = escalas.find((e) => e.id === id);
+      if (fila) Object.assign(fila, op.payload);
+    } else if (op.tipo === 'insert') {
+      escalas.push({
+        id: `nueva-${String((op.payload ?? {}).orden)}`,
+        taco_salida: null,
+        taco_llegada: null,
+        cancelada_at: null,
+        solo_operativa: false,
+        ...op.payload,
+      });
+    } else if (op.tipo === 'delete') {
+      const i = escalas.findIndex((e) => e.id === id);
+      if (i >= 0) escalas.splice(i, 1);
+    }
+  };
   const supabase = {
     service: {
       from(tabla: string) {
@@ -215,12 +244,24 @@ function armar(m: Mundo = {}) {
           log.push(op);
           if (tabla === 'vuelo') {
             if (op.tipo === 'update') {
+              if (m.vivo) {
+                // CAS: `.eq('itinerario_operativo', X)` solo acierta si la
+                // bandera sigue en X.
+                const cas = op.filtros.find(
+                  (f) => f[0] === 'eq' && f[1] === 'itinerario_operativo',
+                );
+                if (cas && vuelo.itinerario_operativo !== cas[2]) {
+                  return { data: null };
+                }
+                Object.assign(vuelo, op.payload);
+              }
               return { data: { ...vuelo, ...op.payload } };
             }
             return { data: single ? vuelo : [vuelo] };
           }
           if (tabla === 'escala') {
             if (op.tipo !== 'select') {
+              if (m.vivo) aplicarEscala(op);
               return { data: single ? escalas[0] : [escalas[0]] };
             }
             // pernoctaDestinos: ningún tramo pernocta.
@@ -280,6 +321,9 @@ function armar(m: Mundo = {}) {
     },
   } as unknown as SupabaseService;
 
+  // Mocks sueltos (sin `this`): se pasan a expect() sin desligar un método.
+  const refreshPermisos = jest.fn().mockResolvedValue(undefined);
+  const notifyUser = jest.fn().mockResolvedValue(true);
   const aircraft = {
     findById: jest.fn(() => Promise.resolve(FICHA)),
   } as unknown as AircraftService;
@@ -294,8 +338,12 @@ function armar(m: Mundo = {}) {
       ),
     ),
     anyRequiresPermit: jest.fn().mockResolvedValue(false),
-    refreshPermisosDeVuelo: jest.fn().mockResolvedValue(undefined),
+    refreshPermisosDeVuelo: refreshPermisos,
   } as unknown as AirportsService;
+  const notifications = {
+    notifyUser,
+    notifyRole: jest.fn().mockResolvedValue(true),
+  } as unknown as NotificationsService;
   const service = new QuotesService(
     aircraft,
     airports,
@@ -306,10 +354,7 @@ function armar(m: Mundo = {}) {
       removeEscalaEvent: jest.fn().mockResolvedValue(true),
     } as unknown as CalendarSyncService,
     {} as EmailService,
-    {
-      notifyUser: jest.fn().mockResolvedValue(true),
-      notifyRole: jest.fn().mockResolvedValue(true),
-    } as unknown as NotificationsService,
+    notifications,
     {
       validateAssignTargets: jest
         .fn()
@@ -334,7 +379,16 @@ function armar(m: Mundo = {}) {
         o.tipo === 'update' &&
         o.filtros.some((f) => f[1] === 'id' && f[2] === `e${orden}`),
     )?.payload ?? null;
-  return { service, log, patchVuelo, patchEscala };
+  return {
+    service,
+    log,
+    patchVuelo,
+    patchEscala,
+    vuelo,
+    escalas,
+    refreshPermisos,
+    notifyUser,
+  };
 }
 
 /** Tramos tal como los rehidrataría el panel NUEVO (del snapshot). */
@@ -833,5 +887,343 @@ describe('#364 — tramo del cliente que agregó la operación', () => {
     const b = borrados(w.log);
     expect(b).toHaveLength(1);
     expect(b[0].filtros.some((f) => f[1] === 'id' && f[2] === 'e2')).toBe(true);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// «PASAR ESTOS TRAMOS AL VUELO» (17-nov-2026, API 0.0.141, invariante 136)
+//
+// Caso REAL #478 (lectura de prod del 17-nov-2026): nació el 23-oct como
+// RESERVA con UN tramo CUN → MHL de 0 pasajeros (`itinerario_operativo =
+// true`); el 17-nov la oficina lo cotizó CUN → CTM → MHL → CTM → CUN (v3,
+// $6,156.83) y el vuelo siguió con su único tramo: «no salen los demás
+// tramos y no se actualiza a lo que acabo de poner en la cotización».
+// ───────────────────────────────────────────────────────────────────────────
+describe('pasarTramosAlVuelo — la ruta de la cotización pasa a ser la del vuelo (caso #478)', () => {
+  const SNAP_478 = [
+    tramoSnapshot(1, {
+      origen_iata: 'CUN',
+      destino_iata: 'CTM',
+      pasajeros: 4,
+      es_ferry: false,
+      millas_nauticas: 173,
+      fecha_salida_plan: '2026-11-18T15:00:00.000Z',
+    }),
+    tramoSnapshot(2, {
+      origen_iata: 'CTM',
+      destino_iata: 'MHL',
+      pasajeros: 6,
+      es_ferry: false,
+      millas_nauticas: 38.82,
+      fecha_salida_plan: '2026-11-18T17:00:00.000Z',
+    }),
+    tramoSnapshot(3, {
+      origen_iata: 'MHL',
+      destino_iata: 'CTM',
+      pasajeros: 2,
+      es_ferry: false,
+      millas_nauticas: 38.82,
+    }),
+    tramoSnapshot(4, {
+      origen_iata: 'CTM',
+      destino_iata: 'CUN',
+      pasajeros: 0,
+      es_ferry: true,
+      millas_nauticas: 173,
+    }),
+  ];
+
+  /** La escala de la RESERVA: CUN → MHL, 0 pax, 08:00, sin tacómetro. */
+  const escalaReserva = (extra: Row = {}) =>
+    escalaViva(1, {
+      origen_iata: 'CUN',
+      destino_iata: 'MHL',
+      pasajeros: 0,
+      millas_nauticas: null,
+      taco_salida: null,
+      taco_llegada: null,
+      fecha_salida_plan: '2026-11-18T13:00:00+00:00',
+      notas: '',
+      piloto_id: 'p-pablo',
+      ...extra,
+    });
+
+  function mundo478(extraVuelo: Row = {}, escalas?: Row[]) {
+    const m = armar({
+      vivo: true,
+      vuelo: vueloRow({
+        folio: 478,
+        estado: 'CONFIRMADO',
+        itinerario_operativo: true,
+        cotizacion_version: 3,
+        fecha_vuelo: '2026-11-18T13:00:00+00:00',
+        fecha_traslado_final: null,
+        notas_internas: 'Horario tentativo',
+        combinado_con_id: null,
+        grupo_id: null,
+        monto_total_usd: 6156.83,
+        calculo_snapshot: {
+          ruta: { escalas: SNAP_478 },
+          totales: { total_usd: 6156.83 },
+        },
+        ...extraVuelo,
+      }),
+      escalas: escalas ?? [escalaReserva()],
+    });
+    const interno = m.service as unknown as {
+      notificarTripulacion: (...a: unknown[]) => Promise<void>;
+      replaceEscalas: (...a: unknown[]) => Promise<string[]>;
+    };
+    const avisar = jest
+      .spyOn(interno, 'notificarTripulacion')
+      .mockResolvedValue(undefined);
+    // El aviso lee el vuelo completo; aquí basta con su id y su folio.
+    jest
+      .spyOn(m.service, 'findById')
+      .mockResolvedValue({ id: V326, folio: 478 } as never);
+    const escrituras = () => m.log.filter((o) => o.tipo !== 'select');
+    const porOrden = () =>
+      [...m.escalas].sort((a, b) => Number(a.orden) - Number(b.orden));
+    return { ...m, interno, avisar, escrituras, porOrden };
+  }
+
+  const codigoDe = async (p: Promise<unknown>): Promise<string> => {
+    try {
+      await p;
+      return 'OK';
+    } catch (e) {
+      const r = (e as { response?: { error?: string } }).response;
+      return r?.error ?? `sin código: ${String(e)}`;
+    }
+  };
+
+  it('#478: el vuelo queda con los CUATRO tramos cotizados, con sus pasajeros y sus horas', async () => {
+    const m = mundo478();
+    const r = await m.service.pasarTramosAlVuelo(V326, USER);
+
+    expect(r).toMatchObject({
+      ok: true,
+      vuelo_id: V326,
+      folio: 478,
+      tramos: 4,
+      ruta: 'CUN → CTM → MHL → CTM → CUN',
+      ruta_anterior: 'CUN → MHL',
+    });
+    // El vuelo deja de ser «ruta operativa»: desde aquí sigue la cotización.
+    expect(m.vuelo.itinerario_operativo).toBe(false);
+    expect(
+      m
+        .porOrden()
+        .map(
+          (e) =>
+            `${String(e.orden)}:${String(e.origen_iata)}-${String(e.destino_iata)}:${String(e.pasajeros)}:${e.es_ferry === true ? 'ferry' : 'pax'}`,
+        ),
+    ).toEqual([
+      '1:CUN-CTM:4:pax',
+      '2:CTM-MHL:6:pax',
+      '3:MHL-CTM:2:pax',
+      '4:CTM-CUN:0:ferry',
+    ]);
+    // La hora de cada tramo es la que la oficina guardó en la cotización.
+    expect(m.porOrden().map((e) => e.fecha_salida_plan)).toEqual([
+      '2026-11-18T15:00:00.000Z',
+      '2026-11-18T17:00:00.000Z',
+      null,
+      null,
+    ]);
+    expect(m.porOrden().map((e) => e.millas_nauticas)).toEqual([
+      173, 38.82, 38.82, 173,
+    ]);
+  });
+
+  it('el tramo 1 se ACTUALIZA en su lugar (mismo id, mismo piloto): no se borra y se vuelve a crear', async () => {
+    const m = mundo478();
+    await m.service.pasarTramosAlVuelo(V326, USER);
+    const t1 = m.porOrden()[0];
+    expect(t1.id).toBe('e1');
+    expect(t1.piloto_id).toBe('p-pablo');
+    expect(t1.aeronave_id).toBe(N621TX);
+    // Los tres nuevos nacen SIN piloto ni avión propios: heredan los del vuelo.
+    for (const e of m.porOrden().slice(1)) {
+      expect(e.piloto_id).toBeUndefined();
+      expect(e.aeronave_id).toBeUndefined();
+    }
+    expect(
+      m.log.filter((o) => o.tabla === 'escala' && o.tipo === 'delete'),
+    ).toHaveLength(0);
+  });
+
+  it('NO es una revisión: ni el precio, ni el snapshot, ni la versión se tocan', async () => {
+    const m = mundo478();
+    await m.service.pasarTramosAlVuelo(V326, USER);
+    const tocadas = new Set(
+      m.log
+        .filter((o) => o.tabla === 'vuelo' && o.tipo === 'update')
+        .flatMap((o) => Object.keys(o.payload ?? {})),
+    );
+    expect([...tocadas].sort()).toEqual([
+      'itinerario_operativo',
+      'notas_internas',
+      'updated_by',
+    ]);
+    expect(m.vuelo.monto_total_usd).toBe(6156.83);
+    expect(m.vuelo.cotizacion_version).toBe(3);
+    expect(
+      m.log.some(
+        (o) => o.tabla === 'cotizacion_version_history' && o.tipo === 'insert',
+      ),
+    ).toBe(false);
+  });
+
+  it('re-deriva los permisos de pista, sella quién y cuándo, y avisa UNA vez a la tripulación', async () => {
+    const m = mundo478();
+    const r = await m.service.pasarTramosAlVuelo(V326, USER);
+    expect(m.refreshPermisos).toHaveBeenCalledTimes(1);
+    expect(m.refreshPermisos).toHaveBeenCalledWith(V326);
+    // La nota que ya había se conserva; el sello va debajo.
+    const notas = String(m.vuelo.notas_internas);
+    expect(
+      notas.startsWith(
+        'Horario tentativo\n[Tramos de la cotización al vuelo] ',
+      ),
+    ).toBe(true);
+    expect(notas).toContain(
+      'el vuelo tomó los tramos de la cotización v3 (CUN → CTM → MHL → CTM → CUN); antes tenía CUN → MHL.',
+    );
+    expect(m.avisar).toHaveBeenCalledTimes(1);
+    expect(m.avisar.mock.calls[0][1]).toEqual({
+      titulo: 'Vuelo #478: cambió el itinerario',
+      cuerpo:
+        'Ahora es CUN → CTM → MHL → CTM → CUN (antes CUN → MHL). Revisa tus tramos y horarios.',
+    });
+    // El vuelo decía 08:00 y la cotización 10:00: se AVISA, no se decide.
+    expect(r.avisos).toHaveLength(1);
+    expect(r.avisos[0]).toContain('18/11/2026 10:00');
+    expect(r.avisos[0]).toContain('18/11/2026 08:00');
+  });
+
+  it('pulsarlo dos veces: la segunda responde «ya sigue la cotización» y no escribe nada', async () => {
+    const m = mundo478();
+    await m.service.pasarTramosAlVuelo(V326, USER);
+    const antes = m.escrituras().length;
+    expect(await codigoDe(m.service.pasarTramosAlVuelo(V326, USER))).toBe(
+      'VUELO_YA_SIGUE_COTIZACION',
+    );
+    expect(m.escrituras()).toHaveLength(antes);
+    expect(m.escalas).toHaveLength(4);
+  });
+
+  it.each([
+    ['cancelado', { estado: 'CANCELADO' }, undefined, 'VUELO_CANCELADO'],
+    ['en vuelo', { estado: 'EN_VUELO' }, undefined, 'VUELO_YA_VOLO'],
+    ['completado', { estado: 'COMPLETADO' }, undefined, 'VUELO_YA_VOLO'],
+    [
+      'con un tacómetro capturado',
+      {},
+      [escalaReserva({ taco_salida: 5599.4 })],
+      'VUELO_YA_VOLO',
+    ],
+    [
+      'combinado con otro vuelo',
+      { combinado_con_id: 'otro' },
+      undefined,
+      'VUELO_COMBINADO',
+    ],
+    ['avión de un grupo', { grupo_id: 'g-12' }, undefined, 'VUELO_DE_GRUPO'],
+    [
+      'sin tramos cotizados',
+      { calculo_snapshot: { ruta: { escalas: [] } } },
+      undefined,
+      'SIN_TRAMOS_COTIZADOS',
+    ],
+    [
+      'que ya sigue la cotización',
+      { itinerario_operativo: false },
+      undefined,
+      'VUELO_YA_SIGUE_COTIZACION',
+    ],
+  ] as Array<[string, Row, Row[] | undefined, string]>)(
+    'vuelo %s: 409 con su código y NADA escrito',
+    async (_caso, extraVuelo, escalas, codigo) => {
+      const m = mundo478(extraVuelo, escalas);
+      expect(await codigoDe(m.service.pasarTramosAlVuelo(V326, USER))).toBe(
+        codigo,
+      );
+      expect(m.escrituras()).toHaveLength(0);
+      expect(m.avisar).not.toHaveBeenCalled();
+      expect(m.refreshPermisos).not.toHaveBeenCalled();
+    },
+  );
+
+  it('la cotización tiene MENOS tramos que el vuelo: el sobrante se borra y su piloto recibe aviso directo', async () => {
+    const m = mundo478(
+      {
+        calculo_snapshot: {
+          ruta: { escalas: [SNAP_478[0], SNAP_478[3]] },
+          totales: { total_usd: 4040.22 },
+        },
+      },
+      [
+        escalaReserva(),
+        escalaViva(2, {
+          origen_iata: 'MHL',
+          destino_iata: 'CZM',
+          pasajeros: 0,
+          taco_salida: null,
+          taco_llegada: null,
+        }),
+        escalaViva(3, {
+          origen_iata: 'CZM',
+          destino_iata: 'CUN',
+          pasajeros: 0,
+          taco_salida: null,
+          taco_llegada: null,
+          piloto_id: 'p-otro',
+        }),
+      ],
+    );
+    const r = await m.service.pasarTramosAlVuelo(V326, USER);
+    expect(r.ruta_anterior).toBe('CUN → MHL → CZM → CUN');
+    expect(
+      m
+        .porOrden()
+        .map((e) => `${String(e.origen_iata)}-${String(e.destino_iata)}`),
+    ).toEqual(['CUN-CTM', 'CTM-CUN']);
+    const directos = (
+      m.notifyUser.mock.calls as Array<[string, Record<string, unknown>]>
+    ).filter((c) => c[0] === 'p-otro');
+    expect(directos).toHaveLength(1);
+    expect(directos[0][1]).toMatchObject({
+      titulo: 'Tramo eliminado · vuelo #478',
+      cuerpo:
+        'El tramo CZM → CUN que tenías asignado se eliminó: el vuelo tomó los tramos de la cotización.',
+    });
+  });
+
+  it('si la escritura de tramos FALLA, la bandera regresa (el botón se puede repetir) y responde 503', async () => {
+    const m = mundo478();
+    jest
+      .spyOn(m.interno, 'replaceEscalas')
+      .mockRejectedValue(new Error('boom'));
+    expect(await codigoDe(m.service.pasarTramosAlVuelo(V326, USER))).toBe(
+      'TRAMOS_NO_ESCRITOS',
+    );
+    expect(m.vuelo.itinerario_operativo).toBe(true);
+    expect(m.refreshPermisos).not.toHaveBeenCalled();
+    expect(m.avisar).not.toHaveBeenCalled();
+    expect(String(m.vuelo.notas_internas)).toBe('Horario tentativo');
+  });
+
+  it('la ruta es de quien GUARDA la cotización: ADMIN y COORDINADOR (Dirección pasa el guard)', () => {
+    expect(
+      Reflect.getMetadata(
+        ROLES_KEY,
+        // Del descriptor: leer el método del prototipo lo desligaría.
+        Object.getOwnPropertyDescriptor(
+          QuotesController.prototype,
+          'pasarTramosAlVuelo',
+        )?.value as object,
+      ),
+    ).toEqual([Rol.ADMIN, Rol.COORDINADOR]);
   });
 });

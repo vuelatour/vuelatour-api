@@ -279,6 +279,23 @@ export class QuotesController {
     return this.quotes.quickAdjust(id, dto, c.userId);
   }
 
+  // «Pasar estos tramos al vuelo» (17-nov-2026, invariante 136, caso #478):
+  // mismos roles que revisar la cotización (quien GUARDA la cotización es
+  // quien decide que su ruta sea la del vuelo).
+  @Post(':id/tramos-al-vuelo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Pasa los tramos COTIZADOS (snapshot vigente) al vuelo cuando este nació con ruta operativa propia (reserva): el vuelo deja de ser «ruta operativa» y sus escalas se escriben con el mismo UPSERT de la revisión (ruta, pasajeros, ferry, pernocta y hora por tramo); re-deriva permisos de pista, sella notas_internas y avisa UNA vez a la tripulación. NO cambia precio, snapshot ni versión. 409 con code estable y nada escrito: VUELO_YA_SIGUE_COTIZACION, VUELO_CANCELADO, VUELO_YA_VOLO (EN_VUELO, COMPLETADO o algún tramo con tacómetro), VUELO_COMBINADO, VUELO_DE_GRUPO, SIN_TRAMOS_COTIZADOS. 503 TRAMOS_NO_ESCRITOS si la escritura falla (la bandera regresa: se puede repetir). Responde {ok, vuelo_id, folio, tramos, ruta, ruta_anterior, avisos[]}.',
+  })
+  pasarTramosAlVuelo(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotes.pasarTramosAlVuelo(id, c.userId);
+  }
+
   // Sub-ruta de ':id': va con las demás rutas ':id/...' (las literales del
   // segmento — calculate, rutas-sugeridas — ya están declaradas antes de
   // ':id', convención del repo).
