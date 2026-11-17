@@ -10,7 +10,9 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -56,10 +58,17 @@ export class ComprasController {
   @Post()
   @ApiOperation({
     summary:
-      'Crear compra (opcionalmente desde el gasto de mercancía: hereda datos y arma líneas de los conceptos IA)',
+      'Crear compra (opcionalmente desde el gasto de mercancía: hereda datos y arma líneas de los conceptos IA). 201; con client_request_id repetido devuelve la compra ya creada (200, idempotente:true, sin duplicar ni volver a validar). 503 COMPRA_EN_PROCESO (transitorio: reintentar con la misma llave); 409 COMPRA_INCOMPLETA (la compra de esa llave quedó a medias y ya tiene líneas o pagos).',
   })
-  create(@Body() dto: CreateCompraDto, @CurrentUser() c: AuthenticatedUser) {
-    return this.compras.create(dto, c.userId);
+  async create(
+    @Body() dto: CreateCompraDto,
+    @CurrentUser() c: AuthenticatedUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const r = await this.compras.create(dto, c.userId);
+    // El alta responde 201; el replay idempotente (misma llave), 200.
+    if (r.idempotente === true) res.status(HttpStatus.OK);
+    return r;
   }
 
   // Literal ANTES de ':id' (convención del repo).

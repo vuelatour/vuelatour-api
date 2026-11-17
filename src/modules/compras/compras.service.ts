@@ -4,7 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { columnaOpcional } from '../../common/columna-opcional.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { findOrCreateItem } from '../inventory/compras.service';
@@ -82,6 +84,112 @@ export const MENSAJE_ENTRADA_TC_REQUERIDO =
 /** Aviso cuando la compra nació con el gasto pero la recepción falló. */
 export function avisoEntradaNoRecibida(folio: number, motivo: string): string {
   return `La compra #${folio} quedó registrada con el gasto vinculado, pero la pieza NO entró a bodega: ${motivo} Recíbela desde Compras.`;
+}
+
+// ===== Alta idempotente por `client_request_id` (17-nov-2026, invariante 137) =====
+
+/** Migración que crea `compra.client_request_id` y su índice único parcial. */
+export const MIGRACION_COMPRA_CLIENT_REQUEST = '20261117000002';
+/** Índice único parcial de `compra.client_request_id`. */
+const UQ_COMPRA_CLIENT_REQUEST = 'uq_compra_client_request';
+
+/**
+ * Una compra A MEDIAS más joven que esto no se toca: otro envío con la misma
+ * llave la puede estar terminando (503 `COMPRA_EN_PROCESO`). El mismo margen
+ * que la reserva sin tramos (`HUERFANO_MIN_EDAD_MS` de flights.service).
+ */
+export const ALTA_A_MEDIAS_MIN_EDAD_MS = 5 * 60_000;
+
+export const CODE_COMPRA_EN_PROCESO = 'COMPRA_EN_PROCESO';
+export const CODE_COMPRA_INCOMPLETA = 'COMPRA_INCOMPLETA';
+
+/** Lo que le falta a una compra para ser el alta COMPLETA que pide el cuerpo. */
+export type FaltanteAlta = 'LINEAS' | 'GASTO';
+
+/**
+ * ¿Qué le FALTA a la compra para ser el alta completa que pide `dto`? (PURO).
+ * El alta escribe en este orden: la compra → sus líneas (UN solo INSERT: o
+ * entran todas o ninguna) → la liga del gasto de mercancía. Basta mirar el
+ * ÚLTIMO paso que ese cuerpo pide:
+ *  - con `gasto_mercancia_id`: el gasto debe estar entre sus pagos;
+ *  - si no, con `lineas`: la compra debe tener líneas;
+ *  - sin líneas ni gasto: el INSERT de la compra ERA el alta entera.
+ * `null` = completa. No lee ni valida nada: compara lo que ya está guardado.
+ */
+export function faltanteDeAlta(
+  dto: Pick<CreateCompraDto, 'gasto_mercancia_id' | 'lineas'>,
+  detalle: {
+    lineas: readonly unknown[];
+    pagos: ReadonlyArray<{ id: string }>;
+  },
+): FaltanteAlta | null {
+  if (dto.gasto_mercancia_id) {
+    return detalle.pagos.some((p) => p.id === dto.gasto_mercancia_id)
+      ? null
+      : 'GASTO';
+  }
+  return (dto.lineas?.length ?? 0) > 0 && detalle.lineas.length === 0
+    ? 'LINEAS'
+    : null;
+}
+
+/** Texto del 503 `COMPRA_EN_PROCESO` (es-MX, para el operador). */
+export function mensajeCompraEnProceso(folio: number | null): string {
+  return `La compra${folio == null ? '' : ` #${folio}`} todavía se está guardando. Vuelve a intentarlo en unos minutos: no se va a duplicar.`;
+}
+
+/** Texto del 409 `COMPRA_INCOMPLETA` (es-MX, para el operador). */
+export function mensajeCompraIncompleta(
+  folio: number,
+  falta: FaltanteAlta,
+): string {
+  const que =
+    falta === 'GASTO'
+      ? 'no tiene ligado su gasto de mercancía'
+      : 'no tiene artículos';
+  return `La compra #${folio} ya está registrada pero quedó incompleta (${que}). Revísala en Compras: complétala o elimínala. No se creó otra.`;
+}
+
+/**
+ * 503 ESTRUCTURADO: la compra de esa llave se está escribiendo (o quedó a
+ * medias hace menos de `ALTA_A_MEDIAS_MIN_EDAD_MS`). Transitorio: quien
+ * reintenta con la MISMA llave termina con la compra completa.
+ */
+function compraEnProceso(
+  key: string,
+  compra: { id: string; folio: number } | null,
+): ServiceUnavailableException {
+  return new ServiceUnavailableException({
+    message: mensajeCompraEnProceso(compra?.folio ?? null),
+    error: CODE_COMPRA_EN_PROCESO,
+    details: {
+      client_request_id: key,
+      compra_id: compra?.id ?? null,
+      folio: compra?.folio ?? null,
+    },
+  });
+}
+
+/**
+ * 409 ESTRUCTURADO: la compra de esa llave existe, le falta el último paso
+ * del alta y ya tiene líneas o pagos (o ya se recibió) — no se borra ni se
+ * completa a ciegas.
+ */
+function compraIncompleta(
+  key: string,
+  compra: { id: string; folio: number },
+  falta: FaltanteAlta,
+): ConflictException {
+  return new ConflictException({
+    message: mensajeCompraIncompleta(compra.folio, falta),
+    error: CODE_COMPRA_INCOMPLETA,
+    details: {
+      client_request_id: key,
+      compra_id: compra.id,
+      folio: compra.folio,
+      falta,
+    },
+  });
 }
 
 /**
@@ -206,6 +314,16 @@ type GastoFuente = {
 };
 
 type DbError = { code?: string; message: string };
+
+/** El detalle de una compra tal como lo arma `getDetail`. */
+type DetalleCompra = Awaited<ReturnType<ComprasService['getDetail']>>;
+
+/**
+ * Respuesta de `POST /v1/compras`: el detalle de siempre. `idempotente: true`
+ * viaja SOLO en el replay (misma llave); el alta normal no trae el campo
+ * (contrato con el panel: es ADITIVO).
+ */
+export type RespuestaAltaCompra = DetalleCompra & { idempotente?: true };
 
 /** Día Cancún (UTC−5) de un timestamptz. */
 function diaCancun(iso: string): string {
@@ -523,7 +641,12 @@ export class ComprasService {
   }
 
   async getDetail(id: string) {
-    const compra = await this.findCompra(id);
+    return this.detalleDe(await this.findCompra(id));
+  }
+
+  /** El detalle (líneas con costo final, pagos y resumen) de una compra YA leída. */
+  private async detalleDe(compra: CompraRow) {
+    const id = compra.id;
     const [lineasMap, pagosMap] = await Promise.all([
       this.lineasDe([id]),
       this.pagosDe([id]),
@@ -723,7 +846,136 @@ export class ComprasService {
 
   // ===== Alta =====
 
-  async create(dto: CreateCompraDto, userId: string) {
+  /**
+   * Alta de una compra, IDEMPOTENTE por `client_request_id` (17-nov-2026,
+   * invariante 137: la app registra compras de la tienda desde el teléfono y
+   * reenvía cuando se pierde la respuesta; sin llave nacían DOS compras).
+   * SIN llave —panel, `unir`, «Entrada desde un gasto», refacción a
+   * inventario— es el alta de siempre, sin una sola consulta de más.
+   *
+   * Con llave:
+   *  1. pre-check por llave ANTES de toda validación y de toda escritura: la
+   *     compra que ya existe y está completa se responde tal cual, con
+   *     `idempotente: true`, sin validar ni escribir (`replayDeAlta`);
+   *  2. el INSERT lleva la llave: el índice único es el candado entre
+   *     procesos (23505 ⇒ relectura por llave, nunca un 500);
+   *  3. los envíos con la MISMA llave en este proceso se serializan: el
+   *     segundo espera al primero y ya ve la compra completa.
+   */
+  async create(
+    dto: CreateCompraDto,
+    userId: string,
+  ): Promise<RespuestaAltaCompra> {
+    // La llave SOLO cuenta si viaja y la columna ya existe.
+    const key =
+      dto.client_request_id && (await this.conClientRequestCompra())
+        ? dto.client_request_id
+        : null;
+    if (!key) return this.crearCompra(dto, userId, null);
+    return this.conCandado(`alta:${key}`, async () => {
+      const previa = await this.compraPorClientRequest(key);
+      if (previa) {
+        const replay = await this.replayDeAlta(previa, dto, key, userId);
+        if (replay) return replay;
+        // Era el resto de un alta que no terminó y ya se retiró: de nuevo.
+      }
+      return this.crearCompra(dto, userId, key);
+    });
+  }
+
+  /**
+   * Columna OPCIONAL `compra.client_request_id` (migración
+   * `20261117000002`): mientras no exista no hay pre-check ni columna en el
+   * INSERT (alta de siempre, sin idempotencia). Se enciende sola en ≤ 10 min
+   * tras aplicarla, sin reiniciar.
+   */
+  private conClientRequestCompra(): Promise<boolean> {
+    return columnaOpcional(
+      this.supabase.service,
+      'compra',
+      'client_request_id',
+      {
+        mensajeAusente: `Columna compra.client_request_id no existe todavía: compras sin idempotencia hasta aplicar la migración ${MIGRACION_COMPRA_CLIENT_REQUEST}`,
+      },
+    ).disponible();
+  }
+
+  /**
+   * La compra que nació con esa llave (o null). La llave es GLOBAL —el alta
+   * no cuelga de ningún padre— y el índice es único: a lo más una.
+   */
+  private async compraPorClientRequest(key: string): Promise<CompraRow | null> {
+    const { data, error } = await this.supabase.service
+      .from('compra')
+      .select(COMPRA_SEL)
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as unknown as CompraRow | null) ?? null;
+  }
+
+  /**
+   * La compra de esa llave YA existe (pre-check o 23505). Tres salidas:
+   *  - COMPLETA ⇒ su detalle con `idempotente: true`. No valida, no escribe
+   *    y no lee el gasto ni el proveedor: el alta ya ocurrió.
+   *  - A MEDIAS (le falta el último paso del alta, `faltanteDeAlta`: sus
+   *    líneas o la liga del gasto fallaron y la compensación también, o el
+   *    proceso murió entre dos escrituras). JAMÁS se responde como «ya
+   *    creada»: la app seguiría con registrar su gasto y recibirla, y una
+   *    compra sin líneas rebota en los dos.
+   *      · creada hace ≤ 5 min ⇒ 503 `COMPRA_EN_PROCESO`: otro envío la puede
+   *        estar terminando; no se toca y se reintenta;
+   *      · cascarón (ABIERTA, sin líneas y sin pagos) ⇒ se RETIRA con la
+   *        misma compensación del alta (`borrarCompra`) y devuelve `null`:
+   *        quien llama la da de alta completa, como si aquella limpieza
+   *        hubiera funcionado;
+   *      · con líneas o pagos, o ya recibida ⇒ 409 `COMPRA_INCOMPLETA`:
+   *        alguien ya trabajó sobre ella; no se borra ni se completa a ciegas.
+   */
+  private async replayDeAlta(
+    compra: CompraRow,
+    dto: CreateCompraDto,
+    key: string,
+    userId: string,
+  ): Promise<RespuestaAltaCompra | null> {
+    const detalle = await this.detalleDe(compra);
+    const falta = faltanteDeAlta(dto, detalle);
+    if (!falta) {
+      this.logger.log(
+        `Compra idempotente: reintento con client_request_id ${key} → se devuelve la existente #${compra.folio} (sin duplicar).`,
+      );
+      return { ...detalle, idempotente: true as const };
+    }
+    const edadMs = Date.now() - new Date(String(compra.created_at)).getTime();
+    // `!(edad > …)`: una fecha ilegible cuenta como joven (no se borra nada).
+    if (!(edadMs > ALTA_A_MEDIAS_MIN_EDAD_MS)) {
+      throw compraEnProceso(key, compra);
+    }
+    const cascaron =
+      compra.estado === 'ABIERTA' &&
+      detalle.lineas.length === 0 &&
+      detalle.pagos.length === 0;
+    if (!cascaron) throw compraIncompleta(key, compra, falta);
+    try {
+      await this.borrarCompra(compra.id, userId);
+    } catch (e) {
+      this.logger.error(
+        `Compra #${compra.folio} (${compra.id}) a medias con client_request_id ${key}: no se pudo retirar: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      throw compraEnProceso(key, compra);
+    }
+    this.logger.warn(
+      `Compra #${compra.folio} (${compra.id}) quedó a medias en un alta anterior con client_request_id ${key}: se retiró y se da de alta de nuevo.`,
+    );
+    return null;
+  }
+
+  /** El alta en sí. `key` = la llave de idempotencia que va al INSERT (o null). */
+  private async crearCompra(
+    dto: CreateCompraDto,
+    userId: string,
+    key: string | null,
+  ): Promise<RespuestaAltaCompra> {
     let gasto: GastoFuente | null = null;
     let derivado: ReturnType<typeof this.derivarDesdeGasto> | null = null;
     if (dto.gasto_mercancia_id) {
@@ -761,14 +1013,36 @@ export class ComprasService {
         notas: dto.notas ?? null,
         created_by: userId,
         updated_by: userId,
+        // Llave SOLO cuando viaja y la columna existe (insert de siempre si no).
+        ...(key ? { client_request_id: key } : {}),
       })
       .select('id')
       .maybeSingle();
-    if (error) this.lanzarErrorCompra(error);
+    if (error) {
+      // Carrera con la misma llave en OTRO proceso (el candado en memoria
+      // solo serializa este): el índice único rechazó el segundo INSERT.
+      if (
+        key &&
+        error.code === '23505' &&
+        error.message.includes(UQ_COMPRA_CLIENT_REQUEST)
+      ) {
+        const previa = await this.compraPorClientRequest(key);
+        const replay = previa
+          ? await this.replayDeAlta(previa, dto, key, userId)
+          : null;
+        if (replay) return replay;
+        // Ya no está (el otro envío la deshizo): transitorio, jamás un 500.
+        throw compraEnProceso(key, null);
+      }
+      this.lanzarErrorCompra(error);
+    }
     const compraId = (data as { id: string }).id;
 
     // Si las líneas o la liga fallan, la compra recién creada se va con
-    // ellas: jamás una compra huérfana a medio armar.
+    // ellas: jamás una compra huérfana a medio armar. Con llave, al borrarse
+    // la llave queda libre y el reintento crea la compra completa; si este
+    // borrado también falla, la compra a medias conserva la llave y el
+    // reintento la detecta (`replayDeAlta`): nunca la da por «ya creada».
     try {
       if (lineas.length > 0) await this.insertarLineas(compraId, lineas, 1);
       if (gasto) {

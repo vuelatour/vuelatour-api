@@ -13622,6 +13622,68 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        cada candado sin escrituras, sobrante con piloto, falla con la bandera
        de regreso, segundo clic, roles de la ruta).
 
+137. **`POST /v1/compras` ES IDEMPOTENTE POR `client_request_id` (17-nov-2026,
+     API 0.0.142, migración `20261117000002`).** La app (1.1.4+92) registra
+     una «compra de la tienda» desde el teléfono y `CreateCompraDto` no tenía
+     llave: un reenvío tras una respuesta perdida creaba DOS compras (dinero e
+     inventario duplicados). Mismo patrón de las invariantes 12 y 13, en
+     `ComprasService.create`.
+     - **Con llave**: pre-check por llave ANTES de toda validación y de toda
+       escritura; si la compra ya existe COMPLETA responde su detalle de
+       siempre + `idempotente: true` (**200**; el alta sigue en 201), sin
+       validar, sin escribir y sin leer el gasto ni el proveedor (el alta ya
+       ocurrió: un 4xx tardío sería un «fallido» falso en la app). El INSERT
+       lleva la llave; el 23505 de `uq_compra_client_request` (dos procesos)
+       ⇒ relectura por llave, nunca un 500. Dos envíos con la MISMA llave en
+       este proceso se serializan (`conCandado('alta:<llave>')`): el segundo
+       espera y ya ve la compra completa. La llave es GLOBAL (el alta no
+       cuelga de un padre): aquí no existe `CLIENT_REQUEST_ID_EN_USO`.
+     - **Sin llave** (panel, `unir`, «Entrada desde un gasto», refacción a
+       inventario) el alta es EXACTAMENTE la de antes, sin una consulta de
+       más. `idempotente` es ADITIVO y viaja SOLO en el replay (el alta
+       normal no trae el campo: contrato con el panel); la respuesta no
+       expone `client_request_id` y `COMPRA_COLS` no cambió.
+     - **Una compra A MEDIAS jamás se responde como «ya creada»** (la app
+       sigue con registrar su gasto y recibirla, y sin líneas rebota en los
+       dos). El alta son hasta tres escrituras —compra → líneas (UN solo
+       INSERT: todas o ninguna) → liga del gasto de mercancía—; si falla una,
+       `deshacerCompra` borra la compra como siempre y la llave queda libre:
+       el reintento la crea completa. Si ese borrado TAMBIÉN falla (o el
+       proceso muere entre dos escrituras) queda una compra con la llave y sin
+       su último paso. Por eso el replay mira `faltanteDeAlta` (PURA; solo
+       compara lo guardado con el cuerpo: con `gasto_mercancia_id` el gasto
+       debe estar entre sus pagos; si no, con `lineas` debe tener líneas; sin
+       ninguno, el INSERT era el alta entera) y, si falta algo:
+       - creada hace ≤ 5 min (`ALTA_A_MEDIAS_MIN_EDAD_MS`) ⇒ **503
+         `COMPRA_EN_PROCESO`**: otro envío la puede estar terminando; no se
+         toca, se reintenta con la misma llave;
+       - cascarón (ABIERTA, 0 líneas, 0 pagos: nada que perder) ⇒ se RETIRA
+         con la misma compensación del alta (`borrarCompra`) y se da de alta
+         de nuevo con el cuerpo del reintento (201, completa, folio nuevo);
+         si el retiro falla ⇒ 503 otra vez;
+       - con líneas o pagos, o ya RECIBIDA ⇒ **409 `COMPRA_INCOMPLETA`** +
+         `details {compra_id, folio, falta}`: alguien ya trabajó sobre ella;
+         no se borra ni se completa a ciegas (se arregla en Compras).
+     - **Columna OPCIONAL** (`columnaOpcional('compra',
+       'client_request_id')`): sin la migración la llave se IGNORA (ni
+       pre-check ni columna en el INSERT: alta sin idempotencia, como antes);
+       se enciende sola en ≤ 10 min. La migración es aditiva (columna + índice
+       único parcial + comment), sin disparadores y **sin DROP / DELETE /
+       REVOKE ni en comentarios**. **APLICADA en prod el 17-nov-2026 por MCP**
+       (un `do` con pruebas de escritura REALES que se revierten + registro;
+       dry-run en `_dryrun/`). Las filas de prueba llevan `folio` EXPLÍCITO
+       (negativo): el folio sale de una secuencia y `nextval` NO se revierte
+       con la transacción — sin eso el dry-run dejaba un hueco en la
+       numeración de las compras. **Orden de deploy: el API ANTES que la app
+       que manda la llave** — un API ≤ 0.0.141 la rechaza con 400
+       (`forbidNonWhitelisted`).
+     - Specs: `compras.service.idempotencia.spec.ts` (PostgREST falso con
+       ESTADO: filtra, proyecta el `select`, escribe, respeta el índice único
+       y la cascada de líneas; replay sin escrituras, sin re-validar, carrera
+       en el mismo proceso y 23505 de otro, alta a medias en sus tres salidas,
+       columna ausente y encendido solo) y `compras.controller.spec.ts` (HTTP
+       real: 201 / 200, llave uuid o 400, `code` y `details` por el filtro).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

@@ -166,6 +166,18 @@ export class CreateCompraDto {
   @ValidateNested({ each: true })
   @Type(() => CargoFacturaDto)
   cargos_factura?: CargoFacturaDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por alta; ' +
+      'la manda la app al registrar una compra de la tienda, 17-nov-2026, ' +
+      'invariante 137). Un reintento con la misma llave devuelve la compra ' +
+      'YA creada (200, idempotente:true) sin duplicarla, sin validar ni ' +
+      'escribir de nuevo. El panel no la manda.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
 /**
