@@ -11,6 +11,11 @@ import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { resolverTsoBase } from '../../common/turm-componente.util';
+import {
+  borrarArchivosDeAdjuntos,
+  reponerAdjuntos,
+  retirarAdjuntosDeComponenteMayor,
+} from '../../common/adjuntos-ingenieria.util';
 import type {
   CreateEngineDto,
   ListEnginesQuery,
@@ -296,11 +301,30 @@ export class EnginesService {
       .select('archivo_url')
       .eq('motor_id', id)
       .not('archivo_url', 'is', null);
+    // ARCHIVOS DE INGENIERÍA del motor (invariante 135, 0.0.140): su llave
+    // foránea va sin cascada, así que sus filas se retiran ANTES por código
+    // (tolera que la tabla aún no exista). Si el borrado del motor falla, se
+    // reponen: nunca se pierde un archivo por un borrado que no ocurrió.
+    const adjuntos = await retirarAdjuntosDeComponenteMayor(
+      this.supabase.service,
+      'motor_id',
+      id,
+    );
     const { error } = await this.supabase.service
       .from('motor')
       .delete()
       .eq('id', id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      await reponerAdjuntos(this.supabase.service, adjuntos.filas);
+      throw new Error(error.message);
+    }
+    // El motor ya se borró: sus archivos de ingeniería quedarían huérfanos en
+    // el bucket (best-effort, como las copias de sus vencimientos).
+    await borrarArchivosDeAdjuntos(
+      this.supabase.service,
+      adjuntos.paths,
+      `el motor ${id}`,
+    );
     const paths = ((vencs ?? []) as Array<{ archivo_url: string | null }>)
       .map((v) => v.archivo_url)
       .filter((p): p is string => !!p);

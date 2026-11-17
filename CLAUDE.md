@@ -13407,6 +13407,154 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        cero avisos en los de todos, «Ahora es para todos», y el cableado de
        `alerts.service` y `me.controller`).
 
+135. **MANTENIMIENTO UNIFICADO: COMPONENTES CON VIDA LÍMITE Y ARCHIVOS DE
+     INGENIERÍA (17-nov-2026, API 0.0.140, migración `20261117000001`).**
+     Pedido del cliente con las capturas del expediente del N990GG: «en
+     mantenimientos la opción para subir una foto o pdf […] cada que se le da
+     un mantenimiento el taller te entrega un sticker […] poder descargarlas
+     una vez que ya las hayan subido», «se incluya en ese apartado de
+     mantenimiento también la lista de componentes del avión y su seguimiento
+     […] saber cuánto tiempo le queda a un foco, a una llanta» y «poder subir
+     uno o varios documentos por componente». Todo vive en el módulo
+     `engineering` (rutas bajo `/v1/engineering`).
+     - **Dos tablas nuevas, ninguna existente cambia.** `componente_aeronave`
+       (lo CAPTURADO: qué es, cuándo y a qué Hobbs se instaló, cada cuánto se
+       cambia; `estado` INSTALADO | RETIRADO; el nuevo de un cambio señala al
+       viejo con `reemplaza_a_id`) y `adjunto_ingenieria` (un archivo de UN
+       destino: mantenimiento, componente, motor o hélice — check
+       `num_nonnulls(…) = 1`; llave del objeto en el bucket PRIVADO
+       `documentos-flota`, con índice único). Baja = sello `eliminado_at` /
+       `eliminado_por`: la fila se conserva y el archivo sigue en el bucket.
+       Sin disparadores: `updated_at` lo sella el API en cada UPDATE.
+     - **La migración NO lleva DROP / DELETE / REVOKE** (ni `on delete …`, ni
+       columnas `deleted_*`): el MCP de Supabase declina esas sentencias. Por
+       eso las llaves foráneas van sin cascada y por eso
+       `engines.service.remove` / `propellers.service.remove` retiran ANTES,
+       por código, las filas de `adjunto_ingenieria` del motor o la hélice
+       (`common/adjuntos-ingenieria.util.ts`), las REPONEN si el borrado del
+       componente falla y, si sí se borró, quitan sus archivos del bucket
+       (best-effort, como las copias de sus vencimientos). Una migración
+       futura sobre estas tablas conserva la regla (o va por el SQL Editor).
+     - **«Cuánto le queda» NO se guarda: se calcula en cada lectura** con la
+       fuente única PURA `engineering/componente-vida.util.ts`
+       (`vidaDeComponente`, con spec), el Hobbs del avión y el día de hoy en
+       hora Cancún (`hoyCancun`). **El Hobbs es `AircraftService.currentHobbs`
+       — el MISMO número que la ficha pinta en «Horas actuales»** (paginado,
+       con la herencia del avión del vuelo y sin tramos ni vuelos cancelados):
+       en la misma card el operador ve «Horas actuales» y, al lado, «faltan X
+       h» de un componente, y con dos lecturas distintas el restante podría
+       no cuadrar (sin cálculos paralelos). Por eso `EngineeringModule`
+       importa `AircraftModule`, sin `forwardRef`: fuera de AppModule ningún
+       módulo importa EngineeringModule, así que no hay ciclo
+       (`engineering.module.spec` congela el import, que AircraftModule
+       exporte `AircraftService` y que nadie más lo importe).
+       `EngineeringService.horasActualesAeronave` sigue PRIVADO y solo sella
+       las horas de entrada de una orden de mantenimiento (otra lectura: no
+       pagina ni descarta tramos cancelados; no usarla para componentes).
+       **0 = el avión no tiene lecturas ⇒ `null` («no se sabe»), jamás «cero
+       horas»** (⇒ SIN_DATOS con `faltantes: ['horas_aeronave']`). Reglas:
+       - Dimensión HORAS (con `limite_horas`): en servicio = `horas_previas`
+         + max(0, Hobbs − `horas_aeronave_instalacion`); restantes ≤ 0 ⇒
+         VENCIDO, ≤ `aviso_horas` ⇒ POR_VENCER, si no VIGENTE.
+       - Dimensión FECHA (con `fecha_vencimiento` —la EXACTA manda— o con
+         `limite_meses` desde `fecha_instalacion`; sumar meses = mismo día o
+         el ÚLTIMO del mes destino, 31-ene + 1 mes = 28-feb): días < 0 ⇒
+         VENCIDO (0 = vence HOY, todavía no vencido), ≤ `aviso_dias` ⇒
+         POR_VENCER, si no VIGENTE.
+       - Falta un dato de una dimensión CON límite ⇒ SIN_DATOS + `faltantes`
+         (`horas_aeronave_instalacion`, `horas_aeronave`,
+         `fecha_instalacion`). Sin ningún límite ⇒ SIN_LIMITE (se cambia «a
+         condición»: solo se dice cuánto lleva en servicio).
+       - Estado general = el PEOR (VENCIDO > POR_VENCER > SIN_DATOS >
+         VIGENTE); `por` = la dimensión que lo decidió (empate ⇒ HORAS).
+       - RETIRADO: horas y días en servicio CONGELADOS al retiro
+         (`horas_aeronave_retiro`, `fecha_retiro`); ya no vence nada.
+       **El panel solo pinta `vida`: no la recalcula.**
+     - **Rutas de componentes** (`ComponentesService`): `GET
+       aircraft/:id/components` ⇒ `{disponible, horas_aeronave, hoy,
+       componentes, retirados}` (`componentes` = INSTALADOS por urgencia y
+       luego nombre; `retirados` = el más reciente primero, tope 50; los
+       eliminados no salen); `POST aircraft/:id/components`; `PATCH
+       components/:cid` (un null EXPLÍCITO limpia un opcional; `nombre`,
+       `horas_previas` y los avisos rechazan null; no cambia `estado`);
+       `POST components/:cid/retirar`; `POST components/:cid/reemplazar` ⇒
+       `{retirado, nuevo}`; `DELETE components/:cid` = baja con sello
+       (captura por error). En el CAMBIO el nuevo hereda nombre, categoría,
+       posición y avisos. **Límites de `nuevo` (precisión del contrato con el
+       panel, que los manda SIEMPRE): `limite_horas` / `limite_meses` con
+       número = ese límite; con `null` EXPLÍCITO = la pieza nueva NO tiene
+       ese límite (no hereda); campo AUSENTE (`undefined`) = hereda el del
+       componente que sale.** El servicio distingue `=== undefined` de `===
+       null` y el DTO deja pasar el null tal cual. P/N, S/N, fabricante,
+       notas y la fecha exacta de vencimiento son de la PIEZA: ausentes o en
+       null quedan vacíos, nunca se heredan; `horas_previas` ausente = 0.
+       **Orden del cambio: se INSERTA
+       el nuevo y después se retira el viejo con la guarda `estado =
+       INSTALADO` dentro del UPDATE; si lo segundo falla (error o carrera),
+       el nuevo se da de baja y se responde el error / 409
+       `COMPONENTE_YA_RETIRADO` — nunca dos instalados por un cambio a
+       medias.** Fecha de retiro anterior a la de instalación ⇒ 400
+       `FECHA_ANTERIOR_A_INSTALACION`. `reemplazado_por_id` se DERIVA (el
+       sustituto VIVO que lo señala); `horas_aeronave` omitido al retirar o
+       reemplazar = ese mismo `currentHobbs` (null si el avión no tiene
+       lecturas, nunca 0).
+     - **Rutas de archivos** (`AdjuntosIngenieriaService`): el NAVEGADOR sube
+       el archivo al bucket (las mismas políticas de Storage que permisos y
+       seguros: solo oficina; JPG/PNG/WebP/PDF, 10 MB) y `POST adjuntos` solo
+       lo REGISTRA `{destino, destino_id, storage_path, nombre, mime, bytes,
+       etiqueta?, nota?}`: 404 `DESTINO_NO_ENCONTRADO` (también un
+       componente eliminado) · 409 `ARCHIVO_YA_REGISTRADO` (pre-lectura y el
+       23505 del índice único) · 409 `TOPE_ADJUNTOS` (20 ACTIVOS por
+       destino) · 400 `ARCHIVO_NO_ENCONTRADO` (el objeto se verifica
+       firmándolo; cualquier otra falla de Storage es 503
+       `STORAGE_NO_DISPONIBLE`, no un «no existe» falso). El `aeronave_id`
+       de la fila lo pone el API (el del destino), nunca el cliente. `GET
+       aircraft/:id/adjuntos` ⇒ `{disponible, adjuntos}` = lo que HOY es del
+       avión: sus mantenimientos, sus componentes NO eliminados y los
+       motores y hélices que tiene hoy (**un motor trasladado se lleva sus
+       archivos**: los sigue `motor_id`, no `aeronave_id`); lectura
+       PAGINADA (`leer-paginado.util`). `GET adjuntos/:aid/url?
+       descargar=true` ⇒ URL firmada de 600 s (el nombre de la descarga va
+       SANEADO con `nombreDeDescarga`: storage-js lo pega crudo en la
+       query). `DELETE adjuntos/:aid` = baja con sello. **`storage_path`
+       NUNCA sale en una respuesta.**
+     - **Roles**: leer, capturar / editar / retirar / reemplazar componentes
+       y ver o descargar archivos = ADMIN, COORDINADOR, MECANICO
+       (`ROLES_INGENIERIA_CON_MECANICO`); registrar o quitar un archivo y
+       eliminar un componente = el default del controlador (ADMIN,
+       COORDINADOR). DIRECCION pasa todo (invariante 122).
+     - **Tolerancia a la migración sin aplicar**: sonda
+       `columnaOpcional(…, 'id', {tambienTabla: true})` por tabla (re-sondea
+       en ≤ 10 min, se enciende sola). Los GET responden `disponible: false`
+       con listas vacías, las escrituras 503 `MIGRACION_PENDIENTE` y `GET
+       adjuntos/:aid/url` 404. El panel decide por `disponible` / `code`.
+     - **Lo que NO cambió**: `GET aircraft/:id/maintenance` conserva su
+       forma (los archivos de un mantenimiento se leen del endpoint de
+       adjuntos y el panel los reparte por `destino_id`); la aptitud («No
+       apto») NO mira los componentes — un componente vencido no deja el
+       avión en tierra por sí solo (decisión pendiente del cliente) — y
+       `fleetUpcoming` y las alertas tampoco los incluyen todavía.
+     - Specs: `componente-vida.util.spec` (las reglas),
+       `componentes.service.spec` y `adjuntos-ingenieria.service.spec`
+       (PostgREST y Storage falsos que FILTRAN y ESCRIBEN:
+       `ingenieria.fixture-spec`), `engineering.controller.componentes.spec`
+       (HTTP real: roles por ruta, DTO estricto, null explícito, `code` y
+       `details` por el filtro), `engineering.module.spec` (ARRANQUE: Nest
+       resuelve el controlador y los tres servicios con dobles de Supabase y
+       de los módulos importados, y NO arranca sin el `AircraftService` de
+       AircraftModule) y `engines/componente-remove-adjuntos.spec` (borrar un
+       motor o una hélice con archivos). Dry-run:
+       `supabase/migrations/_dryrun/20261117000001_…dryrun.sql`.
+     - **APLICADA en prod el 17-nov-2026 por MCP** (`execute_sql`, registrada
+       como `20261117000001` en `schema_migrations`): UNA transacción que
+       corrió el cuerpo, probó con escrituras REALES en un sub-bloque que
+       siempre se revierte (altas, edición, reemplazo, un adjunto por cada
+       destino, las bajas con sello y lo que cada candado debe rechazar) y
+       solo confirmó al pasar todo; las dos tablas quedaron vacías.
+       `get_advisors` después: nada de nivel WARN ni ERROR sobre ellas (solo
+       los INFO de siempre: RLS sin políticas, llaves de auditoría sin índice
+       e índices nuevos aún sin uso).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

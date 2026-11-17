@@ -10,6 +10,11 @@ import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { resolverTsoBase } from '../../common/turm-componente.util';
+import {
+  borrarArchivosDeAdjuntos,
+  reponerAdjuntos,
+  retirarAdjuntosDeComponenteMayor,
+} from '../../common/adjuntos-ingenieria.util';
 import type {
   CreatePropellerDto,
   ListPropellersQuery,
@@ -171,11 +176,29 @@ export class PropellersService {
 
   async remove(id: string) {
     const helice = await this.findById(id);
+    // ARCHIVOS DE INGENIERÍA de la hélice (invariante 135, 0.0.140): su llave
+    // foránea va sin cascada, así que sus filas se retiran ANTES por código
+    // (tolera que la tabla aún no exista). Si el borrado de la hélice falla,
+    // se reponen: nunca se pierde un archivo por un borrado que no ocurrió.
+    const adjuntos = await retirarAdjuntosDeComponenteMayor(
+      this.supabase.service,
+      'helice_id',
+      id,
+    );
     const { error } = await this.supabase.service
       .from('helice')
       .delete()
       .eq('id', id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      await reponerAdjuntos(this.supabase.service, adjuntos.filas);
+      throw new Error(error.message);
+    }
+    // La hélice ya se borró: sus archivos quedarían huérfanos en el bucket.
+    await borrarArchivosDeAdjuntos(
+      this.supabase.service,
+      adjuntos.paths,
+      `la hélice ${id}`,
+    );
     return { deleted: true, id, numero_serie: String(helice.numero_serie) };
   }
 
