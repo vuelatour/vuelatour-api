@@ -73,6 +73,8 @@ import { combustibleAeronaveDisponible } from '../../common/combustible-disponib
 import { COMBUSTIBLE_DEFAULT } from '../../common/combustible.util';
 import {
   MANT_HITO_COLS,
+  TOLERANCIA_HITO_HR,
+  hitoAnclado,
   hitoPendienteDeOrden,
   ordenAbiertaDelHito,
   type MantenimientoHitoRow,
@@ -874,13 +876,21 @@ export class AircraftService {
    * ese hito. Regla del mecánico: en hitos coincidentes el servicio mayor
    * incluye a los menores — las tareas se UNEN (menor→mayor, sin duplicados).
    *
-   * Con `mantenimientos` (invariante 108, 27-oct-2026) manda primero el HITO
-   * PENDIENTE: una orden ABIERTA del avión cuyo hito ya se alcanzó sostiene
-   * el próximo servicio —`faltan` NEGATIVO («vencido por 14.2 h»)— hasta que
-   * se marque COMPLETADO; solo sin orden abierta alcanzada se recorre el
-   * programa cíclico como siempre. La regla es `hitoPendienteDeOrden`
-   * (`servicio-hito.util`, PURO): ficha, listado y programa automático la
-   * leen de ahí. Sin el parámetro (llamadas que no tienen las órdenes a la
+   * Con `mantenimientos` EL PROGRAMA NO AVANZA SOLO (invariantes 108 y 138):
+   * el próximo servicio se queda en un hito —con `faltan` NEGATIVO («vencido
+   * por 4.1 h») si el tacómetro ya lo pasó— hasta que un servicio HECHO lo
+   * atienda. Dos candidatos, los dos de `servicio-hito.util` (PURO; ficha,
+   * listado y programa automático los leen de ahí):
+   *  - el HITO PENDIENTE (`hitoPendienteDeOrden`, 27-oct-2026): una orden
+   *    ABIERTA del avión cuyo hito ya se alcanzó; y
+   *  - el HITO ANCLADO (`hitoAnclado`, 18-nov-2026): el primer hito del
+   *    programa después del último que un servicio hecho dejó atendido,
+   *    exista o no su orden (N4142R: sin orden de 4,500, el programa brincaba
+   *    a 4,550 en cuanto el tacómetro pasaba las 4,500).
+   * Gana el de horas más BAJAS (lo más atrasado primero); a igualdad, el
+   * pendiente. Solo sin ninguno de los dos —un avión sin ningún servicio
+   * hecho del programa— se recorre el programa cíclico desde el tacómetro,
+   * como siempre. Sin el parámetro (llamadas que no tienen las órdenes a la
    * mano) el comportamiento es el histórico.
    */
   proximoServicioDetallado(
@@ -895,19 +905,26 @@ export class AircraftService {
     mantenimientos?: readonly MantenimientoHitoRow[],
   ) {
     const r1 = (n: number) => Number(n.toFixed(1));
-    const pendiente = mantenimientos
-      ? hitoPendienteDeOrden({ mantenimientos, intervalos, base, horas })
-      : null;
-    if (pendiente) {
-      return this.detallarHito(
-        {
-          a_las: pendiente.a_las,
-          intervalo: pendiente.intervalo,
-          faltan: r1(pendiente.a_las - horas),
-        },
-        pendiente.etapas_incluidas,
-        etapas,
-      );
+    if (mantenimientos) {
+      const args = { mantenimientos, intervalos, base, horas };
+      const pendiente = hitoPendienteDeOrden(args);
+      const anclado = hitoAnclado(args);
+      const hito =
+        pendiente &&
+        (!anclado || pendiente.a_las <= anclado.a_las + TOLERANCIA_HITO_HR)
+          ? pendiente
+          : anclado;
+      if (hito) {
+        return this.detallarHito(
+          {
+            a_las: hito.a_las,
+            intervalo: hito.intervalo,
+            faltan: r1(hito.a_las - horas),
+          },
+          hito.etapas_incluidas,
+          etapas,
+        );
+      }
     }
     const prox = this.proximoServicio(intervalos, base, horas);
     if (!prox) return null;

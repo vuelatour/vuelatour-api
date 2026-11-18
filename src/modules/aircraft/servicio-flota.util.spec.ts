@@ -14,6 +14,13 @@ import {
   type MantenimientoServicioRow,
   type ProximoServicioFn,
 } from './servicio-flota.util';
+import {
+  FLOTA_REAL_17_NOV,
+  N4142R,
+  N58BT,
+  N621TX,
+  type AvionReal,
+} from '../../common/servicio-hito.flota-real.fixture-spec';
 
 /**
  * «ÚLTIMO / SIGUIENTE SERVICIO» del listado de la flota (22-sep-2026).
@@ -672,5 +679,213 @@ describe('armarServicioFila', () => {
       [etapa(100, 'Servicio 100 hrs / Anual')],
       [orden],
     );
+  });
+});
+
+// ───────── El programa no avanza solo (18-nov-2026, invariante 138) ─────────
+
+/**
+ * Reporte del cliente (17-nov-2026): «en el XA-VGV aparece vencido por 14
+ * horas. Creo que solo se aplicó en ese avión: el N4142R ya se venció por
+ * como cinco horas y aparece que faltan 45 horas, cuando debería decir
+ * vencido por cinco horas. Como que se brincó al siguiente servicio de manera
+ * automática».
+ *
+ * Los 7 aviones con programa, con sus datos REALES de ese día
+ * (`servicio-hito.flota-real.fixture-spec`), pasando por la MISMA fuente
+ * única que la lista, la ficha y el programa automático.
+ */
+describe('flota REAL del 17-nov-2026 — el próximo servicio no brinca (invariante 138)', () => {
+  const filaReal = (
+    a: AvionReal,
+    mantenimientos: MantenimientoServicioRow[] = a.mantenimientos,
+    ultimoTaco: number = a.hobbs,
+  ) =>
+    fila({
+      intervalos: a.intervalos,
+      base: a.base,
+      ultimoTaco,
+      mantenimientos,
+    });
+
+  it.each(FLOTA_REAL_17_NOV)(
+    '$matricula a $hobbs h: siguiente servicio a las $esperado.a_las (faltan $esperado.faltan)',
+    (a) => {
+      const s = filaReal(a);
+      expect(s?.siguiente).toMatchObject({
+        hobbs_hr: a.esperado.a_las,
+        intervalo_hr: a.esperado.intervalo,
+        faltan_hr: a.esperado.faltan,
+      });
+      expect(s?.siguiente?.orden?.id ?? null).toBe(a.esperado.orden);
+      // La fuente única, entera (la FORMA de la respuesta no cambia).
+      expect(
+        svc.proximoServicioDetallado(
+          a.intervalos,
+          a.base,
+          a.hobbs,
+          [],
+          a.mantenimientos,
+        ),
+      ).toEqual({
+        a_las: a.esperado.a_las,
+        intervalo: a.esperado.intervalo,
+        faltan: a.esperado.faltan,
+        nombre: null,
+        etapas_incluidas: a.esperado.etapas_incluidas,
+        tareas: [],
+      });
+    },
+  );
+
+  it('N4142R: «vencido por 4.1 h» al hito de 4,500 (100 hrs / anual), SIN orden todavía — antes decía «faltan 45.9 h» al de 4,550', () => {
+    const s = fila({
+      intervalos: N4142R.intervalos,
+      base: N4142R.base,
+      ultimoTaco: N4142R.hobbs,
+      etapas: [
+        etapa(50, 'Servicio 50 hrs'),
+        etapa(100, 'Servicio 100 hrs / Anual'),
+        etapa(500, 'Servicio de 500 hrs'),
+        etapa(1000, 'Servicio de 1000 hrs'),
+      ],
+      mantenimientos: N4142R.mantenimientos,
+    });
+    expect(s?.siguiente).toEqual({
+      hobbs_hr: 4500,
+      intervalo_hr: 100,
+      etiqueta: 'Servicio 100 hrs / Anual',
+      faltan_hr: -4.1,
+      orden: null,
+    });
+    // El «último servicio» no cambia: el tacómetro más alto con el que se
+    // hizo uno (el «50 hrs» de 4,455.1).
+    expect(s?.ultimo).toMatchObject({ hobbs_hr: 4455.1, etiqueta: '50 hrs' });
+    // Lo que decía prod el 17-nov es justo el programa cíclico a secas…
+    expect(
+      svc.proximoServicio(N4142R.intervalos, N4142R.base, N4142R.hobbs),
+    ).toEqual({ a_las: 4550, intervalo: 50, faltan: 45.9 });
+    // …que sigue siendo lo que responden las llamadas SIN las órdenes (la
+    // línea informativa del balance por avión): comportamiento histórico.
+    expect(
+      svc.proximoServicioDetallado(
+        N4142R.intervalos,
+        N4142R.base,
+        N4142R.hobbs,
+        [],
+      ),
+    ).toMatchObject({ a_las: 4550, intervalo: 50, faltan: 45.9 });
+  });
+
+  it('N4142R con la orden de 4,500 ya creada por el programa: sigue vencido y la lista ya trae la orden', () => {
+    const orden = mant({
+      id: 'auto-4500',
+      estado: 'PROGRAMADO',
+      horas_programadas: 4500,
+      etapa_intervalo_hr: 100,
+      notas:
+        'Creado automáticamente por el programa de servicio: el hito de 4500 h ya se alcanzó (vencido por 4.1 h, tacómetro 4504.1). Confirma la fecha de entrada al taller.',
+    });
+    const s = filaReal(N4142R, [...N4142R.mantenimientos, orden]);
+    expect(s?.siguiente).toMatchObject({
+      hobbs_hr: 4500,
+      intervalo_hr: 100,
+      faltan_hr: -4.1,
+      orden: {
+        id: 'auto-4500',
+        estado: 'PROGRAMADO',
+        fecha_programada: null,
+        automatica: true,
+      },
+    });
+  });
+
+  it('al completar la orden vencida el programa avanza UN hito: N4142R ⇒ 4,550 (faltan 45.9); N621TX ⇒ 1,800 (faltan 97.6)', () => {
+    const n4142r = filaReal(N4142R, [
+      ...N4142R.mantenimientos,
+      mant({
+        id: 'auto-4500',
+        estado: 'COMPLETADO',
+        horas_programadas: 4500,
+        etapa_intervalo_hr: 100,
+        horas_aeronave: 4504.1,
+        fecha_realizada: '2026-11-18',
+      }),
+    ]);
+    expect(n4142r?.siguiente).toMatchObject({
+      hobbs_hr: 4550,
+      intervalo_hr: 50,
+      faltan_hr: 45.9,
+      orden: null,
+    });
+    expect(n4142r?.ultimo).toMatchObject({ hobbs_hr: 4504.1 });
+
+    const n621tx = filaReal(N621TX, [
+      ...N621TX.mantenimientos,
+      mant({
+        id: 'auto-1700',
+        estado: 'COMPLETADO',
+        horas_programadas: 1700,
+        etapa_intervalo_hr: 100,
+        horas_aeronave: 1702.4,
+        fecha_realizada: '2026-11-18',
+      }),
+    ]);
+    expect(n621tx?.siguiente).toMatchObject({
+      hobbs_hr: 1800,
+      intervalo_hr: 100,
+      faltan_hr: 97.6,
+      orden: null,
+    });
+  });
+
+  it('el hito no brinca aunque pasen más horas: N621TX a 1,812 h sigue en 1,700 («vencido por 112 h»)', () => {
+    expect(
+      filaReal(N621TX, N621TX.mantenimientos, 1812)?.siguiente,
+    ).toMatchObject({ hobbs_hr: 1700, faltan_hr: -112, orden: null });
+  });
+
+  it('manda el hito más BAJO — el anclado, aunque haya una orden abierta ya alcanzada MÁS ADELANTE', () => {
+    // N58BT a 1,810 h: nadie hizo el de 1,700 y la «HSI» de 1,800 sigue
+    // abierta y ya se alcanzó. Lo más atrasado es el de 1,700 (sin orden).
+    const s = filaReal(N58BT, N58BT.mantenimientos, 1810);
+    expect(s?.siguiente).toMatchObject({
+      hobbs_hr: 1700,
+      intervalo_hr: 100,
+      faltan_hr: -110,
+      orden: null,
+    });
+  });
+
+  it('manda el hito más BAJO — la orden abierta ya alcanzada, aunque un servicio POSTERIOR ya se haya hecho', () => {
+    // N4142R: la orden de 4,500 (100 hrs) sigue abierta y el «50 hrs» de
+    // 4,550 ya se hizo. El de 50 no es el de 100: 4,500 sigue vencido.
+    const s = filaReal(
+      N4142R,
+      [
+        ...N4142R.mantenimientos,
+        mant({
+          id: 'auto-4500',
+          estado: 'PROGRAMADO',
+          horas_programadas: 4500,
+          etapa_intervalo_hr: 100,
+        }),
+        mant({
+          id: 'm-4550',
+          estado: 'COMPLETADO',
+          horas_programadas: 4550,
+          etapa_intervalo_hr: 50,
+          horas_aeronave: 4552,
+          fecha_realizada: '2026-12-01',
+        }),
+      ],
+      4560,
+    );
+    expect(s?.siguiente).toMatchObject({
+      hobbs_hr: 4500,
+      intervalo_hr: 100,
+      faltan_hr: -60,
+      orden: { id: 'auto-4500', estado: 'PROGRAMADO' },
+    });
   });
 });

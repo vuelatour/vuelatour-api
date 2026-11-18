@@ -28,6 +28,13 @@
  * (N621TX: el pizarrón diría 1732.7 y el sistema dice 1700). Aquí se usa la
  * fuente única EXISTENTE a propósito: cambiar el ancla movería también el
  * motor de alertas, y eso se decide con el cliente, no de lado.
+ *
+ * 18-nov-2026 (invariante 138): los hitos SIGUEN siendo los del programa
+ * cíclico, pero el programa ya NO avanza solo. El siguiente servicio es el
+ * primer hito después del último que un servicio HECHO dejó atendido
+ * (`hitoAnclado`, `servicio-hito.util`) y se queda ahí, con `faltan_hr`
+ * negativo, hasta que alguien lo haga: el N621TX sigue en 1700 (no 1732.7) y
+ * ya no brinca a 1800 al pasar las 1,700 h con el de 1700 sin hacer.
  */
 
 import {
@@ -231,7 +238,8 @@ export function ultimoServicioDe(
  *
  * `faltan_hr` viaja TAL CUAL sale de la fuente única: cuando el hito queda
  * por debajo del tacómetro —una orden ABIERTA ya alcanzada lo sostiene hasta
- * que se marque COMPLETADO, invariante 108— el número sale NEGATIVO (el
+ * que se marque COMPLETADO (invariante 108), o simplemente nadie ha hecho
+ * todavía ese servicio (invariante 138)— el número sale NEGATIVO (el
  * pizarrón escribe «−30» en rojo). Recortarlo a 0 convertiría un servicio
  * VENCIDO en «justo a tiempo», que es el error más caro posible en esta tabla.
  */

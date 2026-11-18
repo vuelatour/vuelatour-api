@@ -1362,7 +1362,10 @@ export class AlertsService {
         mants,
       );
       if (!prox || prox.faltan > umbralHoras) return;
-      // Vencido = el hito ya quedó atrás y su orden sigue abierta.
+      // Vencido = el hito ya quedó atrás y ningún servicio hecho lo atiende.
+      // Desde el 18-nov-2026 (invariante 138) el hito se sostiene TAMBIÉN sin
+      // orden (`hitoAnclado`): si nunca nació —N4142R, hito de 4,500— se crea
+      // aquí mismo, ya vencida, y el aviso lo dice.
       const vencido = prox.faltan < 0;
       const vencidoHr = Number(Math.abs(prox.faltan).toFixed(1));
       const yaExiste = hitoYaTieneOrden(mants, prox);
@@ -1409,6 +1412,15 @@ export class AlertsService {
               prox.tareas.length > 4 ? '…' : ''
             }.`
           : '';
+      // El cierre del aviso VENCIDO no puede mentir sobre la orden: «sigue
+      // abierta» solo es cierto si ya existía. Si se acaba de crear en esta
+      // misma pasada (el hito se venció sin orden) hay que confirmarle fecha;
+      // y si el insert falló, no se promete una orden que no está.
+      const ordenVencidaTxt = yaExiste
+        ? 'Su orden sigue abierta: al terminar el servicio márcala como COMPLETADA para que el programa pase al siguiente hito.'
+        : mantenimientoId
+          ? 'Su orden quedó PROGRAMADA sin fecha: confirma la entrada al taller y, al terminar el servicio, márcala como COMPLETADA para que el programa pase al siguiente hito.'
+          : 'Su orden no se pudo crear en este intento (el sistema lo reintenta solo); el programa no pasa al siguiente hito hasta que ese servicio quede COMPLETADO.';
       await this.dispatch(
         config,
         `servicio:${aeronaveId}:${prox.a_las}:${mes}`,
@@ -1418,7 +1430,7 @@ export class AlertsService {
             ? `Servicio por horas VENCIDO: ${avion.matricula}`
             : `Servicio por horas cerca: ${avion.matricula}`,
           cuerpo: vencido
-            ? `El servicio de ${prox.intervalo} hrs (a las ${prox.a_las}) está vencido por ${vencidoHr} hrs. Tacómetro actual: ${hobbs}.${tareasTxt} Su orden sigue abierta: al terminar el servicio márcala como COMPLETADA para que el programa pase al siguiente hito.`
+            ? `El servicio de ${prox.intervalo} hrs (a las ${prox.a_las}) está vencido por ${vencidoHr} hrs. Tacómetro actual: ${hobbs}.${tareasTxt} ${ordenVencidaTxt}`
             : `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
           data: {
             aeronave_id: aeronaveId,

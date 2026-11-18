@@ -402,3 +402,91 @@ describe('proximo_servicio con una orden abierta ya alcanzada (hito pendiente)',
     });
   });
 });
+
+/**
+ * HITO ANCLADO (18-nov-2026, invariante 138). Reporte del cliente: «el N4142R
+ * ya se venció por como cinco horas y aparece que faltan 45 horas… como que
+ * se brincó al siguiente servicio de manera automática». El hito vencido NO
+ * tenía orden (el dedupe la daba por «cubierta» por el servicio del ciclo
+ * anterior, hecho tarde) y sin orden abierta nada sostenía el hito. Ahora lo
+ * sostiene el último servicio HECHO: el programa no avanza solo.
+ */
+describe('proximo_servicio SIN orden: el hito no brinca mientras nadie lo haga (hito anclado)', () => {
+  const HOBBS_VENCIDO = 2264.2;
+  /** El servicio de 2,200 (50 y 100 con base 1,700), hecho a 2,203.4. */
+  const HECHO_2200 = {
+    ...ORDEN_MANUAL,
+    id: 'hecho-2200',
+    estado: 'COMPLETADO',
+    horas_programadas: 2200,
+    etapa_intervalo_hr: 100,
+    horas_aeronave: 2203.4,
+    fecha_realizada: '2026-08-01',
+  };
+
+  it('el KPI y la ficha de tacómetros se quedan en 2,250 con faltan NEGATIVO y orden null (todavía no existe)', async () => {
+    const s = armar([HECHO_2200], undefined, HOBBS_VENCIDO);
+    const [kpi, hist] = await Promise.all([
+      s.aircraftMetrics(AVION),
+      s.tacometroHistorial(AVION),
+    ]);
+    expect(kpi.proximo_servicio).toMatchObject({
+      titulo: 'Servicio 500 hrs',
+      horas_objetivo: 2250,
+      faltan_hr: -14.2,
+      orden: null,
+    });
+    expect(hist.proximo_servicio).toMatchObject({
+      a_las: 2250,
+      intervalo: 50,
+      faltan: -14.2,
+      nombre: 'Servicio 500 hrs',
+      etapas_incluidas: [50],
+      orden: null,
+    });
+  });
+
+  it('el servicio del ciclo ANTERIOR hecho TARDE (programado a 2,200, hecho a 2,210) no atiende el de 2,250', async () => {
+    const m = await armar(
+      [{ ...HECHO_2200, etapa_intervalo_hr: 50, horas_aeronave: 2210 }],
+      undefined,
+      HOBBS_VENCIDO,
+    ).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2250,
+      faltan_hr: -14.2,
+      orden: null,
+    });
+  });
+
+  it('al registrar HECHO el servicio de 2,250 (aunque sea tarde) el programa avanza a 2,300', async () => {
+    const m = await armar(
+      [
+        HECHO_2200,
+        {
+          ...ORDEN_MANUAL,
+          estado: 'COMPLETADO',
+          etapa_intervalo_hr: 50,
+          horas_aeronave: 2262,
+          fecha_realizada: '2026-10-28',
+        },
+      ],
+      undefined,
+      HOBBS_VENCIDO,
+    ).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2300,
+      faltan_hr: 35.8,
+      orden: null,
+    });
+  });
+
+  it('antes del hito no cambia nada: a 2,240.2 h sigue «faltan 9.8 h» al de 2,250', async () => {
+    const m = await armar([HECHO_2200]).aircraftMetrics(AVION);
+    expect(m.proximo_servicio).toMatchObject({
+      horas_objetivo: 2250,
+      faltan_hr: 9.8,
+      orden: null,
+    });
+  });
+});

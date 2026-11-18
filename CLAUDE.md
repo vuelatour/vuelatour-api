@@ -12080,7 +12080,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       superior: un servicio tardío también atiende—; NO «una etapa mayor
       incluye a la menor», porque el dedupe tampoco lo asume y la ficha no
       puede dar por atendido un hito para el que el programa sí crea orden).
-      **Sin orden abierta alcanzada NO se inventa un vencido**: el programa
+      **Sin orden abierta alcanzada NO se inventa un vencido** (ACOTADO el
+      18-nov-2026, invariante 138: desde entonces eso vale SOLO para un
+      avión sin ningún servicio hecho del programa; con historial, el hito
+      se sostiene vencido aunque no tenga orden): el programa
       cíclico sigue igual (XB-ANU con base 1,253.9 y cero mantenimientos
       sigue en «faltan 22.3 h» al hito de 1,403.9; el historial sin capturar
       no se castiga).
@@ -13683,6 +13686,120 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        en el mismo proceso y 23505 de otro, alta a medias en sus tres salidas,
        columna ausente y encendido solo) y `compras.controller.spec.ts` (HTTP
        real: 201 / 200, llave uuid o 400, `code` y `details` por el filtro).
+
+138. **PRÓXIMO SERVICIO: EL PROGRAMA NO AVANZA SOLO — HITO ANCLADO AL ÚLTIMO
+     SERVICIO HECHO (18-nov-2026, API 0.0.143, SIN migración).** Reporte del
+     cliente (17-nov): «ajustamos para que los servicios, en vez de
+     continuarse al siguiente de manera automática, aparezcan "vencido por"…
+     en el XA-VGV aparece vencido por 14 horas. Creo que solo se aplicó en ese
+     avión: el N4142R ya se venció por como cinco horas y aparece que faltan
+     45 horas… como que se brincó al siguiente servicio de manera
+     automática». Era cierto: la invariante 108 solo sostenía el hito con una
+     ORDEN ABIERTA, y esa orden no nacía cuando el servicio del ciclo
+     ANTERIOR se había hecho tarde. N4142R (base 4,200, [50,100,500,1000]):
+     la orden de 4,400 (etapa 100) se completó a 4,406 h ⇒ la regla 2 del
+     dedupe (`horas_aeronave ∈ (hito − intervalo, hito + 0.05]`) la daba por
+     «hecha dentro del ciclo» del hito de 4,500 ⇒ el programa nunca creó la
+     orden de 4,500 ⇒ al pasar las 4,500 el cíclico brincó a 4,550 («faltan
+     45.9 h» con el tacómetro en 4,504.1). N621TX igual: la de 1,600 se
+     completó a 1,632.7 y a 1,702.4 h decía «faltan 97.6 h» (1,800) con el
+     de 1,700 sin hacer. Peor: el aviso «Servicio por horas cerca» SÍ salió
+     (N4142R el 31-oct y el 1-nov, N621TX el 6-nov, en `alerta_emitida`) y
+     decía «El mantenimiento ya quedó PROGRAMADO» sin que existiera ninguna
+     orden.
+     - **Regla (PURA, `src/common/servicio-hito.util.ts`)**: el programa sigue
+       siendo CÍCLICO (hitos `base + k × intervalo`) pero NO avanza solo. El
+       próximo servicio es el primer hito ESTRICTAMENTE después del último
+       que un servicio HECHO dejó atendido (`hitoAnclado` =
+       `siguienteHitoDespuesDe(…, ultimoHitoAtendido)`), y ahí se queda —con
+       `faltan` NEGATIVO— hasta que otro servicio hecho lo atienda, exista o
+       no su orden. `siguienteHitoDespuesDe` usa `k = max(1, floor((desde −
+       base + 0.05) / intervalo) + 1)`: con base 329.6, `(1029.6 − 329.6) /
+       100` da 6.999999999999999 y un `floor` a secas devolvería el MISMO
+       hito.
+     - **`posicionAtendida`** (hasta dónde deja atendido el programa un
+       servicio HECHO del avión; `null` = no cuenta). CON `horas_programadas`
+       la fila DECLARA su hito y la posición es ese número aunque se haya
+       hecho tarde (programado a 4,450, hecho a 4,455.1 ⇒ 4,450): cuenta si
+       el número es un hito del programa o si la fila trae una etapa del
+       programa (XA-VGV: 2,212 con etapa 50); fuera del programa y sin etapa
+       no cuenta (XB-PEV: «Servicio 50,100» a las 300 con base 329.6;
+       N621TX: el «100» hecho EN la base 1,500). SIN `horas_programadas`
+       exige etapa del programa y `horas_aeronave`: si el siguiente hito está
+       a ≤ `VENTANA_ANTICIPO_HR` (10 h) y es de ESA etapa, la posición es ese
+       hito (se hizo un poco antes); si no, es el tacómetro (se hizo tarde y
+       el hito siguiente queda pendiente). Reparaciones y capturas sin etapa
+       («50 Y 100 HRS» en texto libre) no cuentan: una reparación terminada
+       después del hito NO lo atiende.
+     - **Guarda de futuro** (`ultimoHitoAtendido`): se ignoran las posiciones
+       por arriba de `tacómetro + intervalo más chico + 0.05`. Un «hecho» de
+       un hito a cientos de horas adelante (dedazo) no esconde los servicios
+       que tocan.
+     - **Sin ningún servicio hecho del programa NO se inventa un vencido**
+       (`hitoAnclado` = `null` ⇒ el cíclico de siempre desde el tacómetro):
+       XB-ANU (base 1,253.9, cero mantenimientos) sigue en «faltan 22.3 h» al
+       de 1,403.9. Decisión MÍA del lote, sin confirmar con el cliente: la
+       base de varios aviones es solo el origen de fase del programa (XA-VGV
+       1,750) y anclar ahí inventaría cientos de horas vencidas; basta
+       capturar UN servicio hecho para que el avión entre a la regla.
+     - **`VENTANA_ANTICIPO_HR = 10` es UNA constante para tres reglas que
+       tienen que coincidir**: la posición, la regla 2 del dedupe
+       (`mantenimientoCubreHito`: hecho, SIN `horas_programadas`, misma
+       etapa, `horas_aeronave ∈ [hito − 10 − 0.05, hito + 0.05]`; una fila
+       CON horas programadas pertenece a ESE número y solo cubre por la
+       regla 1) y la regla (b) de `hitoAtendido` (misma etapa y
+       `horas_programadas ≥ hito − 0.05`, o sin horas programadas y
+       `horas_aeronave ≥ hito − 10 − 0.05`). Si el dedupe da por «cubierto»
+       un hito que la ficha muestra pendiente, su orden no se crea NUNCA (es
+       lo que pasó). El spec barre 2,402 tacómetros y el hito anclado jamás
+       sale cubierto por un servicio hecho sin número.
+     - **Una sola fuente**: `AircraftService.proximoServicioDetallado(…,
+       mantenimientos)` toma el hito PENDIENTE de orden (inv. 108) y el
+       ANCLADO y se queda con el de horas más BAJAS (lo más atrasado primero;
+       a igualdad, el pendiente). Sin ninguno ⇒ cíclico. Sin `mantenimientos`
+       ⇒ comportamiento histórico. `proximoServicio` NO cambió: la línea
+       «próximo servicio» del balance por avión sigue con el cíclico (para
+       N4142R dice 4,550 mientras la ficha dice «vencido por 4.1 h»; sigue
+       fuera a propósito, inv. 108).
+     - **Programa automático** (`AlertsService.revisarProgramaDeServicio`):
+       con el hito vencido y sin orden, la CREA (nota «…el hito de 4500 h ya
+       se alcanzó (vencido por 4.1 h, tacómetro 4504.1)…») y avisa «Servicio
+       por horas VENCIDO». El cierre del aviso no miente sobre la orden: «Su
+       orden sigue abierta…» solo si ya existía; «Su orden quedó PROGRAMADA
+       sin fecha…» si se creó en esa pasada; «Su orden no se pudo crear en
+       este intento…» si el insert falló. Dedupe mensual y candados de
+       concurrencia intactos — OJO: el aviso VENCIDO comparte clave con el
+       «cerca» (`servicio:<avión>:<a_las>:<mes>`), así que un hito cuyo
+       «cerca» ya salió ese mes NO vuelve a avisar al vencerse (la orden sí
+       se crea; el aviso regresa el mes siguiente). Contrato sin cambios de
+       FORMA (solo qué hito sale): el panel ya pinta «vencido por N h» y, sin
+       orden, «La orden se genera sola en unos minutos».
+     - **Flota real del 17-nov**: N4142R 4,500 (100; [50,100]) −4.1 y
+       N621TX 1,700 −2.4, los dos sin orden ⇒ se crea. Igual que antes:
+       N58BT 1,700 +72.2; N990GG 5,650 +48.7 (su orden PROGRAMADA); XA-VGV
+       2,250 (500) −14.2 (su orden EN_TALLER); XB-PEV 429.6 (100) +31;
+       XB-ANU 1,403.9 +22.3.
+     - **Límites conocidos**: (1) una orden CON horas programadas completada
+       con más de un intervalo de retraso deja el siguiente hito ya vencido
+       (se cierran uno por uno; un servicio manual sin horas programadas sí
+       se pone al día solo); (2) una orden sin etapa cuyo número cae en un
+       hito del programa (la «HSI» del N58BT a 1,800) cuenta como el servicio
+       de ese hito al completarse; (3) un overhaul de componente con horas
+       programadas justo en un hito lo «cubre» para el dedupe (regla 1, sin
+       cambio) pero no lo atiende; (4) el aviso «cerca» sigue diciendo «El
+       mantenimiento ya quedó PROGRAMADO» aunque su insert falle (solo se
+       corrigió el VENCIDO).
+     - Specs: `servicio-hito.flota-real.fixture-spec.ts` (los 7 aviones
+       reales con sus esperados, compartido), `servicio-hito.util.spec`
+       (`siguienteHitoDespuesDe`: flotantes, desde < base, empates;
+       `posicionAtendida` rama por rama; guarda de futuro; manual 7 h antes
+       sí / 15 h antes no; reparación que no atiende; regla 2 y regla (b)
+       nuevas; barrido dedupe-vs-ancla), `servicio-flota.util.spec` (la flota
+       real por la fuente única; manda el más bajo en los dos sentidos; al
+       completar pasa a 4,550 / 1,800), `aircraft.service.proximo-servicio.spec`
+       (KPI y tacómetros sin orden) y `alerts.service.servicio-horas.spec`
+       (N4142R y N621TX crean la orden vencida y no la duplican; al completar
+       avanzan; insert fallido; los otros cinco no crean nada).
 
 ## Convenciones NestJS
 

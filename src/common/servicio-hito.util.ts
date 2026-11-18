@@ -19,6 +19,14 @@
  * (`hitoPendienteDeOrden`): el programa cíclico NO brinca al siguiente
  * servicio mientras una orden ya alcanzada siga abierta (invariante 108).
  *
+ * Desde el 18-nov-2026 también vive aquí el HITO ANCLADO (`hitoAnclado`,
+ * invariante 138): el programa NO avanza solo. El «próximo servicio» es el
+ * primer hito del programa después del ÚLTIMO que un servicio HECHO dejó
+ * atendido, exista o no su orden — y se queda ahí, con contador negativo,
+ * hasta que alguien lo haga. Antes solo una orden abierta sostenía el hito, y
+ * la orden no nacía cuando el servicio del ciclo ANTERIOR se había hecho
+ * tarde (N4142R: el de 4,400 hecho a 4,406 «cubría» el de 4,500).
+ *
  * Todo aquí es PURO (sin BD, sin fechas del sistema): se prueba con specs.
  */
 
@@ -27,6 +35,23 @@
  * 1 decimal; 0.05 es media décima (el criterio histórico del check).
  */
 export const TOLERANCIA_HITO_HR = 0.05;
+
+/**
+ * VENTANA DE ANTICIPO (18-nov-2026, invariante 138): un servicio hecho hasta
+ * 10 h ANTES de un hito cuenta para ESE hito. Es el mismo margen con el que
+ * el programa automático crea la orden (`alerta_config.servicio_horas`, 10 h
+ * por omisión): el mecánico mete el avión unas horas antes y ese servicio es
+ * el del hito que viene. Más lejos que eso ya no es «un poco antes»: es el
+ * servicio del hito ANTERIOR hecho tarde, y el que viene sigue pendiente.
+ *
+ * La usan TRES reglas que tienen que coincidir (por eso es una constante):
+ * `posicionAtendida` (hasta dónde deja atendido el programa un servicio sin
+ * horas programadas), la regla 2 de `mantenimientoCubreHito` (dedupe) y la
+ * regla (b) de `hitoAtendido`. Si el dedupe usara una ventana más ancha que
+ * la posición, daría por «cubierto» un hito que la ficha muestra pendiente y
+ * su orden no se crearía nunca.
+ */
+export const VENTANA_ANTICIPO_HR = 10;
 
 /**
  * Prefijo EXACTO de `mantenimiento.notas` cuando la orden la creó el programa
@@ -81,6 +106,11 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Horas a 1 decimal (como viajan el hobbs y los hitos). */
+function r1(n: number): number {
+  return Number(n.toFixed(1));
+}
+
 /** ¿`v` es el mismo número que `objetivo` dentro de la tolerancia del hito? */
 function cerca(v: unknown, objetivo: number): boolean {
   const n = num(v);
@@ -91,10 +121,17 @@ function cerca(v: unknown, objetivo: number): boolean {
  * ¿Esta orden CUBRE el hito? (criterio del dedupe, EN CUALQUIER ESTADO)
  *
  * 1. Mismo hito por horas programadas (±0.05) — da igual el estado.
- * 2. Servicio de la MISMA etapa ya HECHO dentro del ciclo actual (entró a
- *    horas ∈ (hito − intervalo, hito + 0.05]): el hito está cubierto aunque
- *    el hobbs no lo rebase todavía — no re-crear lo que el mecánico acaba de
- *    terminar (verificación 26-ago-2026).
+ * 2. Servicio de la MISMA etapa ya HECHO, capturado SIN horas programadas,
+ *    que entró dentro de la ventana de anticipo del hito (horas ∈
+ *    [hito − 10 − 0.05, hito + 0.05], `VENTANA_ANTICIPO_HR`): el hito está
+ *    cubierto aunque el hobbs no lo rebase todavía — no re-crear lo que el
+ *    mecánico acaba de terminar (verificación 26-ago-2026).
+ *    Una fila CON horas programadas pertenece a ESE número y solo cubre por
+ *    la regla 1. Hasta el 17-nov-2026 la ventana era el ciclo ENTERO
+ *    ((hito − intervalo, hito + 0.05]) y no miraba las horas programadas: el
+ *    servicio de 4,400 h del N4142R, hecho TARDE a 4,406 h, «cubría» el hito
+ *    de 4,500 ⇒ su orden no se creó nunca y, al pasar las 4,500, el programa
+ *    brincó a 4,550 (invariante 138).
  * 3. Entrada MANUAL abierta de la misma etapa SIN horas programadas: es la
  *    que levantó el mecánico; duplicarla sería ruido.
  */
@@ -106,9 +143,10 @@ export function mantenimientoCubreHito(
   if (m.estado === 'COMPLETADO' || m.fecha_realizada != null) {
     const ha = num(m.horas_aeronave);
     return (
+      num(m.horas_programadas) == null &&
       cerca(m.etapa_intervalo_hr, hito.intervalo) &&
       ha != null &&
-      ha > hito.a_las - hito.intervalo &&
+      ha >= hito.a_las - VENTANA_ANTICIPO_HR - TOLERANCIA_HITO_HR &&
       ha <= hito.a_las + TOLERANCIA_HITO_HR
     );
   }
@@ -253,13 +291,21 @@ export interface HitoPendiente extends HitoServicio {
  *
  *  a) La orden de ese hito se completó: `horas_programadas` ≈ hito (±0.05)
  *     — la regla 1 del dedupe.
- *  b) Un servicio de la MISMA etapa entró DESPUÉS del hito anterior de ese
- *     intervalo (`horas_aeronave > hito − intervalo`), antes o DESPUÉS del
- *     hito: es la regla 2 del dedupe sin su tope superior (un servicio tardío
- *     también atiende). Misma etapa a propósito —no «una mayor incluye a la
- *     menor»—: el dedupe tampoco lo asume, y si aquí lo asumiéramos la ficha
- *     daría por atendido un hito para el que el programa SÍ crea orden. Sin
- *     etapa capturada no se puede atribuir ⇒ no cuenta.
+ *  b) Un servicio de la MISMA etapa que es de ESTE hito o de uno POSTERIOR:
+ *     - CON horas programadas: `horas_programadas ≥ hito − 0.05` (la fila
+ *       declara su número: un servicio posterior de la misma etapa ya
+ *       hecho deja atrás a este);
+ *     - SIN horas programadas: `horas_aeronave ≥ hito − 10 − 0.05`
+ *       (`VENTANA_ANTICIPO_HR`): entró un poco antes del hito, en el hito o
+ *       DESPUÉS (un servicio tardío también atiende).
+ *     Misma etapa a propósito —no «una mayor incluye a la menor»—: el dedupe
+ *     tampoco lo asume, y si aquí lo asumiéramos la ficha daría por atendido
+ *     un hito para el que el programa SÍ crea orden. Sin etapa capturada no
+ *     se puede atribuir ⇒ no cuenta.
+ *     Hasta el 17-nov-2026 bastaba `horas_aeronave > hito − intervalo`, sin
+ *     mirar las horas programadas: el servicio del ciclo ANTERIOR hecho tarde
+ *     (N4142R: programado a 4,400, hecho a 4,406) daba por atendido el hito
+ *     de 4,500 (invariante 138).
  */
 export function hitoAtendido(
   hechos: readonly MantenimientoHitoRow[],
@@ -268,11 +314,12 @@ export function hitoAtendido(
   return hechos.some((h) => {
     if (!servicioHecho(h) || !esServicioDelAvion(h)) return false;
     if (cerca(h.horas_programadas, hito.a_las)) return true;
+    if (!cerca(h.etapa_intervalo_hr, hito.intervalo)) return false;
+    const hp = num(h.horas_programadas);
+    if (hp != null) return hp >= hito.a_las - TOLERANCIA_HITO_HR;
     const ha = num(h.horas_aeronave);
     return (
-      cerca(h.etapa_intervalo_hr, hito.intervalo) &&
-      ha != null &&
-      ha > hito.a_las - hito.intervalo
+      ha != null && ha >= hito.a_las - VENTANA_ANTICIPO_HR - TOLERANCIA_HITO_HR
     );
   });
 }
@@ -296,9 +343,12 @@ export function hitoAtendido(
  * programa (un «cambio de llanta a las 2,230 h» no es un servicio por
  * horas). Sin programa (`intervalos` vacío) ⇒ `null`.
  *
- * Sin orden abierta alcanzada NO se inventa un vencido: un avión con
- * historial sin capturar (XB-ANU: base 1,253.9 y ningún mantenimiento) sigue
- * apuntando al siguiente hito del programa, como siempre.
+ * Sin orden abierta alcanzada ESTA función no sostiene nada (`null`). Desde
+ * el 18-nov-2026 el hito tampoco brinca sin orden: de eso se encarga
+ * `hitoAnclado` (invariante 138), y `proximoServicioDetallado` se queda con
+ * el más BAJO de los dos. Un avión sin NINGÚN servicio hecho del programa
+ * (XB-ANU: base 1,253.9 y ningún mantenimiento) sigue apuntando al siguiente
+ * hito del programa cíclico, como siempre: no se inventa un vencido.
  */
 export function hitoPendienteDeOrden(args: {
   mantenimientos: readonly MantenimientoHitoRow[];
@@ -308,7 +358,6 @@ export function hitoPendienteDeOrden(args: {
 }): HitoPendiente | null {
   const ints = intervalosDelPrograma(args.intervalos);
   if (ints.length === 0 || !Number.isFinite(args.horas)) return null;
-  const r1 = (n: number) => Number(n.toFixed(1));
   let mejor: HitoPendiente | null = null;
   for (const m of args.mantenimientos) {
     if (!esServicioDelAvion(m) || !ordenEstaAbierta(m)) continue;
@@ -339,4 +388,174 @@ export function hitoPendienteDeOrden(args: {
     }
   }
   return mejor;
+}
+
+// ───────── Hito ANCLADO: el programa no avanza solo (18-nov-2026, inv. 138) ─────────
+
+/** Un hito del programa con las etapas que caen en él. */
+export interface HitoDelPrograma extends HitoServicio {
+  /** Intervalos del programa cuyo ciclo cae en el hito (ascendente). El
+   *  `intervalo` del hito es el MAYOR: el servicio grande incluye a los
+   *  chicos (misma regla que `AircraftService.proximoServicio`). */
+  etapas_incluidas: number[];
+}
+
+/**
+ * El primer hito del programa cíclico (`base + k × intervalo`, k ≥ 1)
+ * ESTRICTAMENTE después de `desde`. `null` sin programa.
+ *
+ * ROBUSTO AL PUNTO FLOTANTE cuando `desde` cae justo en un hito: con base
+ * 329.6, `(1029.6 − 329.6) / 100` da 6.999999999999999 y un `floor` a secas
+ * devolvería el MISMO hito de 1,029.6 en vez del siguiente. Por eso
+ * `k = max(1, floor((desde − base + 0.05) / intervalo) + 1)`: todo lo que
+ * esté a media décima del hito ES el hito, y el que sigue es el próximo.
+ * `desde` por debajo de la base ⇒ el primer hito (`base + intervalo`).
+ *
+ * Empate entre intervalos ⇒ la etiqueta (`intervalo`) es el MAYOR y
+ * `etapas_incluidas` los trae todos, de menor a mayor.
+ */
+export function siguienteHitoDespuesDe(
+  intervalos: readonly unknown[],
+  base: unknown,
+  desde: number,
+): HitoDelPrograma | null {
+  const ints = intervalosDelPrograma(intervalos);
+  if (ints.length === 0 || !Number.isFinite(desde)) return null;
+  const b = num(base) ?? 0;
+  let aLas: number | null = null;
+  let incluidas: number[] = [];
+  for (const int of ints) {
+    const k = Math.max(
+      1,
+      Math.floor((desde - b + TOLERANCIA_HITO_HR) / int) + 1,
+    );
+    const hito = r1(b + k * int);
+    if (aLas == null || hito < aLas - TOLERANCIA_HITO_HR) {
+      aLas = hito;
+      incluidas = [int];
+    } else if (Math.abs(hito - aLas) <= TOLERANCIA_HITO_HR) {
+      incluidas.push(int);
+    }
+  }
+  if (aLas == null) return null;
+  incluidas.sort((x, y) => x - y);
+  return {
+    a_las: aLas,
+    intervalo: incluidas[incluidas.length - 1],
+    etapas_incluidas: incluidas,
+  };
+}
+
+/**
+ * ¿HASTA QUÉ HORAS deja ATENDIDO el programa este servicio? `null` = no
+ * cuenta para el programa (no está hecho, es de un componente, o no se puede
+ * atribuir a ningún hito).
+ *
+ * CON `horas_programadas` la fila DECLARA su hito y la posición es ese
+ * número, se haya hecho cuando se haya hecho (programado a 4,450 y hecho a
+ * 4,455.1 ⇒ 4,450: el siguiente es 4,500, no 4,550). Cuenta si ese número es
+ * un hito del programa (`intervalosEnHito`) O si la fila trae una etapa del
+ * programa (la orden manual «50 hrs a las 2,212»). Con horas fuera del
+ * programa y sin etapa —un «cambio de llanta a las 2,230», el «Servicio
+ * 50,100» capturado a las 300 con base 329.6, o el servicio hecho EN la base
+ * (1,500 con base 1,500)— no cuenta.
+ *
+ * SIN `horas_programadas` solo se puede atribuir por la etapa y el tacómetro
+ * con el que entró (`horas_aeronave`):
+ *  - si el siguiente hito del programa (en o después de ese tacómetro) está
+ *    a ≤ 10 h (`VENTANA_ANTICIPO_HR`) y es de ESA etapa ⇒ se hizo un poco
+ *    antes: la posición es ese hito;
+ *  - si no ⇒ se hizo TARDE (o es de una etapa menor que la del hito): la
+ *    posición es el tacómetro, y el primer hito después de él queda
+ *    pendiente.
+ * Sin etapa del programa (reparaciones, o un «50 Y 100 HRS» capturado como
+ * texto libre) no cuenta: una reparación terminada después del hito no lo
+ * atiende.
+ */
+export function posicionAtendida(
+  m: MantenimientoHitoRow,
+  intervalos: readonly unknown[],
+  base: unknown,
+): number | null {
+  if (!servicioHecho(m) || !esServicioDelAvion(m)) return null;
+  const ints = intervalosDelPrograma(intervalos);
+  if (ints.length === 0) return null;
+  const etapa = num(m.etapa_intervalo_hr);
+  const etapaDelPrograma = etapa != null && ints.some((i) => cerca(i, etapa));
+  const hp = num(m.horas_programadas);
+  if (hp != null) {
+    return etapaDelPrograma || intervalosEnHito(ints, base, hp).length > 0
+      ? hp
+      : null;
+  }
+  const ha = num(m.horas_aeronave);
+  if (!etapaDelPrograma || ha == null) return null;
+  // El primer hito EN o después del tacómetro (≥ ha − 0.05).
+  const siguiente = siguienteHitoDespuesDe(
+    ints,
+    base,
+    ha - 2 * TOLERANCIA_HITO_HR,
+  );
+  const unPocoAntes =
+    siguiente != null &&
+    siguiente.a_las - ha <= VENTANA_ANTICIPO_HR + TOLERANCIA_HITO_HR &&
+    cerca(etapa, siguiente.intervalo);
+  return unPocoAntes ? siguiente.a_las : ha;
+}
+
+/** Lo que necesitan `ultimoHitoAtendido` y `hitoAnclado`. */
+export interface ArgsHitoAnclado {
+  mantenimientos: readonly MantenimientoHitoRow[];
+  intervalos: readonly unknown[];
+  base: unknown;
+  /** Tacómetro actual del avión. */
+  horas: number;
+}
+
+/**
+ * La posición MÁS ALTA que dejaron atendida los servicios HECHOS del
+ * programa (`posicionAtendida`), o `null` si ninguno cuenta.
+ *
+ * GUARDA CONTRA ERRORES DE CAPTURA: se ignoran las posiciones por arriba de
+ * `horas + (intervalo más chico del programa) + 0.05`. Un servicio hecho se
+ * adelanta, a lo mucho, unas horas a su hito; un «hecho» de un hito a cientos
+ * de horas en el futuro (dedazo, o una orden lejana cerrada por error) no
+ * puede esconder los servicios que SÍ tocan.
+ */
+export function ultimoHitoAtendido(args: ArgsHitoAnclado): number | null {
+  const ints = intervalosDelPrograma(args.intervalos);
+  if (ints.length === 0 || !Number.isFinite(args.horas)) return null;
+  const tope = args.horas + Math.min(...ints) + TOLERANCIA_HITO_HR;
+  let ultimo: number | null = null;
+  for (const m of args.mantenimientos) {
+    const posicion = posicionAtendida(m, ints, args.base);
+    if (posicion == null || posicion > tope) continue;
+    if (ultimo == null || posicion > ultimo) ultimo = posicion;
+  }
+  return ultimo;
+}
+
+/**
+ * EL HITO ANCLADO (invariante 138, reporte del cliente 17-nov-2026): «los
+ * servicios, en vez de continuarse al siguiente de manera automática,
+ * aparezcan "vencido por"… el N4142R ya se venció por como cinco horas y
+ * aparece que faltan 45 horas… como que se brincó al siguiente servicio de
+ * manera automática».
+ *
+ * El programa sigue siendo CÍCLICO (hitos `base + k × intervalo`), pero NO
+ * avanza solo: el próximo servicio es el primer hito ESTRICTAMENTE después
+ * del último que un servicio HECHO dejó atendido (`ultimoHitoAtendido`), y
+ * ahí se queda —con `faltan` negativo si el tacómetro ya lo pasó— hasta que
+ * otro servicio hecho lo atienda. No depende de que exista la orden: es
+ * justo lo que permite CREARLA cuando el hito ya se venció.
+ *
+ * `null` = el avión no tiene NINGÚN servicio hecho del programa (XB-ANU:
+ * cero mantenimientos): ahí sigue el programa cíclico desde el tacómetro,
+ * como siempre — el historial sin capturar no se castiga con un vencido
+ * inventado.
+ */
+export function hitoAnclado(args: ArgsHitoAnclado): HitoDelPrograma | null {
+  const ultimo = ultimoHitoAtendido(args);
+  if (ultimo == null) return null;
+  return siguienteHitoDespuesDe(args.intervalos, args.base, ultimo);
 }
