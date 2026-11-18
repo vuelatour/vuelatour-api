@@ -13828,6 +13828,91 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        servicios del N4142R, todos vuelven; la consulta no lleva ninguna
        condición de fecha).
 
+140. **GOOGLE CALENDAR: UNA FILA POR DÍA EN LOS VUELOS DE VARIOS DÍAS — EL
+     VUELO DE UN DÍA NO CAMBIA (18-nov-2026, API 0.0.145, caso #478, SIN
+     migración).** Reporte de la oficina (17-nov): «por ser un vuelo de dos
+     días no sé por qué lo manda a la barrita de arriba […] estaría bien que
+     se mostrara normal». Desde el 15-sep cada vuelo era UN evento de la
+     primera salida a la última + 1 h; el #478 quedó 18-nov 10:00 → 19-nov
+     13:00 y Google pinta en la franja de «todo el día» cualquier evento de
+     24 h o más.
+     - **Regla**: un vuelo cuyos tramos ACTIVOS salen en DOS O MÁS días de
+       Cancún se publica como UNA FILA POR DÍA CON SALIDAS, cada una en su
+       hora y de menos de 24 h; los días intermedios sin salidas no llevan
+       fila. **El vuelo de UN día sale EXACTAMENTE como antes** (decisión del
+       cliente del 15-sep: mismo cuerpo, misma columna, mismas escrituras;
+       cotejado contra el servicio anterior en 20,000 vuelos de un día al
+       azar). La regla mira las SALIDAS: tramos de un solo día con
+       `fecha_traslado_final` en otro siguen siendo la fila única de siempre.
+     - **Piezas PURAS** (`calendar/google-evento.util.ts`, con spec):
+       `partirTramosPorDia` (un grupo por día con salidas, cronológico; el
+       tramo sin fecha va con el día del anterior con fecha y nunca abre un
+       día; jamás dos grupos del mismo día), `ventanaDiaEventoVuelo` (salida
+       más temprana del día → último instante conocido de ESE día + 1 h;
+       `fecha_traslado_final` solo cuenta en el día en que cae; tope 23 h
+       59 min), `lineaDiaEventoVuelo` y `etiquetaFilaVuelo`.
+     - **Cada fila**: título `{piloto} {AVIÓN} {ruta} {hora}` con la ruta y
+       la hora DE ESE DÍA y el piloto y el avión del PRIMER tramo de ese día
+       (con herencia del vuelo); color = el criterio de siempre aplicado a
+       ese primer tramo; descripción = la del vuelo COMPLETO, igual en todas
+       las filas, con una primera línea «Día 1 de 2 · miércoles 18/11/2026 ·
+       tramos T1 y T2» («Día N de M» cuenta días CON salidas).
+       `vuelatour_tramo` = `'vuelo'` en el día 1 y `'dia-N'` en los
+       siguientes: es INFORMATIVA, ningún paso de limpieza decide por ella.
+       #478: `Alejandro N621TX cun-ctm-mhl 10:00` (18-nov 10:00–13:00) y
+       `Alejandro N621TX mhl-ctm-cun 10:00` (19-nov 10:00–13:00).
+     - **RANURAS (dónde vive el id; columnas que ya existían)**: día 1 ⇒
+       `vuelo.google_calendar_id` (el evento que ya existía se ACTUALIZA,
+       jamás se borra para re-crearlo); día N ≥ 2 ⇒
+       `escala.google_calendar_id` del PRIMER tramo activo de ese día (el
+       ANCLA); REDONDO sin escalas con el regreso otro día ⇒
+       `vuelo.google_calendar_regreso_id`. **Esas dos columnas YA NO son
+       «legado»**: lo que diga lo contrario en la sección del espejo a Google
+       (bullets «UNA SOLA FILA POR VUELO … LEGADO», «`vuelatour_tramo:
+       'vuelo'` (valor único)» e «Idempotencia») quedó superado por esta
+       invariante. `verificarVivos` lee las tres: no quitarle ninguna.
+     - **Orden de `syncFlightAhora` (no cambiarlo)**: (1) `buildFilasVuelo`
+       calcula las filas deseadas, puro; (2) `limpiarRanurasSobrantes` (antes
+       `limpiarEventosLegado`, que borraba a ciegas) borra de Google y pone
+       en null SOLO el id de una ranura que hoy no se desea — formato viejo,
+       tramo que ya no abre un día, tramo cancelado, vuelo que volvió a ser
+       de un día —; borrado fallido ⇒ conserva el id y devuelve false;
+       (3) publica cada fila en orden y guarda su id EN CUANTO Google lo
+       devuelve, solo si cambió.
+     - **NUNCA DOS FILAS DEL MISMO DÍA NI UN FANTASMA**: (a) si en la pasada
+       falló un borrado de (2), NO se crea ninguna fila nueva de día ≥ 2 (las
+       existentes sí se actualizan); (b) el id de una fila de día ≥ 2 se
+       guarda con `returning id`: si la base falla o el UPDATE no toca
+       ninguna fila (ancla borrada a media pasada), el evento recién creado
+       se BORRA y la pasada devuelve false; (c) el worker procesa los
+       `borrar_evento` ANTES que los vuelos del mismo lote
+       (`ordenarItemsCola`): al borrar de la base un tramo ancla, su fila
+       sale antes de que nazca la del nuevo primero de ese día.
+     - **Anti-loop intacto (verificado en PROD el 18-nov con un UPDATE real
+       revertido)**: esos UPDATE mandan SOLO la columna del id ⇒
+       `tg_set_updated_at` conserva `escala.updated_at` /
+       `vuelo.updated_at`, y ni `trg_escala_calendar_sync` ni
+       `trg_vuelo_calendar_sync` (son `AFTER UPDATE OF …` sin los ids de
+       Google) vuelven a encolar. No agregar campos a esos updates.
+     - **Despliegue**: solo API. Los vuelos de varios días ya publicados se
+       corrigen con el reconcile de las 00:15, con `POST /v1/calendar/resync`
+       o encolándolos por SQL (`insert into calendar_sync_cola (entidad,
+       entidad_id, motivo) … on conflict … do update`, los vuelos cuyo
+       `fecha_fin` cae en un día de Cancún posterior al de `fecha_vuelo`).
+       Rollback limpio: el API anterior borra las filas de día en la
+       siguiente pasada de cada vuelo.
+     - **Specs**: `calendar-sync.fila-por-dia.spec.ts` (Google y base falsos
+       CON ESTADO; tras cada pasada revisa que no haya fantasmas, columnas
+       colgando ni dos filas el mismo día; 60 secuencias al azar con fallos),
+       `google-evento.util.spec.ts`, `calendar-sync.cola.spec.ts` (orden del
+       worker) y `calendar-sync.reconcile.spec.ts` (`dia-N` se conserva si su
+       id está guardado).
+     - **Pendiente de decisión**: tramos de un solo día con
+       `fecha_traslado_final` en otro siguen saliendo como barra; la ranura
+       del VUELO sigue sin compensar un fallo al guardar su id (como antes);
+       y en un viaje con pernocta los días intermedios SIN salidas ya no
+       muestran nada (antes la barra los cubría).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

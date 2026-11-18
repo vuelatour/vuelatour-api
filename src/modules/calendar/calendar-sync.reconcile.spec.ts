@@ -568,6 +568,72 @@ describe('CalendarSyncService — paso inverso (huérfanos y duplicados)', () =>
     expect(borrados).not.toContain('ev-manual');
   });
 
+  /**
+   * UNA FILA POR DÍA (17-nov-2026): las filas de los días 2, 3… de un vuelo
+   * de varios días llevan `vuelatour_tramo: 'dia-N'` y su id vive en
+   * `escala.google_calendar_id` (el tramo ancla del día) o, en un REDONDO sin
+   * escalas, en `vuelo.google_calendar_regreso_id` — las MISMAS columnas que
+   * guardaban el formato viejo. Este paso NO decide por la etiqueta: conserva
+   * lo que una columna apunta y borra lo que no, se llame como se llame.
+   */
+  it('las filas de DÍA de un vuelo de varios días (dia-N) se CONSERVAN mientras su id esté guardado; la que nadie apunta se borra', async () => {
+    eventosGoogle.list.mockReset();
+    eventosGoogle.list.mockResolvedValueOnce({
+      data: {
+        items: [
+          evGoogle(
+            'ev-vivo',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'vuelo' },
+            'Alejandro N621TX cun-ctm-mhl 10:00',
+          ),
+          // Día 2: id guardado en el tramo ancla (`escala.google_calendar_id`).
+          evGoogle(
+            'ev-tramo',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'dia-2' },
+            'Alejandro N621TX mhl-ctm-cun 10:00',
+          ),
+          // Una fila de día con el id en la columna del regreso
+          // (`vuelo.google_calendar_regreso_id`), que es donde vive el día 2
+          // de un REDONDO sin escalas. Un vuelo real no usa las dos columnas
+          // a la vez: aquí solo importa que CUALQUIERA de ellas la protege.
+          evGoogle(
+            'ev-regreso',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'dia-3' },
+            'Alejandro N621TX cun-czm-cun 9:00',
+          ),
+          // Otra fila «dia-2» del MISMO vuelo que ninguna columna apunta: es
+          // un duplicado fantasma, por mucho que su etiqueta sea la vigente.
+          evGoogle(
+            'ev-dia-2-fantasma',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'dia-2' },
+            'Alejandro N621TX mhl-ctm-cun 10:00',
+          ),
+        ],
+      },
+    });
+    const { service } = armar(
+      rutasVerificacion({
+        vuelo: (q) => {
+          if (!tiene(q, 'in')) return { data: [], error: null }; // ventana
+          return {
+            data: [
+              {
+                id: V1,
+                google_calendar_id: 'ev-vivo',
+                google_calendar_regreso_id: 'ev-regreso',
+              },
+            ],
+            error: null,
+          };
+        },
+      }),
+    );
+
+    await service.reconcileVentana();
+
+    expect(idsBorrados()).toEqual(['ev-dia-2-fantasma']);
+  });
+
   it('lee la BD por LOTES (una consulta por tipo), nunca un id a la vez', async () => {
     const { service, llamadas } = armar(rutasVerificacion());
 

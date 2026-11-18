@@ -406,6 +406,13 @@ export interface DatosEventoVuelo {
   montoUsd?: number | string | null;
   notas?: string | null;
   tramos: readonly TramoEventoVuelo[];
+  /**
+   * SOLO en vuelos de VARIOS DÍAS (17-nov-2026, `lineaDiaEventoVuelo`): la
+   * primera línea de la descripción dice qué día del vuelo es ESTA fila
+   * («Día 1 de 2 · miércoles 18/11/2026 · tramos T1 y T2»). Ausente o vacía ⇒
+   * la descripción es byte a byte la del vuelo de un día.
+   */
+  lineaDia?: string | null;
 }
 
 /** Renglón de la descripción de un vuelo de SERVICIO (28-sep-2026). */
@@ -422,7 +429,10 @@ export const LINEA_DESCRIPCION_SERVICIO =
  * de Google y ayuda a la oficina a saber que el evento es del sistema.
  */
 export function descripcionEventoVuelo(v: DatosEventoVuelo): string {
+  const lineaDia = (v.lineaDia ?? '').trim();
   const lineas: Array<string | null> = [
+    // Vuelo de varios días: lo PRIMERO que se lee es qué día es esta fila.
+    lineaDia !== '' ? lineaDia : null,
     `Folio: #${v.folio}`,
     `Estado: ${v.estado}`,
     v.servicio ? LINEA_DESCRIPCION_SERVICIO : null,
@@ -502,6 +512,225 @@ export function ventanaEventoVuelo(
     inicio.getTime() + EVENTO_VUELO_MIN_MS,
   );
   return { inicio, fin: new Date(fin) };
+}
+
+/* ===================================================================== *
+ * UNA FILA POR DÍA EN LOS VUELOS DE VARIOS DÍAS (17-nov-2026, vuelo #478)
+ *
+ * Reporte de la oficina: «por ser un vuelo de dos días no sé por qué lo
+ * manda a la barrita de arriba […] estaría bien que se mostrara normal».
+ * Google pinta en la franja de «todo el día» cualquier evento de 24 h o más,
+ * y la fila única del #478 iba del 18-nov 10:00 al 19-nov 13:00.
+ *
+ * La decisión del cliente del 15-sep («una sola fila por vuelo») NO cambia
+ * para el vuelo de UN día: sale exactamente igual. Un vuelo cuyos tramos
+ * ACTIVOS salen en DOS O MÁS días de Cancún se publica como UNA FILA POR DÍA
+ * CON SALIDAS, cada una en su hora y de menos de 24 h, con el mismo formato
+ * de título pero con la ruta y la hora DE ESE DÍA. Los días intermedios sin
+ * salidas no llevan fila.
+ * ===================================================================== */
+
+const FORMATO_DIA_CANCUN = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Cancun',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/**
+ * Día de calendario en Cancún (UTC−5) de un instante, como `YYYY-MM-DD`.
+ * `null` si el valor viene nulo o no es un instante válido — nunca lanza.
+ */
+export function diaCancunDe(
+  iso: string | Date | null | undefined,
+): string | null {
+  if (iso == null || iso === '') return null;
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const p: Record<string, string> = {};
+  for (const parte of FORMATO_DIA_CANCUN.formatToParts(d)) {
+    p[parte.type] = parte.value;
+  }
+  if (!p.year || !p.month || !p.day) return null;
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+/** Los tramos que SALEN un mismo día de Cancún. */
+export interface DiaEventoVuelo<T> {
+  /** Día de Cancún `YYYY-MM-DD`. */
+  dia: string;
+  /** Tramos de ese día, en el orden en que llegaron (el de `orden`). */
+  tramos: T[];
+}
+
+/**
+ * Parte los tramos de un vuelo por DÍA DE CANCÚN de su `salida` (PURA).
+ *
+ * - Devuelve un grupo por día CON salidas, en orden cronológico, y dentro de
+ *   cada grupo los tramos en el orden en que llegaron. Los días sin salidas
+ *   no existen: de un viaje 18 → 20 salen dos grupos, no tres.
+ * - Un tramo SIN `salida` (o con una fecha ilegible) va con el día del tramo
+ *   ANTERIOR que sí la tiene; si no hay anterior —es de los primeros—, con el
+ *   día del primer tramo con fecha. Nunca abre un día por sí solo.
+ * - Los tramos del MISMO día quedan en UN solo grupo aunque no vengan
+ *   seguidos (dato roto): jamás dos grupos —dos filas en Google— del mismo
+ *   día.
+ * - Sin NINGÚN tramo con fecha no hay días: `[]`. En cualquier otro caso cada
+ *   tramo de entrada aparece en exactamente un grupo.
+ *
+ * Un vuelo es «de varios días» cuando esto devuelve DOS o más grupos.
+ */
+export function partirTramosPorDia<T extends { salida?: string | Date | null }>(
+  tramos: readonly T[],
+): Array<DiaEventoVuelo<T>> {
+  const porDia = new Map<string, T[]>();
+  // Tramos sin fecha que van ANTES del primero que sí la tiene.
+  const sinFechaAlInicio: T[] = [];
+  let diaVigente: string | null = null;
+  for (const t of tramos ?? []) {
+    const dia: string | null = diaCancunDe(t?.salida) ?? diaVigente;
+    if (dia == null) {
+      sinFechaAlInicio.push(t);
+      continue;
+    }
+    diaVigente = dia;
+    const grupo = porDia.get(dia);
+    if (grupo) grupo.push(t);
+    else if (porDia.size === 0) porDia.set(dia, [...sinFechaAlInicio, t]);
+    else porDia.set(dia, [t]);
+  }
+  return [...porDia.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([dia, delDia]) => ({ dia, tramos: delDia }));
+}
+
+/**
+ * Tope de la fila de UN día: 23 h 59 min. Con 24 h o más Google la sube a la
+ * franja de «todo el día», que es justo lo que la fila por día viene a
+ * evitar. Solo se alcanza con una primera salida de madrugada y una última
+ * casi a medianoche del mismo día.
+ */
+export const EVENTO_DIA_TOPE_MS = 24 * 60 * 60 * 1000 - 60 * 1000;
+
+/**
+ * VENTANA de la fila de UN día de un vuelo de varios días (PURA): de la
+ * PRIMERA salida de ese día a su último instante conocido + 1 h — la misma
+ * regla de `ventanaEventoVuelo` (1 h mínima), acotada a ese día y a menos de
+ * 24 h.
+ *
+ * `fecha_traslado_final` solo cuenta en el día en que cae: si es de otro día
+ * (o de uno sin salidas) no estira esta fila. Un tramo sin fecha que heredó
+ * el día no aporta instante. `null` si el grupo no trae ninguna salida de
+ * ese día (no hay dónde poner la fila).
+ */
+export function ventanaDiaEventoVuelo(
+  grupo: DiaEventoVuelo<{ salida?: string | Date | null }>,
+  fechaTrasladoFinal?: string | Date | null,
+): { inicio: Date; fin: Date } | null {
+  const salidas: number[] = [];
+  for (const t of grupo?.tramos ?? []) {
+    if (diaCancunDe(t?.salida) !== grupo.dia) continue;
+    salidas.push(new Date(t.salida as string | Date).getTime());
+  }
+  if (salidas.length === 0) return null;
+  const inicio = new Date(Math.min(...salidas));
+  const ventana = ventanaEventoVuelo(inicio, [
+    ...salidas.map((ms) => new Date(ms)),
+    diaCancunDe(fechaTrasladoFinal) === grupo.dia ? fechaTrasladoFinal : null,
+  ]);
+  if (!ventana) return null;
+  const tope = inicio.getTime() + EVENTO_DIA_TOPE_MS;
+  return {
+    inicio: ventana.inicio,
+    fin: new Date(Math.min(ventana.fin.getTime(), tope)),
+  };
+}
+
+const DIAS_SEMANA = [
+  'domingo',
+  'lunes',
+  'martes',
+  'miércoles',
+  'jueves',
+  'viernes',
+  'sábado',
+] as const;
+
+/**
+ * `miércoles 18/11/2026`: día de la semana + fecha DD/MM/AAAA de un día
+ * `YYYY-MM-DD`. Sin `Intl` a propósito: el nombre del día no depende de los
+ * datos de idioma con que venga compilado Node. Cadena vacía si no es un día
+ * válido (nunca lanza).
+ */
+export function fechaLargaDia(dia: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dia ?? '').trim());
+  if (!m) return '';
+  const [, anio, mes, diaMes] = m;
+  const d = new Date(Date.UTC(Number(anio), Number(mes) - 1, Number(diaMes)));
+  // `Date.UTC` acepta «2026-02-31» y lo corre a marzo: eso no es un día.
+  if (
+    d.getUTCFullYear() !== Number(anio) ||
+    d.getUTCMonth() !== Number(mes) - 1 ||
+    d.getUTCDate() !== Number(diaMes)
+  ) {
+    return '';
+  }
+  return `${DIAS_SEMANA[d.getUTCDay()]} ${diaMes}/${mes}/${anio}`;
+}
+
+/**
+ * PRIMERA LÍNEA de la descripción en un vuelo de varios días: qué día del
+ * vuelo es ESTA fila y qué tramos de la lista de abajo salen ese día (las
+ * líneas de los tramos traen la hora, no la fecha):
+ * `Día 1 de 2 · miércoles 18/11/2026 · tramos T1 y T2`.
+ *
+ * «Día N de M» cuenta los días CON salidas (los intermedios sin salidas no
+ * llevan fila); la fecha va completa para que no haya duda.
+ */
+export function lineaDiaEventoVuelo(p: {
+  numero: number;
+  total: number;
+  dia: string;
+  ordenes?: readonly number[];
+}): string {
+  const etiquetas = (p.ordenes ?? []).map((o) => `T${o}`);
+  const lista =
+    etiquetas.length <= 1
+      ? etiquetas.join('')
+      : `${etiquetas.slice(0, -1).join(', ')} y ${etiquetas[etiquetas.length - 1]}`;
+  return [
+    `Día ${p.numero} de ${p.total}`,
+    fechaLargaDia(p.dia),
+    lista === ''
+      ? ''
+      : `${etiquetas.length === 1 ? 'tramo' : 'tramos'} ${lista}`,
+  ]
+    .filter((x) => x !== '')
+    .join(' · ');
+}
+
+/**
+ * `extendedProperties.private.vuelatour_tramo` de la fila del vuelo.
+ * `'vuelo'` = la fila del vuelo de un día y la del DÍA 1 de uno de varios
+ * (id en `vuelo.google_calendar_id`).
+ */
+export const ETIQUETA_FILA_VUELO = 'vuelo';
+
+/**
+ * Etiqueta de la fila del día N (1 = primero): `'vuelo'` para el día 1 y
+ * `'dia-N'` para los siguientes (`'dia-2'`, `'dia-3'`…).
+ *
+ * Es INFORMATIVA (sirve para leer un evento desde la API de Google): ningún
+ * paso de limpieza decide por ella. Lo que hace legítima a una fila es que su
+ * id esté guardado en la base (`vuelo.google_calendar_id`,
+ * `vuelo.google_calendar_regreso_id` o `escala.google_calendar_id`); los
+ * valores `'ida'` / `'regreso'` / `'leg-N'` son del formato anterior al
+ * 15-sep-2026.
+ */
+export function etiquetaFilaVuelo(numeroDia: number): string {
+  return Number.isInteger(numeroDia) && numeroDia >= 2
+    ? `dia-${numeroDia}`
+    : ETIQUETA_FILA_VUELO;
 }
 
 /**

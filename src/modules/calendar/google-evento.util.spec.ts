@@ -7,14 +7,22 @@ import {
   colorIdGoogleMantenimiento,
   colorIdGoogleSemaforo,
   descripcionEventoVuelo,
+  diaCancunDe,
   estadoHttpGoogle,
+  ETIQUETA_FILA_VUELO,
+  etiquetaFilaVuelo,
+  EVENTO_DIA_TOPE_MS,
+  fechaLargaDia,
   LINEA_DESCRIPCION_SERVICIO,
   eventoAusenteEnGoogle,
   horaCortaCancun,
+  lineaDiaEventoVuelo,
   nombreCortoPiloto,
   parsearServiceAccountJson,
+  partirTramosPorDia,
   rutaMinusculas,
   tituloEventoVuelo,
+  ventanaDiaEventoVuelo,
   ventanaEventoVuelo,
 } from './google-evento.util';
 import { SEMAFORO } from './colores-calendario.util';
@@ -750,6 +758,369 @@ describe('ventanaEventoVuelo', () => {
     expect(ventanaEventoVuelo(null)).toBeNull();
     expect(ventanaEventoVuelo('')).toBeNull();
     expect(ventanaEventoVuelo('no es una fecha')).toBeNull();
+  });
+});
+
+/**
+ * UNA FILA POR DÍA EN LOS VUELOS DE VARIOS DÍAS (17-nov-2026, vuelo #478).
+ * Reporte de la oficina: «por ser un vuelo de dos días no sé por qué lo manda
+ * a la barrita de arriba». Google sube a la franja de «todo el día» cualquier
+ * evento de 24 h o más; la fila única del #478 iba del 18-nov 10:00 al 19-nov
+ * 13:00. Estas piezas PURAS deciden cuántas filas lleva un vuelo y dónde va
+ * cada una.
+ */
+describe('una fila por día: diaCancunDe / partirTramosPorDia', () => {
+  // Los cuatro tramos REALES del #478 (horas de Cancún, UTC−5).
+  const T478 = [
+    { orden: 1, origen: 'CUN', destino: 'CTM', salida: '2026-11-18T15:00:00Z' },
+    { orden: 2, origen: 'CTM', destino: 'MHL', salida: '2026-11-18T17:00:00Z' },
+    { orden: 3, origen: 'MHL', destino: 'CTM', salida: '2026-11-19T15:00:00Z' },
+    { orden: 4, origen: 'CTM', destino: 'CUN', salida: '2026-11-19T17:00:00Z' },
+  ];
+  const ordenes = (
+    grupos: Array<{ dia: string; tramos: { orden: number }[] }>,
+  ) => grupos.map((g) => [g.dia, g.tramos.map((t) => t.orden)]);
+
+  it('diaCancunDe: el día es el de CANCÚN (UTC−5), no el de UTC', () => {
+    // 23:59 del 18 en Cancún = 04:59Z del 19; medianoche del 19 = 05:00Z.
+    expect(diaCancunDe('2026-11-19T04:59:59.000Z')).toBe('2026-11-18');
+    expect(diaCancunDe('2026-11-19T05:00:00.000Z')).toBe('2026-11-19');
+    expect(diaCancunDe(new Date('2026-11-18T15:00:00Z'))).toBe('2026-11-18');
+    // Cancún NO tiene horario de verano: en junio sigue siendo UTC−5.
+    expect(diaCancunDe('2026-06-16T04:59:59.000Z')).toBe('2026-06-15');
+    // Cambio de año.
+    expect(diaCancunDe('2027-01-01T03:00:00.000Z')).toBe('2026-12-31');
+  });
+
+  it('diaCancunDe: nulo o basura devuelve null (nunca lanza)', () => {
+    expect(diaCancunDe(null)).toBeNull();
+    expect(diaCancunDe(undefined)).toBeNull();
+    expect(diaCancunDe('')).toBeNull();
+    expect(diaCancunDe('no es una fecha')).toBeNull();
+  });
+
+  it('vuelo de UN día: un solo grupo con todos sus tramos', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: '2026-09-20T14:00:00Z' },
+      { orden: 2, salida: '2026-09-20T20:00:00Z' },
+    ]);
+    expect(ordenes(grupos)).toEqual([['2026-09-20', [1, 2]]]);
+  });
+
+  it('el #478 REAL: dos días, dos tramos cada uno, en orden', () => {
+    const grupos = partirTramosPorDia(T478);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [1, 2]],
+      ['2026-11-19', [3, 4]],
+    ]);
+    // Devuelve los MISMOS objetos (el servicio los empata con sus escalas).
+    expect(grupos[1].tramos[0]).toBe(T478[2]);
+  });
+
+  it('tres días con uno INTERMEDIO sin salidas: dos grupos, no tres', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: '2026-11-18T15:00:00Z' },
+      { orden: 2, salida: '2026-11-20T15:00:00Z' },
+      { orden: 3, salida: '2026-11-20T19:00:00Z' },
+    ]);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [1]],
+      ['2026-11-20', [2, 3]],
+    ]);
+  });
+
+  it('una salida de madrugada cae en SU día de Cancún (23:30 y 0:30 son días distintos)', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: '2026-11-19T04:30:00Z' }, // 18-nov 23:30
+      { orden: 2, salida: '2026-11-19T05:30:00Z' }, // 19-nov 0:30
+    ]);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [1]],
+      ['2026-11-19', [2]],
+    ]);
+  });
+
+  it('tramo SIN fecha: va con el día del tramo anterior que sí la tiene', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: '2026-11-18T15:00:00Z' },
+      { orden: 2, salida: null },
+      { orden: 3, salida: '2026-11-19T15:00:00Z' },
+      { orden: 4 },
+      { orden: 5, salida: 'no es una fecha' },
+    ]);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [1, 2]],
+      ['2026-11-19', [3, 4, 5]],
+    ]);
+  });
+
+  it('tramo SIN fecha al INICIO: va con el día del primer tramo con fecha (nunca abre un día)', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: null },
+      { orden: 2, salida: null },
+      { orden: 3, salida: '2026-11-18T15:00:00Z' },
+      { orden: 4, salida: '2026-11-19T15:00:00Z' },
+    ]);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [1, 2, 3]],
+      ['2026-11-19', [4]],
+    ]);
+  });
+
+  it('sin NINGÚN tramo con fecha (o sin tramos) no hay días', () => {
+    expect(partirTramosPorDia([])).toEqual([]);
+    expect(
+      partirTramosPorDia([
+        { orden: 1, salida: null },
+        { orden: 2, salida: '' },
+      ]),
+    ).toEqual([]);
+  });
+
+  it('dato roto (fechas fuera de orden): JAMÁS dos grupos del mismo día, y los días salen cronológicos', () => {
+    const grupos = partirTramosPorDia([
+      { orden: 1, salida: '2026-11-19T15:00:00Z' },
+      { orden: 2, salida: '2026-11-18T15:00:00Z' },
+      { orden: 3, salida: '2026-11-19T19:00:00Z' },
+      { orden: 4, salida: null },
+    ]);
+    expect(ordenes(grupos)).toEqual([
+      ['2026-11-18', [2]],
+      ['2026-11-19', [1, 3, 4]],
+    ]);
+  });
+
+  it('PARTICIÓN: con alguna fecha, cada tramo aparece en exactamente un grupo y ningún día se repite (500 itinerarios al azar)', () => {
+    // Generador determinista: sin Math.random, la prueba es reproducible.
+    let semilla = 478;
+    const azar = (n: number): number => {
+      // mulberry32: determinista y bien repartido.
+      semilla = (semilla + 0x6d2b79f5) | 0;
+      let t = Math.imul(semilla ^ (semilla >>> 15), 1 | semilla);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
+    };
+    const base = Date.parse('2026-11-18T05:00:00Z'); // medianoche Cancún
+    for (let caso = 0; caso < 500; caso++) {
+      const n = 1 + azar(7);
+      const tramos = Array.from({ length: n }, (_x, i) => ({
+        orden: i + 1,
+        salida:
+          azar(5) === 0
+            ? null
+            : new Date(
+                base + azar(4) * 86_400_000 + azar(24 * 60) * 60_000,
+              ).toISOString(),
+      }));
+      const grupos = partirTramosPorDia(tramos);
+      const conFecha = tramos.filter((t) => t.salida != null);
+      if (conFecha.length === 0) {
+        expect(grupos).toEqual([]);
+        continue;
+      }
+      const dias = grupos.map((g) => g.dia);
+      expect(new Set(dias).size).toBe(dias.length);
+      expect([...dias].sort()).toEqual(dias);
+      expect(
+        grupos
+          .flatMap((g) => g.tramos.map((t) => t.orden))
+          .sort((a, b) => a - b),
+      ).toEqual(tramos.map((t) => t.orden));
+      // Un tramo con fecha SIEMPRE está en el grupo de su propio día…
+      for (const g of grupos) {
+        for (const t of g.tramos) {
+          if (t.salida != null) expect(diaCancunDe(t.salida)).toBe(g.dia);
+        }
+        // …y todo grupo tiene al menos una salida de ese día (hay fila).
+        expect(g.tramos.some((t) => t.salida != null)).toBe(true);
+      }
+      // Los días son exactamente los días con salidas.
+      expect(dias).toEqual(
+        [...new Set(conFecha.map((t) => diaCancunDe(t.salida)))].sort(),
+      );
+    }
+  });
+});
+
+describe('una fila por día: ventanaDiaEventoVuelo', () => {
+  const grupo = (dia: string, ...salidas: Array<string | null>) => ({
+    dia,
+    tramos: salidas.map((salida) => ({ salida })),
+  });
+  const iso = (v: { inicio: Date; fin: Date } | null) =>
+    v ? [v.inicio.toISOString(), v.fin.toISOString()] : null;
+
+  it('el #478 REAL: cada día de 10:00 a 13:00 (última salida + 1 h), en su hora', () => {
+    expect(
+      iso(
+        ventanaDiaEventoVuelo(
+          grupo('2026-11-18', '2026-11-18T15:00:00Z', '2026-11-18T17:00:00Z'),
+        ),
+      ),
+    ).toEqual(['2026-11-18T15:00:00.000Z', '2026-11-18T18:00:00.000Z']);
+    expect(
+      iso(
+        ventanaDiaEventoVuelo(
+          grupo('2026-11-19', '2026-11-19T15:00:00Z', '2026-11-19T17:00:00Z'),
+        ),
+      ),
+    ).toEqual(['2026-11-19T15:00:00.000Z', '2026-11-19T18:00:00.000Z']);
+  });
+
+  it('una sola salida en el día: 1 h mínima', () => {
+    expect(
+      iso(ventanaDiaEventoVuelo(grupo('2026-11-18', '2026-11-18T15:00:00Z'))),
+    ).toEqual(['2026-11-18T15:00:00.000Z', '2026-11-18T16:00:00.000Z']);
+  });
+
+  it('fecha_traslado_final SOLO cuenta en el día en que cae', () => {
+    const dia18 = grupo('2026-11-18', '2026-11-18T15:00:00Z');
+    const dia19 = grupo('2026-11-19', '2026-11-19T15:00:00Z');
+    const traslado = '2026-11-19T21:00:00Z'; // 19-nov 16:00 Cancún
+    // En SU día estira la fila hasta el traslado + 1 h…
+    expect(iso(ventanaDiaEventoVuelo(dia19, traslado))).toEqual([
+      '2026-11-19T15:00:00.000Z',
+      '2026-11-19T22:00:00.000Z',
+    ]);
+    // …y en otro día no la toca (si no, el día 1 volvería a ser de 31 h).
+    expect(iso(ventanaDiaEventoVuelo(dia18, traslado))).toEqual([
+      '2026-11-18T15:00:00.000Z',
+      '2026-11-18T16:00:00.000Z',
+    ]);
+    // Un traslado en un día SIN salidas no estira a nadie.
+    expect(iso(ventanaDiaEventoVuelo(dia19, '2026-11-20T21:00:00Z'))).toEqual([
+      '2026-11-19T15:00:00.000Z',
+      '2026-11-19T16:00:00.000Z',
+    ]);
+  });
+
+  it('un tramo SIN fecha que heredó el día no aporta instante', () => {
+    expect(
+      iso(
+        ventanaDiaEventoVuelo(
+          grupo('2026-11-18', null, '2026-11-18T15:00:00Z', null),
+        ),
+      ),
+    ).toEqual(['2026-11-18T15:00:00.000Z', '2026-11-18T16:00:00.000Z']);
+  });
+
+  it('la fila empieza en la salida MÁS TEMPRANA del día aunque los tramos vengan desordenados', () => {
+    expect(
+      iso(
+        ventanaDiaEventoVuelo(
+          grupo('2026-11-18', '2026-11-18T17:00:00Z', '2026-11-18T15:00:00Z'),
+        ),
+      ),
+    ).toEqual(['2026-11-18T15:00:00.000Z', '2026-11-18T18:00:00.000Z']);
+  });
+
+  it('SIEMPRE menos de 24 h: de las 0:15 a las 23:30 se corta en 23 h 59 min (si no, Google la sube a «todo el día»)', () => {
+    const v = ventanaDiaEventoVuelo(
+      grupo('2026-11-18', '2026-11-18T05:15:00Z', '2026-11-19T04:30:00Z'),
+    );
+    expect(EVENTO_DIA_TOPE_MS).toBe(24 * 60 * 60 * 1000 - 60 * 1000);
+    expect(iso(v)).toEqual([
+      '2026-11-18T05:15:00.000Z',
+      '2026-11-19T05:14:00.000Z',
+    ]);
+    expect(
+      (v as { inicio: Date; fin: Date }).fin.getTime() -
+        (v as { inicio: Date; fin: Date }).inicio.getTime(),
+    ).toBeLessThan(24 * 60 * 60 * 1000);
+  });
+
+  it('sin ninguna salida de ese día no hay fila', () => {
+    expect(ventanaDiaEventoVuelo(grupo('2026-11-18'))).toBeNull();
+    expect(ventanaDiaEventoVuelo(grupo('2026-11-18', null))).toBeNull();
+    // Una salida de OTRO día no cuenta para este.
+    expect(
+      ventanaDiaEventoVuelo(grupo('2026-11-18', '2026-11-19T15:00:00Z')),
+    ).toBeNull();
+  });
+});
+
+describe('una fila por día: textos y etiqueta', () => {
+  it('fechaLargaDia: día de la semana + DD/MM/AAAA', () => {
+    expect(fechaLargaDia('2026-11-18')).toBe('miércoles 18/11/2026');
+    expect(fechaLargaDia('2026-11-19')).toBe('jueves 19/11/2026');
+    expect(fechaLargaDia('2026-11-21')).toBe('sábado 21/11/2026');
+    expect(fechaLargaDia('2026-11-22')).toBe('domingo 22/11/2026');
+    expect(fechaLargaDia('2026-09-01')).toBe('martes 01/09/2026');
+    // El 29 de febrero de un año bisiesto existe; el 31 de febrero, no.
+    expect(fechaLargaDia('2028-02-29')).toBe('martes 29/02/2028');
+    expect(fechaLargaDia('2026-02-31')).toBe('');
+    expect(fechaLargaDia('18/11/2026')).toBe('');
+    expect(fechaLargaDia(null)).toBe('');
+  });
+
+  it('lineaDiaEventoVuelo: qué día es la fila y qué tramos salen ese día', () => {
+    expect(
+      lineaDiaEventoVuelo({
+        numero: 1,
+        total: 2,
+        dia: '2026-11-18',
+        ordenes: [1, 2],
+      }),
+    ).toBe('Día 1 de 2 · miércoles 18/11/2026 · tramos T1 y T2');
+    expect(
+      lineaDiaEventoVuelo({
+        numero: 2,
+        total: 3,
+        dia: '2026-11-19',
+        ordenes: [3],
+      }),
+    ).toBe('Día 2 de 3 · jueves 19/11/2026 · tramo T3');
+    expect(
+      lineaDiaEventoVuelo({
+        numero: 3,
+        total: 3,
+        dia: '2026-11-20',
+        ordenes: [4, 5, 6],
+      }),
+    ).toBe('Día 3 de 3 · viernes 20/11/2026 · tramos T4, T5 y T6');
+    // Sin lista de tramos la línea se queda en el día.
+    expect(
+      lineaDiaEventoVuelo({ numero: 1, total: 2, dia: '2026-11-18' }),
+    ).toBe('Día 1 de 2 · miércoles 18/11/2026');
+  });
+
+  it('etiquetaFilaVuelo: «vuelo» para el día 1 (y el vuelo de un día), «dia-N» para los siguientes', () => {
+    expect(ETIQUETA_FILA_VUELO).toBe('vuelo');
+    expect(etiquetaFilaVuelo(1)).toBe('vuelo');
+    expect(etiquetaFilaVuelo(2)).toBe('dia-2');
+    expect(etiquetaFilaVuelo(3)).toBe('dia-3');
+    expect(etiquetaFilaVuelo(0)).toBe('vuelo');
+    expect(etiquetaFilaVuelo(Number.NaN)).toBe('vuelo');
+  });
+
+  it('descripcionEventoVuelo: la línea del día va PRIMERO y, sin ella, la descripción no cambia ni un carácter', () => {
+    const datos = {
+      id: 'v-1',
+      folio: 478,
+      estado: 'CONFIRMADO',
+      cliente: 'Hernan Garza',
+      pasajeros: 5,
+      esExterno: false,
+      matricula: 'N621TX',
+      pilotoNombre: 'Alejandro Canales',
+      montoUsd: null,
+      tramos: [
+        {
+          orden: 1,
+          origen: 'CUN',
+          destino: 'CTM',
+          salida: '2026-11-18T15:00:00Z',
+          pasajeros: 3,
+        },
+      ],
+    };
+    const deUnDia = descripcionEventoVuelo(datos);
+    const linea = 'Día 1 de 2 · miércoles 18/11/2026 · tramo T1';
+    expect(descripcionEventoVuelo({ ...datos, lineaDia: linea })).toBe(
+      `${linea}\n${deUnDia}`,
+    );
+    expect(descripcionEventoVuelo({ ...datos, lineaDia: null })).toBe(deUnDia);
+    expect(descripcionEventoVuelo({ ...datos, lineaDia: '   ' })).toBe(deUnDia);
   });
 });
 

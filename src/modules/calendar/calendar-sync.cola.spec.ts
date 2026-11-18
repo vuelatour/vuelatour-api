@@ -24,6 +24,7 @@ import { CalendarSyncService } from './calendar-sync.service';
 import {
   colaAtorada,
   esLimiteGoogle,
+  ordenarItemsCola,
   sanitizarError,
   siguienteIntentoMs,
   textoAvisoCola,
@@ -295,6 +296,27 @@ describe('calendar-sync-cola.util (puro)', () => {
     expect(esLimiteGoogle(gaxios(404, 'Not Found'))).toBe(false);
     expect(esLimiteGoogle(gaxios(500, 'Backend Error'))).toBe(false);
     expect(esLimiteGoogle(new Error('socket hang up'))).toBe(false);
+  });
+
+  /**
+   * 17-nov-2026 (una fila por día): al BORRAR de la base el tramo que
+   * guardaba la fila de un día, el trigger encola el borrado de su evento y
+   * el re-espejo del vuelo. Si el vuelo fuera primero, publicaría la fila
+   * nueva de ese día con la vieja todavía viva.
+   */
+  it('ordenarItemsCola: los `borrar_evento` van PRIMERO y cada grupo conserva su orden', () => {
+    const lote = [
+      { id: 1, entidad: 'vuelo' as const },
+      { id: 2, entidad: 'borrar_evento' as const },
+      { id: 3, entidad: 'mantenimiento' as const },
+      { id: 4, entidad: 'borrar_evento' as const },
+      { id: 5, entidad: 'descanso' as const },
+      { id: 6, entidad: 'evento' as const },
+    ];
+    expect(ordenarItemsCola(lote).map((i) => i.id)).toEqual([2, 4, 1, 3, 5, 6]);
+    // No pierde, no duplica y no toca el arreglo que recibió.
+    expect(lote.map((i) => i.id)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(ordenarItemsCola([])).toEqual([]);
   });
 
   it('el error guardado NO lleva secretos (el panel lo muestra)', () => {
@@ -636,6 +658,103 @@ describe('CalendarSyncService.drenarCola', () => {
     expect(registro).toHaveLength(0);
     expect(rpcs).toHaveLength(0);
     expect(eventosGoogle.insert).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 17-nov-2026 (una fila por día). El tramo que guardaba la fila del día 2
+   * (su ancla) se BORRÓ de la base y el borrado directo de su evento falló:
+   * la cola trae, de la misma transacción, el re-espejo del vuelo y el
+   * `borrar_evento` de esa fila — y el reclamo no garantiza el orden. El
+   * worker borra PRIMERO: cuando el vuelo publica la fila del nuevo primer
+   * tramo de ese día, la vieja ya no está.
+   */
+  it('ancla ELIMINADA: el `borrar_evento` de la fila vieja se procesa ANTES que el vuelo (nunca dos filas del mismo día)', async () => {
+    const registro: Consulta[] = [];
+    const tramoVivo = (
+      id: string,
+      orden: number,
+      origen: string,
+      destino: string,
+      salida: string,
+    ) => ({
+      id,
+      orden,
+      origen_iata: origen,
+      destino_iata: destino,
+      fecha_salida_plan: salida,
+      es_ferry: false,
+      pasajeros: 3,
+      google_calendar_id: null,
+      aeronave_id: 'a-1',
+      piloto_id: 'p-1',
+      estado_permiso: null,
+      cancelada_at: null,
+      aeronave: null,
+      piloto: null,
+    });
+    const { service, llamadas } = armar(
+      {
+        // El vuelo YA sin el tramo borrado (T3, que abría el 19-nov): hoy el
+        // primer tramo de ese día es T4, todavía sin fila en Google.
+        vuelo: () => ({
+          data: {
+            ...VUELO,
+            tipo: 'MULTIESCALA',
+            google_calendar_id: 'ev-dia-1',
+            fecha_vuelo: '2026-11-18T15:00:00.000Z',
+            escalas: [
+              tramoVivo('e-1', 1, 'CUN', 'CTM', '2026-11-18T15:00:00.000Z'),
+              tramoVivo('e-4', 4, 'CTM', 'CUN', '2026-11-19T17:00:00.000Z'),
+            ],
+          },
+          error: null,
+        }),
+        // El UPDATE del id pide la fila de vuelta (`returning id`).
+        escala: () => ({ data: [{ id: 'e-4' }], error: null }),
+        calendar_sync_cola: rutaCola({
+          // El reclamo los devuelve con el vuelo POR DELANTE.
+          items: [
+            item({ id: 1 }),
+            item({
+              id: 2,
+              entidad: 'borrar_evento',
+              entidad_id: null,
+              google_event_id: 'ev-dia-2-viejo',
+            }),
+          ],
+          registro,
+        }),
+        alerta_emitida: () => ({ data: null, error: null }),
+      },
+      { rpc: colaActiva },
+    );
+
+    await service.drenarCola();
+
+    // La fila vieja del día 2 sale…
+    expect(eventosGoogle.delete).toHaveBeenCalledTimes(1);
+    expect(eventosGoogle.delete).toHaveBeenCalledWith({
+      calendarId: CALENDARIO,
+      eventId: 'ev-dia-2-viejo',
+    });
+    // …ANTES de que nazca la nueva (y de cualquier otra escritura del vuelo).
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+    const orden = (fn: jest.Mock): number => fn.mock.invocationCallOrder[0];
+    expect(orden(eventosGoogle.delete)).toBeLessThan(
+      orden(eventosGoogle.update),
+    );
+    expect(orden(eventosGoogle.delete)).toBeLessThan(
+      orden(eventosGoogle.insert),
+    );
+    // La nueva queda anclada en T4, y solo se escribe la columna del id.
+    const escrituras = llamadas.filter(
+      (l) => l.tabla === 'escala' && l.metodo === 'update',
+    );
+    expect(escrituras).toHaveLength(1);
+    expect(escrituras[0].payload).toEqual({ google_calendar_id: 'ev-nuevo' });
+    expect(tiene(escrituras[0], 'eq', 'id')).toBe(true);
+    // Los dos items se cierran.
+    expect(registro.filter((q) => q.metodo === 'delete')).toHaveLength(2);
   });
 
   it('no corre dos pasadas a la vez (single-flight)', async () => {

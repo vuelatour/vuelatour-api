@@ -79,6 +79,31 @@ export interface ItemCola {
 }
 
 /**
+ * Orden en que el worker procesa un lote ya reclamado (PURO): los
+ * `borrar_evento` PRIMERO y el resto detrás, cada grupo en el orden en que
+ * llegó.
+ *
+ * POR QUÉ (17-nov-2026, una fila por día en los vuelos de varios días): al
+ * BORRAR de la base el tramo que guardaba la fila de un día (el ancla), el
+ * trigger encola en la MISMA transacción el borrado de su evento
+ * (`borrar_evento`, con el id de OLD) y el re-espejo del vuelo. El reclamo
+ * (`update … returning`) no garantiza orden; si el vuelo se procesara antes,
+ * publicaría la fila nueva de ese día mientras la vieja sigue viva en Google:
+ * dos filas del mismo día hasta que llegue el turno del borrado. Borrando
+ * primero, lo normal es que la vieja ya no esté cuando nace la nueva. Borrar
+ * antes de publicar nunca estorba: un `borrar_evento` solo nace de una fila
+ * que YA no existe, así que ningún vuelo vivo apunta a ese evento.
+ */
+export function ordenarItemsCola<T extends { entidad: EntidadCola }>(
+  items: readonly T[],
+): T[] {
+  return [
+    ...items.filter((i) => i.entidad === 'borrar_evento'),
+    ...items.filter((i) => i.entidad !== 'borrar_evento'),
+  ];
+}
+
+/**
  * Estado de la cola que viaja en `GET /v1/calendar/sync-estado` (D5) para el
  * chip del panel. `null` (en `EstadoSyncCalendar.cola`) = la migración no
  * está aplicada: el API sigue con los hooks directos de siempre.

@@ -802,26 +802,94 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     );
   });
 
-  it('REDONDO sin escalas: la ruta va y VUELVE (cun-ptu-cun) en una sola fila', async () => {
+  it('REDONDO sin escalas con el regreso EL MISMO día: la ruta va y VUELVE (cun-ptu-cun) en una sola fila', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       tipo: 'REDONDO',
       escalas: [],
-      fecha_traslado_final: '2026-09-21T23:00:00.000Z',
+      fecha_traslado_final: '2026-09-20T23:00:00.000Z',
     };
-    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+    const { service, llamadas } = armar({
+      vuelo: [{ data: vuelo, error: null }],
+    });
 
     await service.syncFlight('v-1');
 
     expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('Luis N4142R cun-ptu-cun 9:00');
-    // La fila abarca los DOS días (pernocta), no dos bloques sueltos de 2 h.
+    // UNA fila de la salida (9:00) al regreso (18:00) + 1 h, no dos bloques
+    // sueltos de 2 h.
     expect(requestBody.start?.dateTime).toBe('2026-09-20T14:00:00.000Z');
-    expect(requestBody.end?.dateTime).toBe('2026-09-22T00:00:00.000Z');
+    expect(requestBody.end?.dateTime).toBe('2026-09-21T00:00:00.000Z');
     expect(String(requestBody.description).split('\n')).toContain(
       'T2 ptu-cun 18:00 · 3 pax',
     );
+    // La columna del regreso NO se usa en un vuelo de un día.
+    expect(de(llamadas, 'vuelo', 'update').map((l) => l.args[0])).toEqual([
+      { google_calendar_id: 'ev-nuevo' },
+    ]);
+  });
+
+  /**
+   * 17-nov-2026 (vuelo #478): hasta hoy este vuelo era UNA fila del 20-sep
+   * 9:00 al 21-sep 19:00 — 34 h, y Google sube a la franja de «todo el día»
+   * cualquier evento de 24 h o más. Ahora es una fila POR DÍA, cada una en su
+   * hora. Sin escalas capturadas no hay tramo donde anclar el día 2: su id
+   * vive en `vuelo.google_calendar_regreso_id`.
+   */
+  it('REDONDO sin escalas con el regreso OTRO día: una fila por día, la del regreso en google_calendar_regreso_id', async () => {
+    eventosGoogle.insert
+      .mockResolvedValueOnce({ data: { id: 'ev-dia-1' } })
+      .mockResolvedValueOnce({ data: { id: 'ev-dia-2' } });
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      tipo: 'REDONDO',
+      escalas: [],
+      fecha_traslado_final: '2026-09-21T23:00:00.000Z',
+    };
+    const { service, llamadas } = armar({
+      vuelo: [
+        { data: vuelo, error: null },
+        // Los UPDATE del id: el de la columna del regreso pide la fila de
+        // vuelta (`returning id`) para saber que de verdad se guardó.
+        { data: [{ id: 'v-1' }], error: null },
+      ],
+    });
+
+    await expect(service.syncFlight('v-1')).resolves.toBe(true);
+
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(2);
+    expect(eventosGoogle.delete).not.toHaveBeenCalled();
+    // Día 1: la ida, en su hora y de 1 h.
+    const ida = insertado(0).requestBody;
+    expect(ida.summary).toBe('Luis N4142R cun-ptu 9:00');
+    expect(ida.start?.dateTime).toBe('2026-09-20T14:00:00.000Z');
+    expect(ida.end?.dateTime).toBe('2026-09-20T15:00:00.000Z');
+    expect(ida.extendedProperties).toEqual({
+      private: { vuelatour_vuelo_id: 'v-1', vuelatour_tramo: 'vuelo' },
+    });
+    // Día 2: el regreso, en su hora y de 1 h.
+    const regreso = insertado(1).requestBody;
+    expect(regreso.summary).toBe('Luis N4142R ptu-cun 18:00');
+    expect(regreso.start?.dateTime).toBe('2026-09-21T23:00:00.000Z');
+    expect(regreso.end?.dateTime).toBe('2026-09-22T00:00:00.000Z');
+    expect(regreso.extendedProperties).toEqual({
+      private: { vuelatour_vuelo_id: 'v-1', vuelatour_tramo: 'dia-2' },
+    });
+    // Las dos filas llevan el vuelo COMPLETO y dicen qué día son.
+    const lineasIda = String(ida.description).split('\n');
+    expect(lineasIda[0]).toBe('Día 1 de 2 · domingo 20/09/2026 · tramo T1');
+    expect(lineasIda).toContain('T1 cun-ptu 9:00 · 3 pax');
+    expect(lineasIda).toContain('T2 ptu-cun 18:00 · 3 pax');
+    expect(String(regreso.description).split('\n')[0]).toBe(
+      'Día 2 de 2 · lunes 21/09/2026 · tramo T2',
+    );
+    // Cada id en SU columna (las dos ya existían: sin migración).
+    expect(de(llamadas, 'vuelo', 'update').map((l) => l.args[0])).toEqual([
+      { google_calendar_id: 'ev-dia-1' },
+      { google_calendar_regreso_id: 'ev-dia-2' },
+    ]);
   });
 
   it('avión SIN color_calendario: da igual, el semáforo no lo mira (verde → Salvia 2)', async () => {
