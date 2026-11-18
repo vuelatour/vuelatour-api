@@ -3,10 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
-import { inicioOficialDe } from '../../common/inicio-oficial.util';
-import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { triggerUpdatedAt } from '../../common/updated-at-trigger.util';
@@ -42,9 +39,6 @@ export class EngineeringService {
     // nunca await bloqueante) — un problema con Google jamás debe romperle la
     // captura al mecánico ni a la oficina.
     private readonly calendarSync: CalendarSyncService,
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): SOLO
-    // el historial de mantenimientos por avión. @Optional y ÚLTIMO.
-    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /**
@@ -146,23 +140,18 @@ export class EngineeringService {
       .order('fecha_programada', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): se
-    // ocultan los servicios COMPLETADOS cuya fecha (realizada, o programada
-    // si no hay realizada) es anterior al inicio — prod: 9 (7 + 2 sin
-    // `fecha_realizada`). Abiertos (PROGRAMADO/EN_TALLER) de CUALQUIER fecha
-    // se quedan: son estado de seguridad actual. Horas, hitos y órdenes del
-    // programa leen `mantenimiento` por su lado (sin piso).
-    const inicio = await inicioOficialDe(this.configuracion);
-    const filas = (data ?? []) as unknown as Array<Record<string, unknown>>;
-    if (!inicio) return data ?? [];
-    return filas.filter((m) => {
-      if (m.estado !== 'COMPLETADO') return true;
-      const dia =
-        (m.fecha_realizada as string | null) ??
-        (m.fecha_programada as string | null) ??
-        null;
-      return !dia || dia.slice(0, 10) >= inicio;
-    });
+    // EL HISTORIAL DE MANTENIMIENTO VA COMPLETO (18-nov-2026, invariante
+    // 139): del 16-oct al 18-nov (0.0.85, invariante 86) aquí se ocultaban
+    // los servicios COMPLETADOS anteriores al inicio oficial (1-sep-2026).
+    // Reporte de Porfirio: «llené datos de un servicio anterior en N4142R
+    // pero ya no se visualiza (¿ya no se puede ver el historial de
+    // servicios?)» — capturó el 100 hrs del 14-ago y la fila desapareció al
+    // guardarla. El inicio oficial es del DINERO y la operación (agosto se
+    // cerró en el sistema anterior); el historial de servicios es la
+    // bitácora técnica del avión y el programa de servicio lo lee entero
+    // para decidir el siguiente hito: esconderlo deja al mecánico sin ver
+    // el servicio del que sale la cuenta.
+    return data ?? [];
   }
 
   async createMantenimiento(

@@ -13801,6 +13801,33 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        (N4142R y N621TX crean la orden vencida y no la duplican; al completar
        avanzan; insert fallido; los otros cinco no crean nada).
 
+139. **EL HISTORIAL DE MANTENIMIENTO VA COMPLETO: EL INICIO OFICIAL NO LO
+     RECORTA (18-nov-2026, API 0.0.144, SIN migración).** Reporte de Porfirio
+     con la captura de «Órdenes de mantenimiento» del N4142R («1 registrado»,
+     solo el 50 hrs del 12-sep): «llené datos de un servicio anterior en
+     N4142R pero ya no se visualiza (¿o sea ya no se puede ver el historial
+     de servicios?)». Desde el 0.0.85 (invariante 86, auditoría del 16-oct)
+     `EngineeringService.listMantenimientos` ocultaba los servicios
+     COMPLETADOS con fecha anterior al inicio oficial (1-sep-2026): el N4142R
+     tenía cuatro hechos y la tarjeta enseñaba uno; al capturar la fecha real
+     del 100 hrs (14-ago) la fila desapareció al guardarla. Fue una
+     sobre-aplicación mía del «quitemos todo lo de agosto» del cliente, que
+     hablaba del dinero y la operación (agosto se cerró en el sistema
+     anterior). El historial de servicios es la bitácora técnica del avión y
+     el programa de servicio lo lee ENTERO para decidir el siguiente hito
+     (invariantes 108 y 138): la lista decía «Último servicio 4,455.1 h» y
+     el mecánico no podía ver el servicio del que sale la cuenta.
+     - `GET /v1/engineering/aircraft/:id/maintenance` devuelve TODAS las
+       filas (mismo orden de siempre). `EngineeringService` ya no recibe
+       `ConfiguracionService`; `EngineeringModule` conserva el import
+       (inofensivo, lo congela `engineering.module.spec`).
+     - **El inicio oficial sigue igual en todo lo demás** (invariante 86):
+       dinero, vuelos, gastos, conciliación, tableros y `finanzas` de la
+       ficha del avión. Solo salió de esta lista.
+     - Spec: `engineering.inicio-oficial.spec.ts` (reescrito: con los
+       servicios del N4142R, todos vuelven; la consulta no lleva ninguna
+       condición de fecha).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
