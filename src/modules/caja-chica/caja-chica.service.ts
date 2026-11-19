@@ -57,7 +57,7 @@ import {
   type BalanceDeGasto,
 } from '../../common/ubicacion-balance-lector';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
-import { inicioOficialDe, pisoDia } from '../../common/inicio-oficial.util';
+import { inicioOficialDe } from '../../common/inicio-oficial.util';
 // GASTOS «POR PAGAR» (19-oct-2026, invariante 93): un EFECTIVO por pagar
 // vigente NO es del libro (saldo, por reponer, reposición): entra con su
 // fecha real al marcarse pagado. Sonda ÚNICA de la columna; la regla de qué
@@ -1427,29 +1427,31 @@ export class CajaChicaService {
       id: string;
       moneda: string;
     };
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): SOLO
-    // las LISTAS devueltas (movimientos recientes y gastos EFECTIVO) se
-    // recortan a fecha ≥ inicio. El SALDO y la lectura del fondo salen del
-    // libro COMPLETO (`allMovs` y `gastosRes`, sin piso).
-    const inicio = await inicioOficialDe(this.configuracion);
+    // LA CAJA SE VE COMPLETA (19-nov-2026, invariante 141): del 16-oct al
+    // 19-nov (0.0.85, invariante 86) las LISTAS devueltas (movimientos
+    // recientes y gastos EFECTIVO) se recortaban a fecha ≥ inicio oficial
+    // mientras el saldo salía del libro completo. Reporte de la oficina:
+    // «había registrado unos gastos de taxi y ahorita ya no están; ahora me
+    // marca que tengo más dinero». Los taxis eran de AGOSTO y su reposición
+    // de SEPTIEMBRE: la lista enseñaba la reposición sin los gastos que
+    // reponía y, aunque el saldo era el correcto, nada cuadraba a la vista.
+    // La caja es un libro corrido: lista y saldo leen lo MISMO, sin piso.
     // GASTOS POR PAGAR (invariante 93): con la migración, el EFECTIVO por
     // pagar vigente sale del saldo, de la lectura y de la lista `gastos` y
     // viaja aparte en `por_pagar`; sin por pagar, todo byte a byte igual.
     const conPorPagar = await porPagarDisponible(this.supabase.service);
     const hoyPP = hoyCancun();
-    let movsRecientesQ = this.supabase.service
+    const movsRecientesQ = this.supabase.service
       .from('caja_chica_movimiento')
       .select(MOV_COLS)
       .eq('fondo_id', fo.id);
-    if (inicio) movsRecientesQ = movsRecientesQ.gte('fecha', inicio);
-    let gastosListaQ = this.supabase.service
+    const gastosListaQ = this.supabase.service
       .from('gasto')
       .select(
         `id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)${colsPorPagar(conPorPagar)}`,
       )
       .eq('medio_pago', 'EFECTIVO')
       .eq('usuario_captura_id', userId);
-    if (inicio) gastosListaQ = gastosListaQ.gte('fecha_gasto', inicio);
     const [movsRes, gastosRes, gastosListaRes] = await Promise.all([
       movsRecientesQ
         .order('fecha', { ascending: false })
@@ -1609,7 +1611,11 @@ export class CajaChicaService {
    */
   async getMyHistorial(userId: string, query: MiCajaHistorialQuery) {
     const limit = query.limit ?? MI_CAJA_HISTORIAL_LIMIT_DEFAULT;
-    const desdePedido =
+    // SIN piso del inicio oficial (19-nov-2026, invariante 141): la ventana
+    // es la pedida (por defecto, los últimos 6 meses). El corrido
+    // (`saldo_despues`, `por_reponer_despues`) siempre fue del libro
+    // COMPLETO; ahora las filas que lo explican también se ven.
+    const desde =
       query.desde ?? restarMeses(hoyCancun(), MI_CAJA_HISTORIAL_MESES_ATRAS);
     const hasta = query.hasta ?? null;
     // Fecha de pared REAL (Date.parse acepta '2026-02-31' y lo desborda a
@@ -1622,23 +1628,16 @@ export class CajaChicaService {
       );
       return !Number.isNaN(dt.getTime()) && dt.toISOString().slice(0, 10) === d;
     };
-    if (!valida(desdePedido) || (hasta !== null && !valida(hasta))) {
+    if (!valida(desde) || (hasta !== null && !valida(hasta))) {
       throw new BadRequestException(
         'desde/hasta deben ser fechas válidas YYYY-MM-DD.',
       );
     }
-    if (hasta !== null && hasta < desdePedido) {
+    if (hasta !== null && hasta < desde) {
       throw new BadRequestException(
         'hasta debe ser igual o posterior a desde.',
       );
     }
-    // INICIO OFICIAL (invariante 86, auditoría 16-oct-2026, 0.0.85): la
-    // VENTANA sube al inicio (la validación de arriba usa lo pedido: un
-    // rango anterior sale vacío, nunca 400). El corrido (`saldo_despues`,
-    // `por_reponer_despues`) se sigue calculando con el libro COMPLETO.
-    const desde =
-      pisoDia(desdePedido, await inicioOficialDe(this.configuracion)) ??
-      desdePedido;
 
     const { data: fondo, error } = await this.supabase.service
       .from('caja_chica_fondo')

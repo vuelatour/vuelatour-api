@@ -9938,7 +9938,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ≥ 1 vigente visible; `huecos` sobre TODA la serie; aditivo
       `resumen.desde`; el Excel dice «Registradas (desde el 1-sep-2026)»);
       **tablero operativo** `fetchVuelosOps` (`fecha_vuelo` null o ≥
-      corte; prod #234); **Mi caja** de la app (`getMyFondo`: SOLO las
+      corte; prod #234); **Mi caja** de la app — **RETIRADO el 19-nov-2026
+      (invariante 141): la caja chica ya NO se recorta**; lo que sigue es
+      la regla vieja — (`getMyFondo`: SOLO las
       listas — 20 movimientos y gastos EFECTIVO — con piso, saldo/lectura
       con el libro completo; `getMyHistorial`: la ventana sube, el corrido
       `saldo_despues`/`por_reponer_despues` del libro completo, rango
@@ -13912,6 +13914,46 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        del VUELO sigue sin compensar un fallo al guardar su id (como antes);
        y en un viaje con pernocta los días intermedios SIN salidas ya no
        muestran nada (antes la barra los cubría).
+
+141. **LA CAJA CHICA SE VE COMPLETA: EL INICIO OFICIAL NO LA RECORTA
+     (19-nov-2026, API 0.0.146, SIN migración).** Reporte de la oficina (Itzi,
+     info@): «de mi fondo había registrado unos gastos de taxi el mes pasado
+     y ahorita ya no están. Ahora me marca que tengo más dinero pero pues
+     no». Nada se había borrado (la bitácora no tiene ningún DELETE de taxi):
+     sus taxis en efectivo son de AGOSTO (6, 23 y 24-ago) y desde el 0.0.85
+     (invariante 86) «Mi caja» recortaba sus LISTAS al inicio oficial
+     (1-sep-2026) mientras el saldo salía del libro completo. Su libro:
+     fondo $1,000 (4-ago), gastos de agosto −$1,070, reposición +$1,070
+     (21-sep, «gastos del 6 al 24 de agosto»), −$75 (29-sep), −$200 (18-nov)
+     ⇒ $725. El saldo era el CORRECTO, pero la lista enseñaba la reposición
+     de septiembre sin los gastos que reponía (y sin el fondo inicial): no
+     cuadraba a la vista. Pedido de Diego: «haz que la caja chica muestre los
+     movimientos anteriores para que todo cuadre».
+     - **Regla**: la caja chica es un libro corrido — lista y saldo leen lo
+       MISMO, sin piso. `getMyFondo` (`GET /v1/caja-chica/me`): los 20
+       movimientos recientes y los 200 gastos EFECTIVO ya no llevan `gte` de
+       fecha. `getMyHistorial` (`GET /v1/me/caja-chica/movimientos`): la
+       ventana es la PEDIDA (por defecto los últimos 6 meses,
+       `MI_CAJA_HISTORIAL_MESES_ATRAS`); un rango entero anterior al inicio
+       devuelve sus filas (antes salía vacío). Con y sin inicio oficial
+       configurado la respuesta es idéntica. Ningún saldo cambia: el corrido
+       por fila siempre fue del libro completo.
+     - **El detalle del fondo del panel** (`getFondoDetail`) nunca se
+       recortó en el API; el piso lo ponía el panel (vista «desde el inicio»
+       + renglón «Saldo inicial al 1-sep-2026») y también se retiró.
+     - **Lo que SIGUE con el inicio oficial**: `balancesDeGastos` (un gasto
+       anterior al inicio no vive en ningún libro ⇒ `balance: null`, sin
+       enlace «Ver en balance»), la lista de Gastos (`/expenses`, por eso en
+       el detalle del fondo un gasto de antes del inicio se VE pero no trae
+       el botón de editar ni su foto) y todo lo demás de la invariante 86.
+     - Tercera vez que el piso esconde algo que el usuario necesita ver
+       completo (bitácora PDF el 3-nov, historial de mantenimiento el 18-nov,
+       invariante 139): **el inicio oficial recorta periodos de DINERO y
+       listas de operación, no libros corridos ni historiales técnicos**.
+     - Spec: `caja-chica.inicio-oficial.spec.ts` (reescrito con la caja real:
+       ninguna lectura lleva condición de fecha; la ventana pedida se
+       respeta; agosto se devuelve; con y sin inicio la respuesta es la
+       misma).
 
 ## Convenciones NestJS
 
