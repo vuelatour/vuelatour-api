@@ -15,6 +15,8 @@ jest.mock('../realtime/notifications.service', () => ({
   NotificationsService: class {},
 }));
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { CalendarSyncService } from './calendar-sync.service';
 import type { ConfigService } from '@nestjs/config';
@@ -456,7 +458,6 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
       'Folio: #247',
       'Estado: CONFIRMADO',
       'Cliente: ACME',
-      'Pasajeros: 3',
       'Aeronave: N4142R',
       'Piloto: Luis Alberto Ramírez',
       // El permiso pendiente del tramo 2 SÍ se dice (el color solo mira el
@@ -468,6 +469,60 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
       '',
       'VuelaTour · vuelo v-1',
     ]);
+  });
+
+  /**
+   * NOTAS (20-nov-2026): el espejo lee `vuelo.notas_internas`,
+   * `escala.notas` y `escala.servicio_notas` y las publica en el bloque NOTAS
+   * del evento — es lo que ve el mecánico.
+   */
+  it('NOTAS: las del vuelo, las internas, la de cada tramo y la de servicio salen al principio de la descripción', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      notas: 'Quitar banca',
+      notas_internas: 'Dejar solo asiento del capi y copi',
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          notas: 'QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+          // Nota de servicio VIEJA en un tramo que no es parada de servicio:
+          // no se enseña (misma regla que la app).
+          tipo_parada: 'NORMAL',
+          servicio_notas: 'nota vieja de servicio',
+        },
+        {
+          ...VUELO_MULTIESCALA.escalas[1],
+          notas: null,
+          tipo_parada: 'SERVICIO',
+          servicio_notas: 'Limpieza de bujías en taller',
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await expect(service.syncFlight('v-1')).resolves.toBe(true);
+
+    const lineas = String(insertado().requestBody.description).split('\n');
+    expect(lineas.slice(0, 6)).toEqual([
+      'NOTAS:',
+      '• Quitar banca',
+      '• Dejar solo asiento del capi y copi',
+      '• T1 cun-ptu: QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+      '• T2 ptu-cun · servicio: Limpieza de bujías en taller',
+      '',
+    ]);
+    expect(lineas[6]).toBe('Folio: #247');
+    expect(lineas.join('\n')).not.toContain('nota vieja de servicio');
+  });
+
+  it('NOTAS: el espejo pide a la base las columnas de las que salen', () => {
+    const fuente = readFileSync(
+      join(__dirname, 'calendar-sync.service.ts'),
+      'utf8',
+    );
+    const select = /const VUELO_SELECT_BASE =([\s\S]*?);\n/.exec(fuente)?.[1];
+    expect(select).toContain('tipo, notas, notas_internas, estado_permiso');
+    expect(select).toContain('tipo_parada, notas, servicio_notas,');
   });
 
   it('APODO de la oficina: gana sobre el primer nombre («Saab», no «Alexander»)', async () => {

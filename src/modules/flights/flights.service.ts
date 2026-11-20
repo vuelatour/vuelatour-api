@@ -2838,6 +2838,9 @@ export class FlightsService {
           }),
           pasajeros_nombres_tramos: resumen?.pasajeros_nombres_tramos ?? [],
           notas_tramos: resumen?.notas_tramos ?? [],
+          // ADITIVO (20-nov-2026): las mismas notas con su tramo + la de la
+          // parada de servicio. La app las pinta al mecánico.
+          notas_por_tramo: resumen?.notas_por_tramo ?? [],
           factura_cliente:
             facturaPorVuelo.get(vid) ??
             bloqueFacturaCliente(row as VueloFacturaRow),
@@ -2894,7 +2897,9 @@ export class FlightsService {
       .select(
         // tipo_parada/pasajeros (28-sep-2026): bandera `servicio` del listado
         // (CAFÉ del calendario del piloto en la app, `esVueloDeServicio`).
-        'vuelo_id, orden, origen_iata, destino_iata, piloto_id, copiloto_id, pasajeros_nombres, notas, cancelada_at, tipo_parada, pasajeros',
+        // servicio_notas (20-nov-2026): `notas_por_tramo` del listado (las
+        // notas que la app enseña al mecánico en «Vuelos de hoy»).
+        'vuelo_id, orden, origen_iata, destino_iata, piloto_id, copiloto_id, pasajeros_nombres, notas, cancelada_at, tipo_parada, servicio_notas, pasajeros',
       )
       .in('vuelo_id', vueloIds)
       .order('orden', { ascending: true });

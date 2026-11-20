@@ -14,6 +14,10 @@ import {
   EVENTO_DIA_TOPE_MS,
   fechaLargaDia,
   LINEA_DESCRIPCION_SERVICIO,
+  NOTA_EVENTO_MAX_CARACTERES,
+  NOTAS_EVENTO_MAX_RENGLONES,
+  notasEventoVuelo,
+  TITULO_NOTAS_EVENTO,
   eventoAusenteEnGoogle,
   horaCortaCancun,
   lineaDiaEventoVuelo,
@@ -602,7 +606,8 @@ describe('descripcionEventoVuelo', () => {
       'Folio: #247',
       'Estado: CONFIRMADO',
       'Cliente: ACME',
-      'Pasajeros: 2',
+      // Sin «Pasajeros: 2» (20-nov-2026): los pasajeros se leen en cada
+      // tramo; el número del vuelo podía decir otra cosa.
       'Aeronave: N4142R',
       'Piloto: Alexander E. Saab',
       'T1 cun-mid 10:00 · 2 pax',
@@ -620,7 +625,9 @@ describe('descripcionEventoVuelo', () => {
       notas: 'avisar al FBO',
     }).split('\n');
     expect(lineas).toContain('Permiso de pista: PENDIENTE');
-    expect(lineas).toContain('Notas: avisar al FBO');
+    // Desde el 20-nov-2026 las notas van en un bloque AL PRINCIPIO.
+    expect(lineas.slice(0, 3)).toEqual(['NOTAS:', '• avisar al FBO', '']);
+    expect(lineas).not.toContain('Notas: avisar al FBO');
     // El pendiente va ANTES de los tramos (se lee primero).
     expect(lineas.indexOf('Permiso de pista: PENDIENTE')).toBeLessThan(
       lineas.indexOf('T1 cun-mid 10:00 · 2 pax'),
@@ -707,6 +714,167 @@ describe('descripcionEventoVuelo', () => {
     expect(texto).toContain('Piloto: sin asignar');
     expect(texto).not.toContain('Monto');
     expect(texto).not.toContain('undefined');
+  });
+
+  /**
+   * NOTAS (20-nov-2026): «las notas que sí salgan en el google calendar por
+   * favor porque ese es el que ve nuestro mecánico». El evento solo llevaba
+   * `vuelo.notas`; la oficina escribe además en la nota de cada tramo, en las
+   * notas internas y en la nota de la parada de servicio.
+   */
+  describe('bloque NOTAS (20-nov-2026)', () => {
+    const CON_NOTAS = {
+      ...BASE,
+      notas: 'Quitar banca',
+      notasInternas: 'Dejar solo asiento del capi y copi',
+      tramos: [
+        { ...BASE.tramos[0], nota: 'QUITAR DOS ASIENTOS! SUPER IMPORTANTE' },
+        {
+          ...BASE.tramos[1],
+          nota: 'Tienen pases',
+          notaServicio: 'Limpieza de bujías en taller',
+        },
+      ],
+    };
+
+    it('vuelo, internas, tramo y servicio: un renglón cada una, con su tramo', () => {
+      expect(notasEventoVuelo(CON_NOTAS)).toEqual([
+        '• Quitar banca',
+        '• Dejar solo asiento del capi y copi',
+        '• T1 cun-mid: QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+        '• T2 mid-cun: Tienen pases',
+        '• T2 mid-cun · servicio: Limpieza de bujías en taller',
+      ]);
+    });
+
+    it('la descripción las lleva AL PRINCIPIO y el resto queda igual', () => {
+      expect(TITULO_NOTAS_EVENTO).toBe('NOTAS:');
+      expect(descripcionEventoVuelo(CON_NOTAS).split('\n')).toEqual([
+        'NOTAS:',
+        '• Quitar banca',
+        '• Dejar solo asiento del capi y copi',
+        '• T1 cun-mid: QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+        '• T2 mid-cun: Tienen pases',
+        '• T2 mid-cun · servicio: Limpieza de bujías en taller',
+        '',
+        'Folio: #247',
+        'Estado: CONFIRMADO',
+        'Cliente: ACME',
+        'Aeronave: N4142R',
+        'Piloto: Alexander E. Saab',
+        'T1 cun-mid 10:00 · 2 pax',
+        'T2 mid-cun 18:00 · ferry',
+        'Monto: $4200 USD',
+        '',
+        'VuelaTour · vuelo v-1',
+      ]);
+    });
+
+    it('vuelo de varios días: primero qué día es, luego las notas', () => {
+      const lineas = descripcionEventoVuelo({
+        ...CON_NOTAS,
+        lineaDia: 'Día 1 de 2 · miércoles 18/11/2026 · tramos T1 y T2',
+      }).split('\n');
+      expect(lineas.slice(0, 3)).toEqual([
+        'Día 1 de 2 · miércoles 18/11/2026 · tramos T1 y T2',
+        'NOTAS:',
+        '• Quitar banca',
+      ]);
+    });
+
+    it('sin ninguna nota no hay bloque (ni encabezado suelto)', () => {
+      expect(notasEventoVuelo(BASE)).toEqual([]);
+      expect(
+        notasEventoVuelo({
+          notas: '   ',
+          notasInternas: '\n \n',
+          tramos: [{ orden: 1, origen: 'CUN', destino: 'MID', nota: '' }],
+        }),
+      ).toEqual([]);
+      expect(descripcionEventoVuelo(BASE)).not.toContain('NOTAS');
+    });
+
+    it('una nota de varias líneas sale renglón por renglón, sin espacios de sobra', () => {
+      expect(
+        notasEventoVuelo({
+          notas: null,
+          notasInternas:
+            '  Quitar 3   asientos \r\n\n[Grupo G-6] Avión 1 de 1 · 9 pax de este avión.',
+          tramos: [],
+        }),
+      ).toEqual([
+        '• Quitar 3 asientos',
+        '• [Grupo G-6] Avión 1 de 1 · 9 pax de este avión.',
+      ]);
+    });
+
+    it('la misma indicación en «Notas» y en «Notas internas» sale UNA vez', () => {
+      expect(
+        notasEventoVuelo({
+          notas: 'Quitar banca',
+          notasInternas: 'QUITAR BANCA\nllevar comisariato',
+          tramos: [
+            // En un tramo SÍ se repite: ahí dice de cuál tramo es.
+            { orden: 1, origen: 'CUN', destino: 'MID', nota: 'Quitar banca' },
+          ],
+        }),
+      ).toEqual([
+        '• Quitar banca',
+        '• llevar comisariato',
+        '• T1 cun-mid: Quitar banca',
+      ]);
+    });
+
+    it('una nota larguísima se corta con «…» y nunca rebasa el tope', () => {
+      const [renglon] = notasEventoVuelo({
+        notas: 'x'.repeat(NOTA_EVENTO_MAX_CARACTERES + 50),
+        tramos: [],
+      });
+      expect(renglon.endsWith('…')).toBe(true);
+      expect(renglon.length).toBe('• '.length + NOTA_EVENTO_MAX_CARACTERES);
+    });
+
+    it('demasiadas notas: se corta y se DICE cuántas faltan', () => {
+      const tramos = Array.from(
+        { length: NOTAS_EVENTO_MAX_RENGLONES + 3 },
+        (_, i) => ({
+          orden: i + 1,
+          origen: 'CUN',
+          destino: 'MID',
+          nota: `nota ${i + 1}`,
+        }),
+      );
+      const renglones = notasEventoVuelo({ notas: null, tramos });
+      expect(renglones).toHaveLength(NOTAS_EVENTO_MAX_RENGLONES + 1);
+      expect(renglones[NOTAS_EVENTO_MAX_RENGLONES]).toBe(
+        '• … y 3 notas más: ver el vuelo en VuelaTour',
+      );
+      expect(
+        notasEventoVuelo({ notas: null, tramos: tramos.slice(0, -2) }).pop(),
+      ).toBe('• … y 1 nota más: ver el vuelo en VuelaTour');
+    });
+
+    it('nunca escribe «undefined» ni lanza con datos raros', () => {
+      const texto = notasEventoVuelo({
+        notas: 7 as unknown as string,
+        notasInternas: undefined,
+        tramos: [{ orden: 3, nota: 'sin ruta capturada' }],
+      }).join('\n');
+      expect(texto).toBe('• T3: sin ruta capturada');
+    });
+  });
+
+  /**
+   * «Pasajeros: N» del VUELO (20-nov-2026): con líneas de tramo ya no sale —
+   * en el #478 decía «Pasajeros: 5» sobre tramos de 3, 5, 3 y 1 pax («este
+   * dice una cosa y los detalles dice otra»). Solo queda de respaldo si la
+   * descripción se arma sin ningún tramo.
+   */
+  it('«Pasajeros: N» del vuelo: solo cuando no hay ninguna línea de tramo', () => {
+    expect(descripcionEventoVuelo(BASE)).not.toContain('Pasajeros:');
+    expect(
+      descripcionEventoVuelo({ ...BASE, tramos: [] }).split('\n'),
+    ).toContain('Pasajeros: 2');
   });
 });
 

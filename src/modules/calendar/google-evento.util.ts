@@ -383,6 +383,17 @@ export interface TramoEventoVuelo {
    * (rotación de piloto a media jornada, caso #129). Mismo criterio.
    */
   piloto?: string | null;
+  /**
+   * Nota de la oficina para ESTE tramo (`escala.notas`: «QUITAR DOS ASIENTOS»,
+   * «Tienen pases»). 20-nov-2026: sale en el bloque NOTAS de la descripción.
+   */
+  nota?: string | null;
+  /**
+   * Nota de la parada de SERVICIO de este tramo (`escala.servicio_notas`:
+   * «Limpieza de bujías en taller»). El llamador la manda SOLO cuando el
+   * tramo es parada de servicio.
+   */
+  notaServicio?: string | null;
 }
 
 /** Todo lo que la descripción del evento único necesita del vuelo. */
@@ -404,7 +415,14 @@ export interface DatosEventoVuelo {
    */
   servicio?: boolean;
   montoUsd?: number | string | null;
+  /** Notas del vuelo (`vuelo.notas`). */
   notas?: string | null;
+  /**
+   * Notas internas del vuelo (`vuelo.notas_internas`): lo que la oficina
+   * escribe en «Notas internas» al dar de alta la operación («Quitar 3
+   * asientos») y que la app enseña como «Indicaciones del equipo».
+   */
+  notasInternas?: string | null;
   tramos: readonly TramoEventoVuelo[];
   /**
    * SOLO en vuelos de VARIOS DÍAS (17-nov-2026, `lineaDiaEventoVuelo`): la
@@ -419,10 +437,106 @@ export interface DatosEventoVuelo {
 export const LINEA_DESCRIPCION_SERVICIO =
   'Vuelo de SERVICIO (taller / parada técnica, sin pasajeros)';
 
+/* ===================================================================== *
+ * NOTAS DEL VUELO EN EL EVENTO (20-nov-2026)
+ *
+ * Pedido de la oficina: «las notas que sí salgan en el Google Calendar por
+ * favor porque ese es el que ve nuestro mecánico». El evento solo llevaba
+ * `vuelo.notas`, y la oficina escribe sus indicaciones en TRES lugares más:
+ * la nota de cada tramo (`escala.notas`: «QUITAR DOS ASIENTOS! SUPER
+ * IMPORTANTE», 33 de los 169 vuelos de los últimos 45 días), las notas
+ * internas de la operación (`vuelo.notas_internas`: «Dejar solo asiento del
+ * capi y copi») y la nota de la parada de servicio (`escala.servicio_notas`:
+ * «Limpieza de bujías en taller»). Nada de eso llegaba a Google.
+ *
+ * Van en UN bloque AL PRINCIPIO de la descripción (es lo que el mecánico no
+ * puede pasar por alto) y cada nota de tramo dice de cuál tramo es, con la
+ * misma etiqueta de su línea (`T1 cun-czm`).
+ * ===================================================================== */
+
+/** Encabezado del bloque de notas de la descripción. */
+export const TITULO_NOTAS_EVENTO = 'NOTAS:';
+
+/** Tope de caracteres de UN renglón de nota (lo que pase se corta con «…»). */
+export const NOTA_EVENTO_MAX_CARACTERES = 300;
+
+/**
+ * Tope de renglones del bloque: la descripción de un evento de Google admite
+ * 8,192 caracteres y debajo van el folio, los tramos y el ancla.
+ */
+export const NOTAS_EVENTO_MAX_RENGLONES = 20;
+
+/**
+ * Los renglones de UNA nota: uno por línea capturada, sin espacios de sobra,
+ * sin líneas vacías y con el tope de caracteres. Nunca lanza.
+ */
+function renglonesDeNota(texto: string | null | undefined): string[] {
+  if (typeof texto !== 'string') return [];
+  return texto
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter((l) => l !== '')
+    .map((l) =>
+      l.length > NOTA_EVENTO_MAX_CARACTERES
+        ? `${l.slice(0, NOTA_EVENTO_MAX_CARACTERES - 1).trimEnd()}…`
+        : l,
+    );
+}
+
+/**
+ * Los renglones del bloque NOTAS (sin el encabezado), en este orden: notas
+ * del vuelo, notas internas y, por tramo, su nota y la de su parada de
+ * servicio. `[]` cuando el vuelo no tiene ninguna.
+ *
+ * - Cada renglón empieza con «• »; los de tramo dicen cuál (`T1 cun-czm:`) y
+ *   los de servicio lo marcan (`T2 czm-mid · servicio:`).
+ * - Un renglón REPETIDO (la misma indicación en «Notas» y en «Notas
+ *   internas») sale una sola vez.
+ * - Con más de `NOTAS_EVENTO_MAX_RENGLONES` se corta y se DICE cuántos
+ *   faltan: nunca se esconde una nota en silencio.
+ */
+export function notasEventoVuelo(
+  v: Pick<DatosEventoVuelo, 'notas' | 'notasInternas' | 'tramos'>,
+): string[] {
+  const renglones: string[] = [];
+  const vistos = new Set<string>();
+  const agregar = (prefijo: string, texto: string | null | undefined) => {
+    for (const r of renglonesDeNota(texto)) {
+      const renglon = `• ${prefijo}${r}`;
+      const clave = renglon.toLowerCase();
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      renglones.push(renglon);
+    }
+  };
+  agregar('', v.notas);
+  agregar('', v.notasInternas);
+  for (const t of v.tramos ?? []) {
+    const etiqueta = [`T${t.orden}`, rutaMinusculas([t])]
+      .filter((x) => x !== '')
+      .join(' ');
+    agregar(`${etiqueta}: `, t.nota);
+    agregar(`${etiqueta} · servicio: `, t.notaServicio);
+  }
+  if (renglones.length <= NOTAS_EVENTO_MAX_RENGLONES) return renglones;
+  const faltan = renglones.length - NOTAS_EVENTO_MAX_RENGLONES;
+  return [
+    ...renglones.slice(0, NOTAS_EVENTO_MAX_RENGLONES),
+    `• … y ${faltan} nota${faltan === 1 ? '' : 's'} más: ver el vuelo en VuelaTour`,
+  ];
+}
+
 /**
  * DESCRIPCIÓN del evento único, con el desglose por tramo que el título ya
  * no lleva (formato de la oficina: una línea por tramo, como los
  * `cun-ctm | paxs | ctm-cun (15:00)` que escribían a mano).
+ *
+ * 20-nov-2026: (1) las NOTAS —del vuelo, internas, de cada tramo y de la
+ * parada de servicio— van en un bloque al principio (`notasEventoVuelo`); la
+ * línea suelta `Notas: …` del final ya no existe. (2) La línea `Pasajeros: N`
+ * del vuelo ya NO sale cuando hay líneas de tramo: cada tramo dice los suyos
+ * («· 2 pax» / «· ferry») y el número del vuelo podía decir otra cosa (pedido
+ * de la oficina sobre la app: «este dice una cosa y los detalles dice otra»).
  *
  * La última línea es el ANCLA legible `VuelaTour · vuelo <id>`: el ancla de
  * verdad vive en `extendedProperties.private`, pero esta se ve desde la app
@@ -430,14 +544,19 @@ export const LINEA_DESCRIPCION_SERVICIO =
  */
 export function descripcionEventoVuelo(v: DatosEventoVuelo): string {
   const lineaDia = (v.lineaDia ?? '').trim();
+  const notas = notasEventoVuelo(v);
   const lineas: Array<string | null> = [
     // Vuelo de varios días: lo PRIMERO que se lee es qué día es esta fila.
     lineaDia !== '' ? lineaDia : null,
+    // Las indicaciones de la oficina, antes que los datos del vuelo.
+    ...(notas.length > 0 ? [TITULO_NOTAS_EVENTO, ...notas, ''] : []),
     `Folio: #${v.folio}`,
     `Estado: ${v.estado}`,
     v.servicio ? LINEA_DESCRIPCION_SERVICIO : null,
     `Cliente: ${v.cliente ?? '—'}`,
-    `Pasajeros: ${v.pasajeros}`,
+    // Solo sin líneas de tramo (no debería pasar: el espejo siempre arma al
+    // menos una); con ellas, los pasajeros se leen en cada tramo.
+    v.tramos.length === 0 ? `Pasajeros: ${v.pasajeros}` : null,
     v.esExterno
       ? `Operador externo: ${v.operadorExterno ?? '—'}`
       : `Aeronave: ${v.matricula ?? '—'}`,
@@ -461,7 +580,6 @@ export function descripcionEventoVuelo(v: DatosEventoVuelo): string {
     v.montoUsd == null || v.montoUsd === ''
       ? null
       : `Monto: $${Number(v.montoUsd)} USD`,
-    v.notas ? `Notas: ${v.notas}` : null,
     '',
     `VuelaTour · vuelo ${v.id}`,
   ];

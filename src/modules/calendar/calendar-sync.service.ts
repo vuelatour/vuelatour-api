@@ -113,11 +113,18 @@ export interface OpcionesEspejo {
 // migración `20260928000003_calendar_sync_tipo_parada.sql` suma `tipo_parada`
 // a `trg_escala_calendar_sync` (`pasajeros` ya estaba): sin ella, marcar un
 // tramo como Servicio no re-encola el vuelo.
+//
+// NOTAS (20-nov-2026, «las notas que sí salgan en el google calendar […]
+// porque ese es el que ve nuestro mecánico»): además de `vuelo.notas` viajan
+// `vuelo.notas_internas`, `escalas.notas` y `escalas.servicio_notas` y salen
+// en el bloque NOTAS de la descripción (`notasEventoVuelo`). La migración
+// `20261120000001_calendar_sync_notas.sql` las suma a los dos triggers: sin
+// ella, escribir o corregir una nota de tramo NO re-encola el evento.
 
 const VUELO_SELECT_BASE =
-  'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, cobrado, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
+  'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, cobrado, fecha_vuelo, fecha_traslado_final, tipo, notas, notas_internas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@), cliente:cliente_id(nombre), ' +
-  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, tipo_parada, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
+  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, tipo_parada, notas, servicio_notas, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
 
 /**
  * Con `usuario.apodo` (migración `20260917000001`): el TÍTULO de la fila del
@@ -183,6 +190,11 @@ interface VueloRow {
   fecha_traslado_final: string | null;
   tipo: string | null;
   notas: string | null;
+  /**
+   * «Notas internas» de la operación (20-nov-2026): van al bloque NOTAS del
+   * evento. Opcional en el tipo por robustez: ausente = sin notas.
+   */
+  notas_internas?: string | null;
   estado_permiso: string | null;
   /** Asignación a NIVEL VUELO: el tramo la hereda si no tiene propia. */
   aeronave_id: string | null;
@@ -205,6 +217,10 @@ interface VueloRow {
      * vuelo de SERVICIO (`esVueloDeServicio`). Opcional por robustez.
      */
     tipo_parada?: string | null;
+    /** Nota de la oficina para el tramo (20-nov-2026, bloque NOTAS). */
+    notas?: string | null;
+    /** Nota de la parada de SERVICIO del tramo (20-nov-2026). */
+    servicio_notas?: string | null;
     google_calendar_id: string | null;
     aeronave_id: string | null;
     piloto_id: string | null;
@@ -2800,6 +2816,12 @@ export class CalendarSyncService implements OnModuleInit {
                   : null),
             ferry: e.es_ferry,
             pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? v.pasajeros),
+            // NOTAS (20-nov-2026): la del tramo siempre; la de servicio SOLO
+            // si el tramo es parada de servicio (misma regla que la app: una
+            // nota vieja de un tramo que ya no es servicio no se enseña).
+            nota: e.notas ?? null,
+            notaServicio:
+              e.tipo_parada === 'SERVICIO' ? (e.servicio_notas ?? null) : null,
           }))
         : [
             {
@@ -2940,6 +2962,7 @@ export class CalendarSyncService implements OnModuleInit {
         servicio,
         montoUsd: v.monto_total_usd,
         notas: v.notas,
+        notasInternas: v.notas_internas ?? null,
         tramos,
         lineaDia: p.lineaDia,
       });

@@ -32,6 +32,19 @@ import { esVueloDeServicio } from './vuelo-servicio.util';
  *                                calendario del piloto en la app. Misma lectura
  *                                de escalas (se le suman `tipo_parada` y
  *                                `pasajeros`), sin consultas nuevas.
+ *  · `notas_por_tramo`         — (20-nov-2026) las MISMAS notas, pero diciendo
+ *                                de qué tramo son, más la nota de la parada de
+ *                                SERVICIO: `[{ numero, origen_iata,
+ *                                destino_iata, tipo: 'TRAMO' | 'SERVICIO',
+ *                                texto }]`. Es lo que la app enseña al
+ *                                mecánico en «Vuelos de hoy» (pedido: «en la
+ *                                app no aparecen las notas para el mecánico»).
+ *                                `numero` es el número de LISTA del tramo (su
+ *                                posición por `orden`, cancelados incluidos:
+ *                                el mismo que pinta el detalle del vuelo, nunca
+ *                                el `orden` crudo); los tramos CANCELADOS no
+ *                                aportan notas. `notas_tramos` no cambia (lo
+ *                                usa el buscador).
  */
 
 export interface EscalaResumenRow {
@@ -48,14 +61,55 @@ export interface EscalaResumenRow {
   cancelada_at?: string | null;
   /** `NORMAL` | `SERVICIO` (28-sep-2026: bandera `servicio` del resumen). */
   tipo_parada?: string | null;
+  /** Nota de la parada de SERVICIO (20-nov-2026, `notas_por_tramo`). */
+  servicio_notas?: string | null;
   /** Pasajeros del TRAMO (null = 0 para la regla de servicio). */
   pasajeros?: number | null;
+}
+
+/** Una nota de la oficina con el tramo al que pertenece (20-nov-2026). */
+export interface NotaDeTramo {
+  /** Número de LISTA del tramo (1..n por `orden`, cancelados incluidos). */
+  numero: number;
+  origen_iata: string | null;
+  destino_iata: string | null;
+  /** `TRAMO` = `escala.notas`; `SERVICIO` = nota de la parada de servicio. */
+  tipo: 'TRAMO' | 'SERVICIO';
+  texto: string;
+}
+
+/**
+ * Notas por tramo de UN vuelo, en orden de tramo (20-nov-2026). `legs` ya
+ * viene ordenado por `orden`. Los cancelados cuentan para el número pero no
+ * aportan notas; la nota de servicio solo sale si el tramo ES parada de
+ * servicio (misma regla que la app y que el evento de Google).
+ */
+export function notasPorTramoDe(legs: EscalaResumenRow[]): NotaDeTramo[] {
+  const out: NotaDeTramo[] = [];
+  const limpio = (v: unknown): string =>
+    typeof v === 'string' ? v.replace(/[ \t]+/g, ' ').trim() : '';
+  legs.forEach((l, i) => {
+    if (l.cancelada_at) return;
+    const base = {
+      numero: i + 1,
+      origen_iata: l.origen_iata ?? null,
+      destino_iata: l.destino_iata ?? null,
+    };
+    const nota = limpio(l.notas);
+    if (nota) out.push({ ...base, tipo: 'TRAMO', texto: nota });
+    const servicio =
+      l.tipo_parada === 'SERVICIO' ? limpio(l.servicio_notas) : '';
+    if (servicio) out.push({ ...base, tipo: 'SERVICIO', texto: servicio });
+  });
+  return out;
 }
 
 export interface ResumenEscalas {
   ruta_iatas: string[];
   pasajeros_nombres_tramos: string[];
   notas_tramos: string[];
+  /** Las notas con su tramo + la de servicio (20-nov-2026, ADITIVO). */
+  notas_por_tramo: NotaDeTramo[];
   /** Ids EXPLÍCITOS (sin herencia) de piloto de los tramos, sin repetir. */
   piloto_ids: string[];
   /** Ids EXPLÍCITOS (sin herencia) de copiloto de los tramos, sin repetir. */
@@ -168,6 +222,7 @@ export function resumirEscalasPorVuelo(
       ],
       pasajeros_nombres_tramos: pasajeros,
       notas_tramos: notas,
+      notas_por_tramo: notasPorTramoDe(ordenadas),
       piloto_ids: pilotoIds,
       copiloto_ids: copilotoIds,
       servicio: esVueloDeServicio(ordenadas),

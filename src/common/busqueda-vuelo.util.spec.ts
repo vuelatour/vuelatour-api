@@ -97,6 +97,8 @@ describe('resumirEscalasPorVuelo', () => {
       ruta_iatas: ['CUN', 'HOL', 'CUN', 'CZM'],
       pasajeros_nombres_tramos: ['Ana', 'Pedro', 'Familia Boas'],
       notas_tramos: ['Regreso con equipaje extra'],
+      // El tramo 2 está CANCELADO: su nota no se le enseña al mecánico.
+      notas_por_tramo: [],
       piloto_ids: [PIL_B],
       copiloto_ids: [COP_C],
       servicio: false,
@@ -105,6 +107,7 @@ describe('resumirEscalasPorVuelo', () => {
       ruta_iatas: ['CUN', 'MID'],
       pasajeros_nombres_tramos: [],
       notas_tramos: [],
+      notas_por_tramo: [],
       piloto_ids: [],
       copiloto_ids: [],
       servicio: false,
@@ -169,6 +172,74 @@ describe('resumirEscalasPorVuelo', () => {
         },
       ]).get(V1)?.servicio,
     ).toBe(false);
+  });
+
+  /**
+   * `notas_por_tramo` (20-nov-2026): las notas que la app enseña al mecánico
+   * en «Vuelos de hoy», diciendo de qué tramo son, más la nota de la parada
+   * de SERVICIO. El número es el de LISTA (posición por `orden`, cancelados
+   * incluidos), nunca el `orden` crudo (un operativo agregado vale 100).
+   */
+  it('notas_por_tramo: nota de tramo y de servicio con su número de lista; los cancelados no aportan', () => {
+    const r = resumirEscalasPorVuelo([
+      {
+        vuelo_id: V1,
+        orden: 100,
+        origen_iata: 'MID',
+        destino_iata: 'CUN',
+        notas: 'Dejar el avión en el hangar 2',
+        tipo_parada: 'SERVICIO',
+        servicio_notas: '  Limpieza de   bujías ',
+        pasajeros: 0,
+      },
+      {
+        vuelo_id: V1,
+        orden: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'CZM',
+        notas: 'QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+        // Nota de servicio vieja en un tramo NORMAL: no sale.
+        tipo_parada: 'NORMAL',
+        servicio_notas: 'nota vieja',
+      },
+      {
+        vuelo_id: V1,
+        orden: 2,
+        origen_iata: 'CZM',
+        destino_iata: 'MID',
+        notas: 'Tramo cancelado con nota',
+        cancelada_at: '2026-11-20T00:00:00Z',
+      },
+    ]);
+    expect(r.get(V1)?.notas_por_tramo).toEqual([
+      {
+        numero: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'CZM',
+        tipo: 'TRAMO',
+        texto: 'QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+      },
+      {
+        numero: 3,
+        origen_iata: 'MID',
+        destino_iata: 'CUN',
+        tipo: 'TRAMO',
+        texto: 'Dejar el avión en el hangar 2',
+      },
+      {
+        numero: 3,
+        origen_iata: 'MID',
+        destino_iata: 'CUN',
+        tipo: 'SERVICIO',
+        texto: 'Limpieza de bujías',
+      },
+    ]);
+    // `notas_tramos` (buscador) NO cambia: sigue con todas las de tramo.
+    expect(r.get(V1)?.notas_tramos).toEqual([
+      'QUITAR DOS ASIENTOS! SUPER IMPORTANTE',
+      'Tramo cancelado con nota',
+      'Dejar el avión en el hangar 2',
+    ]);
   });
 
   it('sin escalas → mapa vacío; filas sin vuelo_id se ignoran', () => {

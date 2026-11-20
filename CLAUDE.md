@@ -13955,6 +13955,78 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        respeta; agosto se devuelve; con y sin inicio la respuesta es la
        misma).
 
+142. **LAS NOTAS DEL VUELO SALEN EN EL EVENTO DE GOOGLE CALENDAR, Y EL
+     «PASAJEROS: N» DEL VUELO YA NO (20-nov-2026, API 0.0.147, migración
+     `20261120000001` APLICADA por MCP el mismo día).** Pedido de la oficina:
+     «en la app no aparecen las notas para el mecánico y las notas que sí
+     salgan en el google calendar por favor porque ese es el que ve nuestro
+     mecánico». El evento solo llevaba `vuelo.notas` (7 de los 169 vuelos de
+     los últimos 45 días) como una línea al FINAL; la oficina escribe sus
+     indicaciones en tres lugares más y ninguno llegaba a Google: la nota de
+     cada tramo (`escala.notas`, 33 vuelos: «QUITAR DOS ASIENTOS! SUPER
+     IMPORTANTE», «Tienen pases»), las «Notas internas» de la operación
+     (`vuelo.notas_internas`, 14: «Dejar solo asiento del capi y copi» — el
+     formulario de reserva del panel las guarda AHÍ, no en `notas`) y la nota
+     de la parada de servicio (`escala.servicio_notas`: «Limpieza de bujías
+     en taller»).
+     - **Fuente única** `calendar/google-evento.util.ts#notasEventoVuelo`
+       (PURO, con spec): un bloque `NOTAS:` AL PRINCIPIO de la descripción
+       (después de la línea «Día N de M» de un vuelo de varios días), un
+       renglón «• …» por línea capturada, en este orden: notas del vuelo,
+       notas internas y, por tramo, su nota (`• T1 cun-czm: …`) y la de su
+       parada de servicio (`• T2 czm-mid · servicio: …`). La etiqueta del
+       tramo es la MISMA de su línea (`T{orden} {ruta}`). Un renglón repetido
+       sale una vez; cada renglón se corta a `NOTA_EVENTO_MAX_CARACTERES`
+       (300) con «…» y el bloque a `NOTAS_EVENTO_MAX_RENGLONES` (20) DICIENDO
+       cuántas faltan (la descripción de Google admite 8,192 caracteres).
+       Sin ninguna nota no hay bloque. La línea suelta `Notas: …` del final
+       ya no existe.
+     - **`notas_internas` va COMPLETO**, sellos del sistema incluidos
+       («[Grupo G-6] Avión 1 de 1…», «[Cancelado …] pista inoperativa»,
+       «[Discrepancia ALTA aceptada …]»): es el mismo texto que la app enseña
+       al piloto como «Indicaciones del equipo»; filtrar por forma arriesga
+       esconder una indicación real. Ese calendario es interno (ya trae
+       cliente y monto).
+     - **La nota de servicio solo sale si el tramo ES parada de servicio**
+       (`tipo_parada = 'SERVICIO'`): la misma regla de la app. Una nota vieja
+       en un tramo que volvió a NORMAL no se enseña.
+     - **«Pasajeros: N» del vuelo ya NO sale cuando hay líneas de tramo**
+       (siempre: el espejo arma al menos una). Cada tramo dice los suyos
+       («· 2 pax» / «· ferry») y el número del vuelo podía decir otra cosa:
+       el #478 decía «Pasajeros: 5» sobre tramos de 3, 5, 3 y 1. La oficina lo
+       pidió para la app el mismo día («este dice una cosa y los detalles
+       dice otra»); en Google es decisión mía, por la misma razón.
+     - **Triggers**: `calendar_sync_encolar()` no cambia. La migración AGREGA
+       `trg_vuelo_calendar_sync_notas` (`after update of notas_internas`) y
+       `trg_escala_calendar_sync_notas` (`after update of notas,
+       servicio_notas`); los dos vigentes no se recrean (no puede romper lo
+       que ya sincroniza, y la sentencia no lleva ninguna palabra que el MCP
+       decline). Un UPDATE que toca columnas de los dos triggers corre la
+       función dos veces y deja UN item (upsert). Sin la migración el API ya
+       publicaba las notas, pero corregir una nota de tramo no re-encolaba el
+       evento hasta el reconcile de las 00:15. `VUELO_SELECT_BASE` pide
+       `notas_internas`, `escalas.notas` y `escalas.servicio_notas` (un spec
+       lo congela).
+     - **`notas_por_tramo` en `GET /v1/flights` (ADITIVO)**: `[{numero,
+       origen_iata, destino_iata, tipo: 'TRAMO' | 'SERVICIO', texto}]`, de
+       `common/busqueda-vuelo.util.ts#notasPorTramoDe` (misma lectura de
+       escalas, se le suma `servicio_notas`; cero consultas nuevas). `numero`
+       es el número de LISTA del tramo (posición por `orden`, cancelados
+       incluidos — nunca el `orden` crudo, que vale 100 en un operativo
+       agregado); los tramos cancelados no aportan notas. Lo pinta la app en
+       «Vuelos de hoy» del mecánico, que no mostraba ninguna nota.
+       `notas_tramos` (buscador de la app) no cambia.
+     - **Publicar lo que ya existía**: un evento solo se reescribe cuando su
+       vuelo se encola. Tras el deploy se encolaron los vuelos no cancelados
+       de hoy en adelante (`insert … on conflict` sobre `calendar_sync_cola`,
+       el mismo upsert del trigger); los anteriores se quedan como estaban
+       hasta que algo los toque o corra un resync.
+     - Specs: `google-evento.util.spec.ts` (bloque NOTAS: orden, tramo,
+       servicio, repetidos, topes, varios días, datos raros; «Pasajeros: N»
+       solo sin tramos), `calendar-sync.service.spec.ts` (el espejo publica
+       las cuatro y pide sus columnas) y `busqueda-vuelo.util.spec.ts`
+       (`notas_por_tramo`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
