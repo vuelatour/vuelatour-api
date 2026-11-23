@@ -14135,6 +14135,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        «Otro»). «Cómo se cobró»: `cobrado_con` / `metodo_etiqueta` del
        balance, el recibo de pago y el PDF interno dicen «Utilidades del
        socio (Nombre)».
+       Desde el 0.0.149 el `ultimo_pago` del resumen de socios trae también
+       `vuelo` cuando la última entrega es de un vuelo (la columna «Última
+       entrega» del panel leía «Otro»).
      - **Balance por avión y general** (`buildPayload`): `entregado_mxn` y
        `por_entregar_mxn` NO cambian de significado (siguen netos de todo).
        SOLO cuando el avión tiene algún vuelo pagado con utilidades en el

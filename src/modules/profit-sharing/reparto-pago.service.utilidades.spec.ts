@@ -206,6 +206,12 @@ describe('RepartoPagoService — la entrega que es el pago de un vuelo', () => {
     });
     // 1,395.94 de septiembre − 1,000 del vuelo.
     expect(r.cuenta.entregado_mxn).toBe(1000);
+    // «Última entrega» de la lista de socios también dice el vuelo (0.0.149).
+    expect(r.cuenta.ultimo_pago).toMatchObject({
+      id: ENTREGA,
+      metodo: 'OTRO',
+      vuelo: { id: VUELO, folio: 498 },
+    });
     expect(r.cuenta.por_entregar_cerrado_mxn).toBe(395.94);
   });
 

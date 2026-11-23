@@ -1428,6 +1428,11 @@ export interface UltimoPago {
   /** Dólares informativos. */
   monto_usd: number;
   metodo: MetodoPagoSocio;
+  /**
+   * ADITIVO (23-nov-2026, API 0.0.149, invariante 143): SOLO cuando la última
+   * entrega es el pago de un vuelo con utilidades.
+   */
+  vuelo?: PagoSocio['vuelo'];
 }
 
 export interface FilaCuentaSocio {
@@ -1485,6 +1490,9 @@ export function ultimaEntrega(
         monto_mxn: ult.monto_mxn,
         monto_usd: ult.monto_usd,
         metodo: ult.metodo,
+        // El pago de un vuelo con utilidades dice su vuelo (invariante 143):
+        // la lista de socios no debe leer «Otro» en «Última entrega».
+        ...(ult.vuelo ? { vuelo: ult.vuelo } : {}),
       }
     : null;
 }
