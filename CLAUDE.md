@@ -14028,8 +14028,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        (`notas_por_tramo`).
 
 143. **EL SOCIO PAGA SU VUELO CON SUS UTILIDADES (23-nov-2026, API 0.0.148;
-     migración `20261123000001` APLICADA por MCP el 23-nov; la `20261123000002`
-     va por el SQL Editor).** Pedido del dueño (Ale Canales): los socios usan
+     migraciones `20261123000001` APLICADA por MCP y `20261123000002` APLICADA
+     por el SQL Editor, las dos el 23-nov-2026 y verificadas por MCP).** Pedido
+     del dueño (Ale Canales): los socios usan
      sus aviones con una cotización a precio especial y «algunos socios dicen
      que se pague esa cotización de ese vuelo descontándolo de las utilidades
      del mes; necesitamos una forma para que se cobre de las utilidades y les
@@ -14162,8 +14163,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        utilidades; y si las utilidades no alcanzan no se bloquea: se confirma
        como adelanto y el socio queda con «por entregar» negativo, igual que
        cualquier adelanto.
-     - **Despliegue**: migración 000001 (hecha) ⇒ pyservices ⇒ API 0.0.148 ⇒
-       panel; la 000002 cuando el usuario la pegue. Sin la 000001 el alta
+     - **Despliegue** (hecho el 23-nov-2026): migración 000001 ⇒ pyservices
+       ⇒ API 0.0.148 ⇒ panel ⇒ 000002 por el SQL Editor. Sin la 000001 el alta
        responde 503 `COBRO_UTILIDADES_NO_DISPONIBLE` y todo lo demás sale
        como en el 0.0.147.
      - Specs: `common/cobro-utilidades.util.spec.ts`,
