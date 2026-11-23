@@ -33,6 +33,7 @@ import { ROLES_KEY } from '../../common/decorators/roles.decorator';
 import { AllExceptionsFilter } from '../../common/filters/all-exceptions.filter';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Rol } from '../../common/types/auth.types';
+import { CobroUtilidadesService } from './cobro-utilidades.service';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingController } from './profit-sharing.controller';
 import { ProfitSharingService } from './profit-sharing.service';
@@ -48,6 +49,8 @@ const MAURICIO = 'bbbbbbbb-0000-4000-8000-000000000069';
 const PAGO = 'dddddddd-0000-4000-8000-000000000001';
 const USER = 'cccccccc-0000-4000-8000-0000000000a1';
 const KEY = 'eeeeeeee-0000-4000-8000-000000000001';
+const VUELO = 'ffffffff-0000-4000-8000-000000000498';
+const COBRO = '99999999-0000-4000-8000-000000000001';
 
 type Servidor = Parameters<typeof request>[0];
 
@@ -75,6 +78,9 @@ describe('ProfitSharingController — cuenta del socio: @Roles en CADA ruta', ()
     ['actualizarPagoSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
     ['eliminarPagoSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
     ['subirComprobantePagoSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
+    // Cobro de un vuelo con utilidades del socio (invariante 143): escribe
+    // en la cuenta del socio ⇒ los mismos roles que una entrega.
+    ['cobrarConUtilidades', ROLES_PAGOS_SOCIOS_ESCRITURA],
   ])('%s', (metodo, roles) => {
     expect(Reflect.getMetadata(ROLES_KEY, proto[metodo])).toEqual([...roles]);
   });
@@ -91,6 +97,7 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
   const actualizar = jest.fn();
   const eliminar = jest.fn();
   const subirComprobante = jest.fn();
+  const registrarConUtilidades = jest.fn();
   const compute = jest.fn();
   const preCierre = jest.fn();
   const http = (): Servidor => app.getHttpServer() as Servidor;
@@ -108,6 +115,10 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
         {
           provide: RepartoPagoService,
           useValue: { listar, crear, actualizar, eliminar, subirComprobante },
+        },
+        {
+          provide: CobroUtilidadesService,
+          useValue: { registrar: registrarConUtilidades },
         },
       ],
     }).compile();
@@ -145,10 +156,16 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
       actualizar,
       eliminar,
       subirComprobante,
+      registrarConUtilidades,
       compute,
       preCierre,
     ])
       f.mockReset();
+    registrarConUtilidades.mockResolvedValue({
+      cobro: { id: COBRO },
+      pago: { id: PAGO },
+      cuenta: {},
+    });
     preCierre.mockResolvedValue({ listo: true, items: [] });
     resumen.mockResolvedValue({ disponible: true, socios: [], totales: null });
     estadoDeCuenta.mockResolvedValue({ disponible: true, movimientos: [] });
@@ -611,5 +628,136 @@ describe('ProfitSharingController — cuenta del socio por HTTP', () => {
       });
     expect(r403.status).toBe(403);
     expect(subirComprobante).toHaveBeenCalledTimes(1);
+  });
+  // ---------------------------------------------------------------------
+  // COBRO DE UN VUELO CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143)
+  // ---------------------------------------------------------------------
+  const COBRO_UTILIDADES = {
+    socio_id: MAURICIO,
+    aeronave_id: N4142R,
+    monto: 44174.3,
+    moneda: 'MXN',
+    tc_usd_mxn: 18.6673,
+    client_request_id: KEY,
+  };
+  const URL_UTILIDADES = `/v1/profit-sharing/vuelos/${VUELO}/cobro-utilidades`;
+
+  it('POST vuelos/:id/cobro-utilidades: 201 con el DTO limpio (vuelo de la ruta, fecha como Date, notas recortadas); replay ⇒ 200', async () => {
+    const res = await request(http())
+      .post(URL_UTILIDADES)
+      .send({
+        ...COBRO_UTILIDADES,
+        fecha_cobro: '2026-10-28T17:00:00.000Z',
+        notas: '  lo pidió el socio  ',
+        aceptar_exceso: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      cobro: { id: COBRO },
+      pago: { id: PAGO },
+    });
+    expect(registrarConUtilidades).toHaveBeenCalledWith(
+      VUELO,
+      expect.objectContaining({
+        ...COBRO_UTILIDADES,
+        notas: 'lo pidió el socio',
+        aceptar_exceso: true,
+      }),
+      expect.objectContaining({ userId: USER, rol: Rol.DIRECCION }),
+    );
+    const dto = (
+      registrarConUtilidades.mock.calls[0] as [string, { fecha_cobro: Date }]
+    )[1];
+    expect(dto.fecha_cobro).toBeInstanceOf(Date);
+    expect(dto.fecha_cobro.toISOString()).toBe('2026-10-28T17:00:00.000Z');
+
+    registrarConUtilidades.mockResolvedValueOnce({
+      cobro: { id: COBRO },
+      pago: { id: PAGO },
+      cuenta: {},
+      idempotente: true,
+    });
+    const replay = await request(http())
+      .post(URL_UTILIDADES)
+      .send(COBRO_UTILIDADES);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ idempotente: true });
+  });
+
+  it('POST vuelos/:id/cobro-utilidades: forma inválida ⇒ 400 sin llegar al service (sin socio, sin avión, sin llave, monto con 3 decimales, moneda, vuelo que no es uuid, campo extra, «false» como texto)', async () => {
+    const malos: Array<Record<string, unknown>> = [
+      { ...COBRO_UTILIDADES, socio_id: undefined },
+      { ...COBRO_UTILIDADES, aeronave_id: undefined },
+      { ...COBRO_UTILIDADES, client_request_id: undefined },
+      { ...COBRO_UTILIDADES, monto: 10.123 },
+      { ...COBRO_UTILIDADES, monto: 0 },
+      { ...COBRO_UTILIDADES, moneda: 'EUR' },
+      { ...COBRO_UTILIDADES, metodo_cobro: 'TRANSFERENCIA' },
+      { ...COBRO_UTILIDADES, aceptar_exceso: 'false' },
+    ];
+    for (const cuerpo of malos) {
+      const r = await request(http()).post(URL_UTILIDADES).send(cuerpo);
+      expect([cuerpo, r.status]).toEqual([cuerpo, 400]);
+    }
+    expect(
+      (
+        await request(http())
+          .post('/v1/profit-sharing/vuelos/no-es-uuid/cobro-utilidades')
+          .send(COBRO_UTILIDADES)
+      ).status,
+    ).toBe(400);
+    expect(registrarConUtilidades).not.toHaveBeenCalled();
+  });
+
+  it('POST vuelos/:id/cobro-utilidades: solo DIRECCION y FACTURACION (ADMIN, COORDINADOR, ANALISTA, SOCIO y PILOTO ⇒ 403)', async () => {
+    for (const r of [
+      Rol.ADMIN,
+      Rol.COORDINADOR,
+      Rol.ANALISTA,
+      Rol.SOCIO,
+      Rol.PILOTO,
+    ]) {
+      rol = r;
+      expect(
+        (await request(http()).post(URL_UTILIDADES).send(COBRO_UTILIDADES))
+          .status,
+      ).toBe(403);
+    }
+    expect(registrarConUtilidades).not.toHaveBeenCalled();
+    rol = Rol.FACTURACION;
+    expect(
+      (await request(http()).post(URL_UTILIDADES).send(COBRO_UTILIDADES))
+        .status,
+    ).toBe(201);
+  });
+
+  it('POST vuelos/:id/cobro-utilidades: el 409 del adelanto y el 503 sin migración llegan con code y details', async () => {
+    registrarConUtilidades.mockRejectedValueOnce(
+      new ConflictException({
+        message: 'Rebasa lo por entregar',
+        error: 'PAGO_EXCEDE_SALDO',
+        details: { por_entregar_mxn: 1000, monto_mxn: 44174.3 },
+      }),
+    );
+    const adelanto = await request(http())
+      .post(URL_UTILIDADES)
+      .send(COBRO_UTILIDADES);
+    expect(adelanto.status).toBe(409);
+    expect(JSON.stringify(adelanto.body)).toContain('PAGO_EXCEDE_SALDO');
+    expect(JSON.stringify(adelanto.body)).toContain('44174.3');
+    registrarConUtilidades.mockRejectedValueOnce(
+      new ServiceUnavailableException({
+        message: 'Falta la migración',
+        error: 'COBRO_UTILIDADES_NO_DISPONIBLE',
+        details: { migracion: '20261123000001' },
+      }),
+    );
+    const sin = await request(http())
+      .post(URL_UTILIDADES)
+      .send(COBRO_UTILIDADES);
+    expect(sin.status).toBe(503);
+    expect(JSON.stringify(sin.body)).toContain(
+      'COBRO_UTILIDADES_NO_DISPONIBLE',
+    );
   });
 });

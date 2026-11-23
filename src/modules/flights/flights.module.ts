@@ -15,6 +15,7 @@ import { CobroReciboService } from './cobro-recibo.service';
 import { FacturaClienteService } from './factura-cliente.service';
 import { FacturaSolicitudService } from './factura-solicitud.service';
 import { FlightReportService } from './flight-report.service';
+import { COBROS_DE_VUELO } from './cobros-de-vuelo.token';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
 import { VueloSeguimientoService } from './vuelo-seguimiento.service';
@@ -49,6 +50,9 @@ import { VueloSeguimientoService } from './vuelo-seguimiento.service';
   controllers: [FlightsController],
   providers: [
     FlightsService,
+    // Alias liviano de FlightsService para el cobro con utilidades del socio
+    // (profit-sharing, invariante 143): ver `cobros-de-vuelo.token.ts`.
+    { provide: COBROS_DE_VUELO, useExisting: FlightsService },
     FlightReportService,
     CobroReciboService,
     FacturaClienteService,
@@ -64,6 +68,7 @@ import { VueloSeguimientoService } from './vuelo-seguimiento.service';
   // ADITIVO del seguimiento a `GET /v1/quotes/:id` (banner del cotizador).
   exports: [
     FlightsService,
+    COBROS_DE_VUELO,
     CobroReciboService,
     FacturaClienteService,
     FacturaSolicitudService,

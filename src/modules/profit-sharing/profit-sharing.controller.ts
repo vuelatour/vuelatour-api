@@ -47,7 +47,9 @@ import {
   PagosQuery,
   SinCamposComprobantePagoDto,
 } from './dto/reparto-pago.dto';
+import { CobroUtilidadesService } from './cobro-utilidades.service';
 import { DineroReportService } from './dinero-report.service';
+import { CobroConUtilidadesDto } from './dto/cobro-utilidades.dto';
 import { ProfitSharingService } from './profit-sharing.service';
 import { RepartoCuentaService } from './reparto-cuenta.service';
 import { RepartoPagoService } from './reparto-pago.service';
@@ -65,6 +67,7 @@ export class ProfitSharingController {
     private readonly dinero: DineroReportService,
     private readonly cuentasSocios: RepartoCuentaService,
     private readonly pagosSocios: RepartoPagoService,
+    private readonly cobroUtilidades: CobroUtilidadesService,
   ) {}
 
   @Get()
@@ -165,6 +168,23 @@ export class ProfitSharingController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const r = await this.pagosSocios.crear(dto, c);
+    if (r.idempotente === true) res.status(HttpStatus.OK);
+    return r;
+  }
+
+  @Post('vuelos/:vueloId/cobro-utilidades')
+  @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
+  @ApiOperation({
+    summary:
+      'EL SOCIO PAGA SU VUELO CON SUS UTILIDADES (invariante 143): registra, en una sola escritura, el COBRO del vuelo (método OTRO) y la ENTREGA al socio que lo descuenta de su cuenta («corresponde a» el avión elegido y el MES de fecha_cobro). 201 {cobro, pago, cuenta}; replay de client_request_id ⇒ 200 idempotente:true. 409 PAGO_EXCEDE_SALDO (adelanto: confirmar con aceptar_exceso y la MISMA llave) / COBRO_EXCEDE_SALDO / MES_CERRADO; 400 SOCIO_INVALIDO / SOCIO_NO_ES_DE_LA_AERONAVE / TC_REQUERIDO / TC_FUERA_DE_RANGO / FECHA_PAGO_FUTURA; 503 COBRO_UTILIDADES_NO_DISPONIBLE.',
+  })
+  async cobrarConUtilidades(
+    @Param('vueloId', ParseUUIDPipe) vueloId: string,
+    @Body() dto: CobroConUtilidadesDto,
+    @CurrentUser() c: AuthenticatedUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const r = await this.cobroUtilidades.registrar(vueloId, dto, c);
     if (r.idempotente === true) res.status(HttpStatus.OK);
     return r;
   }

@@ -1144,7 +1144,9 @@ export class FlightsController {
     @Param('cobroId', ParseUUIDPipe) cobroId: string,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.flights.deleteCobro(cobroId, c.userId);
+    // El rol decide si puede quitar un cobro con utilidades del socio (da de
+    // baja su entrega en «Pagos a socios»): invariante 143.
+    return this.flights.deleteCobro(cobroId, c.userId, { rol: c.rol });
   }
 
   @Post('cobros/:cobroId/comprobante')

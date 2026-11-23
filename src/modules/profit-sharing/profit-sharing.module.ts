@@ -1,8 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ConciliacionModule } from '../conciliacion/conciliacion.module';
 import { ConfiguracionModule } from '../configuracion/configuracion.module';
+import { FlightsModule } from '../flights/flights.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
+import { CobroUtilidadesService } from './cobro-utilidades.service';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingController } from './profit-sharing.controller';
 import { ProfitSharingService } from './profit-sharing.service';
@@ -22,6 +24,11 @@ import { RepartoPagoService } from './reparto-pago.service';
     TipoCambioModule,
     ConciliacionModule,
     ConfiguracionModule,
+    // Cobro de un vuelo CON UTILIDADES DEL SOCIO (23-nov-2026, invariante
+    // 143): `CobroUtilidadesService` llama a `FlightsService.createCobro`.
+    // FlightsModule no importa este módulo (ni nada que lo importe): sin
+    // ciclo; el forwardRef es higiene.
+    forwardRef(() => FlightsModule),
   ],
   controllers: [ProfitSharingController],
   // Cuenta corriente del socio (v2, 2-oct-2026): RepartoCuentaService
@@ -33,6 +40,7 @@ import { RepartoPagoService } from './reparto-pago.service';
     DineroReportService,
     RepartoCuentaService,
     RepartoPagoService,
+    CobroUtilidadesService,
   ],
   exports: [ProfitSharingService],
 })

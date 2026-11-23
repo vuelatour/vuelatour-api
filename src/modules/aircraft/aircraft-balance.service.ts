@@ -67,6 +67,13 @@ import {
 } from '../../common/pago-vendedor.util';
 import { etiquetaMedioPago } from '../../common/medio-pago.util';
 import { etiquetaMetodoCobro } from '../../common/metodo-cobro.util';
+import {
+  METODO_COBRO_UTILIDADES,
+  claveCobroUtilidades,
+  etiquetasUtilidadesDeVuelos,
+  vuelosDeEntregas,
+  type VueloDeEntrega,
+} from '../../common/cobro-utilidades.util';
 import { etiquetaCobradoCon } from '../../common/cobro-etiqueta.util';
 import {
   esEmbedNoResuelto,
@@ -174,6 +181,7 @@ import {
   type BalanceVinculoGastoPayload,
   type BalanceAvionPayload,
   type BalanceAvionSocioPayload,
+  type BalanceVueloUtilidadesPayload,
   type BalanceGeneralPayload,
   type BalanceAvionVueloPayload,
   type BalanceGeneralResumenFilaPayload,
@@ -478,6 +486,12 @@ interface CobroRow {
    * arreglo de uno o null. Se lee SOLO con `nombreDeRelacionUsuario`.
    */
   registro?: unknown;
+  /**
+   * Cobro CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143): su
+   * etiqueta «Utilidades del socio (Nombre)» para «cómo se cobró» (su
+   * `metodo_cobro` es `OTRO`). La pone `leerCobrosDelLibro`.
+   */
+  etiqueta_utilidades?: string | null;
 }
 
 /** Columnas de `cobro_vuelo` que lee el libro (el dinero de cada parcialidad). */
@@ -660,6 +674,88 @@ interface EntregasDeSocio {
 }
 
 /**
+ * El FILTRO único de «esta entrega cuenta en el balance de este avión y
+ * periodo» (viva, de ESE avión y con mes acreditado en los meses del
+ * periodo). Lo comparten `entregasPorSocioDelAvion` y
+ * `vuelosUtilidadesDelAvion`: lo segundo es un subconjunto de lo primero.
+ */
+export function entregasQueCuentanEnAvion(
+  entregas: ReadonlyArray<RepartoPagoRow>,
+  aircraftId: string,
+  desde: string,
+  hasta: string,
+): RepartoPagoRow[] {
+  const meses = new Set(mesesEntre(desde.slice(0, 7), hasta.slice(0, 7)));
+  return entregas.filter(
+    (r) =>
+      r.deleted_at == null &&
+      r.aeronave_id === aircraftId &&
+      meses.has(mesAcreditadoDeEntrega(r)),
+  );
+}
+
+/** Un vuelo pagado con utilidades, en el detalle del balance. */
+export interface VueloUtilidadesDelAvion {
+  socio_id: string;
+  folio: number | null;
+  fecha: string | null;
+  matricula: string | null;
+  cliente: string | null;
+  monto_mxn: number;
+}
+
+/**
+ * VUELOS PAGADOS CON UTILIDADES que cuentan en el balance de un avión
+ * (23-nov-2026, invariante 143): de las entregas que YA cuentan
+ * (`entregasQueCuentanEnAvion`), las que son el pago de un vuelo (`vuelos`:
+ * `entrega_id → vuelo`, de `vuelosDeEntregas`). Por socio (Σ pesos, dólares
+ * y conteo) y el detalle por vuelo, ordenado por fecha y folio. Subconjunto
+ * de `entregasPorSocioDelAvion`: nada se suma dos veces.
+ */
+export function vuelosUtilidadesDelAvion(
+  entregas: ReadonlyArray<RepartoPagoRow>,
+  aircraftId: string,
+  desde: string,
+  hasta: string,
+  vuelos: ReadonlyMap<string, VueloDeEntrega>,
+): {
+  porSocio: Map<string, EntregasDeSocio>;
+  detalle: VueloUtilidadesDelAvion[];
+} {
+  const porSocio = new Map<string, EntregasDeSocio>();
+  const detalle: VueloUtilidadesDelAvion[] = [];
+  for (const r of entregasQueCuentanEnAvion(
+    entregas,
+    aircraftId,
+    desde,
+    hasta,
+  )) {
+    const v = vuelos.get(r.id);
+    if (!v) continue;
+    const p = aPagoSocio(r);
+    const acc = porSocio.get(r.socio_id) ?? { mxn: 0, usd: 0, n: 0 };
+    acc.mxn = round2(acc.mxn + p.monto_mxn);
+    acc.usd = round2(acc.usd + p.monto_usd);
+    acc.n += 1;
+    porSocio.set(r.socio_id, acc);
+    detalle.push({
+      socio_id: r.socio_id,
+      folio: v.folio,
+      fecha: v.fecha,
+      matricula: v.matricula,
+      cliente: v.cliente,
+      monto_mxn: p.monto_mxn,
+    });
+  }
+  detalle.sort(
+    (a, b) =>
+      (a.fecha ?? '').localeCompare(b.fecha ?? '') ||
+      (a.folio ?? 0) - (b.folio ?? 0),
+  );
+  return { porSocio, detalle };
+}
+
+/**
  * ENTREGAS QUE CUENTAN en el balance de un avión (21-oct-2026, invariante
  * 100), por socio: entregas VIVAS cuyo «corresponde a» es ESE avión y cuyo
  * mes acreditado (`periodo` ?? mes de `fecha_pago`, `mesAcreditadoDeEntrega`)
@@ -674,11 +770,13 @@ export function entregasPorSocioDelAvion(
   desde: string,
   hasta: string,
 ): Map<string, EntregasDeSocio> {
-  const meses = new Set(mesesEntre(desde.slice(0, 7), hasta.slice(0, 7)));
   const out = new Map<string, EntregasDeSocio>();
-  for (const r of entregas) {
-    if (r.deleted_at != null || r.aeronave_id !== aircraftId) continue;
-    if (!meses.has(mesAcreditadoDeEntrega(r))) continue;
+  for (const r of entregasQueCuentanEnAvion(
+    entregas,
+    aircraftId,
+    desde,
+    hasta,
+  )) {
     const p = aPagoSocio(r);
     const acc = out.get(r.socio_id) ?? { mxn: 0, usd: 0, n: 0 };
     acc.mxn = round2(acc.mxn + p.monto_mxn);
@@ -2008,7 +2106,7 @@ export class AircraftBalanceService {
       `${COBRO_LIBRO_COLS}, ${COBRO_LIBRO_EMBED_REGISTRO}`,
     );
     if (!conNombre.error || !esEmbedNoResuelto(conNombre.error)) {
-      return conNombre;
+      return this.conEtiquetaDeUtilidades(conNombre);
     }
     this.logger.warn(
       `Balance ${matricula}: PostgREST no resolvió el embed de quién registró los cobros (${conNombre.error.message}); se leen los cobros sin él y los nombres en lote.`,
@@ -2020,12 +2118,49 @@ export class AircraftBalanceService {
       sb,
       filas.map((c) => c.registrado_por),
     );
-    return {
+    return this.conEtiquetaDeUtilidades({
       data: filas.map((c) => {
         const nombre = c.registrado_por ? nombres.get(c.registrado_por) : null;
         // Misma forma que el embed (objeto `{ nombre }` o null): el armador
         // la lee con `nombreDeRelacionUsuario`, sin saber por qué camino vino.
         return { ...c, registro: nombre ? { nombre } : null };
+      }),
+      error: null,
+    });
+  }
+
+  /**
+   * COBROS CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143): su
+   * `metodo_cobro` es `OTRO`; aquí ganan `etiqueta_utilidades` («Utilidades
+   * del socio (Macedo)») para la nota «cómo se cobró». Cero consultas si el
+   * libro no trae ningún cobro `OTRO`; sin la migración, nada cambia. El
+   * dinero no se toca: solo la etiqueta.
+   */
+  private async conEtiquetaDeUtilidades(
+    l: LecturaCobrosLibro,
+  ): Promise<LecturaCobrosLibro> {
+    if (l.error || !l.data) return l;
+    const filas = l.data as CobroRow[];
+    const vuelos = [
+      ...new Set(
+        filas
+          .filter((c) => c.metodo_cobro === METODO_COBRO_UTILIDADES)
+          .map((c) => c.vuelo_id),
+      ),
+    ];
+    if (vuelos.length === 0) return l;
+    const etiquetas = await etiquetasUtilidadesDeVuelos(
+      this.supabase.service,
+      vuelos,
+    );
+    if (etiquetas.size === 0) return l;
+    return {
+      data: filas.map((c) => {
+        const etiqueta =
+          c.metodo_cobro === METODO_COBRO_UTILIDADES
+            ? etiquetas.get(claveCobroUtilidades(c))
+            : undefined;
+        return etiqueta ? { ...c, etiqueta_utilidades: etiqueta } : c;
       }),
       error: null,
     };
@@ -4400,8 +4535,10 @@ export class AircraftBalanceService {
         // la pinta (nota de la celda «COBRO n»).
         const cuenta = c.cuenta_destino?.trim() || null;
         const registro = nombreDeRelacionUsuario(c.registro);
+        // Un cobro con utilidades del socio dice «Utilidades del socio
+        // (Nombre)», no «Otro» (invariante 143).
         const metodoEtiquetaBase = c.metodo_cobro
-          ? etiquetaMetodoCobro(c.metodo_cobro)
+          ? (c.etiqueta_utilidades ?? etiquetaMetodoCobro(c.metodo_cobro))
           : null;
         notaDeCobro.push({
           metodo_etiqueta: metodoEtiquetaBase,
@@ -4418,7 +4555,7 @@ export class AircraftBalanceService {
           comision_mxn: comisionMxn != null ? parteFila(comisionMxn) : null,
           cuenta,
           metodo_etiqueta: multiAvion
-            ? `${etiquetaMetodoCobro(c.metodo_cobro)}${sufijoParteFila}`
+            ? `${c.etiqueta_utilidades ?? etiquetaMetodoCobro(c.metodo_cobro)}${sufijoParteFila}`
             : metodoEtiquetaBase,
           registro,
           cobrado_con: etiquetaCobradoCon({
@@ -6100,6 +6237,9 @@ export class AircraftBalanceService {
     let entregasAvion: {
       entregado_socios_mxn: number;
       por_entregar_socios_mxn: number | null;
+      vuelos_utilidades_socios_mxn?: number;
+      entregado_efectivo_socios_mxn?: number;
+      vuelos_utilidades?: BalanceVueloUtilidadesPayload[];
     } | null = null;
     if (entregasPeriodo != null && aircraftId != null) {
       const porSocio = entregasPorSocioDelAvion(
@@ -6108,12 +6248,51 @@ export class AircraftBalanceService {
         desde,
         hasta,
       );
+      // VUELOS PAGADOS CON UTILIDADES (23-nov-2026, invariante 143): de lo
+      // entregado, lo que fue un vuelo que el socio pagó con sus utilidades.
+      // Solo se pregunta por las entregas `OTRO` de ESTE avión y periodo
+      // (toda entrega de vuelo lo es): sin ellas, ni una consulta ni una
+      // llave nueva — el libro sale como hasta el 0.0.147.
+      const candidatasVuelo = entregasQueCuentanEnAvion(
+        entregasPeriodo,
+        aircraftId,
+        desde,
+        hasta,
+      ).filter((r) => r.metodo === METODO_COBRO_UTILIDADES);
+      const vuelosAvion = vuelosUtilidadesDelAvion(
+        entregasPeriodo,
+        aircraftId,
+        desde,
+        hasta,
+        candidatasVuelo.length > 0
+          ? await vuelosDeEntregas(
+              this.supabase.service,
+              candidatasVuelo.map((r) => r.id),
+            )
+          : new Map<string, VueloDeEntrega>(),
+      );
+      const hayVuelos = vuelosAvion.detalle.length > 0;
+      const llavesVuelos = (
+        e: EntregasDeSocio | undefined,
+        vu: EntregasDeSocio | undefined,
+      ) =>
+        hayVuelos
+          ? {
+              vuelos_utilidades_mxn: vu?.mxn ?? 0,
+              entregado_efectivo_mxn: round2((e?.mxn ?? 0) - (vu?.mxn ?? 0)),
+              entregado_efectivo_usd: round2((e?.usd ?? 0) - (vu?.usd ?? 0)),
+            }
+          : {};
+      const nombreDeSocio = new Map<string, string>();
       const vistos = new Set<string>();
       const conEntregas: BalanceAvionSocioPayload[] = sociosConReserva.map(
         (s, i) => {
           const id = sociosVigentes[i].socio_id;
-          const e = vistos.has(id) ? undefined : porSocio.get(id);
+          const primera = !vistos.has(id);
+          const e = primera ? porSocio.get(id) : undefined;
+          const vu = primera ? vuelosAvion.porSocio.get(id) : undefined;
           vistos.add(id);
+          if (primera) nombreDeSocio.set(id, s.nombre);
           const entregadoMxn = e?.mxn ?? 0;
           return {
             ...s,
@@ -6122,6 +6301,7 @@ export class AircraftBalanceService {
             entregas: e?.n ?? 0,
             por_entregar_mxn:
               s.monto_mxn == null ? null : round2(s.monto_mxn - entregadoMxn),
+            ...llavesVuelos(e, vu),
           };
         },
       );
@@ -6153,7 +6333,9 @@ export class AircraftBalanceService {
             entregado_usd: e.usd,
             entregas: e.n,
             por_entregar_mxn: round2(0 - e.mxn),
+            ...llavesVuelos(e, vuelosAvion.porSocio.get(id)),
           });
+          nombreDeSocio.set(id, nombreDe(id));
         }
       }
       sociosPayload = conEntregas;
@@ -6171,6 +6353,30 @@ export class AircraftBalanceService {
                 0,
               ),
             ),
+        ...(hayVuelos
+          ? {
+              vuelos_utilidades_socios_mxn: round2(
+                conEntregas.reduce(
+                  (acc, s) => acc + (s.vuelos_utilidades_mxn ?? 0),
+                  0,
+                ),
+              ),
+              entregado_efectivo_socios_mxn: round2(
+                conEntregas.reduce(
+                  (acc, s) => acc + (s.entregado_efectivo_mxn ?? 0),
+                  0,
+                ),
+              ),
+              vuelos_utilidades: vuelosAvion.detalle.map((d) => ({
+                folio: d.folio,
+                fecha: d.fecha,
+                socio: nombreDeSocio.get(d.socio_id) ?? 'Socio',
+                matricula: d.matricula,
+                cliente: d.cliente,
+                monto_mxn: d.monto_mxn,
+              })),
+            }
+          : {}),
       };
     }
     if (modoExternos) {

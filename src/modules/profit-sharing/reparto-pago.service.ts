@@ -10,6 +10,11 @@ import {
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import {
+  METODO_COBRO_UTILIDADES,
+  errorEntregaDeVuelo,
+  vuelosDeEntregas,
+} from '../../common/cobro-utilidades.util';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import { Rol } from '../../common/types/auth.types';
 import {
@@ -139,6 +144,21 @@ function bad(code: string, message: string, details?: unknown) {
 
 const sinMigracion = (e: { code?: string | null; message?: string | null }) =>
   esColumnaInexistente(e) || esTablaInexistente(e);
+
+/**
+ * Lo que NO se corrige en una entrega que es el pago de un vuelo con
+ * utilidades (invariante 143): es el dinero del cobro del vuelo.
+ */
+const CAMPOS_FIJOS_ENTREGA_DE_VUELO: ReadonlySet<string> = new Set([
+  'monto',
+  'moneda',
+  'tc_usd_mxn',
+  'fecha_pago',
+  'metodo',
+  'entregado_por_id',
+  'aeronave_id',
+  'mes',
+]);
 
 /**
  * ENTREGAS A LA CUENTA CORRIENTE DEL SOCIO (v2, 2-oct-2026, invariante 38).
@@ -534,6 +554,113 @@ export class RepartoPagoService {
     return { pago: await this.pagoDe(despues, row.id), cuenta: despues.fila };
   }
 
+  // =================================================================
+  // Entrega que es el pago de un vuelo (cobro con utilidades, inv. 143)
+  // =================================================================
+
+  /** 409 `ENTREGA_DE_VUELO` si un cobro de vuelo cita esta entrega. */
+  private async assertNoEsEntregaDeVuelo(id: string): Promise<void> {
+    const vuelo = (await vuelosDeEntregas(this.sb, [id])).get(id);
+    if (vuelo) throw errorEntregaDeVuelo(vuelo);
+  }
+
+  /**
+   * TODO lo que `crear` valida de una entrega, SIN insertarla: el cobro con
+   * utilidades la inserta junto con el cobro del vuelo en una transacción
+   * (`CobroUtilidadesService` → `FlightsService.createCobro`). Mismas
+   * fuentes únicas: `validarDineroPago`, `validarFechaPago`, mes abierto,
+   * socio del avión y el candado del ADELANTO (409 `PAGO_EXCEDE_SALDO` ⇒
+   * `aceptar_exceso`). «Corresponde a» = el avión y el MES de la fecha.
+   */
+  async prepararEntregaDeVuelo(
+    d: {
+      socio_id: string;
+      aeronave_id: string;
+      monto: number;
+      moneda: string;
+      tc_usd_mxn: number | null;
+      fecha_pago: string | null;
+      referencia: string;
+      notas?: string | null;
+      aceptar_exceso?: boolean;
+      client_request_id: string;
+    },
+    actor: ActorPagos,
+  ): Promise<{
+    fila: Record<string, unknown>;
+    monto_mxn: number;
+    por_entregar_mxn: number;
+    adelanto: boolean;
+  }> {
+    await this.cuentas.assertDisponible();
+    const dinero = validarDineroPago(d);
+    if (!dinero.ok) throw bad(dinero.codigo, dinero.mensaje);
+    const fecha = validarFechaPago(d.fecha_pago, this.cuentas.hoy());
+    if (!fecha.ok) throw bad(fecha.codigo, fecha.mensaje);
+    const mes = fecha.fecha.slice(0, 7);
+    await assertMesAbierto(this.sb, mes, 'entrega_socio', [d.aeronave_id]);
+    const ctx = await this.contexto(d.socio_id, {
+      exigirSocio: true,
+      aeronaveId: d.aeronave_id,
+    });
+    const ambito = ambitoDeEntrega({
+      fila: ctx.fila,
+      aeronaveId: d.aeronave_id,
+    });
+    const porEntregar = ambito.por_entregar_cerrado_mxn;
+    const ex = excedeSaldo({
+      por_entregar_mxn: porEntregar,
+      monto_mxn: dinero.monto_mxn,
+    });
+    if (ex.excede && d.aceptar_exceso !== true) {
+      throw this.excede({
+        por_entregar_mxn: porEntregar,
+        mes_en_curso_mxn: ambito.mes_en_curso_mxn,
+        monto_mxn: dinero.monto_mxn,
+        exceso_mxn: ex.exceso_mxn,
+        saldo_despues_mxn: ex.saldo_despues_mxn,
+        aeronave: ambito.aeronave,
+        adelantado_general_mxn: ambito.adelantado_general_mxn,
+      });
+    }
+    return {
+      fila: {
+        socio_id: d.socio_id,
+        aeronave_id: d.aeronave_id,
+        periodo: periodoDeMes(mes),
+        monto: dinero.monto,
+        moneda: dinero.moneda,
+        tc_usd_mxn: dinero.tc_usd_mxn,
+        monto_usd: dinero.monto_usd,
+        monto_mxn: dinero.monto_mxn,
+        saldo_snapshot_mxn: porEntregar,
+        fecha_pago: fecha.fecha,
+        metodo: METODO_COBRO_UTILIDADES,
+        referencia: textoOpcional(d.referencia),
+        notas: textoOpcional(d.notas),
+        entregado_por: actor.userId,
+        client_request_id: d.client_request_id,
+        created_by: actor.userId,
+      },
+      monto_mxn: dinero.monto_mxn,
+      por_entregar_mxn: porEntregar,
+      adelanto: ex.excede,
+    };
+  }
+
+  /**
+   * La entrega de un vuelo YA insertada (por el alta atómica del cobro) y la
+   * cuenta del socio recalculada AL DÍA (`fresco`): el cobro acaba de mover
+   * la utilidad del mes del vuelo y la memoria de 10 min no lo sabe.
+   */
+  async despuesDeVuelo(
+    socioId: string,
+    entregaId: string,
+  ): Promise<{ pago: PagoSocio; cuenta: FilaCuentaSocio }> {
+    const ctx = await this.contexto(socioId, { exigirSocio: false });
+    return { pago: await this.pagoDe(ctx, entregaId), cuenta: ctx.fila };
+  }
+
   /**
    * Antes de responder el 409 del saldo: si la llave del alta YA existe, la
    * primera petición ganó la carrera ⇒ replay (200 idempotente).
@@ -687,6 +814,12 @@ export class RepartoPagoService {
       throw bad('PAGO_SIN_CAMBIOS', MENSAJE_PAGO_SIN_CAMBIOS);
     }
     const actual = await this.pagoVivo(id);
+    // ENTREGA QUE ES EL PAGO DE UN VUELO (invariante 143): su dinero, su
+    // fecha, su método y a qué corresponde son los del cobro del vuelo — se
+    // quita allá. Recibió, folio de factura, referencia y notas siguen libres.
+    if (campos.some((k) => CAMPOS_FIJOS_ENTREGA_DE_VUELO.has(k))) {
+      await this.assertNoEsEntregaDeVuelo(id);
+    }
 
     const moneda = dto.moneda ?? actual.moneda;
     // INVARIANTE 99: en USD el T.C. no se persiste (CHECK de la tabla):
@@ -875,6 +1008,8 @@ export class RepartoPagoService {
       throw bad('MOTIVO_INVALIDO', MENSAJE_MOTIVO_BAJA_PAGO);
     }
     const actual = await this.pagoVivo(id);
+    // El pago de un vuelo con utilidades se quita desde el vuelo (inv. 143).
+    await this.assertNoEsEntregaDeVuelo(id);
     // CIERRE DE MES (invariante 89): dar de baja una entrega de un mes
     // cerrado ⇒ 409 MES_CERRADO.
     await assertMesAbierto(

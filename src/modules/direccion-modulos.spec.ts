@@ -42,6 +42,9 @@ jest.mock('./profit-sharing/reparto-cuenta.service', () => ({
 jest.mock('./profit-sharing/reparto-pago.service', () => ({
   RepartoPagoService: class {},
 }));
+jest.mock('./profit-sharing/cobro-utilidades.service', () => ({
+  CobroUtilidadesService: class {},
+}));
 jest.mock('./users/users.service', () => ({ UsersService: class {} }));
 import { ForbiddenException } from '@nestjs/common';
 import type { ExecutionContext } from '@nestjs/common';
@@ -220,6 +223,11 @@ describe('Módulos SOLO de Dirección: ADMIN salió de sus @Roles', () => {
       ROLES_PAGOS_SOCIOS_LECTURA,
     );
     expect(roles(ProfitSharingController, 'crearPagoSocio')).toEqual(
+      ROLES_PAGOS_SOCIOS_ESCRITURA,
+    );
+    // Cobrar un vuelo con utilidades del socio escribe en su cuenta
+    // (invariante 143): mismos roles que una entrega, ADMIN fuera.
+    expect(roles(ProfitSharingController, 'cobrarConUtilidades')).toEqual(
       ROLES_PAGOS_SOCIOS_ESCRITURA,
     );
   });

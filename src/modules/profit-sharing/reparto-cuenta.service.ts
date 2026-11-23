@@ -7,6 +7,10 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import {
+  vuelosDeEntregas,
+  type VueloDeEntrega,
+} from '../../common/cobro-utilidades.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { inicioOficialDe } from '../../common/inicio-oficial.util';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
@@ -186,7 +190,16 @@ export class RepartoCuentaService {
           rows.map((r) => r.comprobante_path),
         )
       : new Map<string, string>();
-    return rows.map((r) => aPagoSocio(r, nombres, urls, matriculas));
+    // Entregas que son el pago de un vuelo con utilidades (invariante 143):
+    // una lectura por lote de ids; sin la migración, mapa vacío.
+    const vuelos =
+      rows.length > 0
+        ? await vuelosDeEntregas(
+            this.sb,
+            rows.map((r) => r.id),
+          )
+        : new Map<string, VueloDeEntrega>();
+    return rows.map((r) => aPagoSocio(r, nombres, urls, matriculas, vuelos));
   }
 
   /**

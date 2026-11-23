@@ -5,6 +5,11 @@ import {
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { normalizarTc } from '../../common/tc.util';
+import {
+  METODO_COBRO_UTILIDADES,
+  etiquetaCobroConUtilidades,
+  utilidadesDeCobros,
+} from '../../common/cobro-utilidades.util';
 import { METODO_COBRO_LABELS } from '../../common/metodo-cobro.util';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import {
@@ -290,6 +295,11 @@ export class CobroReciboService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!cobro) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    // Solo un cobro `OTRO` puede ser con utilidades: cero consultas en el resto.
+    const utilidades =
+      (cobro.metodo_cobro as string | null) === METODO_COBRO_UTILIDADES
+        ? ((await utilidadesDeCobros(sb, [cobroId])).get(cobroId) ?? null)
+        : null;
 
     const monto = Number(cobro.monto);
     if (!Number.isFinite(monto) || monto <= 0) {
@@ -433,7 +443,11 @@ export class CobroReciboService {
       moneda: (cobro.moneda as string) ?? 'USD',
       tc_usd_mxn: tcUsado,
       equivalente_usd: equivalenteUsd,
-      metodo: METODO_LABELS[metodoCrudo] ?? metodoCrudo,
+      // Cobro con utilidades del socio (invariante 143): su método es
+      // `OTRO`; el recibo dice con qué se pagó de verdad.
+      metodo: utilidades
+        ? etiquetaCobroConUtilidades(utilidades.socio_nombre)
+        : (METODO_LABELS[metodoCrudo] ?? metodoCrudo),
       cuenta_destino: (cobro.cuenta_destino as string | null) ?? null,
       referencia: (cobro.referencia as string | null) ?? null,
       total_cotizacion_usd: Number(totalCotizacion.toFixed(2)),

@@ -14027,6 +14027,150 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        las cuatro y pide sus columnas) y `busqueda-vuelo.util.spec.ts`
        (`notas_por_tramo`).
 
+143. **EL SOCIO PAGA SU VUELO CON SUS UTILIDADES (23-nov-2026, API 0.0.148;
+     migración `20261123000001` APLICADA por MCP el 23-nov; la `20261123000002`
+     va por el SQL Editor).** Pedido del dueño (Ale Canales): los socios usan
+     sus aviones con una cotización a precio especial y «algunos socios dicen
+     que se pague esa cotización de ese vuelo descontándolo de las utilidades
+     del mes; necesitamos una forma para que se cobre de las utilidades y les
+     salga en su balance por avión y en el balance general». Caso real: los
+     $76,384.73 de «pendiente de pago» de N621TX en octubre eran dos vuelos de
+     socios sin cobrar (#496 Carlos Moreno $32,210.43 y #498 Macedo
+     $44,174.30).
+     - **EL MODELO — sin contabilidad nueva.** Pagar un vuelo con utilidades
+       son DOS filas de las tablas de siempre, ligadas 1 a 1 por
+       `cobro_vuelo.reparto_pago_id`: un **COBRO** del vuelo (`cobro_vuelo`,
+       método `OTRO`) y una **ENTREGA** al socio (`reparto_pago`, método
+       `OTRO`, referencia «Vuelo #498», «corresponde a» el avión elegido y al
+       MES de la fecha del cobro). Es «VuelaTour le entrega sus utilidades y
+       el socio paga su vuelo con ellas» sin mover dinero. Por eso **NINGÚN
+       lector de dinero cambió**: el vuelo cuenta como cobrado por
+       `cobrosEnUsd` (invariante 2) y el socio queda descontado por
+       `movimientosDeCuenta` / `entregasPorSocioDelAvion` (invariantes 38 y
+       100). Lo único nuevo son etiquetas y un desglose. **No crear un
+       cálculo paralelo de «utilidades usadas»**: si un número nuevo hiciera
+       falta, sale de esas dos filas.
+     - **«Esta entrega es el pago de un vuelo» = existe un cobro que la
+       cita.** La liga vive SOLO en el cobro (`reparto_pago` no ganó
+       columnas): `reassignAircraft` mueve el cobro al vuelo clon con su liga
+       y la entrega nunca apunta a un vuelo viejo. Ni el enum `metodo_cobro`
+       ni el CHECK `reparto_pago_metodo_chk` cambiaron: `OTRO` no está en
+       ningún conjunto bancario (`METODOS_COBRO_ABONO_*`,
+       `METODOS_COBRO_EXIGEN_FACTURA_SIN_CUENTA`), así que estos cobros no
+       entran a conciliación, a «cobros sin banco» ni piden factura solos, y
+       la app (que lee `OTRO`) no necesita versión nueva.
+     - **Fuente única** `common/cobro-utilidades.util.ts` (con spec): sonda
+       `cobroUtilidadesDisponible` (patrón `columnaOpcional`; la columna
+       NUNCA se nombra sin ella: `colCobroUtilidades`), etiquetas
+       (`etiquetaCobroConUtilidades` = «Utilidades del socio (Macedo)»,
+       `referenciaEntregaDeVuelo`), lectores tolerantes
+       (`utilidadesDeCobros` cobro → socio/avión/mes, `vuelosDeEntregas`
+       entrega → vuelo, `etiquetasUtilidadesDeVuelos` para los libros que
+       leen el cobro sin id, `entregaDeCobro`) y los errores con `code`.
+     - **Alta** `POST /v1/profit-sharing/vuelos/:vueloId/cobro-utilidades`
+       (`ROLES_PAGOS_SOCIOS_ESCRITURA` = DIRECCION y FACTURACION: escribe en
+       la cuenta del socio; ADMIN no) con `{socio_id, aeronave_id (de cuyas
+       utilidades se descuenta; puede no ser el que voló), monto, moneda,
+       tc_usd_mxn?, fecha_cobro?, notas?, aceptar_exceso?,
+       client_request_id}` ⇒ 201 `{cobro, pago, cuenta}` (replay ⇒ 200
+       `idempotente:true`). `CobroUtilidadesService` NO tiene reglas de
+       dinero: ORQUESTA. (1) Replay por llave ANTES de todo candado.
+       (2) `RepartoPagoService.prepararEntregaDeVuelo` valida la entrega con
+       TODO lo de `crear` (dinero, fecha no futura, mes abierto, socio de
+       ese avión, adelanto ⇒ 409 `PAGO_EXCEDE_SALDO` que se confirma con
+       `aceptar_exceso`) y devuelve su fila SIN insertar. (3)
+       `FlightsService.createCobro` (el de siempre: mes del vuelo abierto,
+       409 `COBRO_EXCEDE_SALDO`, push, bandera `cobrado`) con la opción
+       interna `utilidades: {entrega}`: en vez de su insert llama a la
+       función de BD `cobro_utilidades_registrar(p_entrega, p_cobro)`, que
+       inserta las DOS filas en UNA transacción. Todo lo que rechaza va
+       antes de escribir; la escritura es una sola. El T.C. es el mismo en
+       las dos filas (capturado ?? el del vuelo); en USD el cobro no lo
+       guarda (como cualquier cobro en dólares) y la entrega sí lo usa para
+       sus pesos. El mes de utilidades = el MES (día de Cancún) de
+       `fecha_cobro`.
+     - **DI**: `ProfitSharingModule` importa `forwardRef(() =>
+       FlightsModule)` y el servicio inyecta el token `COBROS_DE_VUELO`
+       (`flights/cobros-de-vuelo.token.ts`, alias `useExisting` de
+       `FlightsService`), NO la clase: importar `FlightsService` desde
+       profit-sharing arrastra calendar → realtime → `jose` (ESM) a todo
+       spec que cargue `ProfitSharingController`.
+     - **Corrección y baja.** `updateCobro`: en un cobro ligado, cambiar
+       monto, moneda, T.C., fecha, método, cuenta o comisión ⇒ 409
+       `COBRO_CON_UTILIDADES` (valor NUEVO contra VIGENTE; notas, referencia
+       y factura libres). `deleteCobro(cobroId, userId, {rol})`: solo quien
+       registra entregas (otro rol ⇒ 403
+       `COBRO_CON_UTILIDADES_SOLO_DIRECCION`), con el mes de la entrega
+       abierto; borra el cobro y da de baja la entrega (`deleted_by`,
+       motivo «Se quitó el cobro con utilidades del vuelo»). Si esa baja
+       falla tras 3 intentos ⇒ 500 `ENTREGA_DE_VUELO_SIN_BAJA` diciendo qué
+       entrega dar de baja a mano (ya sin cobro que la cite, «Pagos a
+       socios» la deja). `RepartoPagoService.actualizar` / `eliminar`: una
+       entrega citada por un cobro ⇒ 409 `ENTREGA_DE_VUELO` (details
+       `{vuelo_id, folio, cobro_id}`) al tocar dinero, fecha, método, avión,
+       mes o al darla de baja; recibió, folio de factura, referencia y notas
+       siguen libres.
+     - **La BD lo garantiza (el API repite cada candado con su 409):**
+       `tg_cobro_vuelo_utilidades` (la liga solo nace en el INSERT, es
+       inmutable, la entrega citada existe, está viva y vale lo mismo; con
+       liga no cambian monto/moneda/T.C./fecha), `tg_reparto_pago_de_vuelo`
+       (con cobro vivo la entrega no cambia su dinero, socio ni fecha, ni se
+       da de baja), índice único parcial `uq_cobro_vuelo_reparto_pago` (1 a
+       1), CHECK `cobro_vuelo_utilidades_chk` (con liga: monto > 0, sin
+       sobre, sin anticipo, sin comisión bancaria) y, en la **000002**,
+       `tg_cobro_vuelo_utilidades_baja` (AFTER DELETE: la baja de la entrega
+       ocurre en la MISMA sentencia que borra el cobro, por cualquier
+       camino) + los REVOKE de las cuatro funciones. La 000002 va aparte y
+       por el SQL Editor porque su dry-run necesita un DELETE real y el MCP
+       de este cliente lo declina (`docs/sql-aplicar-23-nov-2026-cobro-con-
+       utilidades/`); el API funciona igual con o sin ella (hace la baja él
+       mismo, idempotente): solo cierra la ventana de las dos escrituras.
+     - **Lecturas (ADITIVAS).** Lista de cobros / snapshot:
+       `cobros[].utilidades {entrega_id, socio_id, socio_nombre,
+       aeronave_id, matricula, mes} | null` (la llave solo viaja con la
+       sonda; cero consultas si ningún cobro trae liga). Entregas
+       (`PagoSocio`): `vuelo {id, folio, cobro_id, fecha, cliente,
+       matricula}` SOLO en las de un vuelo; `conceptoEntrega` dice «Vuelo
+       #498 pagado con utilidades · … · corresponde a oct 2026 · N621TX» (no
+       «Otro»). «Cómo se cobró»: `cobrado_con` / `metodo_etiqueta` del
+       balance, el recibo de pago y el PDF interno dicen «Utilidades del
+       socio (Nombre)».
+     - **Balance por avión y general** (`buildPayload`): `entregado_mxn` y
+       `por_entregar_mxn` NO cambian de significado (siguen netos de todo).
+       SOLO cuando el avión tiene algún vuelo pagado con utilidades en el
+       periodo viajan, por socio, `vuelos_utilidades_mxn`,
+       `entregado_efectivo_mxn` y `entregado_efectivo_usd` (= entregado −
+       vuelos) y, por avión, `vuelos_utilidades_socios_mxn` (el
+       DISCRIMINADOR de pyservices), `entregado_efectivo_socios_mxn` y el
+       detalle `vuelos_utilidades [{folio, fecha, socio, matricula, cliente,
+       monto_mxn}]`. Helpers PUROS `entregasQueCuentanEnAvion` (el filtro
+       único, compartido con `entregasPorSocioDelAvion`) y
+       `vuelosUtilidadesDelAvion` (subconjunto: nada se suma dos veces).
+       Solo se pregunta por las entregas `OTRO` del avión y periodo: sin
+       ellas, ni una consulta ni una llave nueva (libro byte a byte).
+       pyservices pinta la columna «(−) VUELOS PAGADOS CON UTILIDADES (MXN)»
+       y deja ENTREGADO en el dinero de verdad.
+     - **Lo que NO se hizo (decisiones pendientes del cliente):** el IVA y
+       la factura — se descuenta el total de la cotización TAL CUAL (con su
+       IVA si lo trae; si no debe llevarlo, se recotiza antes) y la columna
+       FACTURA VUELATOUR dice «No lleva factura» salvo que se pida; el
+       método NO se ofrece como «previsto» en el cotizador (es un insumo del
+       precio, invariante 15); un cobro de GRUPO (sobre) no se paga con
+       utilidades; y si las utilidades no alcanzan no se bloquea: se confirma
+       como adelanto y el socio queda con «por entregar» negativo, igual que
+       cualquier adelanto.
+     - **Despliegue**: migración 000001 (hecha) ⇒ pyservices ⇒ API 0.0.148 ⇒
+       panel; la 000002 cuando el usuario la pegue. Sin la 000001 el alta
+       responde 503 `COBRO_UTILIDADES_NO_DISPONIBLE` y todo lo demás sale
+       como en el 0.0.147.
+     - Specs: `common/cobro-utilidades.util.spec.ts`,
+       `profit-sharing/cobro-utilidades.service.spec.ts` (orquestador),
+       `profit-sharing/reparto-pago.service.utilidades.spec.ts` (entrega),
+       `flights/flights.service.cobro-utilidades.spec.ts` (alta atómica,
+       lista, corrección, baja), `aircraft-balance.service.entregas-socios
+       .spec.ts` (desglose ADITIVO y etiqueta) y
+       `profit-sharing.controller.reparto-pago.spec.ts` (ruta, roles, DTO).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

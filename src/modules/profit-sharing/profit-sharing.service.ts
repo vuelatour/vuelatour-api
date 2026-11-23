@@ -4,6 +4,10 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  vuelosDeEntregas,
+  type VueloDeEntrega,
+} from '../../common/cobro-utilidades.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import {
@@ -6244,7 +6248,17 @@ export class ProfitSharingService {
       this.fetchNombres(ids),
       this.fetchMatriculas(),
     ]);
-    return propias.map((r) => aPagoSocio(r, nombres, new Map(), matriculas));
+    // El pago de un vuelo con utilidades dice su vuelo (invariante 143).
+    const vuelos =
+      propias.length > 0
+        ? await vuelosDeEntregas(
+            this.supabase.service,
+            propias.map((r) => r.id),
+          )
+        : new Map<string, VueloDeEntrega>();
+    return propias.map((r) =>
+      aPagoSocio(r, nombres, new Map(), matriculas, vuelos),
+    );
   }
 
   /**

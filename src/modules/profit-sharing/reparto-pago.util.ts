@@ -23,6 +23,7 @@
  *  - Fecha de la entrega: día real y nunca futura (día Cancún).
  */
 import { Rol } from '../../common/types/auth.types';
+import type { VueloDeEntrega } from '../../common/cobro-utilidades.util';
 import { redondearA } from '../../common/redondeo.util';
 import { normalizarTc } from '../../common/tc.util';
 
@@ -609,6 +610,12 @@ export interface PagoSocio {
   /** ADITIVO: nombre de quien la corrigió por última vez. */
   updated_by_nombre: string | null;
   comprobante_url: string | null;
+  /**
+   * ADITIVO (23-nov-2026, API 0.0.148, invariante 143): esta entrega ES el
+   * pago de un vuelo con utilidades del socio (existe un cobro que la cita).
+   * La llave SOLO viaja en esas entregas; su `metodo` es `OTRO`.
+   */
+  vuelo?: VueloDeEntrega | null;
 }
 
 const num = (v: unknown): number => {
@@ -628,8 +635,10 @@ export function aPagoSocio(
   nombres: ReadonlyMap<string, string> = new Map(),
   urls: ReadonlyMap<string, string> = new Map(),
   matriculas: ReadonlyMap<string, string> = new Map(),
+  vuelos: ReadonlyMap<string, VueloDeEntrega> = new Map(),
 ): PagoSocio {
   const tc = r.tc_usd_mxn == null ? null : num(r.tc_usd_mxn);
+  const vuelo = vuelos.get(r.id);
   return {
     id: r.id,
     socio_id: r.socio_id,
@@ -684,6 +693,7 @@ export function aPagoSocio(
     comprobante_url: r.comprobante_path
       ? (urls.get(r.comprobante_path) ?? null)
       : null,
+    ...(vuelo ? { vuelo } : {}),
   };
 }
 

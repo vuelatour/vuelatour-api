@@ -58,7 +58,8 @@ import {
  * - `adjuntarSobres`: `factura_emitida {id, etiqueta}`, ≤ 200 ids por
  *   consulta, llave omitida para campo y sin sonda;
  * - carrera: el 23514 del trigger A ⇒ el MISMO 409 con details, nunca 500;
- * - los 7 selects de `cobro_vuelo` pasan por `cobroCols(disponible)`.
+ * - los 8 selects de `cobro_vuelo` pasan por `cobroCols(disponible)` (el 8.º,
+ *   del 23-nov-2026: la relectura del cobro con utilidades del socio).
  */
 const USER = 'u-oficina';
 const V332 = 'v332';
@@ -598,10 +599,12 @@ describe('listCobros / adjuntarSobres — factura_emitida {id, etiqueta}', () =>
   });
 });
 
-describe('cobroCols(disponible): los 7 selects de cobro_vuelo pasan por la fábrica', () => {
-  it('0 `.select(COBRO_COLS)` y 7 `.select(cobroCols(` en flights.service.ts', () => {
+describe('cobroCols(disponible): los 8 selects de cobro_vuelo pasan por la fábrica', () => {
+  it('0 `.select(COBRO_COLS)` y 8 `.select(cobroCols(` en flights.service.ts', () => {
     const fuente = readFileSync(join(__dirname, 'flights.service.ts'), 'utf8');
     expect(fuente.match(/\.select\(COBRO_COLS\)/g) ?? []).toHaveLength(0);
-    expect(fuente.match(/\.select\(cobroCols\(/g)).toHaveLength(7);
+    // 8 desde el 23-nov-2026 (invariante 143): `insertarCobroConUtilidades`
+    // relee el cobro recién insertado por la función de BD.
+    expect(fuente.match(/\.select\(cobroCols\(/g)).toHaveLength(8);
   });
 });

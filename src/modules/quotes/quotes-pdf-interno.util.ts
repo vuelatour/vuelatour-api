@@ -39,6 +39,7 @@
  */
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { diaCancun, fechaHoraCancun } from '../../common/fecha-cancun.util';
+import { etiquetaCobroConUtilidades } from '../../common/cobro-utilidades.util';
 import { METODO_COBRO_LABELS } from '../../common/metodo-cobro.util';
 import {
   ivaComisionVendedorUsd,
@@ -115,6 +116,8 @@ export interface CobroInternoRow {
   notas?: unknown;
   created_at?: unknown;
   grupo_factor?: unknown;
+  /** Cobro con utilidades del socio (invariante 143), de `listCobros`. */
+  utilidades?: { socio_nombre?: string | null } | null;
   cobro_grupo?: {
     grupo_folio?: number | null;
     monto_total?: number;
@@ -698,7 +701,10 @@ export function armarCotizacionInternaPayload(
     return {
       fecha: str(c.fecha_cobro),
       metodo,
-      metodo_label: METODO_LABEL[metodo] ?? metodo,
+      // Con utilidades del socio no dice «Otro» (invariante 143).
+      metodo_label: c.utilidades
+        ? etiquetaCobroConUtilidades(c.utilidades.socio_nombre)
+        : (METODO_LABEL[metodo] ?? metodo),
       monto,
       moneda: str(c.moneda) ?? 'USD',
       tc: num(c.tc_usd_mxn),

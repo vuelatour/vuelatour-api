@@ -22,6 +22,8 @@ jest.mock('../../common/cierre-mes-disponible.util', () => ({
 import {
   AircraftBalanceService,
   entregasPorSocioDelAvion,
+  entregasQueCuentanEnAvion,
+  vuelosUtilidadesDelAvion,
 } from './aircraft-balance.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type {
@@ -520,5 +522,276 @@ describe('Balance general — ENTREGAS A SOCIOS en cada bloque de avión', () =>
     expect(s.tablasLeidas.filter((t) => t === 'reparto_pago')).toHaveLength(2);
     expect('entregado_socios_mxn' in g.consolidado.balance).toBe(false);
     expect(g.consolidado.balance.socios).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// VUELOS PAGADOS CON UTILIDADES DEL SOCIO (23-nov-2026, API 0.0.148,
+// invariante 143). Un vuelo pagado con utilidades es una ENTREGA más
+// (`reparto_pago`, método OTRO) que un cobro de vuelo cita por
+// `cobro_vuelo.reparto_pago_id`. El balance la sigue contando en
+// `entregado_mxn` / `por_entregar_mxn` como siempre y, ADEMÁS, dice cuánto de
+// lo entregado fue un vuelo y cuánto dinero de verdad, con el detalle.
+// ===========================================================================
+
+/** Hernán paga con utilidades de septiembre un vuelo de $500 (el #777). */
+const ENTREGA_DE_VUELO = entrega({
+  id: 'p-vuelo',
+  periodo: '2026-09-01',
+  monto: 500,
+  monto_mxn: 500,
+  tc_usd_mxn: 18.5,
+  monto_usd: 27.03,
+  metodo: 'OTRO',
+  referencia: 'Vuelo #777',
+  fecha_pago: '2026-09-18',
+  created_at: '2026-09-18T15:00:00Z',
+});
+
+/**
+ * El cobro que cita la entrega. Es de un vuelo que NO está en el libro del
+ * periodo (un vuelo de octubre pagado con utilidades de septiembre, o en
+ * otro avión): así el dinero del libro no se mueve y lo único que cambia son
+ * las llaves nuevas.
+ */
+const COBRO_QUE_LA_CITA: Fila = {
+  id: 'c-777',
+  vuelo_id: 'v-fuera-del-libro',
+  monto: 500,
+  moneda: 'MXN',
+  tc_usd_mxn: 18.5,
+  metodo_cobro: 'OTRO',
+  fecha_cobro: '2026-09-18T17:00:00+00:00',
+  reparto_pago_id: 'p-vuelo',
+  vuelo: {
+    folio: 777,
+    fecha_vuelo: '2026-10-02T15:00:00+00:00',
+    cliente: { nombre: 'Hernán en su avión' },
+    aeronave: { matricula: 'XB-DOS' },
+  },
+};
+
+function mundoConVuelo(conCobro = true): Record<string, Fila[]> {
+  const m = mundoConEntregas([ENTREGA_DE_VUELO]);
+  return conCobro
+    ? { ...m, cobro_vuelo: [...(m.cobro_vuelo ?? []), COBRO_QUE_LA_CITA] }
+    : m;
+}
+
+const LLAVES_VUELOS_SOCIO = [
+  'vuelos_utilidades_mxn',
+  'entregado_efectivo_mxn',
+  'entregado_efectivo_usd',
+] as const;
+const LLAVES_VUELOS_AVION = [
+  'vuelos_utilidades_socios_mxn',
+  'entregado_efectivo_socios_mxn',
+  'vuelos_utilidades',
+] as const;
+
+/** El bloque sin las llaves nuevas (lo que viajaba hasta el 0.0.147). */
+function sinVuelosUtilidades(
+  b: BalanceAvionPayload['balance'],
+): BalanceAvionPayload['balance'] {
+  const c = JSON.parse(JSON.stringify(b)) as Record<string, unknown>;
+  for (const k of LLAVES_VUELOS_AVION) delete c[k];
+  for (const s of c.socios as Array<Record<string, unknown>>) {
+    for (const k of LLAVES_VUELOS_SOCIO) delete s[k];
+  }
+  return c as unknown as BalanceAvionPayload['balance'];
+}
+
+describe('vuelosUtilidadesDelAvion (puro): de lo entregado, lo que fue un vuelo', () => {
+  const filas = [...ENTREGAS, ENTREGA_DE_VUELO] as unknown as RepartoPagoRow[];
+  const vuelos = new Map([
+    [
+      'p-vuelo',
+      {
+        id: 'v-fuera-del-libro',
+        folio: 777,
+        cobro_id: 'c-777',
+        fecha: '2026-10-02',
+        cliente: 'Hernán en su avión',
+        matricula: 'XB-DOS',
+      },
+    ],
+  ]);
+
+  it('es un SUBCONJUNTO de las entregas que cuentan (mismo filtro): por socio y con su detalle', () => {
+    const cuentan = entregasQueCuentanEnAvion(filas, AV, DESDE, HASTA);
+    expect(cuentan.map((r) => r.id).sort()).toEqual([
+      'p-sep-mxn',
+      'p-sep-usd',
+      'p-vuelo',
+    ]);
+    const r = vuelosUtilidadesDelAvion(filas, AV, DESDE, HASTA, vuelos);
+    expect([...r.porSocio]).toEqual([[HERNAN, { mxn: 500, usd: 27.03, n: 1 }]]);
+    expect(r.detalle).toEqual([
+      {
+        socio_id: HERNAN,
+        folio: 777,
+        fecha: '2026-10-02',
+        matricula: 'XB-DOS',
+        cliente: 'Hernán en su avión',
+        monto_mxn: 500,
+      },
+    ]);
+    // Lo entregado sigue contando el vuelo (nada se resta dos veces).
+    expect(
+      entregasPorSocioDelAvion(filas, AV, DESDE, HASTA).get(HERNAN),
+    ).toEqual({
+      mxn: 3350,
+      usd: 181.08,
+      n: 3,
+    });
+  });
+
+  it('sin cobros que citen entregas, o en otro avión o periodo: vacío', () => {
+    expect(
+      vuelosUtilidadesDelAvion(filas, AV, DESDE, HASTA, new Map()).detalle,
+    ).toEqual([]);
+    expect(
+      vuelosUtilidadesDelAvion(filas, AV2, DESDE, HASTA, vuelos).detalle,
+    ).toEqual([]);
+    expect(
+      vuelosUtilidadesDelAvion(filas, AV, '2026-10-01', '2026-10-31', vuelos)
+        .detalle,
+    ).toEqual([]);
+  });
+});
+
+describe('Balance por avión — VUELOS PAGADOS CON UTILIDADES (invariante 143)', () => {
+  it('ADITIVO: el libro es el MISMO que con la entrega sin ligar; solo ganan las llaves nuevas (por socio y por avión)', async () => {
+    const con = await libro(mundoConVuelo());
+    const sin = await libro(mundoConVuelo(false));
+    // Sin cobro que la cite, la entrega es una entrega normal: ni una llave nueva.
+    expect(JSON.stringify(sin)).not.toContain('vuelos_utilidades');
+    expect(JSON.stringify(sin)).not.toContain('entregado_efectivo');
+    // Con el cobro: todo lo demás idéntico (dinero, cascada, entregado, por entregar).
+    expect(sinVuelosUtilidades(con.balance)).toEqual(sin.balance);
+    expect({ ...con, balance: null }).toEqual({ ...sin, balance: null });
+  });
+
+  it('por socio: cuánto fue vuelo y cuánto dinero; `entregado_mxn` y `por_entregar_mxn` siguen netos de todo', async () => {
+    const { balance } = await libro(mundoConVuelo());
+    const conVuelo = balance.socios.filter(
+      (s) => (s.vuelos_utilidades_mxn ?? 0) > 0,
+    );
+    expect(conVuelo).toHaveLength(1);
+    const hernan = conVuelo[0];
+    expect(hernan).toMatchObject({
+      entregado_mxn: 3350,
+      entregas: 3,
+      vuelos_utilidades_mxn: 500,
+      entregado_efectivo_mxn: 2850,
+      entregado_efectivo_usd: 154.05,
+    });
+    expect(hernan.por_entregar_mxn).toBe(r2(hernan.monto_mxn! - 3350));
+    // Los demás socios: las llaves viajan en 0 (el bloque tiene la columna).
+    for (const s of balance.socios.filter((x) => x !== hernan)) {
+      expect(s.vuelos_utilidades_mxn).toBe(0);
+      expect(s.entregado_efectivo_mxn).toBe(s.entregado_mxn);
+    }
+    // Las llaves nuevas van al FINAL del socio.
+    expect(Object.keys(hernan).slice(-3)).toEqual([...LLAVES_VUELOS_SOCIO]);
+  });
+
+  it('por avión: el discriminador (Σ), lo entregado en dinero y el detalle del vuelo con el nombre del socio', async () => {
+    const { balance } = await libro(mundoConVuelo());
+    expect(balance.entregado_socios_mxn).toBe(3350);
+    expect(balance.vuelos_utilidades_socios_mxn).toBe(500);
+    expect(balance.entregado_efectivo_socios_mxn).toBe(2850);
+    const hernan = balance.socios.find(
+      (s) => (s.vuelos_utilidades_mxn ?? 0) > 0,
+    )!;
+    expect(balance.vuelos_utilidades).toEqual([
+      {
+        folio: 777,
+        fecha: '2026-10-02',
+        socio: hernan.nombre,
+        // El avión que VOLÓ puede no ser el de las utilidades.
+        matricula: 'XB-DOS',
+        cliente: 'Hernán en su avión',
+        monto_mxn: 500,
+      },
+    ]);
+    // Justo después de las dos de entregas, en ese orden.
+    const keys = Object.keys(balance);
+    const i = keys.indexOf('por_entregar_socios_mxn');
+    expect(keys.slice(i + 1, i + 4)).toEqual([...LLAVES_VUELOS_AVION]);
+  });
+
+  it('sin entregas `OTRO` en el periodo no se pregunta nada a `cobro_vuelo` por ligas (cero consultas extra)', async () => {
+    const s = servicio(mundoConEntregas());
+    await s.service.xlsx(AV, DESDE, HASTA);
+    const base = s.tablasLeidas.filter((t) => t === 'cobro_vuelo').length;
+    const conOtro = servicio(mundoConVuelo());
+    await conOtro.service.xlsx(AV, DESDE, HASTA);
+    // Con la entrega OTRO: la sonda de la columna + la lectura de la liga.
+    expect(conOtro.tablasLeidas.filter((t) => t === 'cobro_vuelo').length).toBe(
+      base + 2,
+    );
+  });
+
+  it('un socio que ya no está vigente pero pagó un vuelo con utilidades: su renglón también trae el desglose', async () => {
+    const m = mundoConVuelo();
+    m.reparto_pago = m.reparto_pago.map((p) =>
+      p.id === 'p-vuelo' ? { ...p, socio_id: 'u-fantasma' } : p,
+    );
+    const { balance } = await libro(m);
+    const fuera = balance.socios.at(-1)!;
+    expect(fuera).toMatchObject({
+      nombre: 'Socio',
+      porcentaje: 0,
+      entregado_mxn: 500,
+      vuelos_utilidades_mxn: 500,
+      entregado_efectivo_mxn: 0,
+      por_entregar_mxn: -500,
+    });
+    expect(balance.vuelos_utilidades?.[0]).toMatchObject({ socio: 'Socio' });
+  });
+
+  it('«cómo se cobró»: un cobro del libro pagado con utilidades dice «Utilidades del socio (Nombre)», no «Otro»', async () => {
+    const m = mundoConEntregas();
+    const cobros = m.cobro_vuelo ?? [];
+    expect(cobros.length).toBeGreaterThan(0);
+    const [primero, ...resto] = cobros;
+    const con = await libro({
+      ...m,
+      cobro_vuelo: [
+        {
+          ...primero,
+          metodo_cobro: 'OTRO',
+          cuenta_destino: null,
+          reparto_pago_id: 'p-sep-mxn',
+          entrega: { socio: { nombre: 'Hernán Garza' } },
+        },
+        ...resto,
+      ],
+    });
+    const texto = JSON.stringify(con.vuelos);
+    expect(texto).toContain('Utilidades del socio (Hernán Garza)');
+    expect(texto).not.toContain('"metodo_etiqueta":"Otro"');
+    // El MISMO cobro como «Otro» normal (sin liga): la etiqueta de siempre.
+    const sin = await libro({
+      ...m,
+      cobro_vuelo: [
+        { ...primero, metodo_cobro: 'OTRO', cuenta_destino: null },
+        ...resto,
+      ],
+    });
+    expect(JSON.stringify(sin.vuelos)).toContain('"metodo_etiqueta":"Otro"');
+    expect(JSON.stringify(sin.vuelos)).not.toContain('Utilidades del socio');
+  });
+});
+
+describe('Balance general — VUELOS PAGADOS CON UTILIDADES en el bloque de su avión', () => {
+  it('el bloque del avión trae el mismo desglose que su libro individual; el consolidado FLOTA no', async () => {
+    const g = await general(mundoConVuelo());
+    const tst = g.aviones.find((a) => a.matricula === 'XB-TST')!;
+    expect(tst.balance).toEqual((await libro(mundoConVuelo())).balance);
+    expect(tst.balance.vuelos_utilidades_socios_mxn).toBe(500);
+    expect(tst.balance.vuelos_utilidades).toHaveLength(1);
+    expect('vuelos_utilidades_socios_mxn' in g.consolidado.balance).toBe(false);
   });
 });

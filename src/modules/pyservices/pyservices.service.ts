@@ -1491,6 +1491,29 @@ export interface BalanceAvionSocioPayload {
   entregado_usd?: number;
   entregas?: number;
   por_entregar_mxn?: number | null;
+  /**
+   * VUELOS PAGADOS CON UTILIDADES (23-nov-2026, API 0.0.148, invariante 143;
+   * ADITIVAS, SOLO cuando el avión tiene alguno en el periodo): de lo
+   * «entregado», cuánto fue un vuelo que el socio pagó con sus utilidades
+   * (`vuelos_utilidades_mxn`) y cuánto dinero de verdad
+   * (`entregado_efectivo_*` = entregado − vuelos). `entregado_mxn` y
+   * `por_entregar_mxn` NO cambian de significado (siguen netos de todo).
+   */
+  vuelos_utilidades_mxn?: number;
+  entregado_efectivo_mxn?: number;
+  entregado_efectivo_usd?: number;
+}
+
+/** Un vuelo pagado con utilidades, en el detalle del balance de su avión. */
+export interface BalanceVueloUtilidadesPayload {
+  folio: number | null;
+  /** Día Cancún del VUELO. */
+  fecha: string | null;
+  socio: string;
+  /** Matrícula del avión que VOLÓ (puede no ser el de las utilidades). */
+  matricula: string | null;
+  cliente: string | null;
+  monto_mxn: number;
 }
 
 /** Participación de la EMPRESA como socia de UN avión (bloque VUELATOUR). */
@@ -1770,6 +1793,15 @@ export interface BalanceAvionBalancePayload {
    */
   entregado_socios_mxn?: number;
   por_entregar_socios_mxn?: number | null;
+  /**
+   * VUELOS PAGADOS CON UTILIDADES (invariante 143; ADITIVAS, solo cuando el
+   * avión tiene alguno en el periodo): `vuelos_utilidades_socios_mxn` es el
+   * DISCRIMINADOR de pyservices (columna «(−) VUELOS PAGADOS CON UTILIDADES»
+   * y ENTREGADO = solo dinero); `vuelos_utilidades` es el detalle por vuelo.
+   */
+  vuelos_utilidades_socios_mxn?: number;
+  entregado_efectivo_socios_mxn?: number;
+  vuelos_utilidades?: BalanceVueloUtilidadesPayload[];
   comisiones_mxn?: number;
   utilidad_antes_comisiones_mxn?: number;
 }

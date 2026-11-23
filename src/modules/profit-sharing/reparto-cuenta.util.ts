@@ -38,6 +38,7 @@
  *    reparto, tal cual).
  */
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
+import { referenciaEntregaDeVuelo } from '../../common/cobro-utilidades.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { diaCortoCancun } from '../../common/mes-contable.util';
 import { redondearA } from '../../common/redondeo.util';
@@ -912,12 +913,17 @@ export function conceptoEntrega(
     | 'tc_usd_mxn'
     | 'referencia'
     | 'aeronave'
+    | 'vuelo'
   > & { monto_mxn?: number | null },
 ): string {
-  const partes = [
-    p.mes ? 'Entrega' : 'Adelanto a cuenta',
-    ETIQUETAS_METODO_PAGO_SOCIO[p.metodo] ?? 'Otro',
-  ];
+  // Entrega que es el pago de un vuelo con utilidades (invariante 143): no
+  // dice «Otro» ni repite su referencia («Vuelo #498» ya va en el título).
+  const partes = p.vuelo
+    ? [`${referenciaEntregaDeVuelo(p.vuelo.folio)} pagado con utilidades`]
+    : [
+        p.mes ? 'Entrega' : 'Adelanto a cuenta',
+        ETIQUETAS_METODO_PAGO_SOCIO[p.metodo] ?? 'Otro',
+      ];
   if (p.moneda === 'MXN') {
     partes.push(
       `${fmtDineroTexto(num(p.monto), 'MXN')}${p.tc_usd_mxn != null ? ` a T.C. ${num(p.tc_usd_mxn)}` : ''}`,
@@ -927,7 +933,7 @@ export function conceptoEntrega(
       `${fmtDineroTexto(num(p.monto), 'USD')} = ${fmtDineroTexto(num(p.monto_mxn), 'MXN')}`,
     );
   }
-  if (p.referencia) partes.push(`ref ${p.referencia}`);
+  if (p.referencia && !p.vuelo) partes.push(`ref ${p.referencia}`);
   if (p.mes) partes.push(`corresponde a ${etiquetaMesCorta(p.mes)}`);
   if (p.aeronave?.matricula) partes.push(p.aeronave.matricula);
   return partes.join(' · ');

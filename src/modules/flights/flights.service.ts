@@ -17,6 +17,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   Optional,
@@ -155,7 +156,11 @@ import {
 } from '../../common/cobrado-de-mas.util';
 import { METODOS_COBRO_ABONO_AUTO } from '../../common/metodo-cobro.util';
 import { normalizarTc } from '../../common/tc.util';
-import { columnaOpcional } from '../../common/columna-opcional.util';
+import {
+  columnaOpcional,
+  esColumnaInexistente,
+} from '../../common/columna-opcional.util';
+import { ROLES_PAGOS_SOCIOS_ESCRITURA } from '../profit-sharing/reparto-pago.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 import {
   aplicarCas,
@@ -196,6 +201,16 @@ import {
   colCobroFactura,
   errorCobroFacturaNoDisponible,
 } from '../../common/cobro-factura-disponible.util';
+import {
+  MOTIVO_BAJA_ENTREGA_DE_VUELO,
+  RPC_COBRO_UTILIDADES,
+  cobroUtilidadesDisponible,
+  colCobroUtilidades,
+  errorAltaCobroUtilidades,
+  errorCobroConUtilidades,
+  utilidadesDeCobros,
+  type UtilidadesDeCobro,
+} from '../../common/cobro-utilidades.util';
 import {
   errorCobroFactura,
   etiquetaDeFactura,
@@ -586,6 +601,14 @@ export interface CobroConSobre extends CobroLike {
   anticipo?: { ingreso_id: string; etiqueta: string } | null;
   conciliado_via?: ViaConciliacion | null;
   /**
+   * ADITIVO (23-nov-2026, API 0.0.148, invariante 143) — SOLO con la
+   * migración 20261123000001 (sonda `cobroUtilidadesDisponible`): el cobro
+   * se pagó CON UTILIDADES DEL SOCIO (qué socio, de qué avión y de qué mes
+   * se descontó, y la entrega de «Pagos a socios» que lo respalda); `null` =
+   * cobro normal. Su `metodo_cobro` es `OTRO`: la etiqueta sale de aquí.
+   */
+  utilidades?: UtilidadesDeCobro | null;
+  /**
    * ADITIVOS (14-oct-2026, API 0.0.78, invariante 77: un cobro acepta
    * VARIOS abonos). `conciliado` pasa a ser CUBIERTO (Σ de sus abonos ≥
    * neto − $1.00, `common/cobro-banco.util`): un PARCIAL ya no dice
@@ -663,6 +686,14 @@ export interface CobroDeAnticipoOpts {
  */
 export interface CobroAltaInternaOpts {
   omitirSolicitudFactura?: boolean;
+  /**
+   * COBRO CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143): la fila de
+   * la ENTREGA (`reparto_pago`) ya validada por `RepartoPagoService`. Con
+   * ella el cobro NO se inserta solo: entra junto con su entrega por la
+   * función de BD `cobro_utilidades_registrar` (una transacción). Solo la usa
+   * `CobroUtilidadesService`; jamás llega de un DTO.
+   */
+  utilidades?: { entrega: Record<string, unknown> };
 }
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
@@ -13456,14 +13487,21 @@ export class FlightsService {
    */
   async listCobros(vueloId: string, current?: AuthenticatedUser) {
     await this.findById(vueloId);
+    // `reparto_pago_id` (cobro con utilidades del socio, invariante 143) SOLO
+    // con su sonda, como `factura_emitida_id`.
+    const [conFactura, conUtilidades] = await Promise.all([
+      cobroFacturaDisponible(this.supabase.service),
+      cobroUtilidadesDisponible(this.supabase.service),
+    ]);
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select(cobroCols(await cobroFacturaDisponible(this.supabase.service)))
+      .select(cobroCols(conFactura) + colCobroUtilidades(conUtilidades))
       .eq('vuelo_id', vueloId)
       .order('fecha_cobro', { ascending: false });
     if (error) throw new Error(error.message);
     return this.adjuntarSobres((data ?? []) as unknown as FilaCobro[], {
       sinDetalleBanco: FlightsService.esRolDeCampo(current),
+      conUtilidades,
     });
   }
 
@@ -13488,7 +13526,7 @@ export class FlightsService {
    */
   private async adjuntarSobres(
     cobros: Array<Record<string, unknown>>,
-    opts: { sinDetalleBanco?: boolean } = {},
+    opts: { sinDetalleBanco?: boolean; conUtilidades?: boolean } = {},
   ): Promise<CobroConSobre[]> {
     if (cobros.length === 0) return [];
     const ids = [
@@ -13527,33 +13565,62 @@ export class FlightsService {
           ),
         ]
       : [];
-    const [sobresRes, movsRes, nombres, anticiposRes, etiquetasFactura] =
-      await Promise.all([
-        ids.length > 0
-          ? this.supabase.service
-              .from('cobro_grupo')
-              .select(
-                'id, grupo_id, monto, moneda, grupo:vuelo_grupo!grupo_id(folio)',
-              )
-              .in('id', ids)
-          : Promise.resolve({ data: [], error: null }),
-        leerLigasDeCobros<MovimientoLiga & { ingreso_id?: unknown }>(
-          this.supabase.service,
-          {
-            cobroIds,
-            sobreIds: ids,
-            cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
-          },
-        ).then((data) => ({ data, error: null as { message: string } | null })),
-        // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
-        fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
-        conIngresos
-          ? this.anticiposDeCobros(cobroIds)
-          : Promise.resolve(new Map<string, string>()),
-        facturaIds.length > 0
-          ? this.etiquetasDeFacturasEmitidas(facturaIds)
-          : Promise.resolve(new Map<string, string>()),
-      ]);
+    // COBROS CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143): solo
+    // con la sonda de 20261123000001 y cero consultas si ningún cobro trae
+    // `reparto_pago_id`.
+    const conUtilidades = opts.conUtilidades === true;
+    const idsConUtilidades = conUtilidades
+      ? cobros
+          .filter(
+            (c) =>
+              typeof c.reparto_pago_id === 'string' &&
+              c.reparto_pago_id.length > 0,
+          )
+          .map((c) => c.id as string)
+      : [];
+    const [
+      sobresRes,
+      movsRes,
+      nombres,
+      anticiposRes,
+      etiquetasFactura,
+      utilidadesRes,
+    ] = await Promise.all([
+      ids.length > 0
+        ? this.supabase.service
+            .from('cobro_grupo')
+            .select(
+              'id, grupo_id, monto, moneda, grupo:vuelo_grupo!grupo_id(folio)',
+            )
+            .in('id', ids)
+        : Promise.resolve({ data: [], error: null }),
+      leerLigasDeCobros<MovimientoLiga & { ingreso_id?: unknown }>(
+        this.supabase.service,
+        {
+          cobroIds,
+          sobreIds: ids,
+          cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+        },
+      ).then((data) => ({ data, error: null as { message: string } | null })),
+      // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
+      fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
+      conIngresos
+        ? this.anticiposDeCobros(cobroIds)
+        : Promise.resolve(new Map<string, string>()),
+      facturaIds.length > 0
+        ? this.etiquetasDeFacturasEmitidas(facturaIds)
+        : Promise.resolve(new Map<string, string>()),
+      idsConUtilidades.length > 0
+        ? utilidadesDeCobros(this.supabase.service, idsConUtilidades)
+        : Promise.resolve(new Map<string, UtilidadesDeCobro>()),
+    ]);
+    // `utilidades {…} | null` del cobro; sin la sonda la llave NO viaja.
+    const utilidadesDeCobro = (
+      c: Record<string, unknown>,
+    ): { utilidades?: UtilidadesDeCobro | null } =>
+      conUtilidades
+        ? { utilidades: utilidadesRes.get(c.id as string) ?? null }
+        : {};
     if (sobresRes.error) throw new Error(sobresRes.error.message);
     if (movsRes.error) throw new Error(movsRes.error.message);
     // `factura_emitida {id, etiqueta} | null` del cobro: si la factura no
@@ -13639,6 +13706,7 @@ export class FlightsService {
           movimiento_bancario_id: banco.movimiento_bancario_id,
           ...banco.aditivos,
           ...facturaDeCobro(c),
+          ...utilidadesDeCobro(c),
         };
       }
       // Con ingresos: fuente única `conciliacionDeCobro` (directo, sobre o
@@ -13670,6 +13738,7 @@ export class FlightsService {
         conciliado_via: conc?.via ?? null,
         ...banco.aditivos,
         ...facturaDeCobro(c),
+        ...utilidadesDeCobro(c),
       };
     });
   }
@@ -14231,44 +14300,68 @@ export class FlightsService {
         )
       : null;
 
-    const { data: cobroRaw, error } = await this.supabase.service
-      .from('cobro_vuelo')
-      .insert({
-        vuelo_id: vueloId,
-        monto: dto.monto,
-        moneda: dto.moneda,
-        metodo_cobro: dto.metodo_cobro,
-        tc_usd_mxn: tcCobro,
-        comision_banco_pct: comisionPct,
-        comision_banco_monto: comisionMonto,
-        cuenta_destino: dto.cuenta_destino?.trim() || null,
-        referencia: dto.referencia,
-        fecha_cobro: dto.fecha_cobro?.toISOString(),
-        foto_voucher_url: dto.foto_voucher_url,
-        registrado_por: userId,
-        notas: dto.notas,
-        // Idempotencia (29-ago): la misma llave colisiona en
-        // uq_cobro_vuelo_client_request y devuelve el cobro existente.
-        client_request_id: dto.client_request_id ?? null,
-        // Parte de un SOBRE de grupo (4-sep): liga + peso informativo.
-        cobro_grupo_id: sobre?.cobro_grupo_id ?? null,
-        grupo_factor: sobre?.grupo_factor ?? null,
-        created_by: userId,
-        updated_by: userId,
-        // Cobro aplicado de un ANTICIPO (24-sep-2026): la columna SOLO entra
-        // cuando viaja (sin ella, el insert de siempre). El trigger
-        // `tg_cobro_vuelo_anticipo` vigila saldo, moneda y la liga inmutable.
-        ...(anticipo
-          ? { ingreso_anticipo_id: anticipo.ingreso_anticipo_id }
-          : {}),
-        // Factura que AMPARA el cobro (invariante 84): la columna SOLO entra
-        // cuando viaja (sin ella, el insert de siempre).
-        ...(facturaId ? { factura_emitida_id: facturaId } : {}),
-      })
-      .select(cobroCols(conFactura))
-      .maybeSingle();
-    const cobro = cobroRaw as unknown as FilaCobro | null;
+    const filaCobro = {
+      vuelo_id: vueloId,
+      monto: dto.monto,
+      moneda: dto.moneda,
+      metodo_cobro: dto.metodo_cobro,
+      tc_usd_mxn: tcCobro,
+      comision_banco_pct: comisionPct,
+      comision_banco_monto: comisionMonto,
+      cuenta_destino: dto.cuenta_destino?.trim() || null,
+      referencia: dto.referencia,
+      fecha_cobro: dto.fecha_cobro?.toISOString(),
+      foto_voucher_url: dto.foto_voucher_url,
+      registrado_por: userId,
+      notas: dto.notas,
+      // Idempotencia (29-ago): la misma llave colisiona en
+      // uq_cobro_vuelo_client_request y devuelve el cobro existente.
+      client_request_id: dto.client_request_id ?? null,
+      // Parte de un SOBRE de grupo (4-sep): liga + peso informativo.
+      cobro_grupo_id: sobre?.cobro_grupo_id ?? null,
+      grupo_factor: sobre?.grupo_factor ?? null,
+      created_by: userId,
+      updated_by: userId,
+      // Cobro aplicado de un ANTICIPO (24-sep-2026): la columna SOLO entra
+      // cuando viaja (sin ella, el insert de siempre). El trigger
+      // `tg_cobro_vuelo_anticipo` vigila saldo, moneda y la liga inmutable.
+      ...(anticipo
+        ? { ingreso_anticipo_id: anticipo.ingreso_anticipo_id }
+        : {}),
+      // Factura que AMPARA el cobro (invariante 84): la columna SOLO entra
+      // cuando viaja (sin ella, el insert de siempre).
+      ...(facturaId ? { factura_emitida_id: facturaId } : {}),
+    };
+    // COBRO CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143): el cobro
+    // entra JUNTO con su entrega al socio, en una sola transacción de la BD.
+    // Sin esa opción interna, el insert de siempre.
+    const { data: cobroRaw, error } = interna?.utilidades
+      ? await this.insertarCobroConUtilidades(
+          filaCobro,
+          interna.utilidades.entrega,
+          conFactura,
+        )
+      : await this.supabase.service
+          .from('cobro_vuelo')
+          .insert(filaCobro)
+          .select(cobroCols(conFactura))
+          .maybeSingle();
+    const cobro = cobroRaw as FilaCobro | null;
     if (error) {
+      // Alta con utilidades: la llave va en las DOS filas, así que el choque
+      // puede venir del índice de la entrega. Replay o llave ajena; cualquier
+      // otro rechazo de la BD ⇒ 409/400/503 legible (nada quedó escrito).
+      if (interna?.utilidades) {
+        if (error.code === '23505' && dto.client_request_id) {
+          const existente = await this.cobroPorClientRequest(
+            vueloId,
+            dto.client_request_id,
+          );
+          if (existente) return { ...existente, idempotente: true as const };
+          throw clientRequestIdEnUso('cobro', dto.client_request_id);
+        }
+        throw errorAltaCobroUtilidades(error);
+      }
       // Reintento con la misma llave de idempotencia: el cobro YA existe —
       // se devuelve tal cual (mismo shape/status que un alta normal), sin
       // duplicar dinero ni disparar avisos otra vez.
@@ -14866,6 +14959,9 @@ export class FlightsService {
     const existing = existenteRaw as unknown as Record<string, unknown>;
     // Parte de un SOBRE de grupo: se corrige desde el grupo (409 COBRO_DE_GRUPO).
     await this.assertNoEsParteDeSobre(existing);
+    // COBRO CON UTILIDADES DEL SOCIO (invariante 143): su dinero es el de la
+    // entrega al socio — no se corrige aquí (409 COBRO_CON_UTILIDADES).
+    await this.assertNoCambiaCobroConUtilidades(cobroId, dto);
     // CIERRE DE MES (16-oct-2026, invariante 89): corregir el DINERO de un
     // cobro (monto, moneda, T.C., fecha, comisión, método) de un vuelo cuyo
     // mes CONTABLE está cerrado ⇒ 409 MES_CERRADO. La factura, la cuenta,
@@ -15137,7 +15233,7 @@ export class FlightsService {
   async deleteCobro(
     cobroId: string,
     userId: string,
-    opts?: { omitirAvisoFactura?: boolean },
+    opts?: { omitirAvisoFactura?: boolean; rol?: Rol },
   ): Promise<{ ok: true }> {
     // Con la migración de ingresos se lee la liga al ANTICIPO: desaplicar
     // desde el vuelo está PERMITIDO (el monto regresa al saldo del
@@ -15171,6 +15267,20 @@ export class FlightsService {
     // el movimiento bancario cuadrado contra nada (409 COBRO_CONCILIADO
     // estructurado desde el 0.0.78, también con un abono PARCIAL).
     await this.assertCobroSinConciliar({ ...existing, id: cobroId });
+    // COBRO CON UTILIDADES DEL SOCIO (invariante 143): quitarlo da de baja
+    // su entrega en «Pagos a socios» — solo quien registra entregas, y con
+    // el mes de la entrega abierto. Se resuelve ANTES de borrar nada.
+    const entregaDeVuelo = await this.entregaDeCobroParaBaja(
+      cobroId,
+      opts?.rol,
+    );
+    if (entregaDeVuelo) {
+      // El trigger de baja (20261123000002) firma la baja con `updated_by`.
+      await this.supabase.service
+        .from('cobro_vuelo')
+        .update({ updated_by: userId })
+        .eq('id', cobroId);
+    }
     const { error } = await this.supabase.service
       .from('cobro_vuelo')
       .delete()
@@ -15185,6 +15295,11 @@ export class FlightsService {
         );
       }
       throw new Error(error.message);
+    }
+    // La entrega del cobro con utilidades: se da de baja aquí (idempotente:
+    // con el trigger de 20261123000002 ya quedó dada de baja en el DELETE).
+    if (entregaDeVuelo) {
+      await this.darDeBajaEntregaDeVuelo(entregaDeVuelo, cobroId, userId);
     }
     // Best-effort: el cobro YA se borró — nunca 5xx por la bandera (se
     // autocorrige en la siguiente escritura/revisión).
@@ -15211,6 +15326,197 @@ export class FlightsService {
       }).catch(() => undefined);
     }
     return { ok: true };
+  }
+
+  // ===================================================================
+  // COBRO CON UTILIDADES DEL SOCIO (23-nov-2026, invariante 143)
+  // ===================================================================
+
+  /**
+   * Alta ATÓMICA: la entrega al socio y el cobro entran en una transacción
+   * (`cobro_utilidades_registrar`); luego se lee el cobro con las columnas de
+   * siempre. Devuelve la misma forma `{data, error}` del insert normal.
+   */
+  private async insertarCobroConUtilidades(
+    filaCobro: Record<string, unknown>,
+    entrega: Record<string, unknown>,
+    conFactura: boolean,
+  ): Promise<{
+    data: unknown;
+    error: {
+      code: string;
+      message: string;
+      hint?: string | null;
+      details?: string | null;
+    } | null;
+  }> {
+    const sb = this.supabase.service;
+    const alta = await sb.rpc(RPC_COBRO_UTILIDADES, {
+      p_entrega: entrega,
+      p_cobro: filaCobro,
+    });
+    if (alta.error) return { data: null, error: alta.error };
+    const cobroId = (alta.data as { cobro_id?: unknown } | null)?.cobro_id;
+    if (typeof cobroId !== 'string' || !cobroId) {
+      return {
+        data: null,
+        error: {
+          code: 'COBRO_UTILIDADES_SIN_ID',
+          message: 'La BD no devolvió el cobro recién registrado.',
+        },
+      };
+    }
+    const leido = await sb
+      .from('cobro_vuelo')
+      .select(cobroCols(conFactura))
+      .eq('id', cobroId)
+      .maybeSingle();
+    return { data: leido.data, error: leido.error };
+  }
+
+  /**
+   * 409 `COBRO_CON_UTILIDADES` si la corrección cambia el DINERO, la fecha,
+   * el método o la cuenta de un cobro pagado con utilidades (valor NUEVO
+   * contra VIGENTE: el panel manda el formulario completo). Referencia,
+   * notas y factura siguen libres. Sin la migración no lee nada.
+   */
+  private async assertNoCambiaCobroConUtilidades(
+    cobroId: string,
+    dto: UpdateCobroDto,
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    if (!(await cobroUtilidadesDisponible(sb))) return;
+    const { data, error } = await sb
+      .from('cobro_vuelo')
+      .select(
+        'id, reparto_pago_id, monto, moneda, metodo_cobro, tc_usd_mxn, fecha_cobro',
+      )
+      .eq('id', cobroId)
+      .maybeSingle();
+    if (error) {
+      if (esColumnaInexistente(error)) return;
+      throw new Error(error.message);
+    }
+    const f = data as Record<string, unknown> | null;
+    if (!f || typeof f.reparto_pago_id !== 'string') return;
+    const cambia: string[] = [];
+    if (dto.monto !== undefined && Number(dto.monto) !== Number(f.monto)) {
+      cambia.push('monto');
+    }
+    if (dto.moneda !== undefined && String(dto.moneda) !== String(f.moneda)) {
+      cambia.push('moneda');
+    }
+    if (
+      dto.metodo_cobro !== undefined &&
+      String(dto.metodo_cobro) !== String(f.metodo_cobro)
+    ) {
+      cambia.push('metodo_cobro');
+    }
+    if (
+      dto.tc_usd_mxn !== undefined &&
+      normalizarTc(dto.tc_usd_mxn) !== normalizarTc(f.tc_usd_mxn)
+    ) {
+      cambia.push('tc_usd_mxn');
+    }
+    if (
+      dto.fecha_cobro !== undefined &&
+      new Date(dto.fecha_cobro).getTime() !==
+        new Date(String(f.fecha_cobro)).getTime()
+    ) {
+      cambia.push('fecha_cobro');
+    }
+    if (Number(dto.comision_banco_pct) > 0) cambia.push('comision_banco_pct');
+    if (Number(dto.comision_banco_monto) > 0) {
+      cambia.push('comision_banco_monto');
+    }
+    if (typeof dto.cuenta_destino === 'string' && dto.cuenta_destino.trim()) {
+      cambia.push('cuenta_destino');
+    }
+    if (cambia.length > 0) {
+      throw errorCobroConUtilidades({ cobro_id: cobroId, campos: cambia });
+    }
+  }
+
+  /**
+   * La entrega que respalda un cobro con utilidades, lista para darse de
+   * baja con él: null si el cobro es normal. Solo quien registra entregas
+   * (`ROLES_PAGOS_SOCIOS_ESCRITURA`) lo quita, y con el mes de la entrega
+   * abierto (candado `entrega_socio`, como `RepartoPagoService.eliminar`).
+   */
+  private async entregaDeCobroParaBaja(
+    cobroId: string,
+    rol?: Rol,
+  ): Promise<{ id: string } | null> {
+    const sb = this.supabase.service;
+    if (!(await cobroUtilidadesDisponible(sb))) return null;
+    const { data, error } = await sb
+      .from('cobro_vuelo')
+      .select(
+        'id, reparto_pago_id, entrega:reparto_pago_id(id, fecha_pago, aeronave_id)',
+      )
+      .eq('id', cobroId)
+      .maybeSingle();
+    if (error) {
+      if (esColumnaInexistente(error)) return null;
+      throw new Error(error.message);
+    }
+    const f = data as Record<string, unknown> | null;
+    if (!f || typeof f.reparto_pago_id !== 'string') return null;
+    if (rol !== undefined && !ROLES_PAGOS_SOCIOS_ESCRITURA.includes(rol)) {
+      throw new ForbiddenException({
+        message:
+          'Este cobro se pagó con utilidades del socio: quitarlo también da de baja su entrega en «Pagos a socios». Solo Dirección o Facturación pueden quitarlo.',
+        error: 'COBRO_CON_UTILIDADES_SOLO_DIRECCION',
+      });
+    }
+    const e = (Array.isArray(f.entrega) ? f.entrega[0] : f.entrega) as {
+      fecha_pago?: unknown;
+      aeronave_id?: unknown;
+    } | null;
+    if (typeof e?.fecha_pago === 'string') {
+      await assertMesAbierto(sb, e.fecha_pago.slice(0, 7), 'entrega_socio', [
+        typeof e.aeronave_id === 'string' ? e.aeronave_id : null,
+      ]);
+    }
+    return { id: f.reparto_pago_id };
+  }
+
+  /**
+   * Da de baja la entrega de un cobro con utilidades que YA se borró.
+   * Idempotente: con el trigger de 20261123000002 la baja ocurrió dentro del
+   * DELETE y aquí no se actualiza nada. Sin el trigger, es el segundo paso:
+   * si falla tras 3 intentos responde 500 diciendo QUÉ entrega dar de baja a
+   * mano (ya sin cobro que la cite, «Pagos a socios» la deja).
+   */
+  private async darDeBajaEntregaDeVuelo(
+    entrega: { id: string },
+    cobroId: string,
+    userId: string,
+  ): Promise<void> {
+    let ultimo = '';
+    for (let intento = 1; intento <= 3; intento++) {
+      const { error } = await this.supabase.service
+        .from('reparto_pago')
+        .update({
+          deleted_at: new Date().toISOString(),
+          deleted_by: userId,
+          updated_by: userId,
+          motivo_baja: MOTIVO_BAJA_ENTREGA_DE_VUELO,
+        })
+        .eq('id', entrega.id)
+        .is('deleted_at', null);
+      if (!error) return;
+      ultimo = error.message;
+      this.logger.error(
+        `deleteCobro ${cobroId}: el cobro con utilidades se borró pero la baja de la entrega ${entrega.id} falló (intento ${intento}/3): ${error.message}`,
+      );
+    }
+    throw new InternalServerErrorException({
+      message:
+        'El cobro se quitó, pero la entrega al socio no se pudo dar de baja. Dala de baja en «Pagos a socios» (motivo: se quitó el cobro del vuelo) para que no se le siga descontando.',
+      error: 'ENTREGA_DE_VUELO_SIN_BAJA',
+      details: { entrega_id: entrega.id, cobro_id: cobroId, tecnico: ultimo },
+    });
   }
 
   /**
