@@ -14176,13 +14176,16 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        `profit-sharing.controller.reparto-pago.spec.ts` (ruta, roles, DTO).
 
 144. **EL USUARIO DE CADA PETICIÓN SALE DE UN CACHÉ CORTO, NO DE LA BASE
-     (25-nov-2026, API 0.0.150; segunda saturación de Supabase Micro).** El
+     (25-nov-2026, API 0.0.150; segunda saturación de Supabase).** El
      25-nov-2026 la base se saturó de 14:35 a 14:55 (hora Cancún; de 14:44 a
      14:54 todo respondía 504/522) y otra vez a las 15:02, igual que el
      4-nov. Postgres no se reinició ni se perdió una escritura: la instancia
-     (2 núcleos compartidos, 1 GB) se queda sin CPU/RAM y la avalancha de
-     recargas al volver la tumba de nuevo. El dueño no aprobó subir el
-     cómputo, así que la única palanca es quitar carga FIJA por petición.
+     se queda sin CPU/RAM y la avalancha de recargas al volver la tumba de
+     nuevo. **El cómputo era NANO (CPU compartido, hasta 0.5 GB), no Micro**
+     como se creyó ese día: lo dice el dashboard («NANO · Compute Upgrade
+     available»), y en una organización de paga Nano se cobra al precio de
+     Micro, así que subir a Micro (1 GB) no cuesta más. El dueño no aprobó
+     pagar un cómputo mayor, así que además se quita carga FIJA por petición.
      - **Qué se midió** (registros de Supabase, minuto pico 14:36: 3,746
        peticiones): 706 eran `usuario` por `supabase_auth_id` —UNA por cada
        petición del API, ~20 % de todo el tráfico— y una carga de
