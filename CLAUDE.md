@@ -14175,6 +14175,55 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        .spec.ts` (desglose ADITIVO y etiqueta) y
        `profit-sharing.controller.reparto-pago.spec.ts` (ruta, roles, DTO).
 
+144. **EL USUARIO DE CADA PETICIÓN SALE DE UN CACHÉ CORTO, NO DE LA BASE
+     (25-nov-2026, API 0.0.150; segunda saturación de Supabase Micro).** El
+     25-nov-2026 la base se saturó de 14:35 a 14:55 (hora Cancún; de 14:44 a
+     14:54 todo respondía 504/522) y otra vez a las 15:02, igual que el
+     4-nov. Postgres no se reinició ni se perdió una escritura: la instancia
+     (2 núcleos compartidos, 1 GB) se queda sin CPU/RAM y la avalancha de
+     recargas al volver la tumba de nuevo. El dueño no aprobó subir el
+     cómputo, así que la única palanca es quitar carga FIJA por petición.
+     - **Qué se midió** (registros de Supabase, minuto pico 14:36: 3,746
+       peticiones): 706 eran `usuario` por `supabase_auth_id` —UNA por cada
+       petición del API, ~20 % de todo el tráfico— y una carga de
+       Conciliación cuesta ~72 consultas. Con la base lenta, cada vencimiento
+       del caché de configuración disparaba decenas de lecturas idénticas a
+       la vez (237/min de `fecha_inicio_oficial`).
+     - **Fuente única `common/auth/usuario-auth-cache.ts`** (PURA, estado de
+       módulo, con spec): `usuarioAuthCacheado(authId, leer)` guarda 30 s
+       (`USUARIO_AUTH_TTL_MS`) SOLO una resolución EXITOSA; un rechazo (no
+       existe, INACTIVO, piloto externo, base caída) NUNCA se guarda; las
+       lecturas simultáneas del mismo usuario comparten una consulta.
+       `AuthTokenService.resolveUser` **sigue verificando el JWT en cada
+       petición** (firma y vencimiento) y devuelve un objeto NUEVO con el
+       `jwt` de esa petición.
+     - **Todo escritor de `usuario` que cambie rol, estado, nombre, correo o
+       el vínculo de la cuenta llama `olvidarUsuariosAuth()`** (hoy:
+       `UsersService.update` —y por él `softDelete` y la edición de
+       pilotos—, `updateSelf` y el alta de la cuenta de acceso). Así
+       desactivar a alguien o cambiarle el rol aplica en su SIGUIENTE
+       petición. Un escritor nuevo que lo olvide deja hasta 30 s de retraso;
+       lo mismo un cambio hecho por SQL directo. Las columnas que no deciden
+       el acceso (tarjeta, fondo de caja) no invalidan.
+     - **Una réplica.** El caché y la invalidación viven en memoria del
+       proceso (Railway corre 1 réplica). Con más réplicas la invalidación
+       dejaría de ser inmediata en las demás.
+     - **Configuración:** `cachedRow` (banderas) e `inicioOficial` comparten
+       la lectura EN CURSO (`lecturaBanderas`, `lecturaInicioOficial`); el
+       TTL de 60 s y el «con la base caída responde lo último leído» no
+       cambian.
+     - **Pendiente, medido y sin hacer** (necesita decisión o migración):
+       `getClaims()` en el proxy del panel en vez de `getUser()` (212/min de
+       `/auth/v1/user`); la carga de Conciliación (~72 consultas por
+       pantalla, incluido un barrido de `movimiento_bancario` desde el
+       inicio oficial en 2 páginas de 1000); `flightBitacora` recorre las 39
+       mil filas de `notificacion` (8,742 llamadas, 418 ms de media: falta
+       un índice por `data->>'vuelo_id'`); y la lista de avisos con
+       `count: 'exact'` (271 ms de media).
+     - Specs: `common/auth/usuario-auth-cache.spec.ts` (caché, servicio y
+       que `UsersService` invalida) y
+       `configuracion/configuracion.lectura-compartida.spec.ts`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

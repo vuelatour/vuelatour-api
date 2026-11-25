@@ -477,6 +477,14 @@ const UUID_RE =
 export class ConfiguracionService {
   private readonly logger = new Logger(ConfiguracionService.name);
   private cache: { data: Map<string, ConfigRow>; at: number } | null = null;
+  /**
+   * Lectura de las banderas EN CURSO: con el caché vencido, N peticiones
+   * simultáneas comparten UNA consulta (25-nov-2026: con la base lenta, cada
+   * vencimiento disparaba decenas de lecturas idénticas a la vez).
+   */
+  private lecturaBanderas: Promise<void> | null = null;
+  /** Igual, para el inicio oficial. */
+  private lecturaInicioOficial: Promise<string | null> | null = null;
   /** Caché corto (60 s) de las listas de ids (`valor_json`) por clave. */
   private cacheListas = new Map<string, { ids: string[]; at: number }>();
   /** Caché corto (60 s) de las fechas en `valor_json` por clave. */
@@ -527,25 +535,36 @@ export class ConfiguracionService {
   private async cachedRow(clave: string): Promise<ConfigRow | undefined> {
     const now = Date.now();
     if (!this.cache || now - this.cache.at > ConfiguracionService.TTL_MS) {
-      const { data, error } = await this.supabase.service
-        .from('configuracion_sistema')
-        .select('clave, activa, valor_numerico');
-      if (error) return this.cache?.data.get(clave);
-      this.cache = {
-        data: new Map(
-          (data ?? []).map((r) => [
-            r.clave as string,
-            {
-              activa: r.activa as boolean,
-              valor_numerico:
-                r.valor_numerico == null ? null : Number(r.valor_numerico),
-            },
-          ]),
-        ),
-        at: now,
-      };
+      if (!this.lecturaBanderas) {
+        const lectura = this.leerBanderas(now).finally(() => {
+          if (this.lecturaBanderas === lectura) this.lecturaBanderas = null;
+        });
+        this.lecturaBanderas = lectura;
+      }
+      await this.lecturaBanderas;
     }
-    return this.cache.data.get(clave);
+    return this.cache?.data.get(clave);
+  }
+
+  /** Rearma el caché de banderas. Si la consulta falla, deja el anterior. */
+  private async leerBanderas(now: number): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('configuracion_sistema')
+      .select('clave, activa, valor_numerico');
+    if (error) return;
+    this.cache = {
+      data: new Map(
+        (data ?? []).map((r) => [
+          r.clave as string,
+          {
+            activa: r.activa as boolean,
+            valor_numerico:
+              r.valor_numerico == null ? null : Number(r.valor_numerico),
+          },
+        ]),
+      ),
+      at: now,
+    };
   }
 
   /**
@@ -603,6 +622,22 @@ export class ConfiguracionService {
     const now = Date.now();
     const c = this.cacheInicioOficial;
     if (c && now - c.at <= ConfiguracionService.TTL_MS) return c.valor;
+    if (!this.lecturaInicioOficial) {
+      const lectura = this.leerInicioOficial(c, now).finally(() => {
+        if (this.lecturaInicioOficial === lectura) {
+          this.lecturaInicioOficial = null;
+        }
+      });
+      this.lecturaInicioOficial = lectura;
+    }
+    return this.lecturaInicioOficial;
+  }
+
+  /** Lee el inicio oficial y rearma su caché. Nunca lanza. */
+  private async leerInicioOficial(
+    c: { valor: string | null; at: number } | null,
+    now: number,
+  ): Promise<string | null> {
     try {
       const { data, error } = await this.supabase.service
         .from('configuracion_sistema')
@@ -680,8 +715,10 @@ export class ConfiguracionService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Configuración ${clave} not found`);
     // El toggle se refleja de inmediato en este proceso (la caché se rearma
-    // en la siguiente lectura).
+    // en la siguiente lectura). Una lectura que iba en curso ya no se
+    // comparte: quien llegue después lee de nuevo.
     this.cache = null;
+    this.lecturaBanderas = null;
     return data;
   }
 

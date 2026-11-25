@@ -6,6 +6,7 @@ import { EstadoUsuario, Rol } from '../types/auth.types';
 import type { AuthenticatedUser } from '../types/auth.types';
 import { SupabaseService } from '../../modules/supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
+import { usuarioAuthCacheado } from './usuario-auth-cache';
 
 export interface SupabaseJwtPayload extends JWTPayload {
   sub: string;
@@ -74,13 +75,33 @@ export class AuthTokenService {
     }
   }
 
-  /** Verifica el token y resuelve el usuario ACTIVO de la app. */
+  /**
+   * Verifica el token y resuelve el usuario ACTIVO de la app.
+   *
+   * El token se verifica SIEMPRE; la fila de `usuario` sale de un caché corto
+   * (`usuario-auth-cache`, invariante 144): antes era una consulta a la base
+   * por CADA petición (~20 % de todo el tráfico a Supabase).
+   */
   async resolveUser(token: string): Promise<AuthenticatedUser> {
     const payload = await this.verify(token);
+    const sub = payload.sub;
+    // Sin `sub` (no es el token de un usuario) no hay llave de caché: se
+    // resuelve directo y rechaza como siempre.
+    const usuario = sub
+      ? await usuarioAuthCacheado(sub, () => this.leerUsuario(sub))
+      : await this.leerUsuario(sub);
+    // Objeto NUEVO por petición: lo guardado no se comparte ni se muta.
+    return { ...usuario, jwt: token };
+  }
+
+  /** Lee y valida la fila de `usuario`. Rechaza si no puede entrar. */
+  private async leerUsuario(
+    authId: string,
+  ): Promise<Omit<AuthenticatedUser, 'jwt'>> {
     const { data, error } = await this.supabase.service
       .from('usuario')
       .select('id, supabase_auth_id, email, nombre, rol, estado, es_piloto_externo')
-      .eq('supabase_auth_id', payload.sub)
+      .eq('supabase_auth_id', authId)
       .maybeSingle();
 
     if (error) throw new UnauthorizedException(`User lookup failed: ${error.message}`);
@@ -101,7 +122,6 @@ export class AuthTokenService {
       nombre: data.nombre,
       rol: data.rol as Rol,
       estado: data.estado as EstadoUsuario,
-      jwt: token,
     };
   }
 }

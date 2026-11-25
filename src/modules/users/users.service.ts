@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { olvidarUsuariosAuth } from '../../common/auth/usuario-auth-cache';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import { Rol } from '../../common/types/auth.types';
 import {
@@ -667,6 +668,9 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to update usuario: ${error.message}`);
     if (!data) throw new NotFoundException(`Usuario ${id} not found`);
+    // Rol, estado o nombre pudieron cambiar: la siguiente petición de ese
+    // usuario relee su fila (invariante 144). Desactivar aplica al instante.
+    olvidarUsuariosAuth();
     return data as unknown as UsuarioRow;
   }
 
@@ -693,6 +697,7 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to update self: ${error.message}`);
     if (!data) throw new NotFoundException('Usuario not provisioned');
+    olvidarUsuariosAuth();
     return data as unknown as UsuarioRow;
   }
 
@@ -785,6 +790,7 @@ export class UsersService {
     if (linkErr) {
       throw new Error(`Failed to link auth user: ${linkErr.message}`);
     }
+    olvidarUsuariosAuth();
 
     return {
       ok: true,
