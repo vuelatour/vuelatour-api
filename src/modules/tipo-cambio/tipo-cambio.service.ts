@@ -55,6 +55,28 @@ export const DESCARGAS_TC_MAX = 5;
 const TRAMO_LECTURA_DIAS = 900;
 
 /**
+ * MEMORIA de `oficialDetallePara` (25-nov-2026, invariante 145). Cada reporte
+ * (balance por avión, reparto, cuenta del socio) pide el T.C. oficial DÍA POR
+ * DÍA y solo evitaba repetir el día dentro de la MISMA petición: en el minuto
+ * pico de la caída de las 17:00 fueron 239 lecturas de `tipo_cambio_oficial`
+ * de 1,094 peticiones a la base.
+ *  - Día PASADO con dato: 10 min (su fila ya no cambia: el cron solo escribe
+ *    la de HOY).
+ *  - HOY o futuro, y cualquier «sin dato»: 60 s (el dato del día llega a las
+ *    07:05 y una cotización sella el T.C. que lee).
+ *  - Toda descarga que escribe la tabla VACÍA la memoria.
+ *  - Un error de lectura NO se guarda (la siguiente llamada reintenta).
+ */
+export const TC_MEMO_TTL_PASADO_MS = 10 * 60_000;
+export const TC_MEMO_TTL_CORTO_MS = 60_000;
+export const TC_MEMO_MAX = 2000;
+
+interface EntradaMemoTc {
+  promesa: Promise<TipoCambioDetalle | null>;
+  expira: number;
+}
+
+/**
  * T.C. oficial vigente para un DÍA, con la fuente LEGIBLE. Estructuralmente
  * igual a `OficialDelDia` de `conciliacion/auto-cruce.util` (no se importa
  * nada de conciliación: sin ciclo).
@@ -148,6 +170,10 @@ export class TipoCambioService {
   private readonly logger = new Logger(TipoCambioService.name);
   /** Descargas recientes por clave (evita N llamadas por reporte / reintentos en bucle). */
   private readonly pedidos = new Map<string, number>();
+  /** Memoria por fecha de `oficialDetallePara` (invariante 145). */
+  private readonly memo = new Map<string, EntradaMemoTc>();
+  /** Reloj de la memoria, inyectable (specs). */
+  ahoraMs: () => number = () => Date.now();
 
   constructor(private readonly supabase: SupabaseService) {}
 
@@ -166,34 +192,86 @@ export class TipoCambioService {
    */
   async oficialDetallePara(fecha: string): Promise<TipoCambioDetalle | null> {
     if (!fechaIsoValida(fecha)) return null;
-    const desde = addDays(fecha, -VENTANA_RESPALDO_TC_DIAS);
     try {
-      const local = await this.buscar(desde, fecha);
-      const hoy = hoyCancun();
-      if (local) {
-        // Fecha de HOY (o futura) resuelta con un dato de un día ANTERIOR
-        // (el cron de las 07:05 falló o el proceso arrancó después): se
-        // intenta bajar el del día — con el throttle de 10 min de
-        // `descargarHoy` — para que el dato de hoy no dependa solo del
-        // cron. Si no se pudo, vale el último publicado (como antes).
-        if (fecha >= hoy && local.fecha_dato < hoy) {
-          const bajado = await this.descargarHoy();
-          if (bajado != null) return (await this.buscar(desde, fecha)) ?? local;
-        }
-        return local;
-      }
-      if (fecha >= hoy) {
-        await this.descargarHoy();
-      } else {
-        await this.descargarHistorico(fecha);
-      }
-      return await this.buscar(desde, fecha);
+      const d = await this.detalleConMemoria(fecha);
+      // Objeto NUEVO por llamada: lo guardado no se comparte ni se muta.
+      return d ? { ...d } : null;
     } catch (err) {
       this.logger.warn(
         `TC oficial ${fecha}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }
+  }
+
+  /**
+   * `resolverDetalle` detrás de la memoria por fecha (invariante 145): las
+   * llamadas simultáneas del mismo día comparten UNA lectura y el resultado
+   * se guarda un rato (ver `TC_MEMO_TTL_*`). Un rechazo no se guarda.
+   */
+  private detalleConMemoria(fecha: string): Promise<TipoCambioDetalle | null> {
+    const ahora = this.ahoraMs();
+    const previa = this.memo.get(fecha);
+    if (previa && previa.expira > ahora) return previa.promesa;
+    if (this.memo.size >= TC_MEMO_MAX) {
+      for (const [k, e] of this.memo)
+        if (e.expira <= ahora) this.memo.delete(k);
+      if (this.memo.size >= TC_MEMO_MAX) this.memo.clear();
+    }
+    const pasado = fecha < hoyCancun();
+    const entrada: EntradaMemoTc = {
+      promesa: this.resolverDetalle(fecha),
+      expira: ahora + (pasado ? TC_MEMO_TTL_PASADO_MS : TC_MEMO_TTL_CORTO_MS),
+    };
+    this.memo.set(fecha, entrada);
+    entrada.promesa.then(
+      (d) => {
+        // «Sin dato» puede llenarse en cualquier momento: memoria corta.
+        if (d == null) {
+          entrada.expira = Math.min(
+            entrada.expira,
+            this.ahoraMs() + TC_MEMO_TTL_CORTO_MS,
+          );
+        }
+      },
+      () => {
+        // Un fallo no se guarda (solo si sigue siendo ESTA entrada).
+        if (this.memo.get(fecha) === entrada) this.memo.delete(fecha);
+      },
+    );
+    return entrada.promesa;
+  }
+
+  /** Olvida lo memorizado: toda escritura de `tipo_cambio_oficial` lo llama. */
+  private olvidarMemo(): void {
+    this.memo.clear();
+  }
+
+  /** La resolución de siempre, SIN memoria. LANZA si la lectura falla. */
+  private async resolverDetalle(
+    fecha: string,
+  ): Promise<TipoCambioDetalle | null> {
+    const desde = addDays(fecha, -VENTANA_RESPALDO_TC_DIAS);
+    const local = await this.buscar(desde, fecha);
+    const hoy = hoyCancun();
+    if (local) {
+      // Fecha de HOY (o futura) resuelta con un dato de un día ANTERIOR
+      // (el cron de las 07:05 falló o el proceso arrancó después): se
+      // intenta bajar el del día — con el throttle de 10 min de
+      // `descargarHoy` — para que el dato de hoy no dependa solo del
+      // cron. Si no se pudo, vale el último publicado (como antes).
+      if (fecha >= hoy && local.fecha_dato < hoy) {
+        const bajado = await this.descargarHoy();
+        if (bajado != null) return (await this.buscar(desde, fecha)) ?? local;
+      }
+      return local;
+    }
+    if (fecha >= hoy) {
+      await this.descargarHoy();
+    } else {
+      await this.descargarHistorico(fecha);
+    }
+    return await this.buscar(desde, fecha);
   }
 
   /**
@@ -314,6 +392,7 @@ export class TipoCambioService {
         .from('tipo_cambio_oficial')
         .upsert(fila, { onConflict: 'fecha' });
       if (error) throw new Error(error.message);
+      this.olvidarMemo();
       return fila.tc;
     } catch (err) {
       this.logger.warn(
@@ -350,6 +429,7 @@ export class TipoCambioService {
         .from('tipo_cambio_oficial')
         .upsert(fila, { onConflict: 'fecha', ignoreDuplicates: true });
       if (error) throw new Error(error.message);
+      this.olvidarMemo();
       return fila.tc;
     } catch (err) {
       this.logger.warn(

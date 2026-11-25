@@ -14224,6 +14224,39 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
        que `UsersService` invalida) y
        `configuracion/configuracion.lectura-compartida.spec.ts`.
 
+145. **EL T.C. OFICIAL DE UN DÍA SE RECUERDA EN EL SERVICIO, NO SE VUELVE A
+     LEER EN CADA REPORTE (25-nov-2026, API 0.0.151; tercera caída del
+     día).** A las 17:01 (hora Cancún) la base volvió a saturarse y a las
+     17:05 dejó de responder. Lo que se midió en los registros de Supabase
+     (minuto 17:00: 1,094 peticiones): **239 eran `tipo_cambio_oficial`**
+     (245 de 1,071 a las 16:55) y 136 `/auth/v1/user` del panel; `usuario`
+     ya solo 35 (el caché del invariante 144 funciona). El balance por
+     avión, el reparto y la cuenta del socio piden el T.C. oficial DÍA POR
+     DÍA (`oficialDetallePara`, una consulta por día) y solo evitaban
+     repetir el día dentro de la MISMA petición: abrir «Pagos a socios» y un
+     balance recalcula tres meses y vuelve a leer los mismos ~90 días.
+     - **`TipoCambioService.oficialDetallePara` guarda por FECHA pedida**
+       (`detalleConMemoria`, la promesa: las simultáneas comparten una
+       lectura). Día PASADO con dato: 10 min (`TC_MEMO_TTL_PASADO_MS`; su
+       fila ya no cambia: el cron solo escribe la de HOY y el histórico solo
+       llena días sin dato). HOY o futuro, y cualquier «sin dato»: 60 s
+       (`TC_MEMO_TTL_CORTO_MS`): el dato del día llega a las 07:05 y una
+       cotización SELLA el T.C. que lee.
+     - **Toda escritura de `tipo_cambio_oficial` vacía la memoria**
+       (`olvidarMemo()` en `descargarHoy` y `descargarHistorico`, los ÚNICOS
+       escritores). Un escritor nuevo de esa tabla —o un ajuste por SQL
+       directo— que no la vacíe deja hasta 10 min con el dato anterior en los
+       reportes.
+     - **Un error de lectura NO se guarda**: `resolverDetalle` LANZA, la
+       entrada se borra y `oficialDetallePara` sigue respondiendo null sin
+       lanzar (contrato de siempre). Guardar ese null habría dejado los
+       reportes «sin T.C.» hasta 10 min después de volver la base.
+     - Devuelve un objeto NUEVO por llamada (lo guardado no se muta).
+       `oficialesPorDias` (una lectura por lote) no cambia y no usa la
+       memoria; `inventory.tcOficialDe` conserva la suya (10 min) encima.
+     - Una réplica: memoria del proceso, como el invariante 144.
+     - Specs: `tipo-cambio/tipo-cambio.service.memo.spec.ts`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
