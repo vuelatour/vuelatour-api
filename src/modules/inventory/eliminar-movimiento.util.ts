@@ -22,9 +22,13 @@
  * salida): la evaluación lo informa (`cambia_precio_vigente`) para que el
  * diálogo de confirmación lo diga antes de borrar.
  *
- * DEVOLUCION y AJUSTE quedan FUERA en esta versión (`TIPO_NO_SOPORTADO`):
- * son correcciones de inventario, y la corrección de una corrección se hace
- * con un movimiento contrario, no borrando el rastro.
+ * DEVOLUCION y TRASPASO quedan FUERA (`TIPO_NO_SOPORTADO`): se corrigen con
+ * un movimiento contrario, no borrando el rastro. El AJUSTE SÍ se elimina
+ * desde el 27-nov-2026 (invariante 146): un ajuste SUMA piezas y no tiene
+ * movimiento contrario (una SALIDA le cobraría a un avión), así que quien lo
+ * capturaba por error —los tres que había en prod querían RESTAR una pieza y
+ * la sumaron— no tenía forma de deshacerlo. No lleva gasto ni fija precio:
+ * solo aplica el candado de la existencia.
  *
  * Sin `this`, sin BD, sin `new Date()`: `fecha_movimiento` ya es día Cancún
  * y «hoy» llega como argumento.
@@ -35,6 +39,7 @@ import {
   EPS,
   esTraspaso,
   fechaCardexEsMx,
+  matriculasDeFlota,
   montoTxt,
   precioTxt,
   round,
@@ -50,6 +55,7 @@ export { fechaCardexEsMx, montoTxt };
 
 const SALIDA = TipoMovimientoInventario.SALIDA as string;
 const ENTRADA = TipoMovimientoInventario.ENTRADA as string;
+const AJUSTE = TipoMovimientoInventario.AJUSTE as string;
 
 /**
  * Medio centavo (se conserva exportada por compatibilidad: desde el 0.0.36
@@ -135,6 +141,8 @@ export type MovEliminable = MovCardex & {
   id: string;
   aeronave_matricula?: string | null;
   para_flota?: boolean | null;
+  /** Matrículas elegidas de una salida repartida (null = toda la flota). */
+  matriculas_flota?: string[] | null;
 };
 
 /**
@@ -200,12 +208,14 @@ export function describirMovimiento(m: MovEliminable): string {
   const destino =
     m.tipo === SALIDA
       ? m.para_flota === true
-        ? ' a toda la flota'
+        ? ` a ${matriculasDeFlota(m)?.join(', ') ?? 'toda la flota'}`
         : m.aeronave_matricula
           ? ` a ${m.aeronave_matricula}`
           : ''
       : '';
-  return `la ${m.tipo} de ${cantidadTxt(m.cantidad)} del ${fechaCardexEsMx(m.fecha_movimiento)}${destino}`;
+  // «el AJUSTE» / «el TRASPASO»; los demás tipos son femeninos.
+  const articulo = m.tipo === AJUSTE || esTraspaso(m) ? 'el' : 'la';
+  return `${articulo} ${m.tipo} de ${cantidadTxt(m.cantidad)} del ${fechaCardexEsMx(m.fecha_movimiento)}${destino}`;
 }
 
 // ===== Simulación =====
@@ -215,7 +225,7 @@ export function describirMovimiento(m: MovEliminable): string {
  * (la salida resta su cantidad completa aunque no haya capas: el stock
  * negativo se VE, no se esconde en 0).
  */
-function recorrerStock(movs: MovEliminable[]): Array<{
+export function recorrerStock(movs: MovEliminable[]): Array<{
   mov: MovEliminable;
   stock: number;
 }> {
@@ -282,16 +292,21 @@ export function evaluarEliminacion(
     cambia_precio_vigente: cambiaPrecio,
   };
 
-  // (1) Tipos soportados: ENTRADA y SALIDA. Una DEVOLUCION/AJUSTE es en sí
-  // una corrección — se corrige con otro movimiento, no borrando el rastro.
-  if (objetivo.tipo !== SALIDA && objetivo.tipo !== ENTRADA) {
+  // (1) Tipos soportados: ENTRADA, SALIDA y AJUSTE (27-nov-2026: un ajuste
+  // suma piezas y no tiene movimiento contrario). DEVOLUCION y TRASPASO se
+  // corrigen con otro movimiento, no borrando el rastro.
+  if (
+    objetivo.tipo !== SALIDA &&
+    objetivo.tipo !== ENTRADA &&
+    objetivo.tipo !== AJUSTE
+  ) {
     return {
       ...base,
       permitido: false,
       codigo_bloqueo: 'TIPO_NO_SOPORTADO',
       detalle: esTraspaso(objetivo)
         ? 'Un TRASPASO entre ubicaciones no se elimina: registra el traspaso contrario (de la bodega destino a la de origen), así el cardex conserva el rastro completo.'
-        : `Un movimiento de tipo ${objetivo.tipo} no se elimina: corrige con un movimiento contrario (una ${objetivo.tipo === 'DEVOLUCION' ? 'SALIDA' : 'ENTRADA/SALIDA'} que lo compense), así el cardex conserva el rastro completo.`,
+        : `Un movimiento de tipo ${objetivo.tipo} no se elimina: corrige con un movimiento contrario (una SALIDA que lo compense), así el cardex conserva el rastro completo.`,
     };
   }
 

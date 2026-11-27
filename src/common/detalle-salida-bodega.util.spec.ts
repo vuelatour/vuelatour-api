@@ -44,6 +44,15 @@ describe('detalleSinPreciosDeBodega', () => {
       'Salida de bodega (toda la flota, 1/7 del costo): 12 × Aceite (último precio + 25 % $45.53 USD) · ref OT-77',
       'Salida de bodega (toda la flota, 1/7): 12 × Aceite · ref OT-77',
     ],
+    // Repartida entre matrículas ELEGIDAS (27-nov-2026): mismo trato.
+    [
+      'Salida de bodega (4 matrículas, 1/4 del precio de venta): 24 × Aceite 15W-50 (precio de venta $8,445.00 MXN)',
+      'Salida de bodega (4 matrículas, 1/4): 24 × Aceite 15W-50',
+    ],
+    [
+      'Salida de bodega (2 matrículas, 1/2 del costo): 6 × Filtro (a costo $1,689.00 MXN) · ref OT-9',
+      'Salida de bodega (2 matrículas, 1/2): 6 × Filtro · ref OT-9',
+    ],
     // Una referencia real y lo que agregó la oficina se quedan.
     [
       'Salida de bodega: 1 × Funda Starlink (precio de venta) · ref OT-123 · para el servicio de 50 h',

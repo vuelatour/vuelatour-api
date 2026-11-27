@@ -126,6 +126,13 @@ export type MovCardex = MovForFifo & {
   venta_unitaria?: number | string | null;
   venta_moneda?: string | null;
   para_flota?: boolean | null;
+  /**
+   * Matrículas ELEGIDAS de una salida repartida (27-nov-2026, invariante
+   * 146), en el orden del reparto. null/ausente = toda la flota activa (o no
+   * es salida repartida). Las adjunta el service desde
+   * `inventario_movimiento.aeronave_ids`; solo texto: ningún número cambia.
+   */
+  matriculas_flota?: string[] | null;
   aeronave_id?: string | null;
   proveedor_id?: string | null;
   referencia?: string | null;
@@ -514,11 +521,31 @@ export function nombreDeJoin(raw: unknown, campo: string): string | null {
   return typeof v === 'string' && v ? v : null;
 }
 
-/** Matrícula de la salida, 'FLOTA' (prorrateo) o '—'. */
+/**
+ * Matrículas ELEGIDAS de una salida repartida (27-nov-2026), o null cuando
+ * la salida es de TODA la flota (o no es repartida). Fuente única de «¿entre
+ * quiénes se repartió?» para los textos del cardex.
+ */
+export function matriculasDeFlota(m: {
+  para_flota?: boolean | null;
+  matriculas_flota?: readonly string[] | null;
+}): string[] | null {
+  if (m.para_flota !== true) return null;
+  const lista = (m.matriculas_flota ?? []).filter(
+    (x): x is string => typeof x === 'string' && x.trim() !== '',
+  );
+  return lista.length > 0 ? lista : null;
+}
+
+/**
+ * Matrícula de la salida; en una salida repartida, las matrículas elegidas
+ * («N4142R, N58BT») o 'FLOTA' (toda la flota); '—' sin avión.
+ */
 function vendidoA(m: MovCardex): string {
-  return m.para_flota === true
-    ? 'FLOTA'
-    : (nombreDeJoin(m.aeronave, 'matricula') ?? '—');
+  if (m.para_flota === true) {
+    return matriculasDeFlota(m)?.join(', ') ?? 'FLOTA';
+  }
+  return nombreDeJoin(m.aeronave, 'matricula') ?? '—';
 }
 
 // ===== Orden y existencia =====
@@ -1473,10 +1500,15 @@ export interface BloqueVenta {
   moneda_utilidad: Moneda | null;
   /** Con venta pero sin utilidad expresable (pesos sobre dólares sin T.C.). */
   utilidad_incompleta: boolean;
-  /** Matrícula, 'FLOTA' (prorrateo a toda la flota) o '—'. */
+  /**
+   * Matrícula; 'FLOTA' (prorrateo a toda la flota); las matrículas elegidas
+   * de una salida repartida («N4142R, N58BT»); o '—'.
+   */
   vendido_a: string;
   aeronave_id: string | null;
   para_flota: boolean;
+  /** ADITIVO (27-nov-2026): matrículas elegidas; null = toda la flota o no aplica. */
+  matriculas_flota: string[] | null;
   referencia: string | null;
   descripcion: string;
   /** Stock corriente DESPUÉS de la salida. */
@@ -1630,9 +1662,12 @@ export function bloquesCardexDe(
         ganancia_usd: venta.gananciaUsd,
         moneda_utilidad: venta.monedaUtilidad,
         utilidad_incompleta: venta.utilidadIncompleta,
-        vendido_a: paraFlota ? 'FLOTA' : (matricula ?? '—'),
+        vendido_a: paraFlota
+          ? (matriculasDeFlota(m)?.join(', ') ?? 'FLOTA')
+          : (matricula ?? '—'),
         aeronave_id: m.aeronave_id ?? null,
         para_flota: paraFlota,
+        matriculas_flota: matriculasDeFlota(m),
         referencia,
         descripcion: `${itemNombre}${aCosto ? TEXTOS_INVENTARIO.aCostoLibro : ''}${venta.sinTc ? ' · sin TC' : ''}${ref}`,
         remanente: paso?.stockDespues ?? 0,
@@ -1799,7 +1834,7 @@ function detalleDeCompra(c: BloqueCompra): string {
 function detalleDeVenta(v: BloqueVenta): string {
   const partes: string[] = [
     v.para_flota
-      ? 'Toda la flota'
+      ? (v.matriculas_flota?.join(', ') ?? 'Toda la flota')
       : v.vendido_a && v.vendido_a !== '—'
         ? v.vendido_a
         : 'Sin avión',

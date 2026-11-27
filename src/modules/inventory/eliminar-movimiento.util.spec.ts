@@ -387,21 +387,90 @@ describe('evaluarEliminacion · tipos y errores', () => {
     ...enPesos(100, 20),
   });
 
-  it('DEVOLUCION y AJUSTE quedan fuera de esta versión', () => {
-    for (const tipo of ['DEVOLUCION', 'AJUSTE']) {
-      const mov = m({
-        id: 'X',
-        tipo,
-        cantidad: 2,
-        fecha_movimiento: '2026-09-02',
-        created_at: '2026-09-02T10:00:00Z',
-        ...enPesos(100, 20),
-      });
-      const r = evaluarEliminacion([base, mov], 'X');
-      expect(r.permitido).toBe(false);
-      expect(r.codigo_bloqueo).toBe('TIPO_NO_SOPORTADO');
-      expect(r.detalle).toContain('movimiento contrario');
-    }
+  it('la DEVOLUCION queda fuera: se corrige con un movimiento contrario', () => {
+    const mov = m({
+      id: 'X',
+      tipo: 'DEVOLUCION',
+      cantidad: 2,
+      fecha_movimiento: '2026-09-02',
+      created_at: '2026-09-02T10:00:00Z',
+      ...enPesos(100, 20),
+    });
+    const r = evaluarEliminacion([base, mov], 'X');
+    expect(r.permitido).toBe(false);
+    expect(r.codigo_bloqueo).toBe('TIPO_NO_SOPORTADO');
+    expect(r.detalle).toContain('movimiento contrario');
+  });
+
+  // 27-nov-2026 (invariante 146): los TRES ajustes de prod querían RESTAR una
+  // pieza y la sumaron; un ajuste no tiene movimiento contrario (la SALIDA le
+  // cobra a un avión), así que se elimina con justificación.
+  it('un AJUSTE SÍ se elimina: la existencia baja lo que el ajuste sumó', () => {
+    const ajuste = m({
+      id: 'AJ',
+      tipo: 'AJUSTE',
+      cantidad: 1,
+      fecha_movimiento: '2026-09-02',
+      created_at: '2026-09-02T10:00:00Z',
+    });
+    const r = evaluarEliminacion([base, ajuste], 'AJ');
+    expect(r.permitido).toBe(true);
+    expect(r.codigo_bloqueo).toBeNull();
+    expect(r.stock_antes).toBe(11);
+    expect(r.stock_despues).toBe(10);
+    // Un ajuste no fija precio: el último precio de compra no se mueve.
+    expect(r.cambia_precio_vigente).toBe(false);
+    expect(r.detalle).toContain('el AJUSTE de 1');
+  });
+
+  it('un AJUSTE del que ya salieron piezas no se elimina: STOCK_NEGATIVO y dice qué quitar primero', () => {
+    const ajuste = m({
+      id: 'AJ',
+      tipo: 'AJUSTE',
+      cantidad: 3,
+      fecha_movimiento: '2026-09-02',
+      created_at: '2026-09-02T10:00:00Z',
+    });
+    const salida = m({
+      id: 'S',
+      tipo: 'SALIDA',
+      cantidad: 12,
+      fecha_movimiento: '2026-09-03',
+      created_at: '2026-09-03T10:00:00Z',
+      aeronave_matricula: 'XA-VGV',
+    });
+    const r = evaluarEliminacion([base, ajuste, salida], 'AJ');
+    expect(r.permitido).toBe(false);
+    expect(r.codigo_bloqueo).toBe('STOCK_NEGATIVO');
+    expect(r.detalle).toContain('la SALIDA de 12 del 3 sep 2026 a XA-VGV');
+  });
+
+  it('una salida repartida entre matrículas ELEGIDAS se describe con ellas', () => {
+    expect(
+      describirMovimiento(
+        m({
+          id: 'F',
+          tipo: 'SALIDA',
+          cantidad: 24,
+          fecha_movimiento: '2026-11-27',
+          created_at: '2026-11-27T10:00:00Z',
+          para_flota: true,
+          matriculas_flota: ['N4142R', 'N58BT', 'N621TX', 'N990GG'],
+        }),
+      ),
+    ).toBe('la SALIDA de 24 del 27 nov 2026 a N4142R, N58BT, N621TX, N990GG');
+    expect(
+      describirMovimiento(
+        m({
+          id: 'F',
+          tipo: 'SALIDA',
+          cantidad: 24,
+          fecha_movimiento: '2026-11-27',
+          created_at: '2026-11-27T10:00:00Z',
+          para_flota: true,
+        }),
+      ),
+    ).toBe('la SALIDA de 24 del 27 nov 2026 a toda la flota');
   });
 
   it('un movimiento que no está en el cardex revienta (error de programación, no 409)', () => {

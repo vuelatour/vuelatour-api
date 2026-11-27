@@ -531,6 +531,8 @@ describe('InventoryService.createMovimiento — 23514 del movimiento', () => {
         CARDEX, // FIFO de la salida
         { data: null, error: ERROR_23514 }, // insert rechazado por el CHECK viejo
       ],
+      // Desde el 27-nov-2026 los aviones del reparto se leen ANTES del insert.
+      aeronave: [FLOTA_ACTIVA],
     });
     let err: unknown;
     try {
@@ -619,6 +621,7 @@ describe('InventoryService.createMovimiento — 23514 del movimiento', () => {
           },
         },
       ],
+      aeronave: [FLOTA_ACTIVA],
     });
     let err: unknown;
     try {
@@ -651,6 +654,7 @@ describe('InventoryService.createMovimiento — 23514 del movimiento', () => {
           error: { code: '23514', message: 'check constraint violated' },
         },
       ],
+      aeronave: [FLOTA_ACTIVA],
     });
     let err: unknown;
     try {
@@ -1740,5 +1744,528 @@ describe('InventoryService.updateCostoEntrada — último precio y reconocimient
       service.updateCostoEntrada('i-1', 'e1', DTO, 'u-ofi'),
     ).rejects.toThrow(/nace de la compra #3/);
     expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
+  });
+});
+
+/**
+ * 27-nov-2026 · SALIDA PARA ALGUNAS MATRÍCULAS (invariante 146). Pedido de la
+ * oficina (Jimmy): «necesito me den la opción de marcar algunas matrículas ya
+ * que necesito poner solo 4 matrículas y no todas». `aeronave_ids` reparte el
+ * cargo SOLO entre las elegidas; sin lista, toda la flota activa (como
+ * siempre). Los aviones se resuelven y validan ANTES de escribir el cardex.
+ */
+describe('InventoryService.createMovimiento — salida para ALGUNAS matrículas', () => {
+  let warn: jest.SpyInstance;
+  let log: jest.SpyInstance;
+  let error: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => {});
+    error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    log.mockRestore();
+    error.mockRestore();
+  });
+
+  /** Las 4 que pidió la oficina, en el orden en que PostgREST las devuelva. */
+  const ELEGIDAS = {
+    data: [
+      { id: 'av-4', matricula: 'N990GG', activa: true },
+      { id: 'av-1', matricula: 'N4142R', activa: true },
+      { id: 'av-3', matricula: 'N621TX', activa: true },
+      { id: 'av-2', matricula: 'N58BT', activa: true },
+    ],
+    error: null,
+  };
+  /** 1 pieza a $100.01: 4 partes de $25.00 y el centavo que sobra. */
+  const MOV_4 = {
+    ...MOV_FLOTA,
+    id: 'mv-4',
+    cantidad: 1,
+    venta_unitaria: 100.01,
+  };
+  const DTO_4 = {
+    tipo: TipoMovimientoInventario.SALIDA,
+    cantidad: 1,
+    para_flota: true,
+    venta_unitaria: 100.01,
+    venta_moneda: 'USD' as const,
+    aeronave_ids: ['av-4', 'av-1', 'av-3', 'av-2'],
+  };
+
+  it('camino feliz: UN gasto por matrícula ELEGIDA (no por toda la flota), Σ exacta y el residuo en la primera', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        CARDEX_FLOTA,
+        { data: MOV_4, error: null },
+        CARDEX_FLOTA,
+      ],
+      aeronave: [ELEGIDAS],
+      gasto: [
+        {
+          data: [1, 2, 3, 4].map((i) => ({
+            id: `g-${i}`,
+            monto: i === 1 ? 25.01 : 25,
+            moneda: 'USD',
+            categoria: 'REFACCION',
+          })),
+          error: null,
+        },
+      ],
+    });
+    const res = await service.createMovimiento('i-1', DTO_4, 'u-ofi');
+
+    // Los aviones se piden POR ID (los elegidos), no «todos los activos».
+    const lecturaAviones = de(llamadas, 'aeronave', 'in');
+    expect(lecturaAviones).toHaveLength(1);
+    expect(lecturaAviones[0].args).toEqual(['id', DTO_4.aeronave_ids]);
+
+    // El movimiento guarda la lista, ORDENADA por matrícula (el orden del reparto).
+    const mov = de(llamadas, 'inventario_movimiento', 'insert')[0]
+      .args[0] as Record<string, unknown>;
+    expect(mov).toMatchObject({
+      para_flota: true,
+      aeronave_id: null,
+      aeronave_ids: ['av-1', 'av-2', 'av-3', 'av-4'],
+    });
+
+    // FIABILIDAD NUMÉRICA: 25.01 + 3 × 25.00 == 100.01, al centavo.
+    const filas = de(llamadas, 'gasto', 'insert')[0].args[0] as Array<
+      Record<string, unknown>
+    >;
+    expect(filas).toHaveLength(4);
+    expect(filas.map((f) => f.aeronave_id)).toEqual([
+      'av-1',
+      'av-2',
+      'av-3',
+      'av-4',
+    ]);
+    const montos = filas.map((f) => Number(f.monto));
+    expect(montos).toEqual([25.01, 25, 25, 25]);
+    expect(Math.round(montos.reduce((s, m) => s + m, 0) * 100) / 100).toBe(
+      100.01,
+    );
+    for (const f of filas) {
+      expect(f).toMatchObject({
+        categoria: 'REFACCION',
+        medio_pago: 'BODEGA',
+        inventario_movimiento_id: 'mv-4',
+      });
+      // La nota dice entre cuántas se repartió (nunca «toda la flota»).
+      expect(String(f.notas)).toContain(
+        'Salida de bodega (4 matrículas, 1/4 del precio de venta): 1 × Aceite W100',
+      );
+      expect(String(f.notas)).not.toContain('toda la flota');
+    }
+
+    expect(res).toMatchObject({
+      id: 'mv-4',
+      matriculas_flota: ['N4142R', 'N58BT', 'N621TX', 'N990GG'],
+      gasto_generado: {
+        prorrateado: true,
+        aviones: 4,
+        monto_total: 100.01,
+        gastos: 4,
+        matriculas: ['N4142R', 'N58BT', 'N621TX', 'N990GG'],
+      },
+    });
+    expect(de(llamadas, 'inventario_movimiento', 'delete')).toHaveLength(0);
+  });
+
+  it('toda la flota (SIN lista) sigue igual: la fila no lleva aeronave_ids y la nota dice «toda la flota»', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        CARDEX_FLOTA,
+        { data: MOV_FLOTA, error: null },
+        CARDEX_FLOTA,
+      ],
+      aeronave: [FLOTA_ACTIVA],
+      gasto: [{ data: [], error: null }],
+    });
+    const res = await service.createMovimiento('i-1', DTO_FLOTA, 'u-ofi');
+    const mov = de(llamadas, 'inventario_movimiento', 'insert')[0]
+      .args[0] as Record<string, unknown>;
+    expect(mov).toMatchObject({ para_flota: true, aeronave_id: null });
+    expect('aeronave_ids' in mov).toBe(false);
+    const filas = de(llamadas, 'gasto', 'insert')[0].args[0] as Array<
+      Record<string, unknown>
+    >;
+    expect(filas).toHaveLength(7);
+    expect(String(filas[0].notas)).toContain(
+      'Salida de bodega (toda la flota, 1/7 del precio de venta): 12 × Aceite W100',
+    );
+    expect(res).toMatchObject({ matriculas_flota: null });
+  });
+
+  it('una matrícula dada de BAJA en la lista: 400 MATRICULAS_INVALIDAS que la nombra y NADA escrito', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [CARDEX_FLOTA],
+      aeronave: [
+        {
+          data: [
+            { id: 'av-1', matricula: 'N4142R', activa: true },
+            { id: 'av-9', matricula: 'XB-IJP', activa: false },
+          ],
+          error: null,
+        },
+      ],
+    });
+    const err = await service
+      .createMovimiento(
+        'i-1',
+        { ...DTO_4, aeronave_ids: ['av-1', 'av-9'] },
+        'u-ofi',
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as BadRequestException).getResponse()).toMatchObject({
+      error: 'MATRICULAS_INVALIDAS',
+      details: { aeronave_ids: ['av-9'] },
+    });
+    expect((err as Error).message).toContain('XB-IJP');
+    expect((err as Error).message).toContain('está dada de baja');
+    expect(de(llamadas, 'inventario_movimiento', 'insert')).toHaveLength(0);
+    expect(de(llamadas, 'gasto', 'insert')).toHaveLength(0);
+  });
+
+  it('una matrícula que ya NO existe: 400 MATRICULAS_INVALIDAS y nada escrito', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      aeronave: [
+        {
+          data: [{ id: 'av-1', matricula: 'N4142R', activa: true }],
+          error: null,
+        },
+      ],
+    });
+    const err = await service
+      .createMovimiento(
+        'i-1',
+        { ...DTO_4, aeronave_ids: ['av-1', 'av-fantasma'] },
+        'u-ofi',
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as BadRequestException).getResponse()).toMatchObject({
+      error: 'MATRICULAS_INVALIDAS',
+      details: { aeronave_ids: ['av-fantasma'] },
+    });
+    expect(de(llamadas, 'inventario_movimiento', 'insert')).toHaveLength(0);
+  });
+
+  it('la lista SIN «repartir» (para_flota) o en una ENTRADA: 400 MATRICULAS_SIN_REPARTO, sin leer ni escribir nada', async () => {
+    for (const dto of [
+      { ...DTO_4, para_flota: false, aeronave_id: 'av-1' },
+      {
+        tipo: TipoMovimientoInventario.ENTRADA,
+        cantidad: 3,
+        costo_unitario_usd: 10,
+        aeronave_ids: ['av-1', 'av-2'],
+      },
+    ]) {
+      const { service, llamadas } = armar({
+        inventario_item: [{ data: ITEM, error: null }],
+      });
+      const err = await service
+        .createMovimiento('i-1', dto, 'u-ofi')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        error: 'MATRICULAS_SIN_REPARTO',
+      });
+      expect(de(llamadas, 'aeronave', 'select')).toHaveLength(0);
+      expect(de(llamadas, 'inventario_movimiento', 'insert')).toHaveLength(0);
+    }
+  });
+
+  it('sin aviones activos y sin lista: 400 FLOTA_VACIA antes de escribir (ya no hay movimiento que revertir)', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      aeronave: [{ data: [], error: null }],
+    });
+    const err = await service
+      .createMovimiento('i-1', DTO_FLOTA, 'u-ofi')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as BadRequestException).getResponse()).toMatchObject({
+      error: 'FLOTA_VACIA',
+    });
+    expect(de(llamadas, 'inventario_movimiento', 'insert')).toHaveLength(0);
+    expect(de(llamadas, 'inventario_movimiento', 'delete')).toHaveLength(0);
+  });
+});
+
+/**
+ * 27-nov-2026 · CORREGIR LA CANTIDAD DE UNA ENTRADA (invariante 146). Caso
+ * real: la entrada del 30-oct del aceite 15W-50 se capturó con 13 y entraron
+ * 12 («por error de dedo puse 13»). La regla numérica vive en
+ * `corregir-cantidad.util` (con su spec); aquí, los candados del servicio y
+ * QUÉ se escribe.
+ */
+describe('InventoryService.corregirCantidadEntrada', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
+
+  const E13 = {
+    ...MOV,
+    id: 'e13',
+    tipo: 'ENTRADA',
+    cantidad: '13.00',
+    aeronave_id: null,
+    moneda: 'MXN',
+    costo_unitario_mxn: 281.5,
+    costo_unitario_usd: 15.091,
+    tc_usd_mxn: 18.6535,
+    fecha_movimiento: '2026-10-30',
+    created_at: '2026-10-29T22:08:10+00:00',
+    notas: null,
+    para_flota: false,
+    aeronave_ids: null,
+  };
+  const APERTURA = {
+    ...E13,
+    id: 'e0',
+    cantidad: '168.00',
+    fecha_movimiento: '2026-10-01',
+    created_at: '2026-10-01T10:00:00+00:00',
+  };
+  const SALIDA_60 = {
+    ...MOV,
+    id: 's60',
+    cantidad: '60.00',
+    fecha_movimiento: '2026-11-26',
+    created_at: '2026-11-26T18:24:54+00:00',
+    para_flota: false,
+    aeronave_ids: null,
+  };
+  const CARDEX_13 = {
+    data: [APERTURA, E13, SALIDA_60],
+    error: null,
+    count: 3,
+  };
+  const cardexCon = (cantidad: string) => ({
+    data: [APERTURA, { ...E13, cantidad }, SALIDA_60],
+    error: null,
+    count: 3,
+  });
+
+  it('13 → 12: actualiza SOLO la cantidad (CAS por la cantidad leída), deja la nota con quién/cuándo/antes y la existencia baja una pieza', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        { data: E13, error: null }, // movimientoDeItem
+        CARDEX_13, // cardex completo (evaluación)
+        { data: { ...E13, cantidad: '12.00' }, error: null }, // update
+        cardexCon('12.00'), // stats después
+      ],
+      compra_linea: [{ data: null, error: null }],
+      usuario: [{ data: { nombre: 'Jimmy Chi' }, error: null }],
+    });
+    const res = await service.corregirCantidadEntrada(
+      'i-1',
+      'e13',
+      { cantidad: 12, motivo: 'Error de dedo' },
+      'u-jimmy',
+    );
+
+    const upd = de(llamadas, 'inventario_movimiento', 'update');
+    expect(upd).toHaveLength(1);
+    const cambios = upd[0].args[0] as Record<string, unknown>;
+    expect(cambios.cantidad).toBe(12);
+    expect(cambios.updated_by).toBe('u-jimmy');
+    expect(String(cambios.notas)).toMatch(
+      /^Cantidad corregida \d{2}\/\d{2}\/\d{4} por Jimmy Chi: antes 13, ahora 12: Error de dedo$/,
+    );
+    // NI costo, NI fecha, NI tipo, NI empaque (no se capturó por empaque).
+    expect(Object.keys(cambios).sort()).toEqual([
+      'cantidad',
+      'notas',
+      'updated_by',
+    ]);
+    // CAS: el UPDATE va acotado a la cantidad que se evaluó.
+    const eqs = de(llamadas, 'inventario_movimiento', 'eq').map((l) => l.args);
+    expect(eqs).toContainEqual(['cantidad', '13.00']);
+
+    expect(res).toMatchObject({
+      id: 'e13',
+      cantidad_antes: 13,
+      cantidad_despues: 12,
+      stock_antes: 121,
+      stock_resultante: 120,
+    });
+    // Ningún gasto se toca: una entrada manual no lleva dinero.
+    expect(de(llamadas, 'gasto', 'from')).toHaveLength(0);
+  });
+
+  it('una nota previa se CONSERVA y la corrección se agrega al final', async () => {
+    const conNota = { ...E13, notas: 'Llegó con la factura 881' };
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        { data: conNota, error: null },
+        { data: [APERTURA, conNota, SALIDA_60], error: null, count: 3 },
+        { data: { ...conNota, cantidad: '12.00' }, error: null },
+        cardexCon('12.00'),
+      ],
+      compra_linea: [{ data: null, error: null }],
+      usuario: [{ data: null, error: null }],
+    });
+    await service.corregirCantidadEntrada(
+      'i-1',
+      'e13',
+      { cantidad: 12 },
+      'u-x',
+    );
+    const cambios = de(llamadas, 'inventario_movimiento', 'update')[0]
+      .args[0] as Record<string, unknown>;
+    // Sin nombre de usuario no se inventa quién.
+    expect(String(cambios.notas)).toMatch(
+      /^Llegó con la factura 881 · Cantidad corregida \d{2}\/\d{2}\/\d{4}: antes 13, ahora 12$/,
+    );
+  });
+
+  it('capturada por EMPAQUE: el desglose («2 × Caja») se suelta y queda en la nota', async () => {
+    const porCaja = {
+      ...E13,
+      cantidad: '24.00',
+      empaque_id: 'emp-1',
+      cantidad_empaques: '2.00',
+      empaque: { nombre: 'Caja', factor: 12 },
+      notas: '2 × Caja',
+    };
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        { data: porCaja, error: null },
+        { data: [APERTURA, porCaja, SALIDA_60], error: null, count: 3 },
+        { data: { ...porCaja, cantidad: '23.00' }, error: null },
+        {
+          data: [APERTURA, { ...porCaja, cantidad: '23.00' }, SALIDA_60],
+          error: null,
+          count: 3,
+        },
+      ],
+      compra_linea: [{ data: null, error: null }],
+      usuario: [{ data: { nombre: 'Jimmy Chi' }, error: null }],
+    });
+    await service.corregirCantidadEntrada(
+      'i-1',
+      'e13',
+      { cantidad: 23 },
+      'u-jimmy',
+    );
+    const cambios = de(llamadas, 'inventario_movimiento', 'update')[0]
+      .args[0] as Record<string, unknown>;
+    expect(cambios).toMatchObject({
+      cantidad: 23,
+      empaque_id: null,
+      cantidad_empaques: null,
+    });
+    expect(String(cambios.notas)).toContain('antes 24 (2 × Caja), ahora 23');
+  });
+
+  it('entrada que nace de una COMPRA: 409 MOVIMIENTO_DE_COMPRA y nada escrito', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [{ data: E13, error: null }],
+      compra_linea: [
+        { data: { id: 'l-1', compra: { folio: 14 } }, error: null },
+      ],
+    });
+    const err = await service
+      .corregirCantidadEntrada('i-1', 'e13', { cantidad: 12 }, 'u-x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getResponse()).toMatchObject({
+      error: 'MOVIMIENTO_DE_COMPRA',
+    });
+    expect((err as Error).message).toContain('compra #14');
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
+  });
+
+  it('bajar más de lo que ya salió: 409 STOCK_NEGATIVO con lo mínimo que puede quedar, y nada escrito', async () => {
+    // 5 entran y de ahí salen 5: la entrada no puede bajar de 5.
+    const e5 = {
+      ...E13,
+      id: 'e5',
+      cantidad: '5.00',
+      fecha_movimiento: '2026-09-01',
+      created_at: '2026-09-01T10:00:00+00:00',
+    };
+    const s5 = {
+      ...SALIDA_60,
+      id: 's5',
+      cantidad: '5.00',
+      fecha_movimiento: '2026-09-02',
+      created_at: '2026-09-02T10:00:00+00:00',
+    };
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        { data: e5, error: null },
+        { data: [e5, s5, APERTURA], error: null, count: 3 },
+      ],
+      compra_linea: [{ data: null, error: null }],
+    });
+    const err = await service
+      .corregirCantidadEntrada('i-1', 'e5', { cantidad: 3 }, 'u-x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getResponse()).toMatchObject({
+      error: 'STOCK_NEGATIVO',
+      details: { cantidad_antes: 5, cantidad_despues: 3 },
+    });
+    expect((err as Error).message).toContain('Lo menos que puede quedar es 5');
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
+  });
+
+  it('la misma cantidad (400 SIN_CAMBIO) y una SALIDA (400 TIPO_NO_SOPORTADO) no escriben nada', async () => {
+    const casos: Array<[string, Record<string, unknown>, number, string]> = [
+      ['e13', E13, 13, 'SIN_CAMBIO'],
+      ['s60', SALIDA_60, 50, 'TIPO_NO_SOPORTADO'],
+    ];
+    for (const [id, fila, cantidad, codigo] of casos) {
+      const { service, llamadas } = armar({
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [{ data: fila, error: null }, CARDEX_13],
+        compra_linea: [{ data: null, error: null }],
+      });
+      const err = await service
+        .corregirCantidadEntrada('i-1', id, { cantidad }, 'u-x')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toMatchObject({
+        error: codigo,
+      });
+      expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
+    }
+  });
+
+  it('carrera: si la cantidad cambió entre la lectura y el guardado (0 filas), 409 MOVIMIENTO_CAMBIO', async () => {
+    const { service } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        { data: E13, error: null },
+        CARDEX_13,
+        { data: null, error: null }, // el UPDATE con CAS no tocó ninguna fila
+      ],
+      compra_linea: [{ data: null, error: null }],
+      usuario: [{ data: { nombre: 'Jimmy Chi' }, error: null }],
+    });
+    const err = await service
+      .corregirCantidadEntrada('i-1', 'e13', { cantidad: 12 }, 'u-x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getResponse()).toMatchObject({
+      error: 'MOVIMIENTO_CAMBIO',
+    });
   });
 });

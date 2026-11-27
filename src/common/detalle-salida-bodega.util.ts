@@ -10,7 +10,8 @@
  * fijó el cargo: «(precio de venta)», «(último precio + 25 %)», «(a costo)»
  * —hasta el 0.0.35, «(costo FIFO + 25 %)» / «(costo FIFO)»—, la de flota
  * «(toda la flota, 1/7 del precio de venta): … (precio de venta $36.42
- * USD)», y las 10 salidas del 01-sep llevan además la cláusula del re-precio
+ * USD)» —o «(4 matrículas, 1/4 del …)» cuando se reparte entre las
+ * matrículas elegidas, 27-nov-2026—, y las 10 salidas del 01-sep llevan además la cláusula del re-precio
  * («Re-preciado 25-sep-2026: costo FIFO + 25 % (utilidad de la tienda
  * VuelaTour…); antes $373.75 USD», migración 20260925000002). Las de jul/ago
  * llevan «Corrección 28-ago-2026: costo en PESOS…». Todo eso es información
@@ -37,8 +38,13 @@ const SEPARADOR = ' · ';
 const RE_ETIQUETA_PRECIO =
   /\s*\((?:precio de venta|último precio \+ [\d.,]+\s?%|a costo|costo FIFO(?: \+ [\d.,]+\s?%)?|costo)(?: \$[\d,]+(?:\.\d+)? [A-Z]{3})?\)\s*$/i;
 
-/** «(toda la flota, 1/7 del precio de venta)» ⇒ «(toda la flota, 1/7)». */
-const RE_FLOTA = /\(toda la flota, 1\/(\d+) del (?:precio de venta|costo)\)/i;
+/**
+ * «(toda la flota, 1/7 del precio de venta)» ⇒ «(toda la flota, 1/7)» y,
+ * desde el 27-nov-2026 (salida repartida entre matrículas ELEGIDAS),
+ * «(4 matrículas, 1/4 del costo)» ⇒ «(4 matrículas, 1/4)».
+ */
+const RE_FLOTA =
+  /\((toda la flota|\d+ matrículas), 1\/(\d+) del (?:precio de venta|costo)\)/i;
 
 /** Tramos que se quitan después del primero. */
 const TRAMOS_FUERA: RegExp[] = [
@@ -50,7 +56,7 @@ const TRAMOS_FUERA: RegExp[] = [
 function limpiarRenglonSalida(renglon: string): string {
   const [primero, ...resto] = renglon.split(SEPARADOR);
   const principal = primero
-    .replace(RE_FLOTA, '(toda la flota, 1/$1)')
+    .replace(RE_FLOTA, '($1, 1/$2)')
     .replace(RE_ETIQUETA_PRECIO, '')
     .trimEnd();
   const quedan = resto.filter(

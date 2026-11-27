@@ -28,7 +28,11 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { afacRealDisponible } from '../../common/afac-real-disponible.util';
 import { randomUUID } from 'node:crypto';
-import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
+import {
+  anexarSello,
+  fechaSelloCancun,
+  selloCapturaApp,
+} from '../../common/capturado-en.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import { cobroExigeFactura } from '../../common/cuentas-cobro';
@@ -83,7 +87,9 @@ import { PilotsService } from '../pilots/pilots.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { FacturaClienteService } from './factura-cliente.service';
 import {
+  ETIQUETAS_FACTURA_CLIENTE,
   bloqueFacturaCliente,
+  esEstatusFacturaCliente,
   etiquetaSerieFolio,
   type BloqueFacturaCliente,
   type VueloFacturaRow,
@@ -259,7 +265,22 @@ import {
   type ConfirmadorCotizacion,
 } from './confirmar-vuelo.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
-import { estadoVueloVolado } from '../quotes/aeronave-revision.util';
+import {
+  estadoVueloVolado,
+  idAeronaveCotizada,
+} from '../quotes/aeronave-revision.util';
+// Cambiar el cliente de un vuelo que ya existe (27-nov-2026).
+import {
+  avisosCambioCliente,
+  errorCambioClienteDeGrupo,
+  errorClienteInactivo,
+  errorClienteNoExiste,
+  errorVueloFacturado,
+  selloCambioCliente,
+} from './cambio-cliente.util';
+import type { CambiarClienteDto } from './dto/cambio-cliente.dto';
+import { leerContextoCliente } from '../../common/contexto-cliente.util';
+import { tarifaPersistida } from '../../common/tarifa.util';
 import {
   avisoOperacionMovida,
   avisoReagendaVuelo,
@@ -4231,6 +4252,347 @@ export class FlightsService {
       void this.notifications.notifyRole(Rol.COORDINADOR, payload, updatedBy);
     }
     return data;
+  }
+
+  // ===== Cambiar el cliente de un vuelo / cotización (27-nov-2026) =====
+
+  /** Cliente con lo que el cambio necesita; null si no existe. */
+  private async clienteParaCambio(clienteId: string | null): Promise<{
+    id: string;
+    nombre: string | null;
+    activo: boolean;
+    es_interno: boolean;
+    es_broker: boolean;
+  } | null> {
+    if (!clienteId) return null;
+    const { data, error } = await this.supabase.service
+      .from('cliente')
+      .select('id, nombre, activo, es_interno, es_broker')
+      .eq('id', clienteId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    return {
+      id: data.id as string,
+      nombre: (data.nombre as string | null) ?? null,
+      // Solo un `false` explícito es «dado de baja».
+      activo: data.activo !== false,
+      es_interno: data.es_interno === true,
+      es_broker: data.es_broker === true,
+    };
+  }
+
+  /**
+   * La factura lleva RECEPTOR: con una factura viva el cliente no se cambia
+   * (409 `VUELO_FACTURADO`). Tres fuentes, las mismas que usa «Por facturar»:
+   * CFDI del PAC (`facturado`), factura emitida VIGENTE ligada (detrás de la
+   * sonda) y el estatus MANUAL de factura (columna opcional).
+   */
+  private async assertSinFacturaParaCambiarCliente(
+    vueloId: string,
+    current: Record<string, unknown>,
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    const folio = (current.folio as number | null) ?? null;
+    if (current.facturado === true) {
+      throw errorVueloFacturado({ folio, motivo: 'CFDI' });
+    }
+    if (await facturaEmitidaDisponible(sb)) {
+      const { data, error } = await sb
+        .from('factura_emitida_vuelo')
+        .select(
+          'factura_id, factura:factura_id(serie, folio, estatus, deleted_at)',
+        )
+        .eq('vuelo_id', vueloId);
+      if (error) throw new Error(error.message);
+      const vigentes: string[] = [];
+      for (const l of (data ?? []) as Array<Record<string, unknown>>) {
+        const rel = l.factura as
+          | Record<string, unknown>
+          | Array<Record<string, unknown>>
+          | null;
+        const f = Array.isArray(rel) ? rel[0] : rel;
+        if (!f || f.deleted_at != null || f.estatus !== 'VIGENTE') continue;
+        vigentes.push(
+          etiquetaSerieFolio(f.serie, f.folio) ??
+            (typeof f.folio === 'string' ? f.folio : '?'),
+        );
+      }
+      if (vigentes.length > 0) {
+        throw errorVueloFacturado({
+          folio,
+          motivo: 'FACTURA_EMITIDA',
+          facturas: vigentes,
+        });
+      }
+    }
+    // Estatus MANUAL (seguimiento de la oficina): «elaborada y enviada» y
+    // «facturado» dicen que YA salió una factura a nombre del cliente. La
+    // columna es opcional (migración de factura del servicio): sin ella no
+    // hay estatus que leer.
+    const { data: fe, error: feErr } = await sb
+      .from('vuelo')
+      .select('factura_estatus')
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (feErr) {
+      if (!esColumnaInexistente(feErr)) throw new Error(feErr.message);
+      return;
+    }
+    const estatus = (fe as { factura_estatus?: unknown } | null)
+      ?.factura_estatus;
+    if (esEstatusFacturaCliente(estatus) && estatus !== 'SIN_FACTURA') {
+      throw errorVueloFacturado({
+        folio,
+        motivo: 'ESTATUS_MANUAL',
+        estatus: ETIQUETAS_FACTURA_CLIENTE[estatus],
+      });
+    }
+  }
+
+  /**
+   * AVISOS de un cambio de cliente YA guardado (best-effort: NUNCA lanza —
+   * el cliente ya cambió y un 500 aquí haría creer al operador que no).
+   * La regla de la tarifa es la del motor (`leerContextoCliente`, lector
+   * único) sobre el avión COTIZADO; los textos, `avisosCambioCliente`.
+   */
+  private async avisosDeCambioDeCliente(p: {
+    vueloId: string;
+    vuelo: Record<string, unknown>;
+    anterior: {
+      nombre: string | null;
+      es_interno: boolean;
+      es_broker: boolean;
+    } | null;
+    nuevo: {
+      id: string;
+      nombre: string | null;
+      es_interno: boolean;
+      es_broker: boolean;
+    };
+  }): Promise<string[]> {
+    try {
+      const sb = this.supabase.service;
+      const { data: filaCruda, error } = await sb
+        .from('vuelo')
+        .select('calculo_snapshot, tarifa_hora_usd, tarifa_tipo')
+        .eq('id', p.vueloId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      const fila = (filaCruda ?? null) as {
+        calculo_snapshot?: {
+          aeronave?: { id?: unknown } | null;
+          tarifa?: {
+            tipo?: unknown;
+            usd_por_hora?: unknown;
+            proviene_de_override?: unknown;
+            preferencial_cliente?: unknown;
+          } | null;
+        } | null;
+        tarifa_hora_usd?: unknown;
+        tarifa_tipo?: unknown;
+      } | null;
+      const snap = fila?.calculo_snapshot ?? null;
+      const aeronaveRef =
+        idAeronaveCotizada(snap) ??
+        (p.vuelo.aeronave_id as string | null) ??
+        null;
+      const ctxNuevo = aeronaveRef
+        ? await leerContextoCliente(sb, p.nuevo.id, aeronaveRef)
+        : { esInterno: p.nuevo.es_interno, tarifaPreferencial: null };
+
+      // Cobros del vuelo (cuántos, y cuántos vienen de un anticipo).
+      const conIngresos = await ingresosDisponibles(sb);
+      const { data: cobros, error: cErr } = await sb
+        .from('cobro_vuelo')
+        .select(conIngresos ? 'id, ingreso_anticipo_id' : 'id')
+        .eq('vuelo_id', p.vueloId);
+      if (cErr) throw new Error(cErr.message);
+      const listaCobros = (cobros ?? []) as unknown as Array<{
+        ingreso_anticipo_id?: unknown;
+      }>;
+
+      // «Necesito factura» (misma migración que el registro de facturas).
+      let solicitud = false;
+      if (
+        p.vuelo.estado !== 'CANCELADO' &&
+        (await facturaEmitidaDisponible(sb))
+      ) {
+        const { data: sol, error: sErr } = await sb
+          .from('vuelo')
+          .select('factura_solicitada_at')
+          .eq('id', p.vueloId)
+          .maybeSingle();
+        if (sErr) throw new Error(sErr.message);
+        solicitud =
+          (sol as { factura_solicitada_at?: unknown } | null)
+            ?.factura_solicitada_at != null;
+      }
+
+      const tipo = snap?.tarifa?.tipo ?? fila?.tarifa_tipo ?? null;
+      return avisosCambioCliente({
+        anterior: p.anterior,
+        nuevo: {
+          nombre: p.nuevo.nombre,
+          es_interno: ctxNuevo.esInterno,
+          es_broker: p.nuevo.es_broker,
+        },
+        nuevo_tarifa_preferencial: ctxNuevo.tarifaPreferencial,
+        cotizado: snap != null,
+        tarifa_persistida: tarifaPersistida(
+          snap?.tarifa?.usd_por_hora,
+          fila?.tarifa_hora_usd,
+        ),
+        tarifa_personalizada: snap?.tarifa?.proviene_de_override === true,
+        tarifa_preferencial_aplicada:
+          snap?.tarifa?.preferencial_cliente === true,
+        tarifa_tipo: typeof tipo === 'string' ? tipo : null,
+        monto_total_usd: Number(p.vuelo.monto_total_usd) || 0,
+        cobros: listaCobros.length,
+        cobros_de_anticipo: listaCobros.filter(
+          (c) => c.ingreso_anticipo_id != null,
+        ).length,
+        solicitud_factura: solicitud,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `cambiarCliente ${p.vueloId}: no se pudieron armar los avisos (${err instanceof Error ? err.message : String(err)}). El cliente SÍ cambió.`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * CAMBIAR EL CLIENTE de un vuelo / cotización que ya existe (27-nov-2026,
+   * pedido de la oficina: «Nos podrían habilitar cambiar de cliente cuando un
+   * vuelo o cotización ya existe? porque no nos deja»). Puerta PROPIA y
+   * explícita: `revise` sigue anclando `cliente_id` a lo persistido.
+   *
+   * - Solo escribe `vuelo.cliente_id` + el SELLO en `notas_internas` (quién,
+   *   cuándo, de qué cliente a cuál). El PRECIO y el snapshot NO se tocan: la
+   *   cotización conserva lo pactado; la SIGUIENTE versión que se guarde ya
+   *   se cotiza con el cliente nuevo y los `avisos[]` lo dicen.
+   * - El número del vuelo dentro de su cliente (`consecutivo_cliente`, ID
+   *   «alias02-…») lo reasigna el trigger `vuelo_consecutivo_cliente` (toma
+   *   el siguiente del cliente nuevo). Google Calendar se re-encola solo
+   *   (`cliente_id` está en la lista del trigger) y además se sincroniza aquí.
+   * - Mismo cliente ⇒ 200 `sin_cambio: true` SIN escribir y sin mirar la
+   *   versión (un reintento es idempotente).
+   * - Candados ANTES de escribir, en orden: 404 `VUELO_NO_EXISTE`, 404
+   *   `CLIENTE_NO_EXISTE`, 409 `CONFLICTO_VERSION` (con `if_updated_at`), 400
+   *   `CLIENTE_INACTIVO`, 409 `VUELO_DE_GRUPO`, 409 `VUELO_FACTURADO`, 409
+   *   `MES_CERRADO` (el mes contable del vuelo, como `revise`: los libros de
+   *   un mes cerrado imprimen el cliente y leen `es_interno` en vivo).
+   *   Cualquier ESTADO se permite (también CANCELADO y COMPLETADO) y los
+   *   COBROS no lo frenan: no se mueve dinero.
+   * - Sin aviso a la tripulación: la operación no cambia.
+   */
+  async cambiarCliente(id: string, dto: CambiarClienteDto, userId: string) {
+    const sb = this.supabase.service;
+    const current = await this.findById(id);
+    const anteriorId = (current.cliente_id as string | null) ?? null;
+    const [nuevo, anterior] = await Promise.all([
+      this.clienteParaCambio(dto.cliente_id),
+      anteriorId === dto.cliente_id
+        ? Promise.resolve(null)
+        : this.clienteParaCambio(anteriorId).catch(() => null),
+    ]);
+    if (!nuevo) throw errorClienteNoExiste(dto.cliente_id);
+    const refNuevo = { id: nuevo.id, nombre: nuevo.nombre };
+    if (anteriorId === nuevo.id) {
+      return {
+        ...current,
+        sin_cambio: true,
+        avisos: [] as string[],
+        cliente_anterior: refNuevo,
+        cliente: refNuevo,
+      };
+    }
+    assertVersion({
+      entidad: 'vuelo',
+      enviado: dto.if_updated_at,
+      actual: current,
+    });
+    if (!nuevo.activo) throw errorClienteInactivo(nuevo);
+    if (current.grupo_id) {
+      const g = unwrapRel(
+        current.grupo as
+          | { folio?: unknown }
+          | Array<{ folio?: unknown }>
+          | null,
+      );
+      throw errorCambioClienteDeGrupo({
+        folio: (current.folio as number | null) ?? null,
+        grupoId: current.grupo_id as string,
+        grupoFolio:
+          typeof g?.folio === 'number' || typeof g?.folio === 'string'
+            ? g.folio
+            : null,
+      });
+    }
+    await this.assertSinFacturaParaCambiarCliente(id, current);
+    await this.assertVueloEnMesAbierto(id);
+
+    const sello = selloCambioCliente({
+      fecha: fechaSelloCancun(new Date()),
+      quien: await this.nombreUsuario(userId).catch(() => null),
+      anterior: anterior?.nombre ?? null,
+      nuevo: nuevo.nombre,
+    });
+    // CAS: la versión (si viaja), el cliente que se leyó (el sello dice «de A
+    // a B»: si alguien lo cambió entre tanto, no se escribe) y `facturado`
+    // (un CFDI timbrado entre la lectura y el write no se pisa).
+    let q = sb
+      .from('vuelo')
+      .update({
+        cliente_id: nuevo.id,
+        notas_internas: anexarSello(
+          current.notas_internas as string | null,
+          sello,
+        ),
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .eq('facturado', false);
+    q = anteriorId ? q.eq('cliente_id', anteriorId) : q.is('cliente_id', null);
+    const { data, error } = await aplicarCas(q, dto.if_updated_at)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) {
+      // FK: el cliente se borró entre la lectura y el write.
+      if (error.code === '23503') throw errorClienteNoExiste(dto.cliente_id);
+      throw new Error(error.message);
+    }
+    if (!data) {
+      const actual = await this.findById(id);
+      if (actual.facturado === true) {
+        throw errorVueloFacturado({
+          folio: (actual.folio as number | null) ?? null,
+          motivo: 'CFDI',
+        });
+      }
+      throw conflictoVersion({
+        entidad: 'vuelo',
+        actual,
+        enviado: dto.if_updated_at ?? String(current.updated_at ?? ''),
+      });
+    }
+    // El trigger de la cola ya encoló el vuelo (`cliente_id` está en su
+    // lista); esto solo adelanta el espejo, como en `update()`.
+    void this.calendar.syncFlight(id);
+    const avisos = await this.avisosDeCambioDeCliente({
+      vueloId: id,
+      vuelo: data,
+      anterior,
+      nuevo,
+    });
+    return {
+      ...(data as unknown as Record<string, unknown>),
+      sin_cambio: false,
+      avisos,
+      cliente_anterior: { id: anteriorId, nombre: anterior?.nombre ?? null },
+      cliente: refNuevo,
+    };
   }
 
   /**

@@ -19,6 +19,7 @@ import {
   type TablaColumnaPayload,
 } from '../pyservices/pyservices.service';
 import {
+  CorregirCantidadMovimientoDto,
   CreateInventarioItemDto,
   CreateMovimientoDto,
   CreateUbicacionDto,
@@ -65,6 +66,11 @@ import {
   type EvaluacionEliminacion,
   type MovEliminable,
 } from './eliminar-movimiento.util';
+// Corrección de la CANTIDAD de una ENTRADA (27-nov-2026, invariante 146).
+import {
+  evaluarCambioCantidad,
+  notaCantidadCorregida,
+} from './corregir-cantidad.util';
 import { esFuncionInexistente } from '../../common/updated-at-trigger.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
@@ -88,6 +94,7 @@ import {
   filtroPeriodo,
   margenVentaValido,
   mesesCardexDe,
+  matriculasDeFlota,
   montoGastoDeSalida,
   precioTxt,
   precioVentaDeSalida,
@@ -165,6 +172,19 @@ const MOV_JOINS =
 const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
   'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at, ubicacion_id, ubicacion_destino_id';
+
+/**
+ * Columnas de una salida REPARTIDA que NO están en `MOV_COLS` (27-nov-2026,
+ * invariante 146): `para_flota` y las matrículas ELEGIDAS (`aeronave_ids`,
+ * migración 20261127000001; null = toda la flota activa).
+ */
+const MOV_FLOTA_COLS = 'para_flota, aeronave_ids';
+
+/** Avión de un reparto (flota completa o matrículas elegidas). */
+interface AvionDeReparto {
+  id: string;
+  matricula: string;
+}
 
 /** Índice único parcial de `inventario_movimiento.client_request_id`. */
 const UQ_INV_MOVIMIENTO_CLIENT_REQUEST = 'uq_inv_movimiento_client_request';
@@ -1851,13 +1871,17 @@ export class InventoryService {
     >((desde, hasta) =>
       this.supabase.service
         .from('inventario_movimiento')
-        .select(`${MOV_COLS}, para_flota, ${MOV_JOINS}`, { count: 'exact' })
+        .select(`${MOV_COLS}, ${MOV_FLOTA_COLS}, ${MOV_JOINS}`, {
+          count: 'exact',
+        })
         .eq('item_id', id)
         .order('fecha_movimiento', { ascending: false })
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
         .range(desde, hasta),
     );
+    // Salidas repartidas entre matrículas ELEGIDAS: el cardex dice cuáles.
+    await this.adjuntarMatriculasDeFlota(movs);
 
     const stats = await this.statsConTcHoy(movs);
     const vigenteId = stats.costo_vigente?.movimiento_id ?? null;
@@ -2146,16 +2170,119 @@ export class InventoryService {
    * cortada por el tope de PostgREST daría stock y costos falsos en silencio.
    */
   private async movsCardexCompleto(itemId: string): Promise<MovCardex[]> {
-    return this.todasLasFilas<MovCardex>((desde, hasta) =>
+    const movs = await this.todasLasFilas<MovCardex>((desde, hasta) =>
       this.supabase.service
         .from('inventario_movimiento')
-        .select(`${MOV_COLS}, para_flota, ${MOV_JOINS}`, { count: 'exact' })
+        .select(`${MOV_COLS}, ${MOV_FLOTA_COLS}, ${MOV_JOINS}`, {
+          count: 'exact',
+        })
         .eq('item_id', itemId)
         .order('fecha_movimiento', { ascending: true })
         .order('created_at', { ascending: true })
         .order('id', { ascending: true })
         .range(desde, hasta),
     );
+    return this.adjuntarMatriculasDeFlota(movs);
+  }
+
+  /**
+   * MATRÍCULAS ELEGIDAS de las salidas repartidas (27-nov-2026, invariante
+   * 146): a cada movimiento con `aeronave_ids` le pone `matriculas_flota`
+   * (en el orden guardado = el del reparto) para que el cardex diga «N4142R,
+   * N58BT» en vez de «FLOTA». UNA consulta para toda la lista y NINGUNA si
+   * no hay listas; muta y devuelve la misma lista. Solo texto: si la lectura
+   * falla se deja sin matrículas (el cardex dice «FLOTA») y se avisa en el
+   * log — jamás tumba un cardex por una etiqueta.
+   */
+  private async adjuntarMatriculasDeFlota<T extends object>(
+    movs: T[],
+  ): Promise<T[]> {
+    const listas = movs
+      .map((m) => (m as { aeronave_ids?: unknown }).aeronave_ids)
+      .filter((l): l is string[] => Array.isArray(l) && l.length > 0);
+    if (listas.length === 0) return movs;
+    const ids = [...new Set(listas.flat().map(String))];
+    const { data, error } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula')
+      .in('id', ids);
+    if (error) {
+      this.logger.warn(
+        `No se pudieron leer las matrículas de las salidas repartidas (${error.message}): el cardex las muestra como FLOTA.`,
+      );
+      return movs;
+    }
+    const porId = new Map(
+      ((data ?? []) as Array<{ id: string; matricula: string }>).map((a) => [
+        a.id,
+        a.matricula,
+      ]),
+    );
+    for (const m of movs) {
+      const lista = (m as { aeronave_ids?: unknown }).aeronave_ids;
+      if (!Array.isArray(lista) || lista.length === 0) continue;
+      (m as { matriculas_flota?: string[] | null }).matriculas_flota = lista
+        .map((id) => porId.get(String(id)))
+        .filter((x): x is string => !!x);
+    }
+    return movs;
+  }
+
+  /**
+   * AVIONES de una salida repartida: las matrículas ELEGIDAS (`aeronave_ids`,
+   * todas deben existir y estar ACTIVAS) o, sin lista, toda la flota activa.
+   * Ordenados por matrícula: el residuo del prorrateo cae en la primera. Se
+   * resuelve ANTES de escribir nada (400 claro, sin movimiento que revertir).
+   */
+  private async avionesDeReparto(
+    elegidos?: string[] | null,
+  ): Promise<AvionDeReparto[]> {
+    const sb = this.supabase.service;
+    if (elegidos && elegidos.length > 0) {
+      const { data, error } = await sb
+        .from('aeronave')
+        .select('id, matricula, activa')
+        .in('id', elegidos);
+      if (error) throw new Error(error.message);
+      const filas = (data ?? []) as Array<{
+        id: string;
+        matricula: string;
+        activa: boolean | null;
+      }>;
+      const porId = new Map(filas.map((a) => [a.id, a]));
+      const inexistentes = elegidos.filter((id) => !porId.has(id));
+      const inactivas = filas.filter((a) => a.activa !== true);
+      if (inexistentes.length > 0 || inactivas.length > 0) {
+        throw new BadRequestException({
+          message:
+            inactivas.length > 0
+              ? `No se puede repartir a ${inactivas.map((a) => a.matricula).join(', ')}: ${inactivas.length === 1 ? 'está dada de baja' : 'están dadas de baja'}. Quita ${inactivas.length === 1 ? 'esa matrícula' : 'esas matrículas'} de la lista e intenta de nuevo.`
+              : 'Alguna de las matrículas elegidas ya no existe: vuelve a abrir el movimiento y elígelas de nuevo.',
+          error: 'MATRICULAS_INVALIDAS',
+          details: {
+            aeronave_ids: [...inexistentes, ...inactivas.map((a) => a.id)],
+          },
+        });
+      }
+      return filas
+        .map((a) => ({ id: a.id, matricula: a.matricula }))
+        .sort((a, b) => a.matricula.localeCompare(b.matricula));
+    }
+    const { data, error } = await sb
+      .from('aeronave')
+      .select('id, matricula')
+      .eq('activa', true)
+      .order('matricula');
+    if (error) throw new Error(error.message);
+    const flota = (data ?? []) as AvionDeReparto[];
+    if (flota.length === 0) {
+      throw new BadRequestException({
+        message:
+          'No hay aviones activos para repartir la salida: captúrala a un avión.',
+        error: 'FLOTA_VACIA',
+      });
+    }
+    return flota;
   }
 
   /**
@@ -3029,6 +3156,29 @@ export class InventoryService {
       });
     }
 
+    // SALIDA REPARTIDA (27-nov-2026, invariante 146): entre las matrículas
+    // ELEGIDAS (`aeronave_ids`) o, sin lista, entre toda la flota activa. La
+    // lista solo vale en una salida repartida, y los aviones se resuelven
+    // AQUÍ —antes del candado del mes y de escribir el cardex— para que una
+    // matrícula dada de baja sea un 400 sin nada que revertir.
+    const traeLista = (dto.aeronave_ids?.length ?? 0) > 0;
+    if (
+      traeLista &&
+      (dto.tipo !== TipoMovimientoInventario.SALIDA || dto.para_flota !== true)
+    ) {
+      throw new BadRequestException({
+        message:
+          'La lista de matrículas solo aplica a una SALIDA repartida (para_flota). Para una sola matrícula, captura la salida a ese avión.',
+        error: 'MATRICULAS_SIN_REPARTO',
+      });
+    }
+    const avionesReparto =
+      dto.tipo === TipoMovimientoInventario.SALIDA &&
+      dto.para_flota === true &&
+      !dto.aeronave_id
+        ? await this.avionesDeReparto(traeLista ? dto.aeronave_ids : null)
+        : null;
+
     // CIERRE DE MES (revisión 16-oct-2026, invariante 89): la SALIDA genera
     // el gasto REFACCION del avión (y la DEVOLUCION con avión lo ajusta) con
     // INSERT/UPDATE DIRECTO a `gasto` (no pasa por expenses.create) y fecha
@@ -3039,12 +3189,17 @@ export class InventoryService {
       dto.tipo === TipoMovimientoInventario.SALIDA ||
       (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id)
     ) {
-      // Por avión (invariante 105): el avión de la salida / devolución.
+      // Por avión (invariante 105): el avión de la salida / devolución; en
+      // una salida REPARTIDA, cada avión que recibe su parte (27-nov-2026:
+      // antes solo se miraba el cierre global y un avión ya cerrado recibía
+      // su gasto igual).
       await assertMesAbierto(
         this.supabase.service,
         String(dto.fecha_movimiento ?? hoyCancun()).slice(0, 7),
         'gasto',
-        [dto.aeronave_id ?? null],
+        avionesReparto
+          ? avionesReparto.map((a) => a.id)
+          : [dto.aeronave_id ?? null],
       );
     }
 
@@ -3257,6 +3412,11 @@ export class InventoryService {
         venta_unitaria: ventaUnitaria,
         venta_moneda: ventaUnitaria != null ? ventaMoneda : null,
         para_flota: salidaDeFlota,
+        // Matrículas ELEGIDAS (27-nov-2026): la columna solo entra al insert
+        // cuando hay lista (sin ella = toda la flota, fila de siempre).
+        ...(salidaDeFlota && traeLista && avionesReparto
+          ? { aeronave_ids: avionesReparto.map((a) => a.id) }
+          : {}),
         // Un TRASPASO no lleva avión ni proveedor (invariante 111).
         aeronave_id: esTraspasoDto ? null : (dto.aeronave_id ?? null),
         proveedor_id: esTraspasoDto ? null : (dto.proveedor_id ?? null),
@@ -3355,6 +3515,8 @@ export class InventoryService {
         userId,
         presentacion,
         etiquetaCargo,
+        avionesReparto ?? [],
+        traeLista,
       );
     } else if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       gastoGenerado = await this.crearGastoDeSalida(
@@ -3404,6 +3566,12 @@ export class InventoryService {
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
       reversion_pendiente: reversionPendiente,
+      // ADITIVO (27-nov-2026): matrículas ELEGIDAS de una salida repartida;
+      // null = toda la flota o no es repartida.
+      matriculas_flota:
+        salidaDeFlota && traeLista && avionesReparto
+          ? avionesReparto.map((a) => a.matricula)
+          : null,
       // ADITIVOS (25-sep-2026): de dónde salió el precio que paga el avión
       // (null fuera de SALIDA) y el margen aplicado (solo MARGEN).
       venta_origen: ventaOrigen,
@@ -3575,6 +3743,188 @@ export class InventoryService {
     };
   }
 
+  /**
+   * Corrige la CANTIDAD de una ENTRADA de cardex (27-nov-2026, invariante
+   * 146; pedido de la oficina: «por error de dedo puse 13, pero ingresaron
+   * 12»). Antes la única salida era eliminar la entrada y recapturarla; quien
+   * no lo sabía registraba un AJUSTE «para quitar» la pieza de más, y el
+   * ajuste SUMA.
+   *
+   * Candados (el primero que aplique manda):
+   *  - la entrada que nace de una COMPRA se corrige desde la compra (409
+   *    `MOVIMIENTO_DE_COMPRA`: ahí viven la factura y su gasto);
+   *  - solo ENTRADA, cantidad > 0 y distinta de la actual (400
+   *    `TIPO_NO_SOPORTADO` / `SIN_CAMBIO`);
+   *  - la existencia no puede quedar negativa en NINGÚN punto de la
+   *    cronología (409 `STOCK_NEGATIVO`, con lo mínimo que puede quedar) ni
+   *    en ninguna BODEGA (409 `STOCK_UBICACION_INSUFICIENTE`);
+   *  - CAS por la cantidad leída (409 `MOVIMIENTO_CAMBIO` si alguien la
+   *    cambió entre la lectura y el guardado).
+   * El costo unitario, la fecha y el tipo NO se tocan: ninguna salida cambia
+   * de costo (cada una guarda el suyo) y el último precio de compra tampoco.
+   * La cantidad anterior, quién y cuándo quedan en las notas. Una entrada
+   * capturada por empaque («2 × Caja») suelta ese desglose (queda en la nota).
+   */
+  async corregirCantidadEntrada(
+    itemId: string,
+    movId: string,
+    dto: CorregirCantidadMovimientoDto,
+    userId: string,
+  ) {
+    const item = (await this.findItem(itemId)) as {
+      nombre: string;
+      ubicacion_id?: string | null;
+    }; // 404
+    const actual = await this.movimientoDeItem(itemId, movId); // 404
+
+    const compra = await this.compraDeMovimiento(movId);
+    if (compra) {
+      throw new ConflictException({
+        message: `Esta entrada nace de la compra #${compra.folio ?? '?'}: corrige la cantidad desde Compras (ahí están la factura y su pago).`,
+        error: 'MOVIMIENTO_DE_COMPRA',
+        details: { movimiento_id: movId, compra_folio: compra.folio },
+      });
+    }
+
+    const movs = await this.movsEliminablesDeItem(itemId);
+    let ev: ReturnType<typeof evaluarCambioCantidad>;
+    try {
+      ev = evaluarCambioCantidad(movs, movId, dto.cantidad);
+    } catch {
+      // Carrera (alguien lo borró entre las dos lecturas): 404, no un 500.
+      throw new NotFoundException(
+        `Movimiento ${movId} no encontrado en este ítem`,
+      );
+    }
+    if (!ev.permitido) {
+      const cuerpo = {
+        message: ev.detalle,
+        error: ev.codigo_bloqueo,
+        details: {
+          movimiento_id: movId,
+          cantidad_antes: ev.cantidad_antes,
+          cantidad_despues: ev.cantidad_despues,
+          stock_antes: ev.stock_antes,
+          stock_despues: ev.stock_despues,
+        },
+      };
+      throw ev.codigo_bloqueo === 'STOCK_NEGATIVO'
+        ? new ConflictException(cuerpo)
+        : new BadRequestException(cuerpo);
+    }
+
+    // Por BODEGA (invariante 111): bajar una entrada no puede dejar en
+    // negativo la bodega donde entró (de ahí ya salieron o se traspasaron).
+    const principalId =
+      typeof item.ubicacion_id === 'string' ? item.ubicacion_id : null;
+    const corregidos = movs.map((m) =>
+      m.id === movId ? { ...m, cantidad: ev.cantidad_despues } : m,
+    );
+    const negativa = stockPorUbicacion(corregidos, principalId).find(
+      (u) => u.cantidad < -EPS,
+    );
+    if (negativa) {
+      const [conNombre] = await this.conNombresDeUbicacion(
+        [negativa],
+        principalId,
+      );
+      throw new ConflictException({
+        message: `Con ${cantidadTxt(ev.cantidad_despues)} en vez de ${cantidadTxt(ev.cantidad_antes)}, ${conNombre?.nombre ? `la bodega «${conNombre.nombre}»` : 'la existencia sin ubicación'} quedaría en ${cantidadTxt(negativa.cantidad)}: de ahí ya salieron o se traspasaron piezas de esta entrada.`,
+        error: 'STOCK_UBICACION_INSUFICIENTE',
+        details: {
+          movimiento_id: movId,
+          ubicacion_id: negativa.ubicacion_id,
+          ubicacion: conNombre?.nombre ?? null,
+          quedaria: round(negativa.cantidad),
+        },
+      });
+    }
+
+    // Quién corrige (para la nota): best-effort, sin nombre no se inventa.
+    const { data: usuario } = await this.supabase.service
+      .from('usuario')
+      .select('nombre')
+      .eq('id', userId)
+      .maybeSingle();
+    const quien =
+      typeof (usuario as { nombre?: unknown } | null)?.nombre === 'string'
+        ? ((usuario as { nombre: string }).nombre ?? null)
+        : null;
+    const porEmpaque = actual.empaque_id != null;
+    const empaqueNombre = nombreDeJoin(actual.empaque, 'nombre');
+    const presentacion =
+      porEmpaque && empaqueNombre && Number(actual.cantidad_empaques) > 0
+        ? `${round(Number(actual.cantidad_empaques), 2)} × ${empaqueNombre}`
+        : null;
+    const nota = notaCantidadCorregida({
+      hoy: hoyCancun(),
+      quien,
+      antes: ev.cantidad_antes,
+      despues: ev.cantidad_despues,
+      presentacion,
+      motivo: dto.motivo ?? null,
+    });
+    const notas = textoNoVacio(actual.notas)
+      ? `${actual.notas} · ${nota}`
+      : nota;
+
+    const { data: updated, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .update({
+        cantidad: ev.cantidad_despues,
+        // El desglose por empaque ya no describe la cantidad (queda en la nota).
+        ...(porEmpaque ? { empaque_id: null, cantidad_empaques: null } : {}),
+        notas,
+        updated_by: userId,
+        // updated_at lo pone el trigger de la BD.
+      })
+      .eq('id', movId)
+      .eq('item_id', itemId)
+      // CAS: solo si la cantidad sigue siendo la que se evaluó.
+      .eq('cantidad', actual.cantidad as string | number)
+      .select(MOV_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23514') {
+        throw new BadRequestException({
+          message:
+            'La cantidad no cumple una regla de la base (debe ser mayor a 0). No se guardó nada.',
+          error: 'MOVIMIENTO_INVALIDO',
+          details: { constraint: nombreDeConstraint(error.message) },
+        });
+      }
+      throw new Error(error.message);
+    }
+    if (!updated) {
+      throw new ConflictException({
+        message:
+          'Alguien más cambió este movimiento mientras lo corregías: recarga el cardex y vuelve a intentar. No se guardó nada.',
+        error: 'MOVIMIENTO_CAMBIO',
+        details: { movimiento_id: movId },
+      });
+    }
+
+    const stats = await this.statsConTcHoy(await this.movsForItem(itemId));
+    this.logger.warn(
+      `Cantidad de la ENTRADA ${movId} (${item.nombre}) corregida por ${userId}: ${ev.cantidad_antes} → ${ev.cantidad_despues}; existencia ${ev.stock_antes} → ${stats.stock}.${dto.motivo ? ` Motivo: «${dto.motivo}».` : ''}`,
+    );
+    return {
+      ...(updated as Record<string, unknown>),
+      cantidad_antes: ev.cantidad_antes,
+      cantidad_despues: ev.cantidad_despues,
+      stock_antes: ev.stock_antes,
+      stock_resultante: stats.stock,
+      valor_usd: stats.valor_usd,
+      valor_mxn: stats.valor_mxn,
+      valor_usd_sin_tc: stats.valor_usd_sin_tc,
+      pesos_exactos: stats.pesos_exactos,
+      costo_vigente: stats.costo_vigente,
+      costo_vigente_mxn: stats.costo_vigente_mxn,
+      tc_hoy: stats.tc_hoy,
+      regla_costo: REGLA_COSTO,
+    };
+  }
+
   // ===== Baja de un movimiento de cardex (21-sep-2026) =====
   //
   // Pedido del cliente: «podemos agregar una opcion para eliminar algunos
@@ -3603,7 +3953,7 @@ export class InventoryService {
   ): Promise<Record<string, unknown>> {
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select(`${MOV_COLS}, para_flota, ${MOV_JOINS}`)
+      .select(`${MOV_COLS}, ${MOV_FLOTA_COLS}, ${MOV_JOINS}`)
       .eq('id', movId)
       .eq('item_id', itemId)
       .maybeSingle();
@@ -3613,7 +3963,10 @@ export class InventoryService {
         `Movimiento ${movId} no encontrado en este ítem`,
       );
     }
-    return data;
+    const [mov] = await this.adjuntarMatriculasDeFlota([
+      data as Record<string, unknown>,
+    ]);
+    return mov;
   }
 
   /** Cardex COMPLETO del ítem en la forma que pide `evaluarEliminacion`. */
@@ -3626,6 +3979,7 @@ export class InventoryService {
       id: String(m.id),
       aeronave_matricula: nombreDeJoin(m.aeronave, 'matricula'),
       para_flota: m.para_flota ?? false,
+      matriculas_flota: matriculasDeFlota(m),
     }));
   }
 
@@ -3787,6 +4141,7 @@ export class InventoryService {
       );
     }
     const tipo = String(mov.tipo);
+    const matriculasElegidas = matriculasDeFlota(mov);
     const { codigo, mensaje } = this.resolverBloqueoEliminacion(
       cardex,
       compra,
@@ -3803,11 +4158,15 @@ export class InventoryService {
         tipo,
         cantidad: round(Number(mov.cantidad), 2),
         fecha: mov.fecha_movimiento as string,
-        // 'FLOTA' = salida prorrateada entre todos los aviones activos.
+        // 'FLOTA' = salida prorrateada entre todos los aviones activos; en
+        // una repartida entre matrículas ELEGIDAS (27-nov-2026), ellas
+        // («N4142R, N58BT»): el diálogo las nombra tal cual.
         aeronave:
           mov.para_flota === true
-            ? 'FLOTA'
+            ? (matriculasElegidas?.join(', ') ?? 'FLOTA')
             : nombreDeJoin(mov.aeronave, 'matricula'),
+        // ADITIVO (27-nov-2026): la lista; null = toda la flota o no aplica.
+        matriculas_flota: matriculasElegidas,
       },
       gastos,
       de_compra: compra,
@@ -4147,40 +4506,43 @@ export class InventoryService {
   }
 
   /**
-   * SALIDA "para todas las matrículas" (aceites/consumibles de flota): el
-   * cargo total (PRECIO DE VENTA si la salida lo lleva; si no, su costo —
-   * misma fuente única montoGastoDeSalida) se PRORRATEA en partes iguales
-   * entre los aviones ACTIVOS — un gasto REFACCION medio BODEGA por avión,
-   * todos ligados al mismo movimiento. Los centavos de diferencia se ajustan
-   * en el primer avión para que la suma sea EXACTA al total de la salida.
+   * SALIDA REPARTIDA (aceites/consumibles): el cargo total (PRECIO DE VENTA
+   * si la salida lo lleva; si no, su costo — misma fuente única
+   * montoGastoDeSalida) se PRORRATEA en partes iguales entre `aviones` — la
+   * flota ACTIVA («para todas las matrículas») o las matrículas ELEGIDAS
+   * (27-nov-2026, invariante 146; `elegidas`) —: un gasto REFACCION medio
+   * BODEGA por avión, todos ligados al mismo movimiento. Los centavos de
+   * diferencia se ajustan en el primer avión para que la suma sea EXACTA al
+   * total de la salida. Los aviones llegan YA resueltos y validados
+   * (`avionesDeReparto`, antes de escribir el cardex).
    */
   private async crearGastosDeSalidaFlota(
     mov: Record<string, unknown>,
     itemNombre: string,
     userId: string,
-    presentacion: string | null = null,
+    presentacion: string | null,
     /** Cómo se cobró: «precio de venta» | «último precio + 25 %» | «a costo». */
-    etiquetaCargo?: string,
+    etiquetaCargo: string | undefined,
+    aviones: AvionDeReparto[],
+    /** true = matrículas elegidas; false = toda la flota activa. */
+    elegidas: boolean,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
     const etiqueta = etiquetaCargo ?? (esVenta ? 'precio de venta' : 'a costo');
 
-    const { data: aviones, error: avErr } = await this.supabase.service
-      .from('aeronave')
-      .select('id, matricula')
-      .eq('activa', true)
-      .order('matricula');
-    if (avErr || !aviones || aviones.length === 0) {
+    if (aviones.length === 0) {
       // Mismo patrón que la salida individual (29-ago): sin gastos no hay
       // cargo — el stock no puede bajar sin él.
       await this.revertirMovimientoSinGasto(mov.id as string, 'SALIDA flota');
       throw new Error(
-        `La salida de bodega (flota) se revirtió: no hay aviones activos para prorratear el costo (${avErr?.message ?? 'lista vacía'}).`,
+        'La salida de bodega (flota) se revirtió: no hay aviones para prorratear el costo.',
       );
     }
 
     const n = aviones.length;
+    // «toda la flota» (texto de siempre, byte a byte) o «4 matrículas».
+    const alcance = elegidas ? `${n} matrículas` : 'toda la flota';
     const base = round(monto / n, 2);
     // El primero absorbe el residuo de redondeo: base×(n−1) + primero == monto.
     const primero = round(monto - base * (n - 1), 2);
@@ -4199,7 +4561,7 @@ export class InventoryService {
       proveedor_id: mov.proveedor_id ?? null,
       inventario_movimiento_id: mov.id,
       notas:
-        `Salida de bodega (toda la flota, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${etiqueta} $${monto.toFixed(2)} ${moneda})` +
+        `Salida de bodega (${alcance}, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${etiqueta} $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
       // Gasto fabricado por el sistema: capturado = ahora (7-sep).
       capturado_en: capturadoAhora(),
@@ -4252,6 +4614,8 @@ export class InventoryService {
       aviones: n,
       monto_total: monto,
       gastos: (data ?? []).length,
+      // ADITIVO (27-nov-2026): a quiénes se les cargó, en el orden del reparto.
+      matriculas: aviones.map((a) => a.matricula),
     };
   }
 

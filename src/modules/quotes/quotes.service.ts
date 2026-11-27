@@ -14,6 +14,10 @@ import {
   inicioOficialDe,
 } from '../../common/inicio-oficial.util';
 import {
+  leerContextoCliente,
+  type ContextoCliente,
+} from '../../common/contexto-cliente.util';
+import {
   BadRequestException,
   ConflictException,
   Injectable,
@@ -514,25 +518,14 @@ export class QuotesService implements ConfirmadorCotizacion {
    * - tarifaPreferencial: tarifa por hora pactada con el cliente para esta
    *   aeronave (USD/hr), o null si no tiene (se administra en su perfil).
    */
-  private async contextoCliente(
+  private contextoCliente(
     clienteId: string,
     aeronaveId: string,
-  ): Promise<{ esInterno: boolean; tarifaPreferencial: number | null }> {
-    const { data, error } = await this.supabase.service
-      .from('cliente')
-      .select('es_interno, tarifas:tarifa_cliente_aeronave(tarifa_hora_usd)')
-      .eq('id', clienteId)
-      .eq('tarifas.aeronave_id', aeronaveId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    const filas = (data?.tarifas ?? []) as Array<{
-      tarifa_hora_usd: number | string;
-    }>;
-    const tarifa = filas.length > 0 ? Number(filas[0].tarifa_hora_usd) : 0;
-    return {
-      esInterno: data?.es_interno === true,
-      tarifaPreferencial: tarifa > 0 ? tarifa : null,
-    };
+  ): Promise<ContextoCliente> {
+    // Lector ÚNICO (27-nov-2026, `common/contexto-cliente.util`): la misma
+    // consulta de siempre, compartida con «cambiar el cliente de un vuelo»
+    // (FlightsService), que avisa con la regla con la que aquí se cotiza.
+    return leerContextoCliente(this.supabase.service, clienteId, aeronaveId);
   }
 
   /**

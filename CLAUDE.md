@@ -14260,6 +14260,174 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
      - Una réplica: memoria del proceso, como el invariante 144.
      - Specs: `tipo-cambio/tipo-cambio.service.memo.spec.ts`.
 
+146. **INVENTARIO: SALIDA PARA ALGUNAS MATRÍCULAS, CORREGIR LA CANTIDAD DE
+     UNA ENTRADA Y EL AJUSTE QUE SÍ SE PUEDE QUITAR (27-nov-2026, API
+     0.0.152, migración `20261127000001`).** Tres pedidos de la oficina por
+     WhatsApp (Jimmy, ADMIN): «necesito me den la opción de marcar algunas
+     matrículas ya que necesito poner solo 4 matrículas y no todas»; «me
+     podrían habilitar poder editar movimientos en el inventario … por error
+     de dedo puse 13, pero ingresaron 12».
+     - **Lo que se encontró al revisar el caso**: para «quitar» la pieza de
+       más, Jimmy registró un AJUSTE de 1 — y el AJUSTE **SUMA** (existencia
+       = Σ ENTRADA/DEVOLUCION/AJUSTE − Σ SALIDA): el aceite 15W-50 quedó en
+       68 cuando lo real son 66. El panel lo llamaba «Ajuste / merma
+       (corrección o desecho)» y la app «para registrar merma o desecho». Los
+       **TRES** ajustes que había en producción (dos de Pablo en el filtro
+       CH48110, 17-nov) querían RESTAR una pieza y la sumaron; ninguno se
+       podía deshacer (la baja respondía `TIPO_NO_SOPORTADO` y el
+       «movimiento contrario» de un ajuste sería una SALIDA, que le cobra a
+       un avión). **Los datos NO se tocaron**: la oficina los corrige con las
+       dos herramientas nuevas.
+     - **SALIDA REPARTIDA ENTRE MATRÍCULAS ELEGIDAS**: `CreateMovimientoDto.
+       aeronave_ids` (2–50 uuids sin repetir, SOLO con `para_flota: true`;
+       sin ella = toda la flota activa, como siempre). 400
+       `MATRICULAS_SIN_REPARTO` (lista sin `para_flota` o fuera de SALIDA) y
+       400 `MATRICULAS_INVALIDAS` (alguna no existe o está dada de baja; el
+       mensaje la nombra, `details.aeronave_ids`). Los aviones se resuelven
+       en `avionesDeReparto` **ANTES de escribir el cardex** (también los de
+       «toda la flota»: sin aviones activos ya es 400 `FLOTA_VACIA`, no un
+       movimiento insertado y revertido) y van ORDENADOS por matrícula: el
+       residuo del prorrateo cae en la primera.
+       `crearGastosDeSalidaFlota(…, aviones, elegidas)` hace lo de siempre
+       —un gasto REFACCION/BODEGA por avión, Σ EXACTA al centavo— sobre esa
+       lista; la nota dice «(4 matrículas, 1/4 del precio de venta)» (la de
+       toda la flota no cambió un byte) y `detalleSinPreciosDeBodega`
+       (invariante 8) la limpia igual para los balances («(4 matrículas,
+       1/4)»).
+     - **`inventario_movimiento.aeronave_ids uuid[]`** (migración
+       `20261127000001`, ADITIVA, aplicada por MCP el 27-nov-2026 con su
+       dry-run de escrituras reales): las matrículas ELEGIDAS, en el orden
+       del reparto; NULL = un avión o toda la flota. CHECK
+       `inventario_movimiento_aeronave_ids_chk` (solo con `para_flota` y ≥ 2).
+       La columna entra al INSERT solo cuando hay lista. **El dinero NO sale
+       de ahí** (sale de los gastos ligados por
+       `gasto.inventario_movimiento_id`; la hoja «refacciones» del general ya
+       prorrateaba el costo por la proporción de cada gasto, así que un
+       subconjunto cuadra solo): la columna existe para que el cardex DIGA a
+       quiénes aunque la salida haya salido a $0 y para que la bitácora de
+       una baja (`to_jsonb` del movimiento) lo conserve. **Deploy: la
+       migración ANTES que el API** (el API nuevo nombra la columna en el
+       cardex: `MOV_FLOTA_COLS`).
+     - **Lecturas (ADITIVAS)**: `adjuntarMatriculasDeFlota` (UNA consulta a
+       `aeronave` por lista de movimientos, ninguna si no hay listas;
+       best-effort: si falla, el cardex dice «FLOTA») pone
+       `matriculas_flota: string[]` en el detalle del ítem, el cardex
+       completo, la vista previa de la baja y la respuesta del alta
+       (`matriculas_flota` + `gasto_generado.matriculas`). Fuente única del
+       texto: `matriculasDeFlota` (`inventario-cardex.util`): `vendido_a` /
+       detalle del cardex / `describirMovimiento` dicen «N4142R, N58BT» y
+       «FLOTA» / «Toda la flota» solo cuando es toda. En la vista previa de
+       la baja `movimiento.aeronave` trae las matrículas (no el centinela
+       `'FLOTA'`).
+     - **CIERRE POR AVIÓN EN LA SALIDA REPARTIDA** (invariante 105):
+       `assertMesAbierto` recibe los aviones del reparto. Antes una salida
+       «para todas las matrículas» solo miraba el cierre GLOBAL y un avión ya
+       cerrado en ese mes recibía su gasto igual.
+     - **CORREGIR LA CANTIDAD DE UNA ENTRADA**: `PATCH
+       /v1/inventory/items/:id/movimientos/:movId/cantidad` (**SOLO ADMIN**,
+       como la baja; DIRECCION pasa todo guard) con `{ cantidad, motivo? }`.
+       Regla PURA en `inventory/corregir-cantidad.util.ts` (con spec sobre el
+       cardex REAL del aceite: 13 → 12 ⇒ 121 → 120): la MISMA del candado de
+       la baja — la existencia no puede quedar negativa en NINGÚN punto de la
+       cronología (`recorrerStock` de `eliminar-movimiento.util`, ahora
+       exportada). Candados: 409 `MOVIMIENTO_DE_COMPRA` (se corrige desde
+       Compras), 400 `TIPO_NO_SOPORTADO` (solo ENTRADA: una SALIDA ya generó
+       su cargo ⇒ se elimina con justificación y se recaptura), 400
+       `SIN_CAMBIO` (igual o ≤ 0), 409 `STOCK_NEGATIVO` (dice lo MÍNIMO que
+       puede quedar), 409 `STOCK_UBICACION_INSUFICIENTE` (invariante 111: la
+       bodega donde entró no puede quedar negativa) y 409
+       `MOVIMIENTO_CAMBIO` (CAS: el UPDATE va con `.eq('cantidad', <la
+       leída>)`). Escribe SOLO `cantidad`, `notas` (se AGREGA «Cantidad
+       corregida 27/11/2026 por Jimmy Chi: antes 13, ahora 12[: motivo]» —
+       `notaCantidadCorregida`, fecha DD/MM/AAAA) y `updated_by`; una entrada
+       capturada por empaque suelta `empaque_id`/`cantidad_empaques` (el
+       desglose queda en la nota). **Costo, fecha y tipo no se tocan**:
+       ninguna salida cambia de costo (cada una guarda el suyo) ni el último
+       precio de compra. Las ENTRADAS no tocan dinero del cierre ⇒ sin
+       candado de mes (como el alta). Una entrada manual no tiene gasto: no
+       se toca ningún gasto.
+     - **EL AJUSTE SE PUEDE ELIMINAR** (`evaluarEliminacion`): entra a los
+       tipos soportados junto a ENTRADA y SALIDA, con el mismo candado de
+       existencia (y la justificación de siempre; SOLO ADMIN). No lleva
+       gasto ni fija precio, y la función de BD
+       `inventario_eliminar_movimiento` nunca filtró por tipo: **sin
+       migración**. DEVOLUCION y TRASPASO siguen fuera (`TIPO_NO_SOPORTADO`:
+       se corrigen con el movimiento contrario). `describirMovimiento` dice
+       «el AJUSTE» / «el TRASPASO».
+     - **Lo que NO se hizo (decisión pendiente del cliente)**: un movimiento
+       que RESTE piezas sin cobrarle a un avión (merma, pieza rota o
+       caducada). Hoy no existe: el ajuste solo suma y la salida siempre
+       cobra. Hace falta decidir quién absorbe ese costo (la tienda, como
+       pérdida) antes de crearlo. Tampoco se edita la cantidad de una SALIDA
+       (baja con motivo + recaptura) ni la fecha de un movimiento.
+     - Panel y app: el tipo se llama «Ajuste (suma piezas a la existencia)» y
+       al elegirlo se dice que SUMA y que para quitar se usa «Corregir
+       cantidad» (app 1.1.4+94: mismo texto, sin botón — la corrección es
+       del panel).
+     - Specs: `inventory/corregir-cantidad.util.spec.ts`,
+       `inventory/eliminar-movimiento.util.spec.ts` (AJUSTE y matrículas),
+       `inventory/inventory.service.movimiento.spec.ts` (describes «salida
+       para ALGUNAS matrículas» y «corregirCantidadEntrada»; los specs del
+       23514 de flota ahora traen la lectura de aviones, que va ANTES del
+       insert), `inventory.service.eliminacion.spec.ts` (aditivo) y
+       `common/detalle-salida-bodega.util.spec.ts`.
+
+147. **CAMBIAR EL CLIENTE DE UN VUELO / COTIZACIÓN: PUERTA PROPIA, EL PRECIO NO
+     SE MUEVE (27-nov-2026, API 0.0.152, SIN migración).** Pedido de la
+     oficina por WhatsApp (Itzel y Jimmy): «Nos podrían habilitar cambiar de
+     cliente cuando un vuelo o cotización ya existe? porque no nos deja».
+     `revise` SIGUE anclando `cliente_id` a lo persistido
+     (`anclarRevisionAlPersistido`, a propósito: un front malformado no
+     cambia de cliente en silencio); el cliente solo cambia por **`PATCH
+     /v1/flights/:id/cliente`** (ADMIN/COORDINADOR, los mismos de `revise`;
+     body `{cliente_id, if_updated_at?}`), `FlightsService.cambiarCliente`.
+     - **Escribe SOLO** `vuelo.cliente_id` + el sello en `notas_internas`
+       («[Cliente cambiado el DD/MM/AAAA HH:mm por X: «A» → «B»]»,
+       `selloCambioCliente`) + `updated_by`. **Precio y `calculo_snapshot`
+       intactos**: la cotización conserva lo pactado. La SIGUIENTE versión
+       que se guarde ya se cotiza con el cliente nuevo (el ancla lee el
+       persistido) y `avisos[]` lo dice antes de que sorprenda.
+     - **Avisos** (`avisosCambioCliente`, PURO con spec, en
+       `flights/cambio-cliente.util.ts`): tarifa preferencial del cliente
+       nuevo en el avión COTIZADO (distingue tarifa personalizada de tarifa
+       de lista), preferencial del anterior que se pierde, interno ↔ normal,
+       broker vs `tarifa.tipo`, cobros (el recibo lee el cliente del vuelo en
+       vivo), cobros que vienen de un anticipo y «Necesito factura». La regla
+       de la tarifa es la del motor: lector ÚNICO
+       `common/contexto-cliente.util#leerContextoCliente`
+       (`QuotesService.contextoCliente` delega ahí con la MISMA consulta; se
+       movió para que flights no dependa de quotes). Se arman DESPUÉS del
+       write y NUNCA lanzan (si fallan: 200 con `avisos: []` y un warn — el
+       cliente ya cambió).
+     - **Candados ANTES de escribir, con `code` estable y en este orden**:
+       404 `VUELO_NO_EXISTE`, 404 `CLIENTE_NO_EXISTE`, 409
+       `CONFLICTO_VERSION` (con `if_updated_at`), 400 `CLIENTE_INACTIVO`, 409
+       `VUELO_DE_GRUPO` (el cliente de un hijo es el del grupo), 409
+       `VUELO_FACTURADO` (`details.motivo` = `CFDI` | `FACTURA_EMITIDA` (+
+       `facturas[]`) | `ESTATUS_MANUAL`: la factura lleva RECEPTOR; se
+       cancela o se desliga primero) y 409 `MES_CERRADO`
+       (`assertVueloEnMesAbierto`, como `revise`: los libros de un mes
+       cerrado imprimen el cliente y leen `cliente.es_interno` en vivo).
+       Mismo cliente ⇒ 200 `sin_cambio: true` sin escribir ni mirar la
+       versión (idempotente). **Cualquier ESTADO se permite y los COBROS no
+       lo frenan** (no se mueve dinero). El UPDATE lleva CAS por el cliente
+       leído y por `facturado = false`: 0 filas ⇒ `VUELO_FACTURADO` si se
+       timbró entre tanto, si no `CONFLICTO_VERSION`.
+     - **Derivados que NO hace el API** (verificado en prod, solo lectura):
+       `vuelo.consecutivo_cliente` (el número del ID «alias02-…») lo reasigna
+       el trigger `vuelo_consecutivo_cliente` al cambiar `cliente_id`; Google
+       Calendar se encola por `trg_vuelo_calendar_sync` (`cliente_id` está en
+       su lista) y además se llama `calendar.syncFlight`, como en `update()`.
+       Sin aviso a la tripulación: la operación no cambia.
+     - **Conocido**: el sello vive en `notas_internas`, que desde el 20-nov
+       (invariante 142) sale completo en el bloque NOTAS del evento de
+       Google, igual que los demás sellos del vuelo. No se avisa si ya se
+       mandó un correo de cotización al cliente anterior. La app no tiene
+       esta acción (es del panel).
+     - Specs: `flights/cambio-cliente.util.spec.ts`,
+       `flights/flights.service.cambio-cliente.spec.ts` y
+       `flights/flights.controller.cambio-cliente.spec.ts`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

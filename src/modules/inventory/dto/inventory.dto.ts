@@ -653,6 +653,22 @@ export class CreateMovimientoDto {
   para_flota?: boolean;
 
   @ApiPropertyOptional({
+    type: [String],
+    description:
+      'SALIDA repartida entre ALGUNAS matrículas (27-nov-2026, invariante 146): solo con para_flota=true. De 2 a 50 aviones ACTIVOS sin repetir; el cargo se divide en partes iguales SOLO entre ellos (un gasto por avión, residuo en la primera matrícula). Ausente = toda la flota activa. 400 MATRICULAS_SIN_REPARTO sin para_flota; 400 MATRICULAS_INVALIDAS si alguna no existe o está inactiva (details.aeronave_ids).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2, {
+    message:
+      'Elige al menos dos matrículas para repartir; para una sola, captura la salida a ese avión.',
+  })
+  @ArrayMaxSize(50)
+  @ArrayUnique({ message: 'Hay matrículas repetidas en la lista.' })
+  @IsUUID('all', { each: true })
+  aeronave_ids?: string[];
+
+  @ApiPropertyOptional({
     description:
       'Bodega donde ocurre el movimiento (27-oct-2026, invariante 111; catálogo GET /inventory/ubicaciones; debe existir y estar activa: 404 UBICACION_NO_EXISTE / 400 UBICACION_INACTIVA). Ausente = la ubicación PRINCIPAL del producto. En SALIDA y TRASPASO debe haber existencia en esa bodega: 409 STOCK_UBICACION_INSUFICIENTE con `details.por_ubicacion`. En TRASPASO es el ORIGEN.',
   })
@@ -771,6 +787,37 @@ export class UpdateMovimientoCostoDto {
   @IsOptional()
   @IsBoolean()
   confirmar_salidas?: boolean;
+}
+
+/**
+ * Corrección de la CANTIDAD de una ENTRADA de cardex (27-nov-2026, invariante
+ * 146; pedido de la oficina: «por error de dedo puse 13, pero ingresaron
+ * 12»). SOLO viaja la cantidad correcta (+ un motivo opcional): costo,
+ * fecha y tipo no se tocan aquí. La cantidad anterior, quién y cuándo quedan
+ * en las notas del movimiento.
+ */
+export class CorregirCantidadMovimientoDto {
+  @ApiProperty({
+    description:
+      'Cantidad CORRECTA en unidades (> 0, hasta 2 decimales). Debe ser distinta de la actual (409 SIN_CAMBIO).',
+  })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsPositive()
+  cantidad!: number;
+
+  @ApiPropertyOptional({
+    maxLength: 200,
+    description:
+      'Por qué se corrige (opcional). Se agrega a la nota del movimiento.',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MaxLength(200)
+  motivo?: string;
 }
 
 /**

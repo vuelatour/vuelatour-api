@@ -34,6 +34,7 @@ import {
   TiendaResumenQuery,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
+  CorregirCantidadMovimientoDto,
   UpdateMovimientoCostoDto,
   UpdateUbicacionDto,
 } from './dto/inventory.dto';
@@ -439,6 +440,22 @@ export class InventoryController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.inventory.eliminarMovimiento(id, movId, dto.motivo, c.userId);
+  }
+
+  // Sufijo literal ANTES de ':movId' a secas (convención del repo).
+  @Patch('items/:id/movimientos/:movId/cantidad')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Corrige la CANTIDAD de una ENTRADA (27-nov-2026) — SOLO ADMIN. Costo, fecha y tipo no cambian; la cantidad anterior, quién y cuándo quedan en las notas. 409 MOVIMIENTO_DE_COMPRA (se corrige desde Compras), STOCK_NEGATIVO (la existencia quedaría negativa en algún punto; dice lo mínimo que puede quedar), STOCK_UBICACION_INSUFICIENTE, MOVIMIENTO_CAMBIO; 400 TIPO_NO_SOPORTADO (solo ENTRADA: una SALIDA se elimina y se recaptura) y SIN_CAMBIO.',
+  })
+  corregirCantidadMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('movId', ParseUUIDPipe) movId: string,
+    @Body() dto: CorregirCantidadMovimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.corregirCantidadEntrada(id, movId, dto, c.userId);
   }
 
   @Patch('items/:id/movimientos/:movId')

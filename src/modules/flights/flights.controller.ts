@@ -88,6 +88,7 @@ import { FacturaClienteService } from './factura-cliente.service';
 import { FacturaSolicitudService } from './factura-solicitud.service';
 import { SolicitarFacturaDto } from './dto/solicitud-factura.dto';
 import { AlinearFechaTramosDto } from './dto/alinear-fecha.dto';
+import { CambiarClienteDto } from './dto/cambio-cliente.dto';
 import { RecalcularCobradoDto } from './dto/recalcular-cobrado.dto';
 import { SinCamposComprobanteDto } from './dto/cobros.dto';
 import { errorFacturasNoDisponibles } from '../../common/factura-emitida-disponible.util';
@@ -448,6 +449,20 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.update(id, dto, c.userId);
+  }
+
+  @Patch(':id/cliente')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Cambia el CLIENTE de un vuelo / cotización que ya existe (27-nov-2026). Body {cliente_id, if_updated_at?}. NO recalcula el precio ni toca el snapshot: la cotización conserva lo pactado y `avisos[]` dice qué cambia con el cliente nuevo (tarifa preferencial, cliente interno, broker, recibos de los cobros, «Necesito factura»); la siguiente versión que se guarde ya se cotiza con él. Deja el sello en notas_internas (quién, cuándo, de quién a quién) y el trigger reasigna el número del vuelo dentro de su cliente. Mismo cliente ⇒ 200 `sin_cambio: true` sin escribir. 404 VUELO_NO_EXISTE / CLIENTE_NO_EXISTE, 400 CLIENTE_INACTIVO, 409 CONFLICTO_VERSION / VUELO_DE_GRUPO / VUELO_FACTURADO / MES_CERRADO. Respuesta: la fila del vuelo + {sin_cambio, avisos[], cliente_anterior {id, nombre}, cliente {id, nombre}}.',
+  })
+  cambiarCliente(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CambiarClienteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.cambiarCliente(id, dto, c.userId);
   }
 
   @Post(':id/tramos/alinear-fecha')

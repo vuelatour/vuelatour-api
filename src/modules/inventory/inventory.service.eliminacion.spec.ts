@@ -230,6 +230,8 @@ describe('previewEliminacionMovimiento', () => {
       cantidad: 4,
       fecha: '2026-07-17',
       aeronave: 'N4142R',
+      // ADITIVO (27-nov-2026): matrículas elegidas de una salida repartida.
+      matriculas_flota: null,
     });
     expect(r.gastos).toEqual([
       {
