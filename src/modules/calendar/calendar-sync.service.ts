@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
+import { CRON_CALENDAR_COLA } from '../../common/horarios-cron';
 import { calendar_v3, google } from 'googleapis';
 import { JWT } from 'google-auth-library';
 import type { EnvVars } from '../../config/env.schema';
@@ -1086,7 +1087,7 @@ export class CalendarSyncService implements OnModuleInit {
    *   solo una drena por vez. Railway corre 1 réplica hoy; sin la migración
    *   aplicada el candado no existe y todo sigue como antes.
    */
-  @Cron('*/20 * * * * *', { name: 'calendar-sync-cola' })
+  @Cron(CRON_CALENDAR_COLA, { name: 'calendar-sync-cola' })
   async drenarCola(): Promise<void> {
     if (this.drenando) return;
     // El barrido (reconcile/resync) ya está publicando DIRECTO a Google: dos

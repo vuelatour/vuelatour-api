@@ -31,7 +31,13 @@ import {
   diagnosticoSobres,
   type SobreDiagnostico,
 } from '../groups/particion-cobro.util';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
+import {
+  CRON_ALERTAS_CADA_HORA,
+  CRON_RECORDATORIO_EVENTOS,
+  CRON_RECORDATORIO_TACO,
+  CRON_SERVICIO_HORAS,
+} from '../../common/horarios-cron';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
@@ -116,7 +122,9 @@ export class AlertsService {
 
   // ===== Cron =====
 
-  @Cron(CronExpression.EVERY_HOUR)
+  // Horarios ESCALONADOS (27-nov-2026, invariante 148, `common/horarios-cron`):
+  // ninguna tarea recurrente arranca en el mismo segundo que otra.
+  @Cron(CRON_ALERTAS_CADA_HORA)
   async runHourly(): Promise<void> {
     await this.safe('permiso_pista', (c) => this.checkPermisoPista(c));
   }
@@ -126,7 +134,7 @@ export class AlertsService {
    * Corre cada minuto y avisa a 15, 10 y 5 min de la salida si aún no se ha
    * capturado. Cada umbral se envía una sola vez (dedupe vía notificacion).
    */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CRON_RECORDATORIO_TACO)
   async runTacoReminders(): Promise<void> {
     try {
       await this.checkTacoReminders();
@@ -308,7 +316,7 @@ export class AlertsService {
 
   /** 90 min antes: eventos con responsable y fecha en [now+89, now+91]. La
    *  clave lleva la fecha al minuto: reagendar la hora vuelve a avisar. */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CRON_RECORDATORIO_EVENTOS)
   async runEventoRecordatorios(): Promise<void> {
     if (this.eventoRecordatoriosEnCurso) return;
     this.eventoRecordatoriosEnCurso = true;
@@ -450,7 +458,7 @@ export class AlertsService {
    * escritura por un camino nuevo, un hook que falló). MISMO cuerpo, mismos
    * candados: nunca duplica.
    */
-  @Cron('*/10 * * * *', { timeZone: 'America/Cancun' })
+  @Cron(CRON_SERVICIO_HORAS, { timeZone: 'America/Cancun' })
   async runServicioHoras(): Promise<void> {
     // El barrido diario ya incluye esta regla: correr las dos a la vez sería
     // pelear por el mismo insert (lo evita igual el candado por avión, pero

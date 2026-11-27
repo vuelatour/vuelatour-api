@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { CRON_GASTOS_RELEER_FOLIO } from '../../common/horarios-cron';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   VisionService,
@@ -184,7 +185,7 @@ export class FolioRelecturaService {
     private readonly configuracion: ConfiguracionService,
   ) {}
 
-  @Cron('*/5 * * * *', { name: 'gastos-releer-folio' })
+  @Cron(CRON_GASTOS_RELEER_FOLIO, { name: 'gastos-releer-folio' })
   async releerFoliosGastos(): Promise<ResumenRelecturaFolioGasto | null> {
     if (this.enCurso) return null;
     this.enCurso = true;

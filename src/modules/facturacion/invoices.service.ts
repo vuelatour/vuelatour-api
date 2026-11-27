@@ -9,6 +9,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Cron } from '@nestjs/schedule';
+import { CRON_RECIBIDAS_RELEER_FOLIO } from '../../common/horarios-cron';
 import {
   corteTs,
   esAntesDelInicio,
@@ -1568,7 +1569,7 @@ export class InvoicesService {
    *   que otro camino ya selló.
    * Nunca lanza: un fallo se registra con `warn`.
    */
-  @Cron('*/10 * * * *', { name: 'recibidas-releer-folio' })
+  @Cron(CRON_RECIBIDAS_RELEER_FOLIO, { name: 'recibidas-releer-folio' })
   async releerFoliosRecibidas(): Promise<ResumenRelecturaFolio | null> {
     if (this.relecturaFolioEnCurso) return null;
     this.relecturaFolioEnCurso = true;

@@ -26,6 +26,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { CRON_TACO_LIVE } from '../../common/horarios-cron';
 import { afacRealDisponible } from '../../common/afac-real-disponible.util';
 import { randomUUID } from 'node:crypto';
 import {
@@ -11471,7 +11472,7 @@ export class FlightsService {
    * deducía la llegada y la subía, y chocaba con la foto real del piloto.
    * Un aviso por escala (dedupe `taco_vencido_<escala_id>` en alerta_emitida).
    */
-  @Cron('*/10 * * * *', { name: 'taco-live-deduce' })
+  @Cron(CRON_TACO_LIVE, { name: 'taco-live-deduce' })
   async deduceTacosEnVivo(): Promise<void> {
     try {
       const now = new Date();

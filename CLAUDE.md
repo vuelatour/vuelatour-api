@@ -12266,6 +12266,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       externo + Operaciones) y en «Verificar / editar»; chip «Pago operador»
       en Gastos; historial «Pago al operador externo: No → Sí»; ficha del
       vuelo «Pagado al operador (gastos marcados)». La app no manda la llave.
+      **27-nov-2026 (panel `dbe96a9`, caso #552)**: el alta DESDE la ficha del
+      vuelo («Gastos del vuelo» → «Registrar gasto») no ofrecía la casilla
+      (decidía con la lista de vuelos cercanos, que ahí no se carga) y el
+      pago de Ale a Simon ($18,533.09) se sumó ADEMÁS del cotizado
+      ($15,622.57). Ya nace marcada también ahí; el gasto de #552 se marcó
+      por SQL. Sigue abierto el hueco de la APP (no manda la llave): un pago
+      al operador capturado desde el teléfono queda sin marca.
     - **Prod (27-oct-2026)**: el gasto de Ale (#453, `807fa413…`) se marcó
       por SQL tras aplicar la migración: OPERACIONES de #453 $33,712.59 →
       $18,182.00 (Balance general de octubre, libro EXTERNOS); #308 no
@@ -14427,6 +14434,48 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
      - Specs: `flights/cambio-cliente.util.spec.ts`,
        `flights/flights.service.cambio-cliente.spec.ts` y
        `flights/flights.controller.cambio-cliente.spec.ts`.
+
+148. **LAS TAREAS RECURRENTES VAN ESCALONADAS: NINGUNA ARRANCA EN EL MISMO
+     SEGUNDO QUE OTRA (27-nov-2026, API 0.0.153; cuarta caída de la base en
+     tres días).** El 27-nov la base dejó de responder a las 17:02 (hora
+     Cancún) y no volvió sola en una hora (Diego la reinició a las ~18:15);
+     el 25-nov la tercera caída empezó a las 17:01. Las dos, a la HORA EN
+     PUNTO. En los registros de Supabase del 27-nov el tráfico previo era
+     moderado (150–450 peticiones por minuto, la oficina capturando en
+     Gastos; `tipo_cambio_oficial` en 0: la memoria del invariante 145
+     funciona) y el minuto 17:00 trae ~120 lecturas de `vuelo` y `escala` de
+     golpe: en el segundo 0 del minuto 0 arrancaban a la vez OCHO tareas (la
+     de cada hora, tres de cada 10 min, la de cada 5, dos de cada minuto y
+     la cola de Google). Sobre un cómputo Nano (0.5 GB) ese empujón basta.
+     - **Fuente única `common/horarios-cron.ts`**: las expresiones de TODO lo
+       que corre cada hora o más seguido (`CRON_ALERTAS_CADA_HORA` minuto
+       10; `CRON_GASTOS_RELEER_FOLIO` minutos 2, 7, 12…;
+       `CRON_SERVICIO_HORAS` 3, 13…; `CRON_TACO_LIVE` 5, 15…;
+       `CRON_RECIBIDAS_RELEER_FOLIO` 8, 18… — todas en el segundo 20—;
+       `CRON_RECORDATORIO_TACO` segundo 0 de cada minuto;
+       `CRON_RECORDATORIO_EVENTOS` segundo 30; `CRON_CALENDAR_COLA` segundos
+       15, 35 y 55). Cada tarea CONSERVA su frecuencia; solo cambia cuándo
+       cae. Ninguna regla de negocio depende del minuto ni del segundo
+       exacto (los recordatorios trabajan con ventanas de minutos y
+       deduplican en `alerta_emitida`).
+     - **Una tarea recurrente NUEVA se da de alta ahí** (y en
+       `TAREAS_RECURRENTES`), nunca con una expresión suelta en su
+       decorador: `horarios-cron.spec.ts` expande una hora completa y truena
+       si dos tareas comparten segundo, si dos de las pesadas comparten
+       minuto, si cambia una frecuencia o si reaparece un `@Cron('*/N …')` a
+       mano en los cinco servicios. Las tareas DIARIAS (04:45, 04:55, 05:15,
+       07:05, 08:00, 09:00, 11:05, 12:05, 18:00) no viven ahí: corren una vez
+       y a horas distintas.
+     - **Es una mitigación, no la cura**: el fondo es la memoria del cómputo
+       Nano. El plan Pro ya paga Micro (1 GB) y subir es gratis («Upgrade
+       compute» en el dashboard; reinicia la base menos de 2 min); al 27-nov
+       por la noche seguía en Nano. Pendientes gratis sin hacer: los del
+       invariante 144 (proxy `getClaims`, Conciliación con ~72 consultas por
+       carga, índice de `notificacion`, reportes).
+     - Diagnóstico de ese día (sin tocar la base): `query_logs` con
+       `edge_logs` por minuto y `postgrest_logs` («Thread killed by timeout
+       manager», `57014`, `PGRST003`); `/v1/version` respondía y `/v1/health`
+       se colgaba 30 s.
 
 ## Convenciones NestJS
 
